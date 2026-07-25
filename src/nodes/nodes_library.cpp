@@ -357,7 +357,9 @@ public:
         addParameter(Parameter::makeColor("basecolor", "Base Color", Vec3(0.8f, 0.8f, 0.8f)).withGroup("Surface"));
         addParameter(Parameter::makeFloat("roughness", "Roughness", 0.35, 0.0, 1.0).withGroup("Surface"));
         addParameter(Parameter::makeFloat("metallic", "Metallic", 0.0, 0.0, 1.0).withGroup("Surface"));
-        addParameter(Parameter::makeFloat("specular", "Specular", 0.5, 0.0, 1.0).withGroup("Surface"));
+        addParameter(Parameter::makeFloat("specular", "Specular", 0.5, 0.0, 1.0)
+                         .withGroup("Surface")
+                         .withTooltip("Dielectric reflection amount. 0 disables reflections entirely"));
         addParameter(Parameter::makeFloat("ior", "IOR", 1.5, 1.0, 3.0).withGroup("Surface"));
         addParameter(Parameter::makeFloat("transmission", "Transmission", 0.0, 0.0, 1.0).withGroup("Surface"));
         addParameter(Parameter::makeFloat("opacity", "Opacity", 1.0, 0.0, 1.0).withGroup("Surface"));
@@ -402,7 +404,10 @@ public:
         addParameter(Parameter::makeFloat("intensity", "Intensity", defaultIntensity(), 0.0, 100.0, false)
                          .withGroup("Light"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -10.0, 10.0).withGroup("Light"));
-        addParameter(Parameter::makeBool("shadows", "Cast Shadows", true).withGroup("Light"));
+        addParameter(Parameter::makeBool("shadows", "Cast Shadows", true)
+                         .withGroup("Light")
+                         .withTooltip("When off, this light ignores occluders (no shadows). "
+                                      "For HDRI/dome lights, off removes hard environment shadows"));
 
         switch (type_) {
             case kLightRect:

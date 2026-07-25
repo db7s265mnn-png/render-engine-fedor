@@ -136,7 +136,10 @@ SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& trac
     if (ls.pdf <= 0.0f || isBlack(ls.radiance)) return result;
     if (scene.lights[lightIndex].shadowEnable) {
         const Vec3 shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
-        const float tMax = ls.distance < kFloatMax ? ls.distance * (1.0f - 1e-3f) : kFloatMax;
+        // Use a large finite tMax for distant/dome lights — Embree is more stable
+        // with that than with FLT_MAX, and it still reaches any scene geometry.
+        float tMax = 1.0e8f;
+        if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
         if (tracer.occluded(shadowOrigin, ls.wi, tMax)) return result;
     }
 

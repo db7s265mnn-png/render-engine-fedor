@@ -117,11 +117,13 @@ SR_INL SR_HD LobeWeights computeLobes(const Material& mat) {
     LobeWeights lw;
     const float metallic = saturatef(mat.metallic);
     const float transmission = saturatef(mat.transmission);
+    const float specularControl = saturatef(mat.specular);
     lw.alpha = roughnessToAlpha(mat.roughness);
     lw.delta = lw.alpha <= kDeltaAlpha;
     lw.eta = srMax(1.01f, mat.ior);
     const Vec3 base = vmax(Vec3(0.0f), mat.baseColor);
-    const float dielectricF0 = 0.08f * saturatef(mat.specular);
+    // Specular = 0 must fully kill dielectric reflections (artist expectation).
+    const float dielectricF0 = 0.08f * specularControl;
     lw.f0 = lerp(Vec3(dielectricF0), base, metallic);
     lw.diffuseAlbedo = base * ((1.0f - metallic) * (1.0f - transmission));
     lw.transmissionTint = base;
@@ -130,11 +132,19 @@ SR_INL SR_HD LobeWeights computeLobes(const Material& mat) {
     // opaque specular lobe is faded out as transmission increases.
     const float opaqueSpec = 1.0f - transmission * (1.0f - metallic);
     const float diffuseWeight = (1.0f - metallic) * (1.0f - transmission) * average(base);
-    const float specWeight = lerpf(clampf(average(lw.f0) * 3.0f + 0.1f, 0.05f, 1.0f), 1.0f, metallic) * opaqueSpec;
+    float specWeight = 0.0f;
+    if (metallic > 1e-4f) {
+        specWeight = opaqueSpec;
+    } else if (specularControl > 1e-4f) {
+        // Scale with the specular control so lowering it actually reduces the lobe.
+        specWeight = clampf(average(lw.f0) * 4.0f + 0.15f * specularControl, 0.0f, 1.0f) * opaqueSpec *
+                     specularControl;
+    }
     const float transWeight = (1.0f - metallic) * transmission;
     const float total = diffuseWeight + specWeight + transWeight;
     if (total <= 0.0f) {
-        lw.specular = 1.0f;
+        // Pure black / invalid material: fall back to a tiny diffuse lobe.
+        lw.diffuse = 1.0f;
     } else {
         lw.diffuse = diffuseWeight / total;
         lw.specular = specWeight / total;
@@ -172,7 +182,11 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
                     out.f += Vec3(specF * tw);
                     out.pdf += lw.transmission * fr * ggxVndfPdf(wo, h, lw.alpha) / (4.0f * srMax(1e-6f, cosOH));
                 }
-                if (opaqueSpec > 0.0f && wo.z > 0.0f && wi.z > 0.0f) {
+                // Skip the opaque specular lobe entirely when the artist set Specular to 0
+                // (and the surface is not metal) — including grazing-angle Fresnel.
+                const bool hasOpaqueSpec =
+                    lw.specular > 0.0f && (saturatef(mat.metallic) > 1e-4f || saturatef(mat.specular) > 1e-4f);
+                if (opaqueSpec > 0.0f && hasOpaqueSpec && wo.z > 0.0f && wi.z > 0.0f) {
                     const Vec3 fr = fresnelSchlick(lw.f0, cosOH);
                     out.f += fr * (d * g / (4.0f * wo.z * wi.z)) * opaqueSpec;
                     out.pdf += lw.specular * ggxVndfPdf(wo, h, lw.alpha) / (4.0f * srMax(1e-6f, cosOH));
@@ -232,7 +246,7 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
         return s;
     }
 
-    if (uLobe < pDiffuse + pSpecular) {
+    if (pSpecular > 1e-5f && uLobe < pDiffuse + pSpecular) {
         // Opaque specular reflection.
         if (lw.delta) {
             const Vec3 wi(-wo.x, -wo.y, wo.z);
@@ -258,6 +272,7 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
     }
 
     // Dielectric transmission lobe.
+    if (lw.transmission <= 1e-5f) return s;
     const float eta = wo.z > 0.0f ? lw.eta : 1.0f / lw.eta;
     Vec3 h;
     if (lw.delta) {

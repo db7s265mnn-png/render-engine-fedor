@@ -148,6 +148,26 @@ void testBsdf() {
         if (sample.transmitted) ++transmitted;
     }
     check(transmitted > 1000, "most glass samples refract at normal incidence");
+
+    // Specular = 0 must disable dielectric reflections completely.
+    Material matte;
+    matte.baseColor = Vec3(0.7f, 0.7f, 0.7f);
+    matte.roughness = 0.4f;
+    matte.metallic = 0.0f;
+    matte.specular = 0.0f;
+    const LobeWeights matteLobes = computeLobes(matte);
+    check(matteLobes.specular < 1e-4f, "specular=0 removes the reflection lobe");
+    int specularHits = 0;
+    for (int i = 0; i < 2000; ++i) {
+        const BsdfSample sample = bsdfSampleLocal(matte, wo, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                                  rng.nextFloat());
+        if (sample.pdf <= 0.0f) continue;
+        if (sample.specular) ++specularHits;
+        const BsdfEval evaluated = bsdfEvalLocal(matte, wo, sample.wi);
+        // Pure diffuse: the specular microfacet term must stay off.
+        check(evaluated.pdf > 0.0f, "matte sample has a pdf");
+    }
+    check(specularHits == 0, "specular=0 never samples a specular bounce");
 }
 
 void testGlob() {
