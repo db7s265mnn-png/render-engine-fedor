@@ -1,6 +1,7 @@
 build/
 build-*/
 out/
+artifacts/
 *.user
 .DS_Store
 *.png

@@ -2,6 +2,7 @@
 
 #include <embree4/rtcore.h>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 #include "render/integrator.h"
@@ -9,15 +10,52 @@
 namespace sol {
 namespace {
 
-RTCScene buildPickScene(RTCDevice device, const ScenePtr& scene) {
-    if (!device || !scene) return nullptr;
+struct PickCache {
+    std::mutex mutex;
+    const Scene* sceneKey = nullptr;
+    RTCDevice device = nullptr;
+    RTCScene topScene = nullptr;
+    std::vector<RTCScene> meshScenes;
 
-    std::vector<RTCScene> meshScenes(scene->meshes.size(), nullptr);
+    void clear() {
+        if (topScene) {
+            rtcReleaseScene(topScene);
+            topScene = nullptr;
+        }
+        for (RTCScene meshScene : meshScenes) {
+            if (meshScene) rtcReleaseScene(meshScene);
+        }
+        meshScenes.clear();
+        if (device) {
+            rtcReleaseDevice(device);
+            device = nullptr;
+        }
+        sceneKey = nullptr;
+    }
+
+    ~PickCache() { clear(); }
+};
+
+PickCache& pickCache() {
+    static PickCache cache;
+    return cache;
+}
+
+bool ensurePickScene(const ScenePtr& scene) {
+    PickCache& cache = pickCache();
+    if (cache.sceneKey == scene.get() && cache.topScene) return true;
+    cache.clear();
+    if (!scene || scene->instances.empty()) return false;
+
+    cache.device = rtcNewDevice("verbose=0");
+    if (!cache.device) return false;
+
+    cache.meshScenes.assign(scene->meshes.size(), nullptr);
     for (size_t i = 0; i < scene->meshes.size(); ++i) {
         const MeshPtr& mesh = scene->meshes[i];
         if (!mesh || mesh->indices.empty()) continue;
-        RTCScene meshScene = rtcNewScene(device);
-        RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+        RTCScene meshScene = rtcNewScene(cache.device);
+        RTCGeometry geom = rtcNewGeometry(cache.device, RTC_GEOMETRY_TYPE_TRIANGLE);
         const size_t vertexCount = mesh->positions.size();
         const size_t triCount = mesh->indices.size() / 3;
         float* vertices = static_cast<float*>(rtcSetNewGeometryBuffer(
@@ -35,48 +73,43 @@ RTCScene buildPickScene(RTCDevice device, const ScenePtr& scene) {
         rtcAttachGeometry(meshScene, geom);
         rtcReleaseGeometry(geom);
         rtcCommitScene(meshScene);
-        meshScenes[i] = meshScene;
+        cache.meshScenes[i] = meshScene;
     }
 
-    RTCScene topScene = rtcNewScene(device);
-    rtcSetSceneFlags(topScene, RTC_SCENE_FLAG_ROBUST);
+    cache.topScene = rtcNewScene(cache.device);
+    rtcSetSceneFlags(cache.topScene, RTC_SCENE_FLAG_ROBUST);
     for (size_t i = 0; i < scene->instances.size(); ++i) {
         const InstanceData& inst = scene->instances[i];
-        if (inst.meshIndex < 0 || inst.meshIndex >= int(meshScenes.size())) continue;
-        RTCScene meshScene = meshScenes[size_t(inst.meshIndex)];
+        if (inst.meshIndex < 0 || inst.meshIndex >= int(cache.meshScenes.size())) continue;
+        RTCScene meshScene = cache.meshScenes[size_t(inst.meshIndex)];
         if (!meshScene) continue;
-        RTCGeometry instGeom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_INSTANCE);
+        RTCGeometry instGeom = rtcNewGeometry(cache.device, RTC_GEOMETRY_TYPE_INSTANCE);
         rtcSetGeometryInstancedScene(instGeom, meshScene);
         rtcSetGeometryTimeStepCount(instGeom, 1);
         rtcSetGeometryTransform(instGeom, 0, RTC_FORMAT_FLOAT3X4_ROW_MAJOR, inst.xform.m);
         rtcCommitGeometry(instGeom);
-        rtcAttachGeometryByID(topScene, instGeom, static_cast<unsigned int>(i));
+        rtcAttachGeometryByID(cache.topScene, instGeom, static_cast<unsigned int>(i));
         rtcReleaseGeometry(instGeom);
     }
-    rtcCommitScene(topScene);
-
-    for (RTCScene meshScene : meshScenes) {
-        if (meshScene) rtcReleaseScene(meshScene);
-    }
-    return topScene;
+    rtcCommitScene(cache.topScene);
+    cache.sceneKey = scene.get();
+    return cache.topScene != nullptr;
 }
 
 }  // namespace
 
-bool pickSceneSurface(const ScenePtr& scene, const Mat4& cameraToWorld, float aspectRatio, float u, float v,
-                      Vec3& hitPoint) {
+bool pickSceneSurface(const ScenePtr& scene, const CameraData& camera, int resolutionX, int resolutionY,
+                      float u, float v, Vec3& hitPoint) {
     if (!scene || scene->instances.empty()) return false;
 
-    RTCDevice device = rtcNewDevice("verbose=0");
-    if (!device) return false;
-    RTCScene pickScene = buildPickScene(device, scene);
-    if (!pickScene) {
-        rtcReleaseDevice(device);
-        return false;
-    }
+    PickCache& cache = pickCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (!ensurePickScene(scene)) return false;
 
-    SceneView view = scene->view();
-    view.camera.cameraToWorld = cameraToWorld;
+    SceneView view{};
+    view.camera = camera;
+    view.settings.resolutionX = std::max(1, resolutionX);
+    view.settings.resolutionY = std::max(1, resolutionY);
 
     const float px = u * float(view.settings.resolutionX);
     const float py = v * float(view.settings.resolutionY);
@@ -90,13 +123,11 @@ bool pickSceneSurface(const ScenePtr& scene, const Mat4& cameraToWorld, float as
     rayhit.ray.dir_x = direction.x;
     rayhit.ray.dir_y = direction.y;
     rayhit.ray.dir_z = direction.z;
-    rayhit.ray.tnear = 0.001f;
-    rayhit.ray.tfar = 1e6f;
+    rayhit.ray.tnear = 0.0001f;
+    rayhit.ray.tfar = 1e7f;
+    rayhit.ray.mask = 0xFFFFFFFF;
     rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
-    rtcIntersect1(pickScene, &rayhit, nullptr);
-
-    rtcReleaseScene(pickScene);
-    rtcReleaseDevice(device);
+    rtcIntersect1(cache.topScene, &rayhit, nullptr);
 
     if (rayhit.hit.geomID == RTC_INVALID_GEOMETRY_ID) return false;
     hitPoint = origin + direction * rayhit.ray.tfar;

@@ -6,9 +6,9 @@
 
 namespace sol {
 
-// Casts a camera ray through normalized device coordinates (0..1) and returns
-// the first surface hit in world space. Returns false when nothing is hit.
-bool pickSceneSurface(const ScenePtr& scene, const Mat4& cameraToWorld, float aspectRatio, float u, float v,
-                      Vec3& hitPoint);
+// Casts a camera ray through normalized image coordinates (u,v in 0..1) using
+// the supplied camera and returns the first surface hit in world space.
+bool pickSceneSurface(const ScenePtr& scene, const CameraData& camera, int resolutionX, int resolutionY,
+                      float u, float v, Vec3& hitPoint);
 
 }  // namespace sol

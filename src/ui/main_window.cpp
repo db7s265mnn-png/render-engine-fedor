@@ -86,8 +86,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     renderView_->setPickCallback([this](float u, float v, Vec3& hit) -> bool {
         if (!scene_ || scene_->instances.empty()) return false;
-        const float aspect = float(scene_->settings.resolutionX) / float(std::max(1, scene_->settings.resolutionY));
-        return pickSceneSurface(scene_, renderView_->camera().toMatrix(), aspect, u, v, hit);
+        CameraData camera = scene_->camera;
+        camera.cameraToWorld = renderView_->camera().toMatrix();
+        camera.focusDistance = renderView_->camera().distance;
+        return pickSceneSurface(scene_, camera, scene_->settings.resolutionX, scene_->settings.resolutionY, u, v,
+                                hit);
     });
 
     // The render thread only flags that new samples exist; the UI timer picks
@@ -528,9 +531,10 @@ void MainWindow::onShowShortcuts() {
                              "  F             frame all\n"
                              "  L             lay out selection\n"
                              "  Del           delete selection\n"
-                             "  MMB / Alt+LMB pan, wheel zoom\n\n"
-                             "Render view\n"
-                             "  Alt + LMB     orbit\n"
+                             "  MMB drag      pan (1:1)\n"
+                             "  Wheel         zoom to cursor\n\n"
+                             "Render view (Houdini style)\n"
+                             "  Alt + LMB     tumble (pivot on geometry under cursor)\n"
                              "  MMB           pan\n"
                              "  Alt + RMB     dolly\n"
                              "  Wheel         dolly\n\n"

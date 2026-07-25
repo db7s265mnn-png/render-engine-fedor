@@ -1,5 +1,4 @@
-// Interactive render view: shows the progressive framebuffer and drives an
-// orbit camera with the usual Houdini style Alt + mouse navigation.
+// Interactive render view: progressive framebuffer + Houdini-style tumble/pan/dolly.
 #pragma once
 
 #include <QImage>
@@ -13,14 +12,15 @@ namespace sol {
 struct ViewCamera {
     Vec3 pivot{0.0f, 1.0f, 0.0f};
     float distance = 10.0f;
-    float yaw = 30.0f;    // degrees around +Y
-    float pitch = -20.0f; // degrees, negative looks down
+    float yaw = 30.0f;     // degrees around +Y
+    float pitch = -20.0f;  // degrees, negative looks down
 
     Mat4 toMatrix() const;
     Vec3 eye() const;
     void setFromMatrix(const Mat4& cameraToWorld, float focusDistance);
     void orbit(float deltaYaw, float deltaPitch);
-    void setPivot(const Vec3& point);
+    // Keep the eye fixed and make `worldPoint` the new tumble pivot (Houdini).
+    void focusOnPoint(const Vec3& worldPoint);
     void pan(float dx, float dy);
     void dolly(float amount);
 };
@@ -33,7 +33,10 @@ public:
 
     void setImage(const QImage& image);
     void clearImage();
-    void setStatusText(const QString& text) { statusText_ = text; update(); }
+    void setStatusText(const QString& text) {
+        statusText_ = text;
+        update();
+    }
     void setResolution(int width, int height);
 
     ViewCamera& camera() { return camera_; }
@@ -42,6 +45,7 @@ public:
     bool navigationEnabled() const { return navigationEnabled_; }
     void setNavigationEnabled(bool enabled) { navigationEnabled_ = enabled; }
 
+    // u,v in [0,1] across the image rect. Returns true and fills hitPoint on a hit.
     using PickCallback = std::function<bool(float u, float v, Vec3& hitPoint)>;
     void setPickCallback(PickCallback callback) { pickCallback_ = std::move(callback); }
 
@@ -57,6 +61,9 @@ protected:
 
 private:
     QRect imageRect() const;
+    bool pickUnderMouse(const QPoint& pos, Vec3& hitPoint) const;
+    bool projectWorldToWidget(const Vec3& world, QPointF& out) const;
+    void beginNavigation(int mode, const QPoint& pos);
 
     QImage image_;
     QString statusText_;
@@ -67,6 +74,11 @@ private:
     bool navigationEnabled_ = true;
     int resolutionX_ = 960;
     int resolutionY_ = 540;
+
+    // Brief on-screen marker for the tumble pivot after a geometry pick.
+    bool showPivotMarker_ = false;
+    Vec3 pivotMarkerWorld_{0.0f};
+    qint64 pivotMarkerUntilMs_ = 0;
 };
 
 }  // namespace sol
