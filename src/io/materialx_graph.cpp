@@ -139,21 +139,7 @@ std::shared_ptr<Image> loadTextureFromImageNode(const mx::NodePtr& imageNode, co
     if (category != "image" && category != "tiledimage") return nullptr;
     std::string file = inputValueString(imageNode, "file");
     if (file.empty()) return nullptr;
-    QString path = QString::fromStdString(file);
-    QFileInfo info(path);
-    if (!info.isAbsolute() && !searchDirectory.isEmpty())
-        path = QDir(searchDirectory).absoluteFilePath(path);
-    if (!QFileInfo::exists(path)) {
-        error = "texture not found: " + path.toStdString();
-        return nullptr;
-    }
-    auto image = std::make_shared<Image>();
-    std::string loadError;
-    if (!loadImage(path.toStdString(), *image, loadError)) {
-        error = loadError;
-        return nullptr;
-    }
-    return image;
+    return loadImageOrUdim(QString::fromStdString(file), searchDirectory, error);
 }
 
 // Walk through multiply/mix/normalmap wrappers to find an image node.

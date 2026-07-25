@@ -58,6 +58,33 @@ void Image::scaleRgb(float s) {
         pixels_[i + 1] *= s;
         pixels_[i + 2] *= s;
     }
+    for (auto& tile : udimTiles_) {
+        if (tile.second) tile.second->scaleRgb(s);
+    }
+}
+
+void Image::addUdimTile(int udim, std::shared_ptr<Image> tile) {
+    if (!tile || tile->empty() || udim < 1001) return;
+    for (auto& existing : udimTiles_) {
+        if (existing.first == udim) {
+            existing.second = std::move(tile);
+            return;
+        }
+    }
+    udimTiles_.emplace_back(udim, std::move(tile));
+    std::sort(udimTiles_.begin(), udimTiles_.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    if (width_ <= 0 || height_ <= 0) {
+        width_ = udimTiles_.front().second->width();
+        height_ = udimTiles_.front().second->height();
+    }
+}
+
+const Image* Image::findUdimTile(int udim) const {
+    for (const auto& tile : udimTiles_) {
+        if (tile.first == udim) return tile.second.get();
+    }
+    return nullptr;
 }
 
 // ---------------------------------------------------------------------------

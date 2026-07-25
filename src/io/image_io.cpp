@@ -1,6 +1,9 @@
 #include "io/image_io.h"
 
+#include <QDir>
+#include <QFileInfo>
 #include <QImage>
+#include <QRegularExpression>
 #include <QString>
 
 #include <algorithm>
@@ -266,6 +269,71 @@ bool loadImage(const std::string& path, Image& out, std::string& error) {
 #endif
     }
     return loadLdr(path, out, error);
+}
+
+bool pathHasUdimToken(const QString& path) {
+    return path.contains(QLatin1String("<UDIM>"), Qt::CaseInsensitive) ||
+           path.contains(QLatin1String("%(UDIM)d"));
+}
+
+QString expandUdimToken(const QString& pattern, int udim) {
+    QString result = pattern;
+    const QString number = QString::number(udim);
+    result.replace(QLatin1String("<UDIM>"), number, Qt::CaseInsensitive);
+    result.replace(QLatin1String("%(UDIM)d"), number);
+    return result;
+}
+
+QString tokenizeUdimPathIfSequence(const QString& path) {
+    static const QRegularExpression re(QStringLiteral(R"(([._])(10\d{2})(\.[^.]+)$)"));
+    const QRegularExpressionMatch match = re.match(path);
+    if (!match.hasMatch()) return path;
+    const QString tokenized = path.left(match.capturedStart(2)) + QStringLiteral("<UDIM>") + match.captured(3);
+    int found = 0;
+    for (int udim = 1001; udim <= 1100; ++udim) {
+        if (QFileInfo::exists(expandUdimToken(tokenized, udim))) {
+            ++found;
+            if (found >= 2) return tokenized;
+        }
+    }
+    return path;
+}
+
+std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& searchDirectory, std::string& error) {
+    QString path = pathIn;
+    QFileInfo info(path);
+    if (!info.isAbsolute() && !searchDirectory.isEmpty()) path = QDir(searchDirectory).absoluteFilePath(path);
+
+    if (pathHasUdimToken(path)) {
+        auto udimImage = std::make_shared<Image>();
+        int loaded = 0;
+        for (int udim = 1001; udim <= 1100; ++udim) {
+            const QString tilePath = expandUdimToken(path, udim);
+            if (!QFileInfo::exists(tilePath)) continue;
+            auto tile = std::make_shared<Image>();
+            std::string loadError;
+            if (!loadImage(tilePath.toStdString(), *tile, loadError)) {
+                logWarning("UDIM tile failed (" + tilePath.toStdString() + "): " + loadError);
+                continue;
+            }
+            udimImage->addUdimTile(udim, tile);
+            ++loaded;
+        }
+        if (loaded == 0) {
+            error = "no UDIM tiles found for: " + path.toStdString();
+            return nullptr;
+        }
+        logInfo("Loaded " + std::to_string(loaded) + " UDIM tile(s) for " + path.toStdString());
+        return udimImage;
+    }
+
+    if (!QFileInfo::exists(path)) {
+        error = "texture not found: " + path.toStdString();
+        return nullptr;
+    }
+    auto image = std::make_shared<Image>();
+    if (!loadImage(path.toStdString(), *image, error)) return nullptr;
+    return image;
 }
 
 bool saveImagePng(const std::string& path, const Image& displayImage, std::string& error) {

@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "io/image_io.h"
 #include "io/materialx_graph.h"
 #include "nodes/node.h"
 #include "nodes/parameter.h"
@@ -831,6 +832,7 @@ void MaterialNetworkGraphView::frameGraph() {
 }
 
 void MaterialNetworkGraphView::wheelEvent(QWheelEvent* event) {
+    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
     const QPoint delta = event->angleDelta().y() != 0 ? event->angleDelta() : event->pixelDelta();
     const qreal steps = qreal(delta.y()) / 120.0;
     if (std::abs(steps) < 1e-4) {
@@ -844,13 +846,14 @@ void MaterialNetworkGraphView::wheelEvent(QWheelEvent* event) {
         event->accept();
         return;
     }
-    scale(factor, factor);
+    QGraphicsView::scale(factor, factor);
     event->accept();
 }
 
 void MaterialNetworkGraphView::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
         spacePressed_ = true;
+        if (!panning_) viewport()->setCursor(Qt::OpenHandCursor);
         event->accept();
         return;
     }
@@ -871,6 +874,7 @@ void MaterialNetworkGraphView::keyPressEvent(QKeyEvent* event) {
 void MaterialNetworkGraphView::keyReleaseEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
         spacePressed_ = false;
+        if (!panning_) viewport()->unsetCursor();
         event->accept();
         return;
     }
@@ -1008,10 +1012,7 @@ void MaterialNetworkGraphView::mousePressEvent(QMouseEvent* event) {
     mouseMovedSincePress_ = false;
     clickImageNode_.clear();
 
-    const bool panButton = event->button() == Qt::MiddleButton ||
-                           (event->button() == Qt::LeftButton &&
-                            ((event->modifiers() & Qt::AltModifier) || spacePressed_));
-    if (panButton) {
+    if (shouldBeginPan(event)) {
         beginPan(event->pos());
         event->accept();
         return;
@@ -1127,15 +1128,25 @@ void MaterialNetworkGraphView::chooseTexture(const QString& nodeName) {
     }
 
     const QString filter = "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)";
-    const QString path =
+    QString path =
         QFileDialog::getOpenFileName(this, "Choose texture for " + nodeName, node->inputs[fileInput].value, filter);
     if (path.isEmpty()) return;
+
+    // If the pick is one tile of a UDIM sequence, rewrite to Houdini <UDIM> token.
+    const QString tokenized = tokenizeUdimPathIfSequence(path);
+    if (tokenized != path) {
+        path = tokenized;
+        emit statusMessage(QString("%1: detected UDIM sequence → %2").arg(nodeName, QFileInfo(path).fileName()));
+    }
 
     node->inputs[fileInput].value = path;
     node->inputs[fileInput].nodename.clear();
     writeModel(true);
     rebuild();
-    emit statusMessage(QString("%1 file set to %2").arg(nodeName, QFileInfo(path).fileName()));
+    if (pathHasUdimToken(path))
+        emit statusMessage(QString("%1 file set to %2 (UDIM)").arg(nodeName, QFileInfo(path).fileName()));
+    else
+        emit statusMessage(QString("%1 file set to %2").arg(nodeName, QFileInfo(path).fileName()));
 }
 
 void MaterialNetworkGraphView::syncNodePositions() {
@@ -1156,25 +1167,44 @@ void MaterialNetworkGraphView::syncNodePositions() {
     rebuild();
 }
 
+bool MaterialNetworkGraphView::shouldBeginPan(const QMouseEvent* event) const {
+    // Match the Network Editor (Houdini-style):
+    //   MMB drag       — pan
+    //   Alt+LMB drag   — pan
+    //   Space+LMB drag — pan
+    if (event->button() == Qt::MiddleButton) return true;
+    if (event->button() == Qt::LeftButton && (event->modifiers() & Qt::AltModifier)) return true;
+    if (event->button() == Qt::LeftButton && spacePressed_) return true;
+    return false;
+}
+
 void MaterialNetworkGraphView::beginPan(const QPoint& viewPosition) {
     panning_ = true;
     lastPanPoint_ = viewPosition;
+    savedDragMode_ = dragMode();
+    savedAnchor_ = transformationAnchor();
     setDragMode(QGraphicsView::NoDrag);
+    // NoAnchor keeps 1:1 hand-drag — AnchorUnderMouse would warp the pan.
+    setTransformationAnchor(QGraphicsView::NoAnchor);
     viewport()->grabMouse();
     viewport()->setCursor(Qt::ClosedHandCursor);
 }
 
 void MaterialNetworkGraphView::updatePan(const QPoint& viewPosition) {
+    if (!panning_) return;
     if (viewPosition == lastPanPoint_) return;
-    horizontalScrollBar()->setValue(horizontalScrollBar()->value() - (viewPosition.x() - lastPanPoint_.x()));
-    verticalScrollBar()->setValue(verticalScrollBar()->value() - (viewPosition.y() - lastPanPoint_.y()));
+    // Sticky hand: keep the scene point under the cursor glued to it.
+    const QPointF delta = mapToScene(viewPosition) - mapToScene(lastPanPoint_);
+    translate(delta.x(), delta.y());
     lastPanPoint_ = viewPosition;
 }
 
 void MaterialNetworkGraphView::endPan() {
+    if (!panning_) return;
     panning_ = false;
     if (QWidget::mouseGrabber() == viewport()) viewport()->releaseMouse();
-    setDragMode(QGraphicsView::RubberBandDrag);
+    setDragMode(savedDragMode_);
+    setTransformationAnchor(savedAnchor_);
     viewport()->unsetCursor();
 }
 
@@ -1263,7 +1293,7 @@ void MaterialNetworkGraphView::drawForeground(QPainter* painter, const QRectF& r
     painter->setFont(font);
     painter->setPen(theme::textDim());
     painter->drawText(QRect(8, height() - 22, width() - 16, 18), Qt::AlignLeft,
-                      "Tab: add node   LMB wire   MMB pan   Del: delete   image dbl-click: file");
+                      "Tab: add   MMB/Alt+LMB/Space+LMB: pan   Wheel: zoom   Del: delete   image: file");
 }
 
 void MaterialNetworkGraphView::emitSelectionChanged() { emit selectionChanged(); }

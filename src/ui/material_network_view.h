@@ -16,6 +16,7 @@ class QGraphicsPathItem;
 class QGraphicsScene;
 class QLabel;
 class QLineEdit;
+class QMouseEvent;
 class QSplitter;
 class QVBoxLayout;
 
@@ -120,6 +121,7 @@ private:
     bool openTextureDialogAt(const QPoint& viewPosition);
     void chooseTexture(const QString& nodeName);
     void syncNodePositions();
+    bool shouldBeginPan(const QMouseEvent* event) const;
     void beginPan(const QPoint& viewPosition);
     void updatePan(const QPoint& viewPosition);
     void endPan();
@@ -150,6 +152,8 @@ private:
     QPoint lastPanPoint_;
     QPoint lastMousePoint_;
     QPoint mousePressPoint_;
+    QGraphicsView::DragMode savedDragMode_ = QGraphicsView::RubberBandDrag;
+    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::AnchorUnderMouse;
     QString wireSourceNode_;
     QPointF wireSourcePosition_;
     QString clickImageNode_;

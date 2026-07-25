@@ -33,9 +33,53 @@ SR_INL SR_HD float roughnessToAlpha(float roughness) {
     return srMax(kMinAlpha, r * r);
 }
 
-// Bilinear texture fetch (wrap U, clamp V) for MaterialX image maps.
+// Bilinear fetch for a single RGBA32F tile (local UV in [0,1]).
+SR_INL SR_HD Vec4 sampleTextureTileRGBA(const float* pixels, int width, int height, float u, float v) {
+    if (!pixels || width <= 0 || height <= 0) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    u = clampf(u, 0.0f, 1.0f);
+    v = clampf(v, 0.0f, 1.0f);
+    const float x = u * float(width) - 0.5f;
+    const float y = v * float(height) - 0.5f;
+    const int x0 = int(floorf(x));
+    const int y0 = int(floorf(y));
+    const float fx = x - float(x0);
+    const float fy = y - float(y0);
+    auto fetchX = [&](int ix, int iy) -> Vec4 {
+        ix = ix < 0 ? 0 : (ix >= width ? width - 1 : ix);
+        iy = iy < 0 ? 0 : (iy >= height ? height - 1 : iy);
+        const size_t idx = (size_t(iy) * size_t(width) + size_t(ix)) * 4;
+        return Vec4(pixels[idx + 0], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3]);
+    };
+    const Vec4 c00 = fetchX(x0, y0);
+    const Vec4 c10 = fetchX(x0 + 1, y0);
+    const Vec4 c01 = fetchX(x0, y0 + 1);
+    const Vec4 c11 = fetchX(x0 + 1, y0 + 1);
+    const Vec4 c0 = Vec4(c00.x * (1.0f - fx) + c10.x * fx, c00.y * (1.0f - fx) + c10.y * fx,
+                          c00.z * (1.0f - fx) + c10.z * fx, c00.w * (1.0f - fx) + c10.w * fx);
+    const Vec4 c1 = Vec4(c01.x * (1.0f - fx) + c11.x * fx, c01.y * (1.0f - fx) + c11.y * fx,
+                          c01.z * (1.0f - fx) + c11.z * fx, c01.w * (1.0f - fx) + c11.w * fx);
+    return Vec4(c0.x * (1.0f - fy) + c1.x * fy, c0.y * (1.0f - fy) + c1.y * fy, c0.z * (1.0f - fy) + c1.z * fy,
+                c0.w * (1.0f - fy) + c1.w * fy);
+}
+
+// Bilinear texture fetch for MaterialX image maps.
+// Regular maps wrap U / clamp V. UDIM sets select tile 1001 + floor(u) + 10*floor(v).
 SR_INL SR_HD Vec4 sampleTextureRGBA(const TextureView& tex, Vec2 uv) {
     if (!tex.valid()) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    if (tex.isUdim()) {
+        const int uTile = int(floorf(uv.x));
+        const int vTile = int(floorf(uv.y));
+        const int udim = 1001 + uTile + 10 * vTile;
+        const float localU = uv.x - float(uTile);
+        const float localV = uv.y - float(vTile);
+        for (int i = 0; i < tex.udimCount; ++i) {
+            if (tex.udimIds[i] != udim) continue;
+            return sampleTextureTileRGBA(tex.udimPixels[i], tex.udimWidths[i], tex.udimHeights[i], localU, localV);
+        }
+        return Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
     const float u = uv.x - floorf(uv.x);
     const float v = clampf(uv.y, 0.0f, 1.0f);
     const float x = u * float(tex.width) - 0.5f;

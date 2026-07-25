@@ -45,12 +45,24 @@ struct Material {
 };
 
 // RGBA32F texture view shared by CPU / GPU shading.
+// Regular textures use pixels/width/height. UDIM sets use udim* tables instead
+// (Houdini-style <UDIM> token → tiles 1001, 1002, ...).
 struct TextureView {
     const float* pixels = nullptr;
     int width = 0;
     int height = 0;
 
-    SR_HD bool valid() const { return pixels != nullptr && width > 0 && height > 0; }
+    const float* const* udimPixels = nullptr;  // udimCount pointers
+    const int* udimIds = nullptr;              // e.g. 1001, 1002, ...
+    const int* udimWidths = nullptr;
+    const int* udimHeights = nullptr;
+    int udimCount = 0;
+
+    SR_HD bool valid() const {
+        if (udimCount > 0 && udimPixels && udimIds && udimWidths && udimHeights) return true;
+        return pixels != nullptr && width > 0 && height > 0;
+    }
+    SR_HD bool isUdim() const { return udimCount > 0 && udimPixels != nullptr; }
 };
 
 // ---------------------------------------------------------------------------
