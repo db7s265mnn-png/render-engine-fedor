@@ -17,3 +17,4 @@ examples/*.hdr
 
 # Local conversion scratch
 assets/*.obj
+assets/
