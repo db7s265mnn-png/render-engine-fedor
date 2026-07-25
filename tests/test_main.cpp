@@ -236,6 +236,43 @@ void testRender() {
     check(sum > 0.0 && maxValue < 1e4, "render output is in a sane range");
 }
 
+// The equirectangular convention must stay stable: +Y is the top row of the
+// image and importance sampling has to find the bright spot.
+void testEnvironment() {
+    std::printf("environment\n");
+    auto env = std::make_shared<EnvironmentMap>();
+    const int w = 64, h = 32;
+    env->image.resize(w, h);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const Vec3 color = y < h / 2 ? Vec3(1.0f, 0.0f, 0.0f) : Vec3(0.0f, 0.0f, 1.0f);
+            env->image.setRgb(x, y, color);
+        }
+    }
+    // A single very bright texel drives the importance sampling test.
+    env->image.setRgb(10, 4, Vec3(2000.0f, 2000.0f, 2000.0f));
+    env->buildSamplingTables();
+
+    const EnvMapView view = env->view();
+    const Vec3 up = envLookup(view, Vec3(0.0f, 1.0f, 0.0f));
+    const Vec3 down = envLookup(view, Vec3(0.0f, -1.0f, 0.0f));
+    check(up.x > 0.9f && up.z < 0.1f, "+Y samples the top of the environment map");
+    check(down.z > 0.9f && down.x < 0.1f, "-Y samples the bottom of the environment map");
+
+    Rng rng(5u, 9u);
+    int nearBrightTexel = 0;
+    const Vec3 brightDirection = equirectToDirection((10.5f) / float(w), (4.5f) / float(h));
+    for (int i = 0; i < 4000; ++i) {
+        float pdf = 0.0f;
+        const Vec3 dir = envSample(view, rng.nextFloat(), rng.nextFloat(), pdf);
+        check(pdf > 0.0f, "environment sample has a positive pdf");
+        if (dot(dir, brightDirection) > 0.99f) ++nearBrightTexel;
+        // The analytic pdf must agree with the pdf returned while sampling.
+        checkNear(envPdf(view, dir), pdf, std::max(1e-3f, pdf * 0.02f), "envPdf matches envSample");
+    }
+    check(nearBrightTexel > 3000, "environment sampling concentrates on the bright texel");
+}
+
 // Renders an emissive sphere that is only in frame when instance transforms
 // are honoured by the acceleration structure.
 void testInstanceTransform() {
@@ -286,6 +323,7 @@ int main() {
     testBsdf();
     testGlob();
     testGraphCook();
+    testEnvironment();
     testRender();
     testInstanceTransform();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

@@ -39,7 +39,7 @@ void configureParser(QCommandLineParser& parser) {
         {{"j", "threads"}, "CPU thread count (0 = all cores).", "count"},
         {{"a", "abc"}, "Alembic file to import when no scene file is given.", "path"},
         {{"e", "hdri"}, "HDRI used by the generated dome light.", "path"},
-        {{"v", "verbose"}, "Verbose logging."},
+        {"verbose", "Verbose logging."},
     });
 }
 
