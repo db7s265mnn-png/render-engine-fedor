@@ -1,0 +1,414 @@
+{
+    "application": "Solstice",
+    "displayNode": "rendersettings1",
+    "nodes": [
+        {
+            "bypassed": false,
+            "inputs": [
+                ""
+            ],
+            "name": "alembic1",
+            "parameters": [
+                {
+                    "name": "file",
+                    "type": "file",
+                    "value": "kit.abc"
+                },
+                {
+                    "name": "primpath",
+                    "type": "string",
+                    "value": "/geo"
+                },
+                {
+                    "name": "pathfilter",
+                    "type": "string",
+                    "value": ""
+                },
+                {
+                    "name": "time",
+                    "type": "float",
+                    "value": 0
+                },
+                {
+                    "name": "importscale",
+                    "type": "float",
+                    "value": 1
+                },
+                {
+                    "name": "importnormals",
+                    "type": "bool",
+                    "value": true
+                },
+                {
+                    "name": "importuvs",
+                    "type": "bool",
+                    "value": true
+                },
+                {
+                    "name": "translate",
+                    "type": "vec3",
+                    "value": [
+                        0,
+                        0,
+                        0
+                    ]
+                },
+                {
+                    "name": "rotate",
+                    "type": "vec3",
+                    "value": [
+                        0,
+                        0,
+                        0
+                    ]
+                },
+                {
+                    "name": "scale",
+                    "type": "vec3",
+                    "value": [
+                        1,
+                        1,
+                        1
+                    ]
+                },
+                {
+                    "name": "uniformscale",
+                    "type": "float",
+                    "value": 1
+                }
+            ],
+            "type": "alembic",
+            "x": -180,
+            "y": -420
+        },
+        {
+            "bypassed": false,
+            "inputs": [
+                "alembic1"
+            ],
+            "name": "material1",
+            "parameters": [
+                {
+                    "name": "pattern",
+                    "type": "string",
+                    "value": "*"
+                },
+                {
+                    "name": "basecolor",
+                    "type": "color",
+                    "value": [
+                        0.800000011920929,
+                        0.800000011920929,
+                        0.800000011920929
+                    ]
+                },
+                {
+                    "name": "roughness",
+                    "type": "float",
+                    "value": 0.4
+                },
+                {
+                    "name": "metallic",
+                    "type": "float",
+                    "value": 0
+                },
+                {
+                    "name": "specular",
+                    "type": "float",
+                    "value": 0.5
+                },
+                {
+                    "name": "ior",
+                    "type": "float",
+                    "value": 1.5
+                },
+                {
+                    "name": "transmission",
+                    "type": "float",
+                    "value": 0
+                },
+                {
+                    "name": "opacity",
+                    "type": "float",
+                    "value": 1
+                },
+                {
+                    "name": "emissioncolor",
+                    "type": "color",
+                    "value": [
+                        1,
+                        1,
+                        1
+                    ]
+                },
+                {
+                    "name": "emission",
+                    "type": "float",
+                    "value": 0
+                }
+            ],
+            "type": "material",
+            "x": -180,
+            "y": -320
+        },
+        {
+            "bypassed": false,
+            "inputs": [
+                "material1"
+            ],
+            "name": "domelight1",
+            "parameters": [
+                {
+                    "name": "primname",
+                    "type": "string",
+                    "value": "domelight1"
+                },
+                {
+                    "name": "color",
+                    "type": "color",
+                    "value": [
+                        1,
+                        1,
+                        1
+                    ]
+                },
+                {
+                    "name": "intensity",
+                    "type": "float",
+                    "value": 0.35
+                },
+                {
+                    "name": "exposure",
+                    "type": "float",
+                    "value": 0
+                },
+                {
+                    "name": "shadows",
+                    "type": "bool",
+                    "value": true
+                },
+                {
+                    "name": "texture",
+                    "type": "file",
+                    "value": "sky.hdr"
+                },
+                {
+                    "name": "visiblecamera",
+                    "type": "bool",
+                    "value": true
+                },
+                {
+                    "name": "translate",
+                    "type": "vec3",
+                    "value": [
+                        0,
+                        0,
+                        0
+                    ]
+                },
+                {
+                    "name": "rotate",
+                    "type": "vec3",
+                    "value": [
+                        0,
+                        0,
+                        0
+                    ]
+                },
+                {
+                    "name": "scale",
+                    "type": "vec3",
+                    "value": [
+                        1,
+                        1,
+                        1
+                    ]
+                },
+                {
+                    "name": "uniformscale",
+                    "type": "float",
+                    "value": 1
+                }
+            ],
+            "type": "domelight",
+            "x": -180,
+            "y": -220
+        },
+        {
+            "bypassed": false,
+            "inputs": [
+                "domelight1"
+            ],
+            "name": "sunlight1",
+            "parameters": [
+                {
+                    "name": "primname",
+                    "type": "string",
+                    "value": "sunlight1"
+                },
+                {
+                    "name": "color",
+                    "type": "color",
+                    "value": [
+                        1,
+                        1,
+                        1
+                    ]
+                },
+                {
+                    "name": "intensity",
+                    "type": "float",
+                    "value": 3
+                },
+                {
+                    "name": "exposure",
+                    "type": "float",
+                    "value": 0
+                },
+                {
+                    "name": "shadows",
+                    "type": "bool",
+                    "value": true
+                },
+                {
+                    "name": "angle",
+                    "type": "float",
+                    "value": 0.53
+                },
+                {
+                    "name": "normalize",
+                    "type": "bool",
+                    "value": true
+                },
+                {
+                    "name": "translate",
+                    "type": "vec3",
+                    "value": [
+                        0,
+                        0,
+                        0
+                    ]
+                },
+                {
+                    "name": "rotate",
+                    "type": "vec3",
+                    "value": [
+                        -45,
+                        -35,
+                        0
+                    ]
+                },
+                {
+                    "name": "scale",
+                    "type": "vec3",
+                    "value": [
+                        1,
+                        1,
+                        1
+                    ]
+                },
+                {
+                    "name": "uniformscale",
+                    "type": "float",
+                    "value": 1
+                }
+            ],
+            "type": "distantlight",
+            "x": -180,
+            "y": -140
+        },
+        {
+            "bypassed": false,
+            "inputs": [
+                "sunlight1"
+            ],
+            "name": "rendersettings1",
+            "parameters": [
+                {
+                    "name": "resx",
+                    "type": "int",
+                    "value": 960
+                },
+                {
+                    "name": "resy",
+                    "type": "int",
+                    "value": 540
+                },
+                {
+                    "name": "samples",
+                    "type": "int",
+                    "value": 128
+                },
+                {
+                    "name": "backend",
+                    "type": "menu",
+                    "value": 0
+                },
+                {
+                    "name": "integrator",
+                    "type": "menu",
+                    "value": 0
+                },
+                {
+                    "name": "maxdepth",
+                    "type": "int",
+                    "value": 8
+                },
+                {
+                    "name": "rrdepth",
+                    "type": "int",
+                    "value": 3
+                },
+                {
+                    "name": "clamp",
+                    "type": "float",
+                    "value": 20
+                },
+                {
+                    "name": "seed",
+                    "type": "int",
+                    "value": 0
+                },
+                {
+                    "name": "threads",
+                    "type": "int",
+                    "value": 0
+                },
+                {
+                    "name": "tilesize",
+                    "type": "int",
+                    "value": 32
+                },
+                {
+                    "name": "aodistance",
+                    "type": "float",
+                    "value": 1
+                },
+                {
+                    "name": "tonemap",
+                    "type": "menu",
+                    "value": 2
+                },
+                {
+                    "name": "exposure",
+                    "type": "float",
+                    "value": 0
+                },
+                {
+                    "name": "gamma",
+                    "type": "float",
+                    "value": 2.2
+                },
+                {
+                    "name": "envvisible",
+                    "type": "bool",
+                    "value": true
+                }
+            ],
+            "type": "rendersettings",
+            "x": -180,
+            "y": -60
+        }
+    ],
+    "version": 1
+}

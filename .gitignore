@@ -6,3 +6,7 @@ out/
 *.png
 !docs/images/*.png
 *.abc
+
+# Generated example assets (see tools/)
+examples/*.abc
+examples/*.hdr

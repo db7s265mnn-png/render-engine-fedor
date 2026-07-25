@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "solstice",
+  "version": "0.9.0",
+  "description": "Node based path tracer with Embree and OptiX backends",
+  "dependencies": [
+    "embree",
+    "alembic",
+    "openexr",
+    "imath"
+  ]
+}

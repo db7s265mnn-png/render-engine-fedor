@@ -31,6 +31,16 @@ int runHeadless(const HeadlessOptions& options) {
         buildDefaultGraph(graph);
     }
 
+    if (!options.saveScenePath.isEmpty()) {
+        QString error;
+        if (!saveGraphToFile(graph, options.saveScenePath, error)) {
+            std::fprintf(stderr, "error: %s\n", error.toUtf8().constData());
+            return 6;
+        }
+        std::fprintf(stderr, "Wrote %s\n", options.saveScenePath.toUtf8().constData());
+        if (!options.renderImage) return 0;
+    }
+
     CookContext context;
     if (!options.scenePath.isEmpty())
         context.sceneDirectory = QFileInfo(options.scenePath).absolutePath();

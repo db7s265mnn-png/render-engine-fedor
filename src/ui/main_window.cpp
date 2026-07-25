@@ -167,7 +167,7 @@ void MainWindow::createDocks() {
     parameterDock->setObjectName("parameterDock");
     parameterPanel_ = new ParameterPanel(parameterDock);
     parameterDock->setWidget(parameterPanel_);
-    parameterDock->setMinimumWidth(340);
+    parameterDock->setMinimumWidth(380);
     addDockWidget(Qt::RightDockWidgetArea, parameterDock);
 
     auto* sceneDock = new QDockWidget("Scene Graph", this);

@@ -42,7 +42,6 @@ public:
 
 signals:
     void cameraMoved();
-    void saveImageRequested();
 
 protected:
     void paintEvent(QPaintEvent* event) override;

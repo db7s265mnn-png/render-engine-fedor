@@ -39,6 +39,8 @@ void configureParser(QCommandLineParser& parser) {
         {{"j", "threads"}, "CPU thread count (0 = all cores).", "count"},
         {{"a", "abc"}, "Alembic file to import when no scene file is given.", "path"},
         {{"e", "hdri"}, "HDRI used by the generated dome light.", "path"},
+        {"save-scene", "Write the resulting node network to a .solstice file.", "path"},
+        {"no-render", "Skip rendering, useful together with --save-scene."},
         {"verbose", "Verbose logging."},
     });
 }
@@ -71,6 +73,8 @@ int main(int argc, char** argv) {
             const QString backend = parser.value("backend").toLower();
             options.backend = (backend == "gpu" || backend == "optix") ? 1 : 0;
         }
+        options.saveScenePath = parser.value("save-scene");
+        options.renderImage = !parser.isSet("no-render");
         options.verbose = parser.isSet("verbose");
         return sol::runHeadless(options);
     }

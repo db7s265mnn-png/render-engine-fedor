@@ -196,7 +196,7 @@ if(SOLSTICE_BUILD_APP)
             RUNTIME DESTINATION bin)
 endif()
 
-if(WIN32)
+if(WIN32 AND SOLSTICE_BUILD_APP)
     # Produces a self contained folder with the Qt runtime next to Solstice.exe.
     find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS ${Qt6_DIR}/../../../bin)
     if(WINDEPLOYQT_EXECUTABLE)

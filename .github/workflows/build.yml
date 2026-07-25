@@ -1,0 +1,130 @@
+name: build
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux (Embree, tests)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build qt6-base-dev libembree-dev \
+            libopenexr-dev libimath-dev libgl1-mesa-dev
+
+      - name: Cache Alembic
+        id: alembic-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/alembic-install
+          key: alembic-1.8.6-${{ runner.os }}
+
+      - name: Build Alembic
+        if: steps.alembic-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch 1.8.6 https://github.com/alembic/alembic.git /tmp/alembic
+          cmake -S /tmp/alembic -B /tmp/alembic/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~/alembic-install \
+            -DUSE_HDF5=OFF -DALEMBIC_SHARED_LIBS=ON -DUSE_TESTS=OFF
+          cmake --build /tmp/alembic/build -j$(nproc)
+          cmake --install /tmp/alembic/build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH=$HOME/alembic-install
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Test
+        run: |
+          export LD_LIBRARY_PATH=$HOME/alembic-install/lib:$LD_LIBRARY_PATH
+          ./build/bin/solstice_tests
+
+      - name: Headless render smoke test
+        run: |
+          export LD_LIBRARY_PATH=$HOME/alembic-install/lib:$LD_LIBRARY_PATH
+          ./build/bin/sol_make_test_abc /tmp/kit.abc
+          python3 tools/make_test_hdri.py /tmp/sky.hdr --width 256 --height 128
+          ./build/bin/Solstice --headless -a /tmp/kit.abc -e /tmp/sky.hdr \
+            -o /tmp/render.png -s 16 --width 320 --height 180
+          test -s /tmp/render.png
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-render
+          path: /tmp/render.png
+
+  linux-optix:
+    name: Linux (OptiX backend compile)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build qt6-base-dev libembree-dev \
+            libopenexr-dev libimath-dev libgl1-mesa-dev nvidia-cuda-toolkit
+
+      - name: Fetch the OptiX headers
+        run: git clone --depth 1 https://github.com/NVIDIA/optix-dev.git /tmp/optix-dev
+
+      - name: Configure and build with the GPU backend
+        run: |
+          cmake -S . -B build-optix -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DSOLSTICE_ENABLE_ALEMBIC=OFF \
+            -DSOLSTICE_ENABLE_OPTIX=ON -DOptiX_ROOT=/tmp/optix-dev
+          cmake --build build-optix -j$(nproc)
+
+  windows:
+    name: Windows (standalone exe)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.7.2"
+          arch: win64_msvc2019_64
+          cache: true
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: "3508985146f1b1d248c67ead13f8f54be5b4f5da"
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Deploy the Qt runtime
+        run: |
+          cmake --build build --target deploy
+          Copy-Item build/bin/*.dll build/bin/ -ErrorAction SilentlyContinue
+
+      - name: Run the tests
+        run: ./build/bin/solstice_tests.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Solstice-windows-x64
+          path: build/bin/

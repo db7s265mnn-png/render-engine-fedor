@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QString>
+#include <algorithm>
 #include <map>
 
 #include "core/log.h"
@@ -112,10 +113,6 @@ public:
             out.material = Material();
             stage.addPrim(std::move(out));
         }
-    }
-
-    QString describeContents() const {
-        return QString("%1 prims").arg(cache_.prims.size());
     }
 
 private:
