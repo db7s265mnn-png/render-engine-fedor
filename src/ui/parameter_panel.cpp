@@ -4,24 +4,79 @@
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMimeData>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
 #include <QVBoxLayout>
 #include <QVector3D>
+#include <functional>
 
 #include "nodes/node_registry.h"
 #include "ui/theme.h"
 
 namespace sol {
 namespace {
+
+constexpr const char* kPrimPathMime = "application/x-fedor-prim-path";
+
+// String editor that accepts prim paths dragged from the scene graph and
+// commits immediately on drop / paste so Assign To updates without leaving the field.
+class PathLineEdit : public QLineEdit {
+public:
+    using QLineEdit::QLineEdit;
+    std::function<void(const QString&)> onCommitted;
+
+protected:
+    void dragEnterEvent(QDragEnterEvent* event) override {
+        if (event->mimeData()->hasFormat(kPrimPathMime) || event->mimeData()->hasText()) {
+            event->acceptProposedAction();
+            return;
+        }
+        QLineEdit::dragEnterEvent(event);
+    }
+
+    void dragMoveEvent(QDragMoveEvent* event) override {
+        if (event->mimeData()->hasFormat(kPrimPathMime) || event->mimeData()->hasText()) {
+            event->acceptProposedAction();
+            return;
+        }
+        QLineEdit::dragMoveEvent(event);
+    }
+
+    void dropEvent(QDropEvent* event) override {
+        QString path;
+        if (event->mimeData()->hasFormat(kPrimPathMime))
+            path = QString::fromUtf8(event->mimeData()->data(kPrimPathMime));
+        else if (event->mimeData()->hasText())
+            path = event->mimeData()->text().trimmed();
+        // Keep only the first line — clipboard/drag payloads can include extras.
+        const int newline = path.indexOf('\n');
+        if (newline >= 0) path = path.left(newline).trimmed();
+        if (!path.isEmpty()) {
+            setText(path);
+            if (onCommitted) onCommitted(path);
+            event->acceptProposedAction();
+            return;
+        }
+        QLineEdit::dropEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override {
+        QLineEdit::keyPressEvent(event);
+        if (event->matches(QKeySequence::Paste) && onCommitted) onCommitted(text());
+    }
+};
 
 QColor linearToDisplayColor(Vec3 c) {
     return QColor::fromRgbF(double(linearToSrgb(c.x)), double(linearToSrgb(c.y)), double(linearToSrgb(c.z)));
@@ -268,9 +323,16 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             return container;
         }
         case ParamType::String: {
-            auto* edit = new QLineEdit(parameter.toString());
-            connect(edit, &QLineEdit::editingFinished, this,
-                    [notify, edit] { notify(edit->text()); });
+            auto* edit = new PathLineEdit(parameter.toString());
+            edit->setAcceptDrops(true);
+            if (parameter.name == "pattern") {
+                edit->setPlaceholderText("e.g. /geo/sphere1 — Ctrl+V or drop from Scene Graph");
+                if (parameter.tooltip.isEmpty())
+                    edit->setToolTip("Prim path or glob. Copy a prim with Ctrl+C in the Scene Graph, "
+                                     "or drag its name into this field.");
+            }
+            edit->onCommitted = [notify](const QString& text) { notify(text); };
+            connect(edit, &QLineEdit::editingFinished, this, [notify, edit] { notify(edit->text()); });
             return edit;
         }
         case ParamType::FilePath: {

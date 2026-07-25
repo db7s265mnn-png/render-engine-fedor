@@ -353,7 +353,8 @@ class MaterialNode : public Node {
 public:
     explicit MaterialNode(const QString& name) : Node("material", name) {
         addParameter(Parameter::makeString("pattern", "Assign To", "*")
-                         .withTooltip("Prims matching this pattern receive the material"));
+                         .withTooltip("Prim path or glob (e.g. /geo/sphere1). Copy from Scene Graph with "
+                                      "Ctrl+C and paste here with Ctrl+V, or drag the prim name into this field"));
         addParameter(Parameter::makeColor("basecolor", "Base Color", Vec3(0.8f, 0.8f, 0.8f)).withGroup("Surface"));
         addParameter(Parameter::makeFloat("roughness", "Roughness", 0.35, 0.0, 1.0).withGroup("Surface"));
         addParameter(Parameter::makeFloat("metallic", "Metallic", 0.0, 0.0, 1.0).withGroup("Surface"));
