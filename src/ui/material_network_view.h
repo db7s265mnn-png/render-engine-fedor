@@ -1,4 +1,5 @@
 // Solaris-style MaterialX graph view backed by a material node's "mtlx" XML.
+// Layout: graph canvas on the left, inspector for the selected MaterialX node on the right.
 #pragma once
 
 #include <QGraphicsView>
@@ -6,15 +7,24 @@
 #include <QPoint>
 #include <QString>
 #include <QVector>
+#include <QWidget>
 
 #include "nodes/node.h"
 
+class QFormLayout;
 class QGraphicsPathItem;
 class QGraphicsScene;
+class QLabel;
+class QLineEdit;
+class QSplitter;
+class QVBoxLayout;
 
 namespace sol {
 
-class MaterialNetworkView : public QGraphicsView {
+class MaterialNetworkGraphView;
+
+// Public Material Network dock widget: graph + right-side parameter inspector.
+class MaterialNetworkView : public QWidget {
     Q_OBJECT
 
 public:
@@ -25,6 +35,59 @@ public:
 signals:
     void materialEdited(sol::Node* node);
     void statusMessage(const QString& message);
+
+private:
+    void onGraphSelectionChanged();
+    void rebuildInspector();
+    void commitRename();
+    void commitInputValue(const QString& inputName, const QString& type, const QString& value);
+
+    MaterialNetworkGraphView* graphView_ = nullptr;
+    QSplitter* splitter_ = nullptr;
+    QWidget* inspector_ = nullptr;
+    QVBoxLayout* inspectorLayout_ = nullptr;
+    QLabel* inspectorHint_ = nullptr;
+    QLabel* categoryLabel_ = nullptr;
+    QLineEdit* nameEdit_ = nullptr;
+    QWidget* paramsHost_ = nullptr;
+    QFormLayout* paramsForm_ = nullptr;
+    QString selectedNodeName_;
+    bool updatingInspector_ = false;
+};
+
+// Internal left-to-right MaterialX canvas.
+class MaterialNetworkGraphView : public QGraphicsView {
+    Q_OBJECT
+
+public:
+    struct MtlxInput {
+        QString name;
+        QString type;
+        QString value;
+        QString nodename;
+    };
+
+    struct MtlxNode {
+        QString name;
+        QString category;
+        QString type;
+        QPointF layout;
+        QVector<MtlxInput> inputs;
+    };
+
+    explicit MaterialNetworkGraphView(QWidget* parent = nullptr);
+
+    void setMaterialNode(Node* node);
+    QString selectedNodeName() const;
+    const MtlxNode* selectedNode() const;
+    bool renameNode(const QString& oldName, const QString& newName);
+    bool setInputValue(const QString& nodeName, const QString& inputName, const QString& value);
+    void selectNodeByName(const QString& name);
+
+signals:
+    void materialEdited(sol::Node* node);
+    void statusMessage(const QString& message);
+    void selectionChanged();
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -41,21 +104,6 @@ protected:
     void drawForeground(QPainter* painter, const QRectF& rect) override;
 
 private:
-    struct MtlxInput {
-        QString name;
-        QString type;
-        QString value;
-        QString nodename;
-    };
-
-    struct MtlxNode {
-        QString name;
-        QString category;
-        QString type;
-        QPointF layout;
-        QVector<MtlxInput> inputs;
-    };
-
     void rebuild();
     void rebuildFromXml(const QString& xml, bool rewriteRepaired);
     QString serializeGraph() const;
@@ -78,6 +126,7 @@ private:
     void beginWire(const QString& sourceName, QPointF sourcePosition);
     void updateWire(QPointF scenePosition);
     void endWire(const QPoint& viewPosition);
+    void emitSelectionChanged();
     QString uniqueNodeName(const QString& baseName) const;
     static void ensureInput(QVector<MtlxInput>& inputs, const QString& name, const QString& type,
                             const QString& value = QString());
@@ -89,6 +138,7 @@ private:
     Node* materialNode_ = nullptr;
     QGraphicsScene* graphScene_ = nullptr;
     QMetaObject::Connection materialChangedConnection_;
+    QMetaObject::Connection selectionConnection_;
     QVector<MtlxNode> graphNodes_;
     QGraphicsPathItem* previewWire_ = nullptr;
     bool pendingFrame_ = false;
@@ -103,6 +153,7 @@ private:
     QString wireSourceNode_;
     QPointF wireSourcePosition_;
     QString clickImageNode_;
+    QString preservedSelection_;
 };
 
 }  // namespace sol
