@@ -5,6 +5,7 @@
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 
 #include "ui/theme.h"
 
@@ -34,6 +35,8 @@ void ViewCamera::orbit(float deltaYaw, float deltaPitch) {
     yaw += deltaYaw;
     pitch = clampf(pitch + deltaPitch, -89.0f, 89.0f);
 }
+
+void ViewCamera::setPivot(const Vec3& point) { pivot = point; }
 
 void ViewCamera::pan(float dx, float dy) {
     const Vec3 forward = normalize(pivot - eye());
@@ -122,6 +125,15 @@ void RenderView::mousePressEvent(QMouseEvent* event) {
     const bool alt = event->modifiers() & Qt::AltModifier;
     if (event->button() == Qt::LeftButton && alt) {
         mode_ = 1;
+        if (pickCallback_) {
+            const QRect target = imageRect();
+            if (target.contains(event->pos())) {
+                const float u = float(event->pos().x() - target.left()) / float(std::max(1, target.width()));
+                const float v = float(event->pos().y() - target.top()) / float(std::max(1, target.height()));
+                Vec3 hit;
+                if (pickCallback_(u, v, hit)) camera_.setPivot(hit);
+            }
+        }
     } else if (event->button() == Qt::MiddleButton) {
         mode_ = 2;
     } else if (event->button() == Qt::RightButton && alt) {
@@ -136,10 +148,11 @@ void RenderView::mouseMoveEvent(QMouseEvent* event) {
     if (mode_ == 0) return;
     const QPoint delta = event->pos() - lastMousePosition_;
     lastMousePosition_ = event->pos();
+    const float precision = (event->modifiers() & Qt::ShiftModifier) ? 0.35f : 1.0f;
     switch (mode_) {
-        case 1: camera_.orbit(-float(delta.x()) * 0.35f, float(delta.y()) * 0.35f); break;
-        case 2: camera_.pan(float(delta.x()), float(delta.y())); break;
-        case 3: camera_.dolly(float(delta.x() + delta.y())); break;
+        case 1: camera_.orbit(-float(delta.x()) * 0.28f * precision, float(delta.y()) * 0.28f * precision); break;
+        case 2: camera_.pan(float(delta.x()) * precision, float(delta.y()) * precision); break;
+        case 3: camera_.dolly(float(delta.x() + delta.y()) * precision); break;
         default: break;
     }
     emit cameraMoved();
@@ -152,7 +165,8 @@ void RenderView::mouseReleaseEvent(QMouseEvent*) {
 
 void RenderView::wheelEvent(QWheelEvent* event) {
     if (!navigationEnabled_) return;
-    camera_.dolly(float(event->angleDelta().y()) * 0.6f);
+    const float precision = (event->modifiers() & Qt::ShiftModifier) ? 0.35f : 1.0f;
+    camera_.dolly(float(event->angleDelta().y()) * 0.35f * precision);
     emit cameraMoved();
 }
 

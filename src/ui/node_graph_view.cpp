@@ -363,10 +363,86 @@ NodeItem* NodeGraphView::nodeItemAt(QPoint viewPosition) const {
 }
 
 void NodeGraphView::wheelEvent(QWheelEvent* event) {
-    const double factor = event->angleDelta().y() > 0 ? 1.15 : 1.0 / 1.15;
-    const double scale = transform().m11() * factor;
-    if (scale < 0.12 || scale > 4.0) return;
-    this->scale(factor, factor);
+    const qreal factor = zoomFactorFromWheel(event);
+    const double newScale = transform().m11() * factor;
+    if (newScale < 0.12 || newScale > 4.0) return;
+    QGraphicsView::scale(factor, factor);
+    event->accept();
+}
+
+qreal NodeGraphView::panSpeedMultiplier(const QMouseEvent* event) const {
+    if (!event) return 1.0;
+    qreal speed = 1.0;
+    if (event->modifiers() & Qt::AltModifier) speed *= 0.42;  // Alt pan is gentler, Blender-style
+    if (event->modifiers() & Qt::ShiftModifier) speed *= 0.25; // precision move
+    return speed;
+}
+
+qreal NodeGraphView::zoomFactorFromWheel(const QWheelEvent* event) const {
+    // Smooth exponential zoom similar to Blender's node editor.
+    const QPoint delta = event->angleDelta().y() != 0 ? event->angleDelta() : event->pixelDelta();
+    const qreal steps = qreal(delta.y()) / 120.0;
+    if (std::abs(steps) < 1e-4) return 1.0;
+    qreal speed = (event->modifiers() & Qt::ShiftModifier) ? 0.0010 : 0.0016;
+    if (event->modifiers() & Qt::AltModifier) speed *= 0.65;
+    return std::pow(1.0 + speed, steps * 120.0);
+}
+
+QPointF NodeGraphView::snapWireEndpoint(QPoint viewPosition, bool draggingFromOutput) {
+    snapTarget_ = nullptr;
+    snapInputIndex_ = -1;
+    const QPointF scenePos = mapToScene(viewPosition);
+    const qreal snapRadius = NodeItem::kPortHitRadius * 1.15;
+    NodeItem* bestNode = nullptr;
+    int bestInput = -1;
+    qreal bestDist = snapRadius;
+
+    for (QGraphicsItem* item : graphScene_->items()) {
+        auto* nodeItem = qgraphicsitem_cast<NodeItem*>(item);
+        if (!nodeItem) continue;
+        if (draggingFromOutput) {
+            if (dragSource_ && nodeItem == dragSource_) continue;
+            const QPointF local = nodeItem->mapFromScene(scenePos);
+            const int index = nodeItem->nearestInputPort(local, snapRadius);
+            if (index < 0) continue;
+            const qreal dist = QLineF(nodeItem->inputPortPosition(index), scenePos).length();
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestNode = nodeItem;
+                bestInput = index;
+            }
+        } else if (nodeItem->node()->hasOutputPort() && nodeItem != dragDestination_) {
+            const QPointF local = nodeItem->mapFromScene(scenePos);
+            if (!nodeItem->outputPortNear(local, snapRadius)) continue;
+            const qreal dist = QLineF(nodeItem->outputPortPosition(), scenePos).length();
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestNode = nodeItem;
+                bestInput = -1;
+            }
+        }
+    }
+
+    snapTarget_ = bestNode;
+    snapInputIndex_ = bestInput;
+    if (draggingFromOutput && bestNode && bestInput >= 0) return bestNode->inputPortPosition(bestInput);
+    if (!draggingFromOutput && bestNode) return bestNode->outputPortPosition();
+    return scenePos;
+}
+
+void NodeGraphView::updateDragWire(QPoint viewPosition) {
+    if (!dragWire_) return;
+    const QPointF snapped = snapWireEndpoint(viewPosition, dragSource_ != nullptr);
+    if (dragSource_) {
+        dragWire_->setPath(makeWirePath(dragSource_->outputPortPosition(), snapped));
+    } else if (dragDestination_) {
+        dragWire_->setPath(makeWirePath(snapped, dragDestination_->inputPortPosition(dragInputIndex_)));
+    }
+    if (snapTarget_) {
+        dragWire_->setPen(QPen(theme::wireActive(), 2.4, Qt::SolidLine, Qt::RoundCap));
+    } else {
+        dragWire_->setPen(QPen(theme::wireActive(), 1.8, Qt::SolidLine, Qt::RoundCap));
+    }
 }
 
 void NodeGraphView::mousePressEvent(QMouseEvent* event) {
@@ -375,8 +451,10 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::MiddleButton ||
         (event->button() == Qt::LeftButton && (event->modifiers() & Qt::AltModifier))) {
         panning_ = true;
+        altPanning_ = event->modifiers() & Qt::AltModifier;
         lastPanPoint_ = event->pos();
         setCursor(Qt::ClosedHandCursor);
+        event->accept();
         return;
     }
 
@@ -399,23 +477,33 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
                     dragSource_ = item;
                     dragDestination_ = nullptr;
                     dragInputIndex_ = -1;
+                    snapTarget_ = nullptr;
+                    snapInputIndex_ = -1;
                     dragWire_ = graphScene_->addPath(QPainterPath(), QPen(theme::wireActive(), 1.8));
+                    event->accept();
                     return;
                 case NodeItem::Hit::Input: {
                     const int index = item->inputPortAt(local);
                     if (index >= 0) {
-                        // Dragging an existing wire off an input detaches it.
                         Node* existing = item->node()->input(index);
                         if (existing && graph_) {
                             graph_->disconnectInput(item->node(), index);
                             graphScene_->updateConnections();
                             dragSource_ = graphScene_->itemForNode(existing);
+                            dragDestination_ = nullptr;
+                            snapTarget_ = nullptr;
+                            snapInputIndex_ = -1;
                             dragWire_ = graphScene_->addPath(QPainterPath(), QPen(theme::wireActive(), 1.8));
+                            event->accept();
                             return;
                         }
                         dragDestination_ = item;
                         dragInputIndex_ = index;
+                        dragSource_ = nullptr;
+                        snapTarget_ = nullptr;
+                        snapInputIndex_ = -1;
                         dragWire_ = graphScene_->addPath(QPainterPath(), QPen(theme::wireActive(), 1.8));
+                        event->accept();
                     }
                     return;
                 }
@@ -431,16 +519,15 @@ void NodeGraphView::mouseMoveEvent(QMouseEvent* event) {
     if (panning_) {
         const QPoint delta = event->pos() - lastPanPoint_;
         lastPanPoint_ = event->pos();
-        translate(delta.x() / transform().m11(), delta.y() / transform().m22());
+        const qreal speed = panSpeedMultiplier(event);
+        const qreal invScale = 1.0 / transform().m11();
+        translate(delta.x() * invScale * speed, delta.y() * invScale * speed);
+        event->accept();
         return;
     }
     if (dragWire_) {
-        const QPointF cursor = mapToScene(event->pos());
-        if (dragSource_) {
-            dragWire_->setPath(makeWirePath(dragSource_->outputPortPosition(), cursor));
-        } else if (dragDestination_) {
-            dragWire_->setPath(makeWirePath(cursor, dragDestination_->inputPortPosition(dragInputIndex_)));
-        }
+        updateDragWire(event->pos());
+        event->accept();
         return;
     }
     QGraphicsView::mouseMoveEvent(event);
@@ -448,13 +535,27 @@ void NodeGraphView::mouseMoveEvent(QMouseEvent* event) {
 
 void NodeGraphView::finishWireDrag(QPoint viewPosition) {
     if (!graph_) return;
+
+    updateDragWire(viewPosition);
+
+    if (snapTarget_) {
+        if (dragSource_ && snapInputIndex_ >= 0) {
+            if (graph_->connectNodes(dragSource_->node(), snapTarget_->node(), snapInputIndex_))
+                emit statusMessage(dragSource_->node()->name() + " -> " + snapTarget_->node()->name());
+        } else if (dragDestination_ && snapTarget_->node()->hasOutputPort()) {
+            if (graph_->connectNodes(snapTarget_->node(), dragDestination_->node(), dragInputIndex_))
+                emit statusMessage(snapTarget_->node()->name() + " -> " + dragDestination_->node()->name());
+        }
+        graphScene_->updateConnections();
+        return;
+    }
+
     NodeItem* target = nodeItemAt(viewPosition);
     if (target) {
         const QPointF local = target->mapFromScene(mapToScene(viewPosition));
         if (dragSource_ && dragSource_ != target) {
-            int index = target->inputPortAt(local);
+            int index = target->nearestInputPort(local, NodeItem::kPortHitRadius * 1.35);
             if (index < 0 && target->node()->inputCount() > 0) {
-                // Dropping on the body connects to the first free input.
                 index = 0;
                 for (int i = 0; i < target->node()->inputCount(); ++i) {
                     if (!target->node()->input(i)) {
@@ -467,8 +568,9 @@ void NodeGraphView::finishWireDrag(QPoint viewPosition) {
                 if (graph_->connectNodes(dragSource_->node(), target->node(), index))
                     emit statusMessage(dragSource_->node()->name() + " -> " + target->node()->name());
             }
-        } else if (dragDestination_ && dragDestination_ != target && target->node()->hasOutputPort()) {
-            graph_->connectNodes(target->node(), dragDestination_->node(), dragInputIndex_);
+        } else if (dragDestination_ && dragDestination_ != target && target->outputPortNear(local)) {
+            if (graph_->connectNodes(target->node(), dragDestination_->node(), dragInputIndex_))
+                emit statusMessage(target->node()->name() + " -> " + dragDestination_->node()->name());
         }
     }
     graphScene_->updateConnections();
@@ -477,7 +579,9 @@ void NodeGraphView::finishWireDrag(QPoint viewPosition) {
 void NodeGraphView::mouseReleaseEvent(QMouseEvent* event) {
     if (panning_) {
         panning_ = false;
+        altPanning_ = false;
         unsetCursor();
+        event->accept();
         return;
     }
     if (dragWire_) {
@@ -487,7 +591,10 @@ void NodeGraphView::mouseReleaseEvent(QMouseEvent* event) {
         dragWire_ = nullptr;
         dragSource_ = nullptr;
         dragDestination_ = nullptr;
+        snapTarget_ = nullptr;
+        snapInputIndex_ = -1;
         dragInputIndex_ = -1;
+        event->accept();
         return;
     }
     QGraphicsView::mouseReleaseEvent(event);
@@ -567,7 +674,7 @@ void NodeGraphView::drawForeground(QPainter* painter, const QRectF& rect) {
     painter->setFont(font);
     painter->setPen(theme::textDim());
     painter->drawText(QRect(8, height() - 22, width() - 16, 18), Qt::AlignLeft,
-                      "Tab: add node   D: display flag   B: bypass   F: frame   Del: delete");
+                      "Tab: add node   MMB/Alt+LMB: pan   Wheel: zoom   D: display   Del: delete");
 }
 
 }  // namespace sol

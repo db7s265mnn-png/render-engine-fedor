@@ -77,8 +77,10 @@ set(SOLSTICE_LIB_SOURCES
     src/scene/scene.cpp
     src/io/image_io.cpp
     src/io/alembic_loader.cpp
+    src/io/usd_loader.cpp
     src/render/framebuffer.cpp
     src/render/render_session.cpp
+    src/render/scene_picker.cpp
     src/render/cpu/embree_device.cpp
     src/render/optix/optix_device_stub.cpp
     src/nodes/parameter.cpp
@@ -102,12 +104,14 @@ set(SOLSTICE_LIB_HEADERS
     src/scene/scene.h
     src/io/image_io.h
     src/io/alembic_loader.h
+    src/io/usd_loader.h
     src/render/shading.h
     src/render/lights.h
     src/render/integrator.h
     src/render/framebuffer.h
     src/render/render_device.h
     src/render/render_session.h
+    src/render/scene_picker.h
     src/nodes/parameter.h
     src/nodes/node.h
     src/nodes/stage.h

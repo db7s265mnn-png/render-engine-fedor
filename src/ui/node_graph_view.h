@@ -103,6 +103,10 @@ protected:
 private:
     NodeItem* nodeItemAt(QPoint viewPosition) const;
     void finishWireDrag(QPoint viewPosition);
+    QPointF snapWireEndpoint(QPoint viewPosition, bool draggingFromOutput);
+    void updateDragWire(QPoint viewPosition);
+    qreal panSpeedMultiplier(const QMouseEvent* event) const;
+    qreal zoomFactorFromWheel(const QWheelEvent* event) const;
 
     NodeGraph* graph_ = nullptr;
     NodeGraphScene* graphScene_ = nullptr;
@@ -116,8 +120,11 @@ private:
     // Wire dragging state.
     NodeItem* dragSource_ = nullptr;
     NodeItem* dragDestination_ = nullptr;
+    NodeItem* snapTarget_ = nullptr;
+    int snapInputIndex_ = -1;
     int dragInputIndex_ = -1;
     QGraphicsPathItem* dragWire_ = nullptr;
+    bool altPanning_ = false;
 };
 
 }  // namespace sol

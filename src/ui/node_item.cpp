@@ -47,11 +47,27 @@ QPointF NodeItem::inputPortPosition(int index) const {
 }
 
 int NodeItem::inputPortAt(QPointF localPosition) const {
+    return nearestInputPort(localPosition, kPortHitRadius);
+}
+
+int NodeItem::nearestInputPort(QPointF localPosition, qreal maxDistance) const {
+    int best = -1;
+    qreal bestDist = maxDistance;
     for (int i = 0; i < node_->inputCount(); ++i) {
         const QPointF port = inputPortPosition(i) - pos();
-        if (QLineF(port, localPosition).length() < kPortRadius * 2.4) return i;
+        const qreal dist = QLineF(port, localPosition).length();
+        if (dist <= bestDist) {
+            bestDist = dist;
+            best = i;
+        }
     }
-    return -1;
+    return best;
+}
+
+bool NodeItem::outputPortNear(QPointF localPosition, qreal maxDistance) const {
+    if (!node_->hasOutputPort()) return false;
+    const QPointF port = outputPortPosition() - pos();
+    return QLineF(port, localPosition).length() <= maxDistance;
 }
 
 NodeItem::Hit NodeItem::hitTest(QPointF localPosition) const {
@@ -59,8 +75,8 @@ NodeItem::Hit NodeItem::hitTest(QPointF localPosition) const {
     const QRectF bypassRect(kWidth * 0.5 - 16.0, kHeight * 0.5 - 16.0, 12.0, 12.0);
     if (displayRect.contains(localPosition)) return Hit::DisplayFlag;
     if (bypassRect.contains(localPosition)) return Hit::BypassFlag;
-    if (QLineF(outputPortPosition() - pos(), localPosition).length() < kPortRadius * 2.4) return Hit::Output;
-    if (inputPortAt(localPosition) >= 0) return Hit::Input;
+    if (outputPortNear(localPosition)) return Hit::Output;
+    if (nearestInputPort(localPosition) >= 0) return Hit::Input;
     if (shape().contains(localPosition)) return Hit::Body;
     return Hit::None;
 }
@@ -132,16 +148,24 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     painter->setBrush(node_->isBypassed() ? QColor(240, 200, 90) : QColor(60, 63, 68));
     painter->drawRoundedRect(bypassRect, 2.0, 2.0);
 
-    // Ports.
-    painter->setPen(QPen(QColor(20, 21, 24), 1.0));
+    // Ports — draw a soft halo so the grab area is visible.
     for (int i = 0; i < node_->inputCount(); ++i) {
         const QPointF port = inputPortPosition(i) - pos();
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(120, 170, 255, node_->input(i) ? 55 : 35));
+        painter->drawEllipse(port, kPortHitRadius * 0.55, kPortHitRadius * 0.45);
+        painter->setPen(QPen(QColor(20, 21, 24), 1.0));
         painter->setBrush(node_->input(i) ? theme::wireActive() : QColor(120, 125, 133));
         painter->drawEllipse(port, kPortRadius, kPortRadius * 0.8);
     }
     if (node_->hasOutputPort()) {
+        const QPointF port = outputPortPosition() - pos();
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(120, 170, 255, 35));
+        painter->drawEllipse(port, kPortHitRadius * 0.55, kPortHitRadius * 0.45);
+        painter->setPen(QPen(QColor(20, 21, 24), 1.0));
         painter->setBrush(QColor(120, 125, 133));
-        painter->drawEllipse(outputPortPosition() - pos(), kPortRadius, kPortRadius * 0.8);
+        painter->drawEllipse(port, kPortRadius, kPortRadius * 0.8);
     }
 }
 

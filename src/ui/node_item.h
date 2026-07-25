@@ -18,7 +18,8 @@ public:
 
     static constexpr qreal kWidth = 150.0;
     static constexpr qreal kHeight = 42.0;
-    static constexpr qreal kPortRadius = 5.0;
+    static constexpr qreal kPortRadius = 6.5;
+    static constexpr qreal kPortHitRadius = 22.0;
 
     NodeItem(Node* node, NodeGraphScene* scene);
 
@@ -32,6 +33,8 @@ public:
     QPointF outputPortPosition() const;
     QPointF inputPortPosition(int index) const;
     int inputPortAt(QPointF localPosition) const;
+    int nearestInputPort(QPointF localPosition, qreal maxDistance = kPortHitRadius) const;
+    bool outputPortNear(QPointF localPosition, qreal maxDistance = kPortHitRadius) const;
     Hit hitTest(QPointF localPosition) const;
 
     void refresh();

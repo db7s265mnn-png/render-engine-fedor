@@ -42,6 +42,7 @@ private slots:
     void onSaveScene();
     void onSaveSceneAs();
     void onImportAlembic();
+    void onImportUsd();
     void onSaveImage();
     void onStartRender();
     void onStopRender();

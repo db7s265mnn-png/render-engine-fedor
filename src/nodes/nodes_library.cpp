@@ -10,6 +10,7 @@
 #include "core/log.h"
 #include "io/alembic_loader.h"
 #include "io/image_io.h"
+#include "io/usd_loader.h"
 #include "nodes/node_registry.h"
 
 namespace sol {
@@ -118,6 +119,97 @@ public:
 private:
     QString cacheKey_;
     AlembicContents cache_;
+};
+
+class UsdNode : public Node {
+public:
+    explicit UsdNode(const QString& name) : Node("usd", name) {
+        setInputLabels({"Input"});
+        addParameter(Parameter::makeFile("file", "USD File", "", "USD (*.usd *.usda *.usdc)")
+                         .withTooltip("Path to a USDA scene; meshes, cameras and lights are imported"));
+        addParameter(Parameter::makeString("primpath", "Prim Path", "/geo")
+                         .withTooltip("Scene graph location the imported prims are placed under"));
+        addParameter(Parameter::makeString("pathfilter", "Path Filter", "")
+                         .withTooltip("Only import prims whose path matches this glob"));
+        addParameter(Parameter::makeFloat("importscale", "Import Scale", 1.0, 0.001, 100.0, false));
+        addParameter(Parameter::makeBool("importnormals", "Import Normals", true));
+        addParameter(Parameter::makeBool("importuvs", "Import UVs", true));
+        addTransformParameters(*this);
+    }
+
+    void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
+        const QString file = resolvePath(context, stringValue("file"));
+        if (file.isEmpty()) {
+            context.reportWarning(this, "no USD file set");
+            return;
+        }
+        if (!usdSupportAvailable()) {
+            context.reportError(this, "this build has no USD support");
+            return;
+        }
+        if (!QFileInfo::exists(file)) {
+            context.reportError(this, "file not found: " + file);
+            return;
+        }
+
+        UsdLoadOptions options;
+        options.scale = float(floatValue("importscale", 1.0));
+        options.importNormals = boolValue("importnormals", true);
+        options.importUvs = boolValue("importuvs", true);
+        options.pathFilter = stringValue("pathfilter").toStdString();
+
+        const QString cacheKey = file + "|" + QString::number(double(options.scale)) + "|" +
+                                 QString::fromStdString(options.pathFilter);
+        if (cacheKey != cacheKey_ || cache_.prims.empty()) {
+            UsdContents contents;
+            std::string error;
+            if (!loadUsd(file.toStdString(), options, contents, error)) {
+                context.reportError(this, QString::fromStdString(error));
+                return;
+            }
+            cache_ = std::move(contents);
+            cacheKey_ = cacheKey;
+        }
+
+        const Mat4 nodeTransform = transformFromParameters(*this);
+        const QString meshRoot = stringValue("primpath", "/geo");
+        for (const UsdPrim& prim : cache_.prims) {
+            QString leaf = QString::fromStdString(prim.path);
+            if (leaf.startsWith('/')) leaf.remove(0, 1);
+            leaf.replace('/', '_');
+
+            if (prim.type == UsdPrim::Type::Mesh && prim.mesh) {
+                StagePrim out;
+                out.type = PrimType::Mesh;
+                out.mesh = prim.mesh;
+                out.xform = nodeTransform * prim.transform;
+                out.sourceNode = name();
+                out.path = (meshRoot.endsWith('/') ? meshRoot : meshRoot + "/") + leaf;
+                out.material = Material();
+                stage.addPrim(std::move(out));
+            } else if (prim.type == UsdPrim::Type::Camera && prim.hasCamera) {
+                StagePrim out;
+                out.type = PrimType::Camera;
+                out.camera = prim.camera;
+                out.camera.cameraToWorld = nodeTransform * prim.transform;
+                out.sourceNode = name();
+                out.path = "/cameras/" + leaf;
+                stage.addPrim(std::move(out));
+            } else if (prim.type == UsdPrim::Type::Light && prim.hasLight) {
+                StagePrim out;
+                out.type = PrimType::Light;
+                out.light = prim.light;
+                out.xform = nodeTransform * prim.transform;
+                out.sourceNode = name();
+                out.path = "/lights/" + leaf;
+                stage.addPrim(std::move(out));
+            }
+        }
+    }
+
+private:
+    QString cacheKey_;
+    UsdContents cache_;
 };
 
 class PrimitiveNode : public Node {
@@ -547,6 +639,8 @@ void registerBuiltinNodes() {
 
     registry.registerType(makeType<AlembicNode>("alembic", "Alembic Import", "Geometry",
                                                 "Loads polygon meshes from an .abc archive", "#3f6f4f"));
+    registry.registerType(makeType<UsdNode>("usd", "USD Import", "Geometry",
+                                            "Loads meshes, cameras and lights from a USDA scene", "#3f5f6f"));
 
     {
         NodeTypeInfo info;

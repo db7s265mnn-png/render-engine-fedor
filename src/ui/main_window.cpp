@@ -20,6 +20,7 @@
 #include "core/log.h"
 #include "io/image_io.h"
 #include "nodes/node_registry.h"
+#include "render/scene_picker.h"
 #include "solstice_config.h"
 #include "ui/log_panel.h"
 #include "ui/node_graph_view.h"
@@ -83,6 +84,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(renderView_, &RenderView::cameraMoved, this, &MainWindow::onCameraMoved);
 
+    renderView_->setPickCallback([this](float u, float v, Vec3& hit) -> bool {
+        if (!scene_ || scene_->instances.empty()) return false;
+        const float aspect = float(scene_->settings.resolutionX) / float(std::max(1, scene_->settings.resolutionY));
+        return pickSceneSurface(scene_, renderView_->camera().toMatrix(), aspect, u, v, hit);
+    });
+
     // The render thread only flags that new samples exist; the UI timer picks
     // the image up so we never touch widgets from a worker thread.
     session_.setUpdateCallback([this] { framePending_.store(true, std::memory_order_relaxed); });
@@ -114,6 +121,7 @@ void MainWindow::createMenus() {
     fileMenu->addAction("Save Scene &As...", QKeySequence::SaveAs, this, &MainWindow::onSaveSceneAs);
     fileMenu->addSeparator();
     fileMenu->addAction("&Import Alembic...", QKeySequence("Ctrl+I"), this, &MainWindow::onImportAlembic);
+    fileMenu->addAction("Import &USD...", this, &MainWindow::onImportUsd);
     fileMenu->addAction("Save &Image...", QKeySequence("Ctrl+E"), this, &MainWindow::onSaveImage);
     fileMenu->addSeparator();
     fileMenu->addAction("E&xit", QKeySequence::Quit, this, &QWidget::close);
@@ -284,6 +292,20 @@ void MainWindow::onImportAlembic() {
     const QString path = QFileDialog::getOpenFileName(this, "Import Alembic", QString(), "Alembic (*.abc)");
     if (path.isEmpty()) return;
     Node* node = graph_.createNode("alembic");
+    if (!node) return;
+    node->setParameterValue("file", path);
+    node->setPosition(QPointF(0, -420));
+    networkView_->selectNode(node);
+    parameterPanel_->setNode(node);
+    graph_.setDisplayNode(node);
+    scheduleCook(0);
+}
+
+void MainWindow::onImportUsd() {
+    const QString path =
+        QFileDialog::getOpenFileName(this, "Import USD", QString(), "USD (*.usd *.usda *.usdc)");
+    if (path.isEmpty()) return;
+    Node* node = graph_.createNode("usd");
     if (!node) return;
     node->setParameterValue("file", path);
     node->setPosition(QPointF(0, -420));

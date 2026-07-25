@@ -4,6 +4,7 @@
 
 #include <QImage>
 #include <QWidget>
+#include <functional>
 
 #include "core/math.h"
 
@@ -19,6 +20,7 @@ struct ViewCamera {
     Vec3 eye() const;
     void setFromMatrix(const Mat4& cameraToWorld, float focusDistance);
     void orbit(float deltaYaw, float deltaPitch);
+    void setPivot(const Vec3& point);
     void pan(float dx, float dy);
     void dolly(float amount);
 };
@@ -40,6 +42,9 @@ public:
     bool navigationEnabled() const { return navigationEnabled_; }
     void setNavigationEnabled(bool enabled) { navigationEnabled_ = enabled; }
 
+    using PickCallback = std::function<bool(float u, float v, Vec3& hitPoint)>;
+    void setPickCallback(PickCallback callback) { pickCallback_ = std::move(callback); }
+
 signals:
     void cameraMoved();
 
@@ -56,6 +61,7 @@ private:
     QImage image_;
     QString statusText_;
     ViewCamera camera_;
+    PickCallback pickCallback_;
     QPoint lastMousePosition_;
     int mode_ = 0;  // 0 none, 1 orbit, 2 pan, 3 dolly
     bool navigationEnabled_ = true;
