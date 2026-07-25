@@ -1,5 +1,6 @@
 #include "ui/theme.h"
 
+#include <QLocale>
 #include <QPalette>
 #include <QStyleFactory>
 
@@ -7,6 +8,8 @@ namespace sol {
 
 void applyDarkTheme(QApplication& application) {
     application.setStyle(QStyleFactory::create("Fusion"));
+    // Force '.' as the decimal separator in spin boxes and number formatting.
+    QLocale::setDefault(QLocale::c());
 
     QPalette palette;
     palette.setColor(QPalette::Window, theme::background());

@@ -23,6 +23,7 @@
 #include <functional>
 
 #include "nodes/node_registry.h"
+#include "ui/numeric_editors.h"
 #include "ui/theme.h"
 
 namespace sol {
@@ -87,8 +88,8 @@ Vec3 displayColorToLinear(const QColor& color) {
                 srgbToLinear(float(color.blueF())));
 }
 
-QDoubleSpinBox* makeDoubleSpin(double value, double minimum, double maximum) {
-    auto* spin = new QDoubleSpinBox();
+NoWheelDoubleSpinBox* makeDoubleSpin(double value, double minimum, double maximum) {
+    auto* spin = new NoWheelDoubleSpinBox();
     spin->setRange(minimum, maximum);
     spin->setDecimals(4);
     spin->setSingleStep(std::max(0.001, (maximum - minimum) / 200.0));
@@ -221,7 +222,7 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                                         parameter.hasRange ? parameter.maxValue : 1e7);
             QSlider* slider = nullptr;
             if (parameter.hasRange) {
-                slider = new QSlider(Qt::Horizontal);
+                slider = new NoWheelSlider(Qt::Horizontal);
                 slider->setRange(0, 1000);
                 const double t = (parameter.toDouble() - parameter.minValue) /
                                  std::max(1e-9, parameter.maxValue - parameter.minValue);
@@ -249,7 +250,7 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             return container;
         }
         case ParamType::Int: {
-            auto* spin = new QSpinBox();
+            auto* spin = new NoWheelSpinBox();
             spin->setRange(parameter.hasRange ? int(parameter.minValue) : -1000000,
                            parameter.hasRange ? int(parameter.maxValue) : 1000000);
             spin->setValue(parameter.toInt());
@@ -357,7 +358,7 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             return container;
         }
         case ParamType::Menu: {
-            auto* combo = new QComboBox();
+            auto* combo = new NoWheelComboBox();
             combo->addItems(parameter.menuItems);
             combo->setCurrentIndex(parameter.toInt());
             connect(combo, &QComboBox::currentIndexChanged, this, [notify](int index) { notify(index); });

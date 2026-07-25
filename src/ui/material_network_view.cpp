@@ -38,6 +38,7 @@
 #include "nodes/node.h"
 #include "nodes/parameter.h"
 #include "ui/material_wire_item.h"
+#include "ui/numeric_editors.h"
 #include "ui/theme.h"
 
 namespace sol {
@@ -1535,7 +1536,7 @@ void MaterialNetworkView::rebuildInspector() {
         }
 
         if (type == "float" || type == "integer" || type == "int") {
-            auto* spin = new QDoubleSpinBox();
+            auto* spin = new NoWheelDoubleSpinBox();
             spin->setDecimals(type.startsWith("int") ? 0 : 4);
             spin->setRange(-1.0e6, 1.0e6);
             spin->setKeyboardTracking(false);
