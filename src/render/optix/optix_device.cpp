@@ -348,6 +348,14 @@ public:
         }
     }
 
+    void refreshSceneData() override {
+        if (!scene_) return;
+        // Camera and film settings live in the launch parameters, so nothing
+        // has to be re-uploaded or rebuilt.
+        deviceScene_.camera = scene_->camera;
+        deviceScene_.settings = scene_->settings;
+    }
+
     void release() override { releaseScene(); }
 
 private:

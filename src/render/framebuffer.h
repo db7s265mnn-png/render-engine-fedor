@@ -20,8 +20,10 @@ public:
     int sampleCount() const { return samples_.load(std::memory_order_relaxed); }
     void setSampleCount(int n) { samples_.store(n, std::memory_order_relaxed); }
 
-    // Accumulates one sample. Thread safe as long as different threads own
-    // different pixels, which is how the tile scheduler works.
+    // Accumulates one sample. Safe as long as different threads own different
+    // pixels, which is how the tile scheduler works. The UI resolves the buffer
+    // while workers write to it; a preview frame may therefore mix samples from
+    // two passes, which is invisible in practice and avoids a per pixel lock.
     void addSample(int x, int y, Vec3 radiance) {
         Vec4& px = accum_[size_t(y) * size_t(width_) + size_t(x)];
         px.x += radiance.x;

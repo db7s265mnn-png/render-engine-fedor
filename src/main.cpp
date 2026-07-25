@@ -11,7 +11,25 @@
 #include "ui/main_window.h"
 #include "ui/theme.h"
 
+#ifdef _WIN32
+#  include <windows.h>
+#  include <cstdio>
+#endif
+
 namespace {
+
+// The application is linked as a GUI subsystem binary so that launching it
+// never flashes a console window. In headless mode we borrow the console of
+// the shell that started us, otherwise the progress output would go nowhere.
+void attachParentConsole() {
+#ifdef _WIN32
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
+    FILE* stream = nullptr;
+    freopen_s(&stream, "CONOUT$", "w", stdout);
+    freopen_s(&stream, "CONOUT$", "w", stderr);
+    freopen_s(&stream, "CONIN$", "r", stdin);
+#endif
+}
 
 bool wantsHeadless(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
@@ -51,6 +69,7 @@ int main(int argc, char** argv) {
     sol::registerBuiltinNodes();
 
     if (wantsHeadless(argc, argv)) {
+        attachParentConsole();
         QCoreApplication application(argc, argv);
         QCoreApplication::setApplicationName("Solstice");
         QCoreApplication::setApplicationVersion(SOLSTICE_VERSION);

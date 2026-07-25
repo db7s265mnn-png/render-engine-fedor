@@ -30,6 +30,9 @@ public:
     void restart();
     // Restarts only the accumulation, e.g. after a camera move.
     void invalidate();
+    // Picks up in-place scene edits (camera, film settings) and resets the
+    // accumulation without rebuilding acceleration structures.
+    void updateSceneData();
 
     bool isRendering() const { return rendering_.load(std::memory_order_relaxed); }
     RenderProgress progress() const;

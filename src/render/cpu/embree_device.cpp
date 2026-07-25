@@ -198,6 +198,10 @@ public:
         });
     }
 
+    void refreshSceneData() override {
+        if (scene_) view_ = scene_->view();
+    }
+
     void release() override { releaseScene(); }
 
 private:

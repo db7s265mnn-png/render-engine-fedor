@@ -379,9 +379,8 @@ void MainWindow::onCameraMoved() {
     if (!scene_) return;
     scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
     scene_->camera.focusDistance = renderView_->camera().distance;
-    session_.stop();
-    session_.setScene(scene_);
-    session_.framebuffer().clear();
+    // The geometry has not changed, so this keeps the acceleration structures.
+    session_.updateSceneData();
     if (iprAction_->isChecked()) session_.start();
 }
 

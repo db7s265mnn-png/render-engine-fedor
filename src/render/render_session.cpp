@@ -80,6 +80,12 @@ void RenderSession::invalidate() {
     start();
 }
 
+void RenderSession::updateSceneData() {
+    stop();
+    if (device_) device_->refreshSceneData();
+    framebuffer_.clear();
+}
+
 void RenderSession::waitForCompletion() {
     if (thread_.joinable()) thread_.join();
     rendering_.store(false, std::memory_order_relaxed);

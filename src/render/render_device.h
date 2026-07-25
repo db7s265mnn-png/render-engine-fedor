@@ -35,6 +35,11 @@ public:
     // `cancel` is polled frequently so the UI stays responsive.
     virtual void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel) = 0;
 
+    // Picks up in-place edits of the scene that do not touch geometry, such as
+    // a camera move or a change of film settings, without rebuilding the
+    // acceleration structures.
+    virtual void refreshSceneData() {}
+
     virtual void release() {}
 };
 

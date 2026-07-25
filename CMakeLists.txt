@@ -198,7 +198,9 @@ endif()
 
 if(WIN32 AND SOLSTICE_BUILD_APP)
     # Produces a self contained folder with the Qt runtime next to Solstice.exe.
-    find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS ${Qt6_DIR}/../../../bin)
+    get_target_property(SOLSTICE_QMAKE_EXECUTABLE Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(SOLSTICE_QT_BIN_DIR "${SOLSTICE_QMAKE_EXECUTABLE}" DIRECTORY)
+    find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS "${SOLSTICE_QT_BIN_DIR}" ${Qt6_DIR}/../../../bin)
     if(WINDEPLOYQT_EXECUTABLE)
         add_custom_target(deploy
             COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to Solstice.exe"
