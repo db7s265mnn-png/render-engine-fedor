@@ -1540,10 +1540,11 @@ void MaterialNetworkView::rebuildInspector() {
             auto commit = [this, inputName](const QString& value) { commitInputValue(inputName, "filename", value); };
             connect(edit, &QLineEdit::editingFinished, this, [edit, commit] { commit(edit->text()); });
             connect(browse, &QPushButton::clicked, this, [this, edit, commit] {
-                const QString path = QFileDialog::getOpenFileName(
+                QString path = QFileDialog::getOpenFileName(
                     this, "Choose file", edit->text(),
                     "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)");
                 if (path.isEmpty()) return;
+                path = tokenizeUdimPathIfSequence(path);
                 edit->setText(path);
                 commit(path);
             });
