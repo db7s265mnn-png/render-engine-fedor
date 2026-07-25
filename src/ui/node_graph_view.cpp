@@ -363,18 +363,56 @@ NodeItem* NodeGraphView::nodeItemAt(QPoint viewPosition) const {
 }
 
 void NodeGraphView::wheelEvent(QWheelEvent* event) {
+    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
     const qreal factor = zoomFactorFromWheel(event);
     const double newScale = transform().m11() * factor;
-    if (newScale < 0.12 || newScale > 4.0) return;
+    if (newScale < 0.12 || newScale > 4.0) {
+        event->accept();
+        return;
+    }
     QGraphicsView::scale(factor, factor);
     event->accept();
+}
+
+void NodeGraphView::beginPan(const QPoint& viewPos) {
+    panning_ = true;
+    lastPanPoint_ = viewPos;
+    savedAnchor_ = transformationAnchor();
+    savedDragMode_ = dragMode();
+    setDragMode(QGraphicsView::NoDrag);
+    // NoAnchor is required so 1:1 translate is not warped by AnchorUnderMouse.
+    setTransformationAnchor(QGraphicsView::NoAnchor);
+    setCursor(Qt::ClosedHandCursor);
+    grabMouse();
+}
+
+void NodeGraphView::updatePan(const QPoint& viewPos) {
+    if (!panning_) return;
+    const QPoint delta = viewPos - lastPanPoint_;
+    lastPanPoint_ = viewPos;
+    if (delta.isNull()) return;
+
+    // Classic hand-drag, 1:1 in screen pixels with NoAnchor:
+    // mouse right → graph moves right (the view pans the opposite way).
+    const qreal sx = transform().m11();
+    const qreal sy = transform().m22();
+    if (std::abs(sx) < 1e-8 || std::abs(sy) < 1e-8) return;
+    translate(delta.x() / sx, delta.y() / sy);
+}
+
+void NodeGraphView::endPan() {
+    if (!panning_) return;
+    panning_ = false;
+    releaseMouse();
+    unsetCursor();
+    setDragMode(savedDragMode_);
+    setTransformationAnchor(savedAnchor_);
 }
 
 qreal NodeGraphView::zoomFactorFromWheel(const QWheelEvent* event) const {
     const QPoint delta = event->angleDelta().y() != 0 ? event->angleDelta() : event->pixelDelta();
     const qreal steps = qreal(delta.y()) / 120.0;
     if (std::abs(steps) < 1e-4) return 1.0;
-    // Gentler than a hard 15% step so the network does not jump.
     return std::pow(1.08, steps);
 }
 
@@ -438,12 +476,10 @@ void NodeGraphView::updateDragWire(QPoint viewPosition) {
 void NodeGraphView::mousePressEvent(QMouseEvent* event) {
     lastScenePosition_ = mapToScene(event->pos());
 
-    // Middle-mouse / Alt+LMB pan — same simple path as before, but slower.
+    // Middle-mouse (or Alt+LMB) hand-drag pan — 1:1, opposite to mouse motion.
     if (event->button() == Qt::MiddleButton ||
         (event->button() == Qt::LeftButton && (event->modifiers() & Qt::AltModifier))) {
-        panning_ = true;
-        lastPanPoint_ = event->pos();
-        setCursor(Qt::ClosedHandCursor);
+        beginPan(event->pos());
         event->accept();
         return;
     }
@@ -507,12 +543,7 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
 
 void NodeGraphView::mouseMoveEvent(QMouseEvent* event) {
     if (panning_) {
-        const QPoint delta = event->pos() - lastPanPoint_;
-        lastPanPoint_ = event->pos();
-        // Slower than 1:1 so the graph is easier to place precisely.
-        constexpr qreal kPanScale = 0.45;
-        const qreal inv = 1.0 / transform().m11();
-        translate(delta.x() * inv * kPanScale, delta.y() * inv * kPanScale);
+        updatePan(event->pos());
         event->accept();
         return;
     }
@@ -569,8 +600,7 @@ void NodeGraphView::finishWireDrag(QPoint viewPosition) {
 
 void NodeGraphView::mouseReleaseEvent(QMouseEvent* event) {
     if (panning_) {
-        panning_ = false;
-        unsetCursor();
+        endPan();
         event->accept();
         return;
     }
