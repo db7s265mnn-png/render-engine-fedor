@@ -1,0 +1,389 @@
+// Light sampling shared by the Embree and OptiX integrators.
+//
+// Conventions (matching Houdini/USD): rect and disk lights live in the XY plane
+// of their transform and emit along -Z, distant lights travel along -Z, sphere
+// lights are centred on the transform origin, dome lights use an
+// equirectangular map with +Y up.
+#pragma once
+
+#include "core/math.h"
+#include "scene/types.h"
+
+namespace sol {
+
+struct LightSample {
+    Vec3 wi{0.0f, 1.0f, 0.0f};       // direction from the shading point to the light
+    Vec3 radiance{0.0f, 0.0f, 0.0f}; // incident radiance
+    float distance = kFloatMax;
+    float pdf = 0.0f;                // solid angle pdf of this light (light choice excluded)
+    bool delta = false;
+};
+
+// ---------------------------------------------------------------------------
+// Environment map helpers
+// ---------------------------------------------------------------------------
+SR_INL SR_HD Vec3 envTexel(const EnvMapView& env, int x, int y) {
+    x = x < 0 ? 0 : (x >= env.width ? env.width - 1 : x);
+    y = y < 0 ? 0 : (y >= env.height ? env.height - 1 : y);
+    const float* p = env.pixels + (size_t(y) * size_t(env.width) + size_t(x)) * 4;
+    return Vec3(p[0], p[1], p[2]);
+}
+
+SR_INL SR_HD Vec3 envLookup(const EnvMapView& env, Vec3 dirLocal) {
+    if (!env.valid()) return Vec3(0.0f);
+    const Vec2 uv = directionToEquirect(normalize(dirLocal));
+    float u = uv.x - floorf(uv.x);
+    const float v = clampf(uv.y, 0.0f, 1.0f);
+    const float fx = u * float(env.width) - 0.5f;
+    const float fy = v * float(env.height) - 0.5f;
+    const int x0 = int(floorf(fx));
+    const int y0 = int(floorf(fy));
+    const float tx = fx - float(x0);
+    const float ty = fy - float(y0);
+    const int xa = ((x0 % env.width) + env.width) % env.width;
+    const int xb = ((x0 + 1) % env.width + env.width) % env.width;
+    const Vec3 c00 = envTexel(env, xa, y0);
+    const Vec3 c10 = envTexel(env, xb, y0);
+    const Vec3 c01 = envTexel(env, xa, y0 + 1);
+    const Vec3 c11 = envTexel(env, xb, y0 + 1);
+    return lerp(lerp(c00, c10, tx), lerp(c01, c11, tx), ty);
+}
+
+SR_INL SR_HD int cdfFindInterval(const float* cdf, int size, float u) {
+    int first = 0;
+    int len = size;
+    while (len > 0) {
+        const int half = len >> 1;
+        const int middle = first + half;
+        if (cdf[middle] <= u) {
+            first = middle + 1;
+            len -= half + 1;
+        } else {
+            len = half;
+        }
+    }
+    int r = first - 1;
+    if (r < 0) r = 0;
+    if (r > size - 2) r = size - 2;
+    return r;
+}
+
+// pdf with respect to solid angle for a direction in dome-local space.
+SR_INL SR_HD float envPdf(const EnvMapView& env, Vec3 dirLocal) {
+    if (!env.sampled()) return kInv4Pi;
+    const Vec2 uv = directionToEquirect(normalize(dirLocal));
+    const float sinTheta = sinf(clampf(uv.y, 0.0f, 1.0f) * kPi);
+    if (sinTheta <= 0.0f) return 0.0f;
+    int x = int(uv.x * float(env.width));
+    int y = int(uv.y * float(env.height));
+    x = x < 0 ? 0 : (x >= env.width ? env.width - 1 : x);
+    y = y < 0 ? 0 : (y >= env.height ? env.height - 1 : y);
+    const float funcValue = env.func[size_t(y) * size_t(env.width) + size_t(x)];
+    const float pdfUv = funcValue / env.integral;
+    return pdfUv / (kTwoPi * kPi * sinTheta);
+}
+
+// Importance sample the environment; returns a direction in dome-local space.
+SR_INL SR_HD Vec3 envSample(const EnvMapView& env, float u1, float u2, float& pdf) {
+    if (!env.sampled()) {
+        pdf = kInv4Pi;
+        return sampleUniformSphere(u1, u2);
+    }
+    const int y = cdfFindInterval(env.margCdf, env.height + 1, u2);
+    const float dyDen = env.margCdf[y + 1] - env.margCdf[y];
+    const float dy = dyDen > 0.0f ? (u2 - env.margCdf[y]) / dyDen : 0.0f;
+
+    const float* cdf = env.condCdf + size_t(y) * size_t(env.width + 1);
+    const int x = cdfFindInterval(cdf, env.width + 1, u1);
+    const float dxDen = cdf[x + 1] - cdf[x];
+    const float dx = dxDen > 0.0f ? (u1 - cdf[x]) / dxDen : 0.0f;
+
+    const float u = (float(x) + dx) / float(env.width);
+    const float v = (float(y) + dy) / float(env.height);
+    const float theta = v * kPi;
+    const float sinTheta = sinf(theta);
+    if (sinTheta <= 0.0f) {
+        pdf = 0.0f;
+        return Vec3(0.0f, 1.0f, 0.0f);
+    }
+    const float funcValue = env.func[size_t(y) * size_t(env.width) + size_t(x)];
+    pdf = (funcValue / env.integral) / (kTwoPi * kPi * sinTheta);
+    return equirectToDirection(u, v);
+}
+
+// ---------------------------------------------------------------------------
+// Light geometry helpers
+// ---------------------------------------------------------------------------
+SR_INL SR_HD Vec3 lightAxisX(const LightData& l) { return transformVector(l.xform, Vec3(1.0f, 0.0f, 0.0f)); }
+SR_INL SR_HD Vec3 lightAxisY(const LightData& l) { return transformVector(l.xform, Vec3(0.0f, 1.0f, 0.0f)); }
+SR_INL SR_HD Vec3 lightAxisZ(const LightData& l) { return transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f)); }
+SR_INL SR_HD Vec3 lightOrigin(const LightData& l) { return transformPoint(l.xform, Vec3(0.0f, 0.0f, 0.0f)); }
+
+SR_INL SR_HD float rectLightArea(const LightData& l) {
+    return length(cross(lightAxisX(l) * l.width, lightAxisY(l) * l.height));
+}
+
+SR_INL SR_HD float diskLightArea(const LightData& l) {
+    return kPi * length(cross(lightAxisX(l) * l.radius, lightAxisY(l) * l.radius));
+}
+
+SR_INL SR_HD float sphereLightRadius(const LightData& l) {
+    const float sx = length(lightAxisX(l));
+    const float sy = length(lightAxisY(l));
+    const float sz = length(lightAxisZ(l));
+    return l.radius * (sx + sy + sz) * (1.0f / 3.0f);
+}
+
+// Radiance emitted by a light, before any geometric term.
+SR_INL SR_HD Vec3 lightRadiance(const LightData& l) {
+    Vec3 e = l.emittedRadiance();
+    if (!l.normalize) return e;
+    switch (l.type) {
+        case kLightRect: {
+            const float area = rectLightArea(l);
+            return area > 0.0f ? e / area : e;
+        }
+        case kLightDisk: {
+            const float area = diskLightArea(l);
+            return area > 0.0f ? e / area : e;
+        }
+        case kLightSphere: {
+            const float r = sphereLightRadius(l);
+            const float area = 4.0f * kPi * r * r;
+            return area > 0.0f ? e / area : e;
+        }
+        case kLightDistant: {
+            const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
+            const float solidAngle = kTwoPi * (1.0f - cosf(halfAngle));
+            return solidAngle > 1e-9f ? e / solidAngle : e;
+        }
+        default: return e;
+    }
+}
+
+// Radiance leaving an area light towards -wi (wi points from the surface to the
+// light). Returns black when the light does not emit in that direction.
+SR_INL SR_HD Vec3 areaLightEmission(const SceneView& scene, const LightData& l, Vec3 wi, Vec3 lightNormal) {
+    if (l.type == kLightSphere) return lightRadiance(l);
+    const float cosTheta = dot(lightNormal, -wi);
+    if (cosTheta <= 0.0f && !l.twoSided) return Vec3(0.0f);
+    (void)scene;
+    return lightRadiance(l);
+}
+
+// Emitted normal of a rect/disk light in world space (-Z of the transform).
+SR_INL SR_HD Vec3 areaLightNormal(const LightData& l) {
+    return normalize(-lightAxisZ(l));
+}
+
+// Radiance of the dome light for a world space direction.
+SR_INL SR_HD Vec3 domeRadiance(const SceneView& scene, const LightData& l, Vec3 dirWorld) {
+    Vec3 tint = l.emittedRadiance();
+    if (l.envIndex >= 0 && l.envIndex < scene.envMapCount) {
+        const EnvMapView& env = scene.envMaps[l.envIndex];
+        if (env.valid()) {
+            const Vec3 dirLocal = normalize(transformVector(l.xformInv, dirWorld));
+            return tint * envLookup(env, dirLocal);
+        }
+    }
+    return tint;
+}
+
+// Radiance seen by a ray that left the scene.
+SR_INL SR_HD Vec3 environmentRadiance(const SceneView& scene, Vec3 dirWorld) {
+    if (scene.domeLightIndex < 0) return Vec3(0.0f);
+    return domeRadiance(scene, scene.lights[scene.domeLightIndex], dirWorld);
+}
+
+// ---------------------------------------------------------------------------
+// Sampling
+// ---------------------------------------------------------------------------
+SR_INL SR_HD bool sampleLight(const SceneView& scene, int lightIndex, Vec3 refP, float u1, float u2,
+                              LightSample& out) {
+    if (lightIndex < 0 || lightIndex >= scene.lightCount) return false;
+    const LightData& l = scene.lights[lightIndex];
+
+    switch (l.type) {
+        case kLightDistant: {
+            const Vec3 axis = normalize(lightAxisZ(l));
+            const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
+            out.distance = kFloatMax;
+            if (halfAngle < 1e-4f) {
+                out.wi = axis;
+                out.pdf = 1.0f;
+                out.delta = true;
+                out.radiance = l.emittedRadiance();
+                return true;
+            }
+            const float cosThetaMax = cosf(halfAngle);
+            const Frame frame(axis);
+            const Vec3 local = sampleUniformCone(u1, u2, cosThetaMax);
+            out.wi = normalize(frame.toWorld(local));
+            out.pdf = 1.0f / (kTwoPi * (1.0f - cosThetaMax));
+            out.delta = false;
+            out.radiance = lightRadiance(l);
+            return true;
+        }
+        case kLightPoint: {
+            const Vec3 p = lightOrigin(l);
+            const Vec3 d = p - refP;
+            const float dist2 = lengthSquared(d);
+            if (dist2 <= 1e-12f) return false;
+            const float dist = sqrtf(dist2);
+            out.wi = d / dist;
+            out.distance = dist;
+            out.pdf = 1.0f;
+            out.delta = true;
+            out.radiance = l.emittedRadiance() / dist2;
+            return true;
+        }
+        case kLightRect:
+        case kLightDisk: {
+            Vec3 pLocal;
+            if (l.type == kLightRect) {
+                pLocal = Vec3((u1 - 0.5f) * l.width, (u2 - 0.5f) * l.height, 0.0f);
+            } else {
+                const Vec2 d = sampleConcentricDisk(u1, u2);
+                pLocal = Vec3(d.x * l.radius, d.y * l.radius, 0.0f);
+            }
+            const Vec3 p = transformPoint(l.xform, pLocal);
+            const Vec3 toLight = p - refP;
+            const float dist2 = lengthSquared(toLight);
+            if (dist2 <= 1e-12f) return false;
+            const float dist = sqrtf(dist2);
+            const Vec3 wi = toLight / dist;
+            Vec3 n = areaLightNormal(l);
+            float cosLight = dot(n, -wi);
+            if (cosLight <= 0.0f) {
+                if (!l.twoSided) return false;
+                cosLight = -cosLight;
+            }
+            if (cosLight <= 1e-6f) return false;
+            const float area = l.type == kLightRect ? rectLightArea(l) : diskLightArea(l);
+            if (area <= 0.0f) return false;
+            out.wi = wi;
+            out.distance = dist;
+            out.pdf = dist2 / (cosLight * area);
+            out.delta = false;
+            out.radiance = lightRadiance(l);
+            return true;
+        }
+        case kLightSphere: {
+            const Vec3 center = lightOrigin(l);
+            const float radius = srMax(1e-5f, sphereLightRadius(l));
+            const Vec3 toCenter = center - refP;
+            const float dist2 = lengthSquared(toCenter);
+            const float dist = sqrtf(dist2);
+            const Vec3 radiance = lightRadiance(l);
+            if (dist <= radius * 1.0001f) {
+                // Inside the light: sample the full sphere surface.
+                const Vec3 dir = sampleUniformSphere(u1, u2);
+                const Vec3 p = center + dir * radius;
+                const Vec3 toLight = p - refP;
+                const float d2 = lengthSquared(toLight);
+                if (d2 <= 1e-12f) return false;
+                const float d = sqrtf(d2);
+                const Vec3 wi = toLight / d;
+                const float cosLight = absDot(dir, -wi);
+                if (cosLight <= 1e-6f) return false;
+                const float area = 4.0f * kPi * radius * radius;
+                out.wi = wi;
+                out.distance = d;
+                out.pdf = d2 / (cosLight * area);
+                out.delta = false;
+                out.radiance = radiance;
+                return true;
+            }
+            const float sinThetaMax2 = (radius * radius) / dist2;
+            const float cosThetaMax = sqrtf(srMax(0.0f, 1.0f - sinThetaMax2));
+            const Frame frame(toCenter / dist);
+            const Vec3 wi = normalize(frame.toWorld(sampleUniformCone(u1, u2, cosThetaMax)));
+            // Distance to the sphere along wi.
+            const float b = dot(wi, toCenter);
+            const float disc = b * b - (dist2 - radius * radius);
+            const float t = disc > 0.0f ? b - sqrtf(disc) : b;
+            out.wi = wi;
+            out.distance = srMax(1e-4f, t);
+            out.pdf = 1.0f / (kTwoPi * (1.0f - cosThetaMax));
+            out.delta = false;
+            out.radiance = radiance;
+            return true;
+        }
+        case kLightDome: {
+            float pdf = 0.0f;
+            Vec3 dirLocal;
+            if (l.envIndex >= 0 && l.envIndex < scene.envMapCount && scene.envMaps[l.envIndex].sampled()) {
+                dirLocal = envSample(scene.envMaps[l.envIndex], u1, u2, pdf);
+            } else {
+                dirLocal = sampleUniformSphere(u1, u2);
+                pdf = kInv4Pi;
+            }
+            if (pdf <= 0.0f) return false;
+            const Vec3 dirWorld = normalize(transformVector(l.xform, dirLocal));
+            out.wi = dirWorld;
+            out.distance = kFloatMax;
+            out.pdf = pdf;
+            out.delta = false;
+            out.radiance = domeRadiance(scene, l, dirWorld);
+            return true;
+        }
+        default: return false;
+    }
+}
+
+// Solid angle pdf of sampling `wi` on the given light, used for MIS when a BSDF
+// ray hits the light. `hitP`/`hitN` describe the hit on the light geometry.
+SR_INL SR_HD float lightPdfDirection(const SceneView& scene, int lightIndex, Vec3 refP, Vec3 wi, Vec3 hitP,
+                                     Vec3 hitN) {
+    if (lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
+    const LightData& l = scene.lights[lightIndex];
+    switch (l.type) {
+        case kLightRect:
+        case kLightDisk: {
+            const float area = l.type == kLightRect ? rectLightArea(l) : diskLightArea(l);
+            if (area <= 0.0f) return 0.0f;
+            const float dist2 = lengthSquared(hitP - refP);
+            float cosLight = absDot(hitN, wi);
+            if (cosLight <= 1e-6f) return 0.0f;
+            return dist2 / (cosLight * area);
+        }
+        case kLightSphere: {
+            const Vec3 center = lightOrigin(l);
+            const float radius = srMax(1e-5f, sphereLightRadius(l));
+            const float dist2 = lengthSquared(center - refP);
+            if (dist2 <= radius * radius * 1.0002f) {
+                const float area = 4.0f * kPi * radius * radius;
+                const float cosLight = absDot(hitN, wi);
+                if (cosLight <= 1e-6f) return 0.0f;
+                return lengthSquared(hitP - refP) / (cosLight * area);
+            }
+            const float sinThetaMax2 = (radius * radius) / dist2;
+            const float cosThetaMax = sqrtf(srMax(0.0f, 1.0f - sinThetaMax2));
+            const float denom = kTwoPi * (1.0f - cosThetaMax);
+            return denom > 0.0f ? 1.0f / denom : 0.0f;
+        }
+        case kLightDistant: {
+            const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
+            if (halfAngle < 1e-4f) return 0.0f;
+            const float cosThetaMax = cosf(halfAngle);
+            if (dot(normalize(lightAxisZ(l)), wi) < cosThetaMax) return 0.0f;
+            return 1.0f / (kTwoPi * (1.0f - cosThetaMax));
+        }
+        case kLightDome: {
+            if (l.envIndex >= 0 && l.envIndex < scene.envMapCount && scene.envMaps[l.envIndex].sampled()) {
+                const Vec3 dirLocal = normalize(transformVector(l.xformInv, wi));
+                return envPdf(scene.envMaps[l.envIndex], dirLocal);
+            }
+            return kInv4Pi;
+        }
+        default: return 0.0f;
+    }
+}
+
+// Probability of picking a given light in next event estimation. Uniform for
+// now; lights are cheap to sample and the counts are small.
+SR_INL SR_HD float lightSelectionPdf(const SceneView& scene) {
+    return scene.lightCount > 0 ? 1.0f / float(scene.lightCount) : 0.0f;
+}
+
+}  // namespace sol
