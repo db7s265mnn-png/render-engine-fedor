@@ -9,7 +9,6 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QScrollBar>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
