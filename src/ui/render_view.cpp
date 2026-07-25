@@ -10,6 +10,22 @@
 #include "ui/theme.h"
 
 namespace sol {
+namespace {
+
+Vec3 rotateAroundAxis(const Vec3& point, const Vec3& center, const Vec3& axis, float degrees) {
+    const float a = radians(degrees);
+    const float c = std::cos(a);
+    const float s = std::sin(a);
+    const Vec3 d = point - center;
+    const Vec3 n = normalize(axis);
+    return center + d * c + cross(n, d) * s + n * dot(n, d) * (1.0f - c);
+}
+
+Vec3 rotateAroundY(const Vec3& point, const Vec3& center, float degrees) {
+    return rotateAroundAxis(point, center, Vec3(0.0f, 1.0f, 0.0f), degrees);
+}
+
+}  // namespace
 
 Vec3 ViewCamera::eye() const {
     const float yawRad = radians(yaw);
@@ -37,14 +53,28 @@ void ViewCamera::orbit(float deltaYaw, float deltaPitch) {
     pitch = clampf(pitch + deltaPitch, -89.0f, 89.0f);
 }
 
-void ViewCamera::focusOnPoint(const Vec3& worldPoint) {
-    const Vec3 currentEye = eye();
-    pivot = worldPoint;
-    const Vec3 offset = currentEye - pivot;
-    distance = std::max(0.05f, length(offset));
-    const Vec3 dir = offset / distance;
-    pitch = degrees(std::asin(clampf(dir.y, -1.0f, 1.0f)));
-    yaw = degrees(std::atan2(dir.x, dir.z));
+void ViewCamera::orbitAround(const Vec3& center, float deltaYaw, float deltaPitch) {
+    // Rotate both the eye and the look-at point around `center` so the framed
+    // image does not jump when the tumble pivot is chosen under the cursor.
+    Vec3 e = eye();
+    Vec3 p = pivot;
+
+    e = rotateAroundY(e, center, deltaYaw);
+    p = rotateAroundY(p, center, deltaYaw);
+
+    Vec3 forward = normalize(p - e);
+    Vec3 right = cross(forward, Vec3(0.0f, 1.0f, 0.0f));
+    if (lengthSquared(right) < 1e-8f) right = Vec3(1.0f, 0.0f, 0.0f);
+    right = normalize(right);
+
+    e = rotateAroundAxis(e, center, right, deltaPitch);
+    p = rotateAroundAxis(p, center, right, deltaPitch);
+
+    pivot = p;
+    distance = std::max(0.05f, length(e - p));
+    const Vec3 toEye = (e - p) / distance;
+    pitch = degrees(std::asin(clampf(toEye.y, -1.0f, 1.0f)));
+    yaw = degrees(std::atan2(toEye.x, toEye.z));
 }
 
 void ViewCamera::pan(float dx, float dy) {
@@ -118,7 +148,6 @@ bool RenderView::projectWorldToWidget(const Vec3& world, QPointF& out) const {
     const Vec3 cam = transformPoint(worldToCamera, world);
     if (cam.z >= -1e-4f) return false;
 
-    // Match generateCameraRay: sensorWidth 36mm default, focalLength 50mm.
     const float sensorWidth = 36.0f;
     const float focalLength = 50.0f;
     const float aspect = float(resolutionX_) / float(std::max(1, resolutionY_));
@@ -138,14 +167,16 @@ void RenderView::beginNavigation(int mode, const QPoint& pos) {
     mode_ = mode;
     lastMousePosition_ = pos;
     if (mode_ == 1) {
-        // Houdini tumble: the surface under the cursor becomes the orbit pivot.
+        // Pick the tumble center under the cursor, but do NOT reframe the camera.
+        // The view stays exactly where it is; later drags rotate around this point.
+        tumbleCenter_ = camera_.pivot;
         Vec3 hit;
         if (pickUnderMouse(pos, hit)) {
-            camera_.focusOnPoint(hit);
+            tumbleCenter_ = hit;
             showPivotMarker_ = true;
             pivotMarkerWorld_ = hit;
             pivotMarkerUntilMs_ = QDateTime::currentMSecsSinceEpoch() + 1600;
-            emit cameraMoved();
+            update();
         }
         setCursor(Qt::SizeAllCursor);
     } else {
@@ -201,8 +232,6 @@ void RenderView::mousePressEvent(QMouseEvent* event) {
     }
 
     const bool alt = event->modifiers() & Qt::AltModifier;
-    // Houdini: Alt+LMB tumble, Alt+MMB pan, Alt+RMB dolly.
-    // Also accept plain MMB as pan (common in Blender / node editors).
     if (event->button() == Qt::LeftButton && alt) {
         beginNavigation(1, event->pos());
         event->accept();
@@ -233,7 +262,8 @@ void RenderView::mouseMoveEvent(QMouseEvent* event) {
     const float precision = (event->modifiers() & Qt::ShiftModifier) ? 0.3f : 1.0f;
     switch (mode_) {
         case 1:
-            camera_.orbit(-float(delta.x()) * 0.22f * precision, float(delta.y()) * 0.22f * precision);
+            camera_.orbitAround(tumbleCenter_, -float(delta.x()) * 0.22f * precision,
+                                float(delta.y()) * 0.22f * precision);
             break;
         case 2:
             camera_.pan(float(delta.x()) * precision, float(delta.y()) * precision);
@@ -266,8 +296,7 @@ void RenderView::wheelEvent(QWheelEvent* event) {
         return;
     }
     const float precision = (event->modifiers() & Qt::ShiftModifier) ? 0.3f : 1.0f;
-    const float steps = float(event->angleDelta().y());
-    camera_.dolly(steps * 0.28f * precision);
+    camera_.dolly(float(event->angleDelta().y()) * 0.28f * precision);
     emit cameraMoved();
     event->accept();
 }

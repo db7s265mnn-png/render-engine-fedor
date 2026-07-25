@@ -18,9 +18,10 @@ struct ViewCamera {
     Mat4 toMatrix() const;
     Vec3 eye() const;
     void setFromMatrix(const Mat4& cameraToWorld, float focusDistance);
+    // Classic orbit around the look-at pivot.
     void orbit(float deltaYaw, float deltaPitch);
-    // Keep the eye fixed and make `worldPoint` the new tumble pivot (Houdini).
-    void focusOnPoint(const Vec3& worldPoint);
+    // Rotate eye + look-at around a fixed world point without reframing on set.
+    void orbitAround(const Vec3& center, float deltaYaw, float deltaPitch);
     void pan(float dx, float dy);
     void dolly(float amount);
 };
@@ -45,7 +46,6 @@ public:
     bool navigationEnabled() const { return navigationEnabled_; }
     void setNavigationEnabled(bool enabled) { navigationEnabled_ = enabled; }
 
-    // u,v in [0,1] across the image rect. Returns true and fills hitPoint on a hit.
     using PickCallback = std::function<bool(float u, float v, Vec3& hitPoint)>;
     void setPickCallback(PickCallback callback) { pickCallback_ = std::move(callback); }
 
@@ -75,7 +75,8 @@ private:
     int resolutionX_ = 960;
     int resolutionY_ = 540;
 
-    // Brief on-screen marker for the tumble pivot after a geometry pick.
+    // World-space tumble center for the current Alt+LMB drag (may differ from look-at).
+    Vec3 tumbleCenter_{0.0f, 1.0f, 0.0f};
     bool showPivotMarker_ = false;
     Vec3 pivotMarkerWorld_{0.0f};
     qint64 pivotMarkerUntilMs_ = 0;
