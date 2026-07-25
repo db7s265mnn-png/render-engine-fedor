@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <QString>
 
@@ -16,11 +17,20 @@ namespace sol {
 // be sRGB encoded and are linearised.
 bool loadImage(const std::string& path, Image& out, std::string& error);
 
-// Houdini/MaterialX UDIM helpers (<UDIM> or %(UDIM)d).
+// Houdini/MaterialX UDIM helpers (<UDIM> / %(UDIM)d, Mari index 1001+U+V*10).
 bool pathHasUdimToken(const QString& path);
 QString expandUdimToken(const QString& pattern, int udim);
-// Loads a single image, or bakes a UDIM atlas when the path contains <UDIM>.
-std::shared_ptr<Image> loadImageOrUdim(const QString& path, const QString& searchDirectory, std::string& error);
+// If `path` is already a MaterialX UDIM pattern, or a concrete tile like name.1001.exr,
+// returns the unresolved pattern (with <UDIM>) and discovers existing tiles on disk.
+// Matches MaterialX authoring: file keeps <UDIM>; tiles come from udimset / filesystem.
+bool resolveUdimPattern(const QString& path, const QString& searchDirectory, QString& outPattern,
+                        std::vector<int>& outTiles);
+std::vector<int> discoverUdimTiles(const QString& pattern, const QString& searchDirectory,
+                                   const std::vector<int>& explicitUdims = {});
+// Loads a single image, or bakes a UDIM atlas (MaterialX hwNormalizeUdim-style).
+// Optional explicitUdims come from MaterialX geominfo udimset; empty → discover on disk.
+std::shared_ptr<Image> loadImageOrUdim(const QString& path, const QString& searchDirectory, std::string& error,
+                                       const std::vector<int>& explicitUdims = {});
 
 bool saveImagePng(const std::string& path, const Image& displayImage, std::string& error);
 bool saveImageHdr(const std::string& path, const Image& linearImage, std::string& error);

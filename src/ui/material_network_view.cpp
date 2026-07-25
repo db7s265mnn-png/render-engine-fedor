@@ -29,10 +29,9 @@
 #include <QStyleOptionGraphicsItem>
 #include <QVBoxLayout>
 #include <QWheelEvent>
-#include <QXmlStreamReader>
-#include <QXmlStreamWriter>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "io/image_io.h"
 #include "io/materialx_graph.h"
@@ -556,70 +555,59 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
 
 void MaterialNetworkGraphView::rebuildFromXml(const QString& xml, bool rewriteRepaired) {
     graphNodes_.clear();
+    udimSet_.clear();
     bool repaired = false;
-    bool parsedMaterialX = false;
     int ordinal = 0;
 
-    QXmlStreamReader reader(xml);
-    while (!reader.atEnd()) {
-        reader.readNext();
-        if (!reader.isStartElement()) continue;
-        if (reader.name() != QLatin1String("materialx")) {
-            reader.skipCurrentElement();
-            continue;
-        }
-
-        parsedMaterialX = true;
-        while (reader.readNextStartElement()) {
-            const QString category = reader.name().toString();
-            if (!isKnownMaterialXCategory(category)) {
-                reader.skipCurrentElement();
-                continue;
-            }
-
+    // Parse through MaterialX (not Qt XML): MaterialX keeps <UDIM> unescaped in
+    // attribute values, which QXmlStreamReader rejects as malformed markup.
+    QVector<MaterialXGraphNode> parsed;
+    QString parseError;
+    const bool parsedOk = parseMaterialXGraph(xml, parsed, &parseError, &udimSet_);
+    if (!parsedOk) {
+        if (!parseError.isEmpty()) emit statusMessage("MaterialX parse: " + parseError);
+        repaired = true;
+    } else {
+        for (const MaterialXGraphNode& parsedNode : parsed) {
+            if (!isKnownMaterialXCategory(parsedNode.category)) continue;
             MtlxNode node;
-            node.category = category;
-            const QXmlStreamAttributes attrs = reader.attributes();
-            node.name = attrs.value("name").toString();
+            node.category = parsedNode.category;
+            node.name = parsedNode.name;
             if (node.name.isEmpty()) {
-                node.name = uniqueNodeName(category);
+                node.name = uniqueNodeName(parsedNode.category);
                 repaired = true;
             }
-            node.type = attrs.value("type").toString();
-            if (node.type.isEmpty()) node.type = defaultTypeForCategory(category);
-
-            bool okX = false;
-            bool okY = false;
-            const qreal x = attrs.value("xpos").toDouble(&okX);
-            const qreal y = attrs.value("ypos").toDouble(&okY);
-            node.layout = okX && okY ? QPointF(x, y) : defaultLayoutForCategory(category, ordinal);
-            if (!okX || !okY) repaired = true;
-
-            while (reader.readNextStartElement()) {
-                if (reader.name() == QLatin1String("input")) {
-                    MtlxInput input;
-                    const QXmlStreamAttributes inputAttrs = reader.attributes();
-                    input.name = inputAttrs.value("name").toString();
-                    input.type = inputAttrs.value("type").toString();
-                    input.value = inputAttrs.value("value").toString();
-                    input.nodename = inputAttrs.value("nodename").toString();
-                    if (!input.name.isEmpty()) node.inputs.push_back(input);
-                    reader.skipCurrentElement();
-                } else {
-                    reader.skipCurrentElement();
+            node.type = parsedNode.type.isEmpty() ? defaultTypeForCategory(node.category) : parsedNode.type;
+            if (std::isnan(parsedNode.xpos) || std::isnan(parsedNode.ypos))
+                node.layout = defaultLayoutForCategory(node.category, ordinal);
+            else
+                node.layout = QPointF(parsedNode.xpos, parsedNode.ypos);
+            for (const MaterialXGraphInput& parsedInput : parsedNode.inputs) {
+                if (parsedInput.name.isEmpty()) continue;
+                MtlxInput input{parsedInput.name, parsedInput.type, parsedInput.value, parsedInput.nodename};
+                // MaterialX authoring: concrete tile name.1001.exr → unresolved name.<UDIM>.exr
+                if (input.nodename.isEmpty() && input.type == QLatin1String("filename") &&
+                    !input.value.isEmpty() && !pathHasUdimToken(input.value)) {
+                    QString pattern;
+                    std::vector<int> tiles;
+                    if (resolveUdimPattern(input.value, QString(), pattern, tiles)) {
+                        input.value = pattern;
+                        repaired = true;
+                        for (int udim : tiles) {
+                            if (!udimSet_.contains(udim)) udimSet_.push_back(udim);
+                        }
+                    }
                 }
+                node.inputs.push_back(input);
             }
-
-            for (const MtlxInput& input : defaultInputsForCategory(category))
+            for (const MtlxInput& input : defaultInputsForCategory(node.category, node.type))
                 ensureInput(node.inputs, input.name, input.type, input.value);
             graphNodes_.push_back(node);
             ++ordinal;
         }
-    }
-
-    if (!parsedMaterialX || reader.hasError()) {
-        graphNodes_.clear();
-        repaired = true;
+        const QVector<int> authoredUdims = udimSet_;
+        refreshUdimSetFromFilenames();
+        if (udimSet_ != authoredUdims) repaired = true;
     }
 
     if (graphNodes_.isEmpty()) {
@@ -772,34 +760,25 @@ void MaterialNetworkGraphView::rebuild() {
 }
 
 QString MaterialNetworkGraphView::serializeGraph() const {
-    QString xml;
-    QXmlStreamWriter writer(&xml);
-    writer.setAutoFormatting(true);
-    writer.writeStartDocument();
-    writer.writeStartElement("materialx");
-    writer.writeAttribute("version", "1.38");
+    // Serialize with MaterialX so filename tokens like <UDIM> stay valid MTLX
+    // (angle brackets intentionally unescaped — Qt XML must not round-trip this).
+    QVector<MaterialXGraphNode> nodes;
+    nodes.reserve(graphNodes_.size());
     for (const MtlxNode& node : graphNodes_) {
-        writer.writeStartElement(node.category);
-        writer.writeAttribute("name", node.name);
-        writer.writeAttribute("type", node.type.isEmpty() ? defaultTypeForCategory(node.category) : node.type);
-        writer.writeAttribute("xpos", QString::number(node.layout.x(), 'f', 3));
-        writer.writeAttribute("ypos", QString::number(node.layout.y(), 'f', 3));
+        MaterialXGraphNode out;
+        out.name = node.name;
+        out.category = node.category;
+        out.type = node.type.isEmpty() ? defaultTypeForCategory(node.category) : node.type;
+        out.xpos = node.layout.x();
+        out.ypos = node.layout.y();
         for (const MtlxInput& input : node.inputs) {
             if (input.name.isEmpty()) continue;
-            writer.writeEmptyElement("input");
-            writer.writeAttribute("name", input.name);
-            if (!input.type.isEmpty()) writer.writeAttribute("type", input.type);
-            if (!input.nodename.isEmpty()) {
-                writer.writeAttribute("nodename", input.nodename);
-            } else if (!input.value.isEmpty()) {
-                writer.writeAttribute("value", input.value);
-            }
+            out.inputs.push_back({input.name, input.type, input.value, input.nodename});
         }
-        writer.writeEndElement();
+        nodes.push_back(out);
     }
-    writer.writeEndElement();
-    writer.writeEndDocument();
-    return xml;
+    const QString xml = serializeMaterialXGraph(nodes, udimSet_);
+    return xml.trimmed().isEmpty() ? fallbackDefaultDocument() : xml;
 }
 
 void MaterialNetworkGraphView::writeModel(bool emitEdited) { writeXmlToMaterial(serializeGraph(), emitEdited); }
@@ -1112,6 +1091,42 @@ bool MaterialNetworkGraphView::openTextureDialogAt(const QPoint& viewPosition) {
     return true;
 }
 
+QString MaterialNetworkGraphView::applyUdimFilename(const QString& path) {
+    QString pattern;
+    std::vector<int> tiles;
+    if (!resolveUdimPattern(path, QString(), pattern, tiles)) return path;
+    udimSet_.clear();
+    for (int udim : tiles) udimSet_.push_back(udim);
+    if (udimSet_.size() > 1) {
+        emit statusMessage(QString("UDIM: %1 tile(s) [%2…%3]")
+                               .arg(udimSet_.size())
+                               .arg(udimSet_.first())
+                               .arg(udimSet_.last()));
+    }
+    return pattern;
+}
+
+void MaterialNetworkGraphView::refreshUdimSetFromFilenames() {
+    // Rebuild udimset from current image filenames (MaterialX geominfo source of truth).
+    QVector<int> merged;
+    for (const MtlxNode& node : graphNodes_) {
+        if (node.category != "image" && node.category != "tiledimage") continue;
+        for (const MtlxInput& input : node.inputs) {
+            if (input.name != "file" || input.value.isEmpty() || !input.nodename.isEmpty()) continue;
+            QString pattern;
+            std::vector<int> tiles;
+            if (!resolveUdimPattern(input.value, QString(), pattern, tiles)) continue;
+            for (int udim : tiles) {
+                if (!merged.contains(udim)) merged.push_back(udim);
+            }
+        }
+    }
+    // Keep authoring-time udimset when files are missing on this machine.
+    if (merged.isEmpty() && !udimSet_.isEmpty()) return;
+    std::sort(merged.begin(), merged.end());
+    udimSet_ = merged;
+}
+
 void MaterialNetworkGraphView::chooseTexture(const QString& nodeName) {
     MtlxNode* node = findModelNode(nodeName);
     if (!node || (node->category != "image" && node->category != "tiledimage")) return;
@@ -1133,11 +1148,12 @@ void MaterialNetworkGraphView::chooseTexture(const QString& nodeName) {
         QFileDialog::getOpenFileName(this, "Choose texture for " + nodeName, node->inputs[fileInput].value, filter);
     if (path.isEmpty()) return;
 
-    node->inputs[fileInput].value = path;
+    // MaterialX authoring: store unresolved <UDIM> + geominfo udimset (not one concrete tile).
+    node->inputs[fileInput].value = applyUdimFilename(path);
     node->inputs[fileInput].nodename.clear();
     writeModel(true);
     rebuild();
-    emit statusMessage(QString("%1 file set to %2").arg(nodeName, QFileInfo(path).fileName()));
+    emit statusMessage(QString("%1 file set to %2").arg(nodeName, QFileInfo(node->inputs[fileInput].value).fileName()));
 }
 
 void MaterialNetworkGraphView::syncNodePositions() {
@@ -1352,8 +1368,10 @@ bool MaterialNetworkGraphView::setInputValue(const QString& nodeName, const QStr
     for (MtlxInput& input : node->inputs) {
         if (input.name != inputName) continue;
         const bool wasConnected = !input.nodename.isEmpty();
-        if (input.value == value && !wasConnected) return true;
-        input.value = value;
+        QString stored = value;
+        if (input.type == "filename" || inputName == "file") stored = applyUdimFilename(value);
+        if (input.value == stored && !wasConnected) return true;
+        input.value = stored;
         input.nodename.clear();
         writeModel(true);
         // Rebuild only when the graph appearance changes (wires / file subtitle).

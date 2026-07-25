@@ -4,6 +4,7 @@
 
 #include <QString>
 #include <QVector>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -57,5 +58,28 @@ QString normalizeMaterialXDocument(const QString& xml);
 
 // Evaluate a MaterialX user graph into our path-tracer Material + textures.
 MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString& searchDirectory);
+
+// UI graph model helpers — always go through MaterialX I/O so filename tokens
+// like <UDIM> survive (MaterialX intentionally keeps angle brackets unescaped).
+struct MaterialXGraphInput {
+    QString name;
+    QString type;
+    QString value;
+    QString nodename;
+};
+
+struct MaterialXGraphNode {
+    QString name;
+    QString category;
+    QString type;
+    double xpos = std::numeric_limits<double>::quiet_NaN();
+    double ypos = std::numeric_limits<double>::quiet_NaN();
+    QVector<MaterialXGraphInput> inputs;
+};
+
+bool parseMaterialXGraph(const QString& xml, QVector<MaterialXGraphNode>& outNodes, QString* error = nullptr,
+                         QVector<int>* outUdimSet = nullptr);
+// Serialize user nodes (+ optional MaterialX geominfo udimset stringarray).
+QString serializeMaterialXGraph(const QVector<MaterialXGraphNode>& nodes, const QVector<int>& udimSet = {});
 
 }  // namespace sol

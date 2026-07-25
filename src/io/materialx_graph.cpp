@@ -4,6 +4,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <map>
 
 #include "core/log.h"
@@ -12,6 +14,7 @@
 
 #if SOLSTICE_HAVE_MATERIALX
 #  include <MaterialXCore/Document.h>
+#  include <MaterialXCore/Geom.h>
 #  include <MaterialXCore/Interface.h>
 #  include <MaterialXCore/Node.h>
 #  include <MaterialXCore/Value.h>
@@ -90,7 +93,40 @@ QString writeUserNodesOnly(const mx::DocumentPtr& doc) {
         mx::NodeGraphPtr copy = out->addNodeGraph(graph->getName());
         copy->copyContentFrom(graph);
     }
+    // Preserve geominfo (e.g. udimset) — MaterialX UDIM assets declare tiles there.
+    for (const mx::GeomInfoPtr& geomInfo : doc->getGeomInfos()) {
+        if (!geomInfo || !geomInfo->getSourceUri().empty()) continue;
+        mx::GeomInfoPtr copy = out->addGeomInfo(geomInfo->getName());
+        copy->copyContentFrom(geomInfo);
+    }
     return QString::fromStdString(mx::writeToXmlString(out));
+}
+
+std::vector<int> readUdimSet(const mx::DocumentPtr& doc) {
+    std::vector<int> udims;
+    if (!doc) return udims;
+    mx::ValuePtr value = doc->getGeomPropValue(mx::UDIM_SET_PROPERTY);
+    if (!value) return udims;
+    if (value->isA<mx::StringVec>()) {
+        for (const std::string& id : value->asA<mx::StringVec>()) {
+            try {
+                const int udim = std::stoi(id);
+                if (udim >= 1001 && udim < 2000) udims.push_back(udim);
+            } catch (...) {
+            }
+        }
+    } else if (value->isA<std::string>()) {
+        // Some documents store a comma-separated string.
+        QStringList parts = QString::fromStdString(value->asA<std::string>()).split(',', Qt::SkipEmptyParts);
+        for (QString part : parts) {
+            bool ok = false;
+            const int udim = part.trimmed().toInt(&ok);
+            if (ok && udim >= 1001 && udim < 2000) udims.push_back(udim);
+        }
+    }
+    std::sort(udims.begin(), udims.end());
+    udims.erase(std::unique(udims.begin(), udims.end()), udims.end());
+    return udims;
 }
 
 bool parseColor3(const std::string& value, Vec3& out) {
@@ -133,13 +169,31 @@ std::string inputValueString(const mx::NodePtr& node, const std::string& inputNa
 }
 
 std::shared_ptr<Image> loadTextureFromImageNode(const mx::NodePtr& imageNode, const QString& searchDirectory,
-                                                 std::string& error) {
+                                                 const std::vector<int>& udimSet, std::string& error) {
     if (!imageNode) return nullptr;
     const std::string category = imageNode->getCategory();
     if (category != "image" && category != "tiledimage") return nullptr;
+    // MaterialX keeps <UDIM> unresolved on the input; resolution happens at bind/load time
+    // (View: setUdimString per tile; here: discover tiles + atlas bake).
     std::string file = inputValueString(imageNode, "file");
     if (file.empty()) return nullptr;
-    return loadImageOrUdim(QString::fromStdString(file), searchDirectory, error);
+    QString pattern;
+    std::vector<int> discovered;
+    const QString fileQ = QString::fromStdString(file);
+    if (resolveUdimPattern(fileQ, searchDirectory, pattern, discovered)) {
+        std::vector<int> tiles = udimSet;
+        if (tiles.empty()) tiles = discovered;
+        std::string ids;
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            if (i) ids += ",";
+            ids += std::to_string(tiles[i]);
+        }
+        logInfo("MaterialX image file='" + file + "' → pattern='" + pattern.toStdString() + "' tiles=[" + ids +
+                "]");
+        return loadImageOrUdim(pattern, searchDirectory, error, tiles);
+    }
+    logInfo("MaterialX image file='" + file + "'");
+    return loadImageOrUdim(fileQ, searchDirectory, error, udimSet);
 }
 
 // Walk through multiply/mix/normalmap wrappers to find an image node.
@@ -476,12 +530,22 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
 
     applyStandardSurface(ss, result.material);
 
+    const std::vector<int> udimSet = readUdimSet(doc);
+    if (!udimSet.empty()) {
+        std::string ids;
+        for (size_t i = 0; i < udimSet.size(); ++i) {
+            if (i) ids += ",";
+            ids += std::to_string(udimSet[i]);
+        }
+        logInfo("MaterialX udimset=[" + ids + "]");
+    }
+
     auto bindTex = [&](const char* inputName, std::shared_ptr<Image>& slot) {
         mx::NodePtr connected = resolveConnectedNode(ss, inputName);
         mx::NodePtr image = findImageNode(connected);
         if (!image) return;
         std::string texError;
-        slot = loadTextureFromImageNode(image, searchDirectory, texError);
+        slot = loadTextureFromImageNode(image, searchDirectory, udimSet, texError);
         if (!slot && !texError.empty()) logWarning("MaterialX: " + texError);
     };
 
@@ -500,6 +564,95 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
     Q_UNUSED(searchDirectory);
     result.error = "this build has no MaterialX support";
     return result;
+#endif
+}
+
+bool parseMaterialXGraph(const QString& xml, QVector<MaterialXGraphNode>& outNodes, QString* error,
+                         QVector<int>* outUdimSet) {
+    outNodes.clear();
+    if (outUdimSet) outUdimSet->clear();
+#if SOLSTICE_HAVE_MATERIALX
+    std::string err;
+    // MaterialX's pugixml fork accepts raw <UDIM> and escaped &lt;UDIM&gt;.
+    auto doc = loadUserDocument(xml, err);
+    if (!doc) {
+        if (error) *error = QString::fromStdString(err);
+        return false;
+    }
+    if (outUdimSet) {
+        for (int udim : readUdimSet(doc)) outUdimSet->push_back(udim);
+    }
+    for (const mx::NodePtr& node : doc->getNodes()) {
+        if (!node || !node->getSourceUri().empty()) continue;
+        MaterialXGraphNode graphNode;
+        graphNode.name = QString::fromStdString(node->getName());
+        graphNode.category = QString::fromStdString(node->getCategory());
+        graphNode.type = QString::fromStdString(node->getType());
+        if (node->hasAttribute("xpos"))
+            graphNode.xpos = QString::fromStdString(node->getAttribute("xpos")).toDouble();
+        else
+            graphNode.xpos = std::numeric_limits<double>::quiet_NaN();
+        if (node->hasAttribute("ypos"))
+            graphNode.ypos = QString::fromStdString(node->getAttribute("ypos")).toDouble();
+        else
+            graphNode.ypos = std::numeric_limits<double>::quiet_NaN();
+        for (const mx::InputPtr& input : node->getInputs()) {
+            if (!input) continue;
+            MaterialXGraphInput graphInput;
+            graphInput.name = QString::fromStdString(input->getName());
+            graphInput.type = QString::fromStdString(input->getType());
+            graphInput.nodename = QString::fromStdString(input->getNodeName());
+            if (input->hasValueString())
+                graphInput.value = QString::fromStdString(input->getValueString());
+            else if (input->getValue())
+                graphInput.value = QString::fromStdString(input->getValue()->getValueString());
+            graphNode.inputs.push_back(graphInput);
+        }
+        outNodes.push_back(graphNode);
+    }
+    return true;
+#else
+    if (error) *error = "MaterialX unavailable";
+    Q_UNUSED(xml);
+    return false;
+#endif
+}
+
+QString serializeMaterialXGraph(const QVector<MaterialXGraphNode>& nodes, const QVector<int>& udimSet) {
+#if SOLSTICE_HAVE_MATERIALX
+    auto out = mx::createDocument();
+    out->setVersionString("1.38");
+    for (const MaterialXGraphNode& graphNode : nodes) {
+        if (graphNode.category.isEmpty() || graphNode.name.isEmpty()) continue;
+        mx::NodePtr node =
+            out->addNode(graphNode.category.toStdString(), graphNode.name.toStdString(), graphNode.type.toStdString());
+        if (!std::isnan(graphNode.xpos)) node->setAttribute("xpos", std::to_string(graphNode.xpos));
+        if (!std::isnan(graphNode.ypos)) node->setAttribute("ypos", std::to_string(graphNode.ypos));
+        for (const MaterialXGraphInput& graphInput : graphNode.inputs) {
+            if (graphInput.name.isEmpty()) continue;
+            mx::InputPtr input = node->addInput(graphInput.name.toStdString(), graphInput.type.toStdString());
+            if (!graphInput.nodename.isEmpty()) {
+                input->setNodeName(graphInput.nodename.toStdString());
+            } else if (!graphInput.value.isEmpty()) {
+                // Keep MaterialX filename tokens such as <UDIM> unresolved.
+                input->setValueString(graphInput.value.toStdString());
+            }
+        }
+    }
+    // MaterialX UDIM assets declare the tile list on geominfo/udimset (see TestSuite udim.mtlx).
+    if (!udimSet.isEmpty()) {
+        mx::GeomInfoPtr geomInfo = out->addGeomInfo("udim_geom");
+        geomInfo->setGeom("/");
+        mx::StringVec ids;
+        ids.reserve(size_t(udimSet.size()));
+        for (int udim : udimSet) ids.push_back(std::to_string(udim));
+        geomInfo->setGeomPropValue(mx::UDIM_SET_PROPERTY, ids);
+    }
+    return QString::fromStdString(mx::writeToXmlString(out));
+#else
+    Q_UNUSED(nodes);
+    Q_UNUSED(udimSet);
+    return {};
 #endif
 }
 

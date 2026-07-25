@@ -120,6 +120,9 @@ private:
     void deleteSelectedNodes();
     bool openTextureDialogAt(const QPoint& viewPosition);
     void chooseTexture(const QString& nodeName);
+    // MaterialX UDIM: convert concrete tile / pattern → unresolved <UDIM> + udimset.
+    QString applyUdimFilename(const QString& path);
+    void refreshUdimSetFromFilenames();
     void syncNodePositions();
     bool shouldBeginPan(const QMouseEvent* event) const;
     void beginPan(const QPoint& viewPosition);
@@ -142,6 +145,8 @@ private:
     QMetaObject::Connection materialChangedConnection_;
     QMetaObject::Connection selectionConnection_;
     QVector<MtlxNode> graphNodes_;
+    // MaterialX geominfo udimset (tile ids). Empty → discover from disk at cook.
+    QVector<int> udimSet_;
     QGraphicsPathItem* previewWire_ = nullptr;
     bool pendingFrame_ = false;
     bool panning_ = false;

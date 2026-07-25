@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
+#include <QRegularExpression>
 #include <QString>
 
 #include <algorithm>
@@ -283,20 +284,102 @@ QString expandUdimToken(const QString& pattern, int udim) {
     return result;
 }
 
-std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& searchDirectory, std::string& error) {
-    QString path = pathIn.trimmed();
-    QFileInfo info(path);
-    if (!info.isAbsolute() && !searchDirectory.isEmpty()) path = QDir(searchDirectory).absoluteFilePath(path);
+namespace {
+
+QString decodeXmlEntities(QString path) {
+    // Decode entities if a Qt writer previously escaped the MaterialX token.
+    path.replace(QLatin1String("&lt;"), QLatin1String("<"));
+    path.replace(QLatin1String("&gt;"), QLatin1String(">"));
+    return path.trimmed();
+}
+
+QString makeAbsoluteTexturePath(QString path, const QString& searchDirectory) {
+    path = decodeXmlEntities(path);
+    const QFileInfo info(path);
+    if (!info.isAbsolute() && !searchDirectory.isEmpty()) return QDir(searchDirectory).absoluteFilePath(path);
+    return path;
+}
+
+// Concrete Mari/MaterialX tile name: ...[._]1xxx.ext  (1001..1999).
+bool concreteUdimFilename(const QString& fileName, QString& prefix, int& udim, QString& suffixWithDot) {
+    static const QRegularExpression re(QStringLiteral(R"((.*)([._])(1\d{3})(\.[^.]+)$)"));
+    const QRegularExpressionMatch match = re.match(fileName);
+    if (!match.hasMatch()) return false;
+    udim = match.captured(3).toInt();
+    if (udim < 1001 || udim >= 2000) return false;
+    prefix = match.captured(1) + match.captured(2);
+    suffixWithDot = match.captured(4);
+    return true;
+}
+
+}  // namespace
+
+std::vector<int> discoverUdimTiles(const QString& patternIn, const QString& searchDirectory,
+                                   const std::vector<int>& explicitUdims) {
+    const QString pattern = makeAbsoluteTexturePath(patternIn, searchDirectory);
+    std::vector<int> candidates = explicitUdims;
+    if (candidates.empty()) {
+        candidates.reserve(100);
+        for (int udim = 1001; udim <= 1100; ++udim) candidates.push_back(udim);
+    }
+    std::vector<int> found;
+    found.reserve(candidates.size());
+    for (int udim : candidates) {
+        if (udim < 1001 || udim >= 2000) continue;
+        if (QFileInfo::exists(expandUdimToken(pattern, udim))) found.push_back(udim);
+    }
+    return found;
+}
+
+bool resolveUdimPattern(const QString& pathIn, const QString& searchDirectory, QString& outPattern,
+                        std::vector<int>& outTiles) {
+    outPattern.clear();
+    outTiles.clear();
+    QString path = makeAbsoluteTexturePath(pathIn, searchDirectory);
+    if (path.isEmpty()) return false;
 
     if (pathHasUdimToken(path)) {
+        outPattern = path;
+        outTiles = discoverUdimTiles(path, QString(), {});
+        return true;
+    }
+
+    const QFileInfo info(path);
+    QString prefix;
+    QString suffix;
+    int udim = 0;
+    if (!concreteUdimFilename(info.fileName(), prefix, udim, suffix)) return false;
+
+    // MaterialX authoring form: keep <UDIM> unresolved in the filename.
+    outPattern = info.dir().filePath(prefix + QStringLiteral("<UDIM>") + suffix);
+    outTiles = discoverUdimTiles(outPattern, QString(), {});
+    if (outTiles.empty()) outTiles.push_back(udim);
+    return true;
+}
+
+std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& searchDirectory, std::string& error,
+                                       const std::vector<int>& explicitUdims) {
+    QString path = makeAbsoluteTexturePath(pathIn, searchDirectory);
+
+    // MaterialX: unresolved <UDIM> in file + tile list from udimset / disk.
+    // Also accept a concrete tile path (name.1001.exr) and promote it to a UDIM set.
+    QString pattern;
+    std::vector<int> discovered;
+    const bool isUdim = resolveUdimPattern(path, QString(), pattern, discovered);
+    if (isUdim) {
         struct Tile {
             int udim = 0;
             std::shared_ptr<Image> image;
         };
+        std::vector<int> udimList = explicitUdims;
+        if (udimList.empty()) udimList = discovered;
+        if (udimList.empty()) udimList = discoverUdimTiles(pattern, QString(), {});
+
         std::vector<Tile> tiles;
-        tiles.reserve(16);
-        for (int udim = 1001; udim <= 1100; ++udim) {
-            const QString tilePath = expandUdimToken(path, udim);
+        tiles.reserve(udimList.size());
+        for (int udim : udimList) {
+            if (udim < 1001 || udim >= 2000) continue;
+            const QString tilePath = expandUdimToken(pattern, udim);
             if (!QFileInfo::exists(tilePath)) continue;
             auto tile = std::make_shared<Image>();
             std::string loadError;
@@ -307,10 +390,11 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
             tiles.push_back({udim, std::move(tile)});
         }
         if (tiles.empty()) {
-            error = "no UDIM tiles found for: " + path.toStdString();
+            error = "no UDIM tiles found for: " + pattern.toStdString();
             return nullptr;
         }
 
+        // MaterialX Mesh::splitByUdims / Mari: UDIM = 1001 + U + V*10, U,V = floor(uv).
         int maxU = 0;
         int maxV = 0;
         int tileW = tiles.front().image->width();
@@ -326,7 +410,7 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
         const int gridU = maxU + 1;
         const int gridV = maxV + 1;
 
-        // Bake tiles into one atlas so shading only needs a single TextureView.
+        // Bake atlas (MaterialX hwNormalizeUdimTexCoords equivalent for CPU path tracer).
         auto atlas = std::make_shared<Image>(tileW * gridU, tileH * gridV, Vec4(0.0f, 0.0f, 0.0f, 0.0f));
         atlas->setUdimGrid(gridU, gridV);
         for (const Tile& tile : tiles) {
@@ -343,8 +427,13 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
                 }
             }
         }
-        logInfo("Loaded " + std::to_string(tiles.size()) + " UDIM tile(s) → atlas " +
-                std::to_string(gridU) + "x" + std::to_string(gridV) + " for " + path.toStdString());
+        std::string ids;
+        for (size_t i = 0; i < tiles.size(); ++i) {
+            if (i) ids += ",";
+            ids += std::to_string(tiles[i].udim);
+        }
+        logInfo("UDIM: loaded " + std::to_string(tiles.size()) + " tile(s) [" + ids + "] → atlas " +
+                std::to_string(gridU) + "x" + std::to_string(gridV) + " from " + pattern.toStdString());
         return atlas;
     }
 

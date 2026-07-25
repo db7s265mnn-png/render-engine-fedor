@@ -4,10 +4,16 @@
 #include <string>
 #include <vector>
 
+#include <QDir>
+#include <QImage>
+#include <QTemporaryDir>
+
 #include "app/default_scene.h"
 #include "core/image.h"
 #include "core/rng.h"
 #include "io/alembic_loader.h"
+#include "io/image_io.h"
+#include "io/materialx_graph.h"
 #include "nodes/node_graph.h"
 #include "nodes/node_registry.h"
 #include "render/integrator.h"
@@ -334,6 +340,96 @@ void testInstanceTransform() {
     checkNear(corner, 0.0f, 1e-4f, "background stays black");
 }
 
+void testUdimMaterialX() {
+    std::printf("udim-materialx\n");
+    QTemporaryDir dir;
+    check(dir.isValid(), "temp dir for udim tiles");
+    const QString root = dir.path();
+
+    auto writeTile = [&](int udim, int r, int g, int b) {
+        QImage img(4, 4, QImage::Format_RGBA8888);
+        img.fill(QColor(r, g, b, 255));
+        const QString path = root + QString("/grid.%1.png").arg(udim);
+        check(img.save(path), ("write tile " + std::to_string(udim)).c_str());
+    };
+    writeTile(1001, 255, 0, 0);
+    writeTile(1002, 0, 255, 0);
+    writeTile(1011, 0, 0, 255);
+
+    QString pattern;
+    std::vector<int> tiles;
+    check(resolveUdimPattern(root + "/grid.1001.png", QString(), pattern, tiles),
+          "concrete tile promotes to MaterialX <UDIM> pattern");
+    check(pattern.contains(QStringLiteral("<UDIM>")), "pattern keeps unresolved <UDIM>");
+    check(tiles.size() == 3, "discovers three UDIM tiles on disk");
+
+    std::string error;
+    auto atlas = loadImageOrUdim(root + "/grid.1001.png", QString(), error, {});
+    check(atlas != nullptr, "loads udim atlas from concrete tile path");
+    check(atlas && atlas->isUdimAtlas(), "atlas marked as UDIM");
+    check(atlas && atlas->udimGridU() == 2 && atlas->udimGridV() == 2, "atlas grid covers U0..1 V0..1");
+    if (atlas) {
+        // 1001 → red at UV tile (0,0); 1002 → green at (1,0); 1011 → blue at (0,1)
+        checkNear(atlas->at(0, 0).x, 1.0f, 0.05f, "tile 1001 baked into atlas origin");
+        checkNear(atlas->at(4, 0).y, 1.0f, 0.05f, "tile 1002 baked into U=1");
+        checkNear(atlas->at(0, 4).z, 1.0f, 0.05f, "tile 1011 baked into V=1");
+    }
+
+    if (!materialXAvailable()) {
+        std::printf("  skip MaterialX xml roundtrip (MaterialX unavailable)\n");
+        return;
+    }
+
+    QVector<MaterialXGraphNode> nodes;
+    MaterialXGraphNode image;
+    image.name = "image_color";
+    image.category = "image";
+    image.type = "color3";
+    image.inputs.push_back({"file", "filename", pattern, {}});
+    nodes.push_back(image);
+    MaterialXGraphNode ss;
+    ss.name = "standard_surface1";
+    ss.category = "standard_surface";
+    ss.type = "surfaceshader";
+    ss.inputs.push_back({"base_color", "color3", {}, "image_color"});
+    nodes.push_back(ss);
+    MaterialXGraphNode surface;
+    surface.name = "surface";
+    surface.category = "surfacematerial";
+    surface.type = "material";
+    surface.inputs.push_back({"surfaceshader", "surfaceshader", {}, "standard_surface1"});
+    nodes.push_back(surface);
+
+    const QVector<int> udimSet = {1001, 1002, 1011};
+    const QString xml = serializeMaterialXGraph(nodes, udimSet);
+    check(xml.contains(QStringLiteral("<UDIM>")), "MaterialX write keeps raw <UDIM>");
+    check(!xml.contains(QStringLiteral("&lt;UDIM&gt;")), "MaterialX write does not entity-escape <UDIM>");
+    check(xml.contains(QStringLiteral("udimset")), "MaterialX write emits geominfo udimset");
+
+    QVector<MaterialXGraphNode> roundtrip;
+    QVector<int> roundtripSet;
+    QString parseError;
+    check(parseMaterialXGraph(xml, roundtrip, &parseError, &roundtripSet), "MaterialX parse roundtrip");
+    check(roundtripSet.size() == 3, "udimset roundtrips");
+    bool foundFile = false;
+    for (const MaterialXGraphNode& node : roundtrip) {
+        for (const MaterialXGraphInput& input : node.inputs) {
+            if (input.name == "file") {
+                foundFile = true;
+                check(input.value.contains(QStringLiteral("<UDIM>")), "parsed file keeps <UDIM>");
+            }
+        }
+    }
+    check(foundFile, "roundtrip retained image file input");
+
+    MaterialXEvalResult evaluated = evaluateMaterialXDocument(xml, root);
+    check(evaluated.ok, "evaluate MaterialX udim document");
+    check(evaluated.baseColorTexture && evaluated.baseColorTexture->isUdimAtlas(),
+          "cook binds multi-tile UDIM atlas");
+    check(evaluated.baseColorTexture && evaluated.baseColorTexture->udimGridU() >= 2,
+          "cooked atlas spans multiple U tiles");
+}
+
 }  // namespace
 
 int main() {
@@ -346,6 +442,7 @@ int main() {
     testEnvironment();
     testRender();
     testInstanceTransform();
+    testUdimMaterialX();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
