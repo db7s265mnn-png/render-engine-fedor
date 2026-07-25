@@ -158,15 +158,16 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       - name: Run the tests
-        run: ./build/bin/Release/solstice_tests.exe
+        run: |
+          $env:PATH = "$env:DEPS_PREFIX/embree/bin;$env:PATH"
+          ./build/bin/Release/solstice_tests.exe
 
       - name: Assemble the distribution
         run: |
           cmake --build build --config Release --target deploy
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item build/bin/Release/* dist/ -Recurse -Force
-          Get-ChildItem "$env:DEPS_PREFIX/embree" -Recurse -Filter *.dll |
-            ForEach-Object { Copy-Item $_.FullName dist/ -Force }
+          Copy-Item "$env:DEPS_PREFIX/embree/bin/*.dll" dist/ -Force
           Copy-Item README.md dist/
           Copy-Item -Recurse docs dist/docs
           Copy-Item -Recurse examples dist/examples
