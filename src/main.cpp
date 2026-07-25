@@ -1,4 +1,4 @@
-// Fedor Render - node based path tracer with Embree and OptiX backends.
+// Sonya_Render - node based path tracer with Embree and OptiX backends.
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
 
     QApplication application(argc, argv);
     QCoreApplication::setApplicationName(SOLSTICE_APP_NAME);
-    QCoreApplication::setOrganizationName("Fedor");
+    QCoreApplication::setOrganizationName("Sonya");
     QCoreApplication::setApplicationVersion(SOLSTICE_VERSION);
     QGuiApplication::setApplicationDisplayName(QString::fromUtf8(SOLSTICE_APP_NAME));
 

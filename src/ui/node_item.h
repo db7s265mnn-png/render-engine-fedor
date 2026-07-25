@@ -16,10 +16,10 @@ public:
     enum { Type = UserType + 1 };
     enum class Hit { None, Body, Output, Input, DisplayFlag, BypassFlag };
 
-    static constexpr qreal kWidth = 150.0;
-    static constexpr qreal kHeight = 42.0;
-    static constexpr qreal kPortRadius = 6.5;
-    static constexpr qreal kPortHitRadius = 22.0;
+    static constexpr qreal kWidth = 74.0;
+    static constexpr qreal kHeight = 50.0;
+    static constexpr qreal kPortRadius = 5.5;
+    static constexpr qreal kPortHitRadius = 18.0;
 
     NodeItem(Node* node, NodeGraphScene* scene);
 
@@ -44,6 +44,10 @@ protected:
 
 private:
     QColor headerColor() const;
+    QRectF bodyRect() const;
+    QRectF labelRect() const;
+    QRectF displayFlagRect() const;
+    QRectF bypassFlagRect() const;
 
     Node* node_ = nullptr;
     NodeGraphScene* graphScene_ = nullptr;

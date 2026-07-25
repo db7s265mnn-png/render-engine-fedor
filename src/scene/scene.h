@@ -57,6 +57,7 @@ public:
     std::vector<Material> materials;
     std::vector<LightData> lights;
     std::vector<std::shared_ptr<EnvironmentMap>> envMaps;
+    std::vector<std::shared_ptr<Image>> textures;
     std::vector<PrimRecord> prims;
 
     CameraData camera;
@@ -66,6 +67,7 @@ public:
     int addMesh(MeshPtr mesh);
     int addMaterial(const Material& material);
     int addEnvMap(std::shared_ptr<EnvironmentMap> env);
+    int addTexture(std::shared_ptr<Image> image);
 
     // Generates renderable proxy geometry for area lights, recomputes bounds
     // and prepares the flat arrays consumed by SceneView.
@@ -84,6 +86,7 @@ private:
     Bounds3 bounds_;
     std::vector<MeshView> meshViews_;
     std::vector<EnvMapView> envViews_;
+    std::vector<TextureView> textureViews_;
     int domeLightIndex_ = -1;
 };
 

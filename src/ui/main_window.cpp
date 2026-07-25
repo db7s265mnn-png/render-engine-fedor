@@ -23,6 +23,7 @@
 #include "render/scene_picker.h"
 #include "solstice_config.h"
 #include "ui/log_panel.h"
+#include "ui/material_network_view.h"
 #include "ui/node_graph_view.h"
 #include "ui/parameter_panel.h"
 #include "ui/scene_graph_panel.h"
@@ -174,6 +175,12 @@ void MainWindow::createDocks() {
     networkDock->setWidget(networkView_);
     addDockWidget(Qt::BottomDockWidgetArea, networkDock);
 
+    auto* materialNetworkDock = new QDockWidget("Material Network", this);
+    materialNetworkDock->setObjectName("materialNetworkDock");
+    materialNetworkView_ = new MaterialNetworkView(materialNetworkDock);
+    materialNetworkDock->setWidget(materialNetworkView_);
+    addDockWidget(Qt::BottomDockWidgetArea, materialNetworkDock);
+
     auto* parameterDock = new QDockWidget("Parameters", this);
     parameterDock->setObjectName("parameterDock");
     parameterPanel_ = new ParameterPanel(parameterDock);
@@ -193,14 +200,23 @@ void MainWindow::createDocks() {
     logPanel_->installAsLogSink();
     logDock->setWidget(logPanel_);
     addDockWidget(Qt::BottomDockWidgetArea, logDock);
+    tabifyDockWidget(networkDock, materialNetworkDock);
     tabifyDockWidget(networkDock, logDock);
     networkDock->raise();
 
     resizeDocks({networkDock}, {330}, Qt::Vertical);
 
-    connect(networkView_, &NodeGraphView::nodeSelected, this,
-            [this](Node* node) { parameterPanel_->setNode(node); });
+    connect(networkView_, &NodeGraphView::nodeSelected, this, [this](Node* node) {
+        parameterPanel_->setNode(node);
+        materialNetworkView_->setMaterialNode(node && node->typeName() == "material" ? node : nullptr);
+    });
     connect(networkView_, &NodeGraphView::statusMessage, this,
+            [this](const QString& message) { statusBar()->showMessage(message, 3000); });
+    connect(materialNetworkView_, &MaterialNetworkView::materialEdited, this, [this](Node* node) {
+        if (parameterPanel_->node() == node) parameterPanel_->refresh();
+        scheduleCook();
+    });
+    connect(materialNetworkView_, &MaterialNetworkView::statusMessage, this,
             [this](const QString& message) { statusBar()->showMessage(message, 3000); });
     connect(parameterPanel_, &ParameterPanel::parameterEdited, this,
             [this](Node*, const QString&) { scheduleCook(); });
@@ -216,6 +232,7 @@ void MainWindow::newScene() {
     buildDefaultGraph(graph_);
     networkView_->setGraph(&graph_);
     parameterPanel_->setNode(nullptr);
+    materialNetworkView_->setMaterialNode(nullptr);
     cameraOverride_ = false;
     renderView_->clearImage();
     updateWindowTitle();
@@ -228,6 +245,7 @@ void MainWindow::newSceneFromAlembic(const QString& alembicPath, const QString& 
     buildAlembicGraph(graph_, alembicPath, hdriPath);
     networkView_->setGraph(&graph_);
     parameterPanel_->setNode(nullptr);
+    materialNetworkView_->setMaterialNode(nullptr);
     cameraOverride_ = false;
     renderView_->clearImage();
     updateWindowTitle();
@@ -244,6 +262,7 @@ bool MainWindow::openScene(const QString& path) {
     }
     networkView_->setGraph(&graph_);
     parameterPanel_->setNode(nullptr);
+    materialNetworkView_->setMaterialNode(nullptr);
     cameraOverride_ = false;
     updateWindowTitle();
     cookNow();
@@ -420,6 +439,7 @@ void MainWindow::selectDisplayNode() {
     if (!node) return;
     networkView_->selectNode(node);
     parameterPanel_->setNode(node);
+    materialNetworkView_->setMaterialNode(node->typeName() == "material" ? node : nullptr);
 }
 
 Node* MainWindow::findCameraNode() const {

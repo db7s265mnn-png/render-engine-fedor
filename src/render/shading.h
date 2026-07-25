@@ -33,6 +33,75 @@ SR_INL SR_HD float roughnessToAlpha(float roughness) {
     return srMax(kMinAlpha, r * r);
 }
 
+// Bilinear texture fetch (wrap U, clamp V) for MaterialX image maps.
+SR_INL SR_HD Vec4 sampleTextureRGBA(const TextureView& tex, Vec2 uv) {
+    if (!tex.valid()) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    const float u = uv.x - floorf(uv.x);
+    const float v = clampf(uv.y, 0.0f, 1.0f);
+    const float x = u * float(tex.width) - 0.5f;
+    const float y = v * float(tex.height) - 0.5f;
+    const int x0 = int(floorf(x));
+    const int y0 = int(floorf(y));
+    const float fx = x - float(x0);
+    const float fy = y - float(y0);
+    auto fetchX = [&](int ix, int iy) -> Vec4 {
+        ix = ((ix % tex.width) + tex.width) % tex.width;
+        iy = iy < 0 ? 0 : (iy >= tex.height ? tex.height - 1 : iy);
+        const size_t idx = (size_t(iy) * size_t(tex.width) + size_t(ix)) * 4;
+        return Vec4(tex.pixels[idx + 0], tex.pixels[idx + 1], tex.pixels[idx + 2], tex.pixels[idx + 3]);
+    };
+    const Vec4 c00 = fetchX(x0, y0);
+    const Vec4 c10 = fetchX(x0 + 1, y0);
+    const Vec4 c01 = fetchX(x0, y0 + 1);
+    const Vec4 c11 = fetchX(x0 + 1, y0 + 1);
+    const Vec4 c0 = Vec4(c00.x * (1.0f - fx) + c10.x * fx, c00.y * (1.0f - fx) + c10.y * fx,
+                          c00.z * (1.0f - fx) + c10.z * fx, c00.w * (1.0f - fx) + c10.w * fx);
+    const Vec4 c1 = Vec4(c01.x * (1.0f - fx) + c11.x * fx, c01.y * (1.0f - fx) + c11.y * fx,
+                          c01.z * (1.0f - fx) + c11.z * fx, c01.w * (1.0f - fx) + c11.w * fx);
+    return Vec4(c0.x * (1.0f - fy) + c1.x * fy, c0.y * (1.0f - fy) + c1.y * fy, c0.z * (1.0f - fy) + c1.z * fy,
+                c0.w * (1.0f - fy) + c1.w * fy);
+}
+
+SR_INL SR_HD Vec3 sampleTextureRGB(const SceneView& scene, int texIndex, Vec2 uv, Vec3 fallback) {
+    if (texIndex < 0 || texIndex >= scene.textureCount || !scene.textures) return fallback;
+    const Vec4 c = sampleTextureRGBA(scene.textures[texIndex], uv);
+    return vmax(Vec3(0.0f), c.xyz());
+}
+
+SR_INL SR_HD float sampleTextureScalar(const SceneView& scene, int texIndex, Vec2 uv, float fallback) {
+    if (texIndex < 0 || texIndex >= scene.textureCount || !scene.textures) return fallback;
+    const Vec4 c = sampleTextureRGBA(scene.textures[texIndex], uv);
+    return saturatef(c.x);
+}
+
+// Apply MaterialX-style texture maps and normal mapping to a base material.
+SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Material& base, Vec2 uv, Vec3& ns) {
+    Material mat = base;
+    mat.baseColor = sampleTextureRGB(scene, base.baseColorTex, uv, base.baseColor);
+    if (base.baseColorTex >= 0) mat.baseColor = mat.baseColor * vmax(Vec3(0.0f), base.baseColor);
+    mat.roughness = sampleTextureScalar(scene, base.roughnessTex, uv, base.roughness);
+    if (base.roughnessTex >= 0) mat.roughness = saturatef(mat.roughness * base.roughness);
+    mat.metallic = sampleTextureScalar(scene, base.metallicTex, uv, base.metallic);
+    if (base.metallicTex >= 0) mat.metallic = saturatef(mat.metallic * base.metallic);
+    mat.opacity = sampleTextureScalar(scene, base.opacityTex, uv, base.opacity);
+    if (base.opacityTex >= 0) mat.opacity = saturatef(mat.opacity * base.opacity);
+    mat.emissionColor = sampleTextureRGB(scene, base.emissionTex, uv, base.emissionColor);
+    if (base.emissionTex >= 0) mat.emissionColor = mat.emissionColor * vmax(Vec3(0.0f), base.emissionColor);
+    mat.subsurfaceColor = sampleTextureRGB(scene, base.subsurfaceTex, uv, base.subsurfaceColor);
+    if (base.subsurfaceTex >= 0)
+        mat.subsurfaceColor = mat.subsurfaceColor * vmax(Vec3(0.0f), base.subsurfaceColor);
+
+    if (base.normalTex >= 0 && base.normalTex < scene.textureCount && scene.textures) {
+        Vec3 nMap = sampleTextureRGB(scene, base.normalTex, uv, Vec3(0.5f, 0.5f, 1.0f));
+        nMap = nMap * 2.0f - Vec3(1.0f);
+        nMap.z = srMax(0.05f, nMap.z);
+        nMap = normalize(nMap);
+        const Frame frame(ns);
+        ns = normalize(frame.toWorld(nMap));
+    }
+    return mat;
+}
+
 SR_INL SR_HD Vec3 fresnelSchlick(Vec3 f0, float cosTheta) {
     const float m = clampf(1.0f - cosTheta, 0.0f, 1.0f);
     const float m2 = m * m;

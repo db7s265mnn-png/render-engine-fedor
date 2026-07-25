@@ -17,6 +17,7 @@ class QTimer;
 namespace sol {
 
 class NodeGraphView;
+class MaterialNetworkView;
 class ParameterPanel;
 class SceneGraphPanel;
 class LogPanel;
@@ -74,6 +75,7 @@ private:
     ScenePtr scene_;
 
     NodeGraphView* networkView_ = nullptr;
+    MaterialNetworkView* materialNetworkView_ = nullptr;
     ParameterPanel* parameterPanel_ = nullptr;
     SceneGraphPanel* sceneGraphPanel_ = nullptr;
     LogPanel* logPanel_ = nullptr;

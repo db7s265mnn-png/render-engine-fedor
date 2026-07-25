@@ -7,8 +7,8 @@
 
 namespace sol {
 
-// Ground plane + sphere + material + dome light + sun + camera + render
-// settings, wired into a merge and a final render settings node.
+// Ground plane + bundled buddha.abc (or sphere fallback) + MaterialX-style
+// material + Ferndale studio HDRI dome + camera + render settings.
 void buildDefaultGraph(NodeGraph& graph);
 
 // A network that imports an Alembic file and lights it with an HDRI, used by

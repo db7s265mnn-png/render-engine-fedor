@@ -96,7 +96,15 @@ ScenePtr Stage::toScene() const {
                     meshIndex = scene->addMesh(prim.mesh);
                     meshIndexCache[prim.mesh.get()] = meshIndex;
                 }
-                const int materialIndex = scene->addMaterial(prim.material);
+                Material material = prim.material;
+                material.baseColorTex = scene->addTexture(prim.baseColorTexture);
+                material.roughnessTex = scene->addTexture(prim.roughnessTexture);
+                material.metallicTex = scene->addTexture(prim.metallicTexture);
+                material.opacityTex = scene->addTexture(prim.opacityTexture);
+                material.emissionTex = scene->addTexture(prim.emissionTexture);
+                material.normalTex = scene->addTexture(prim.normalTexture);
+                material.subsurfaceTex = scene->addTexture(prim.subsurfaceTexture);
+                const int materialIndex = scene->addMaterial(material);
                 InstanceData inst;
                 inst.xform = prim.xform;
                 inst.xformInv = inverse(prim.xform);

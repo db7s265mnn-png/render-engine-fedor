@@ -26,6 +26,14 @@ struct StagePrim {
     Material material;
     bool materialAssigned = false;
     QString materialName;
+    // Optional MaterialX-style texture maps (loaded by the material node).
+    std::shared_ptr<Image> baseColorTexture;
+    std::shared_ptr<Image> roughnessTexture;
+    std::shared_ptr<Image> metallicTexture;
+    std::shared_ptr<Image> opacityTexture;
+    std::shared_ptr<Image> emissionTexture;
+    std::shared_ptr<Image> normalTexture;
+    std::shared_ptr<Image> subsurfaceTexture;
 
     // Light
     LightData light;

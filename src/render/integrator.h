@@ -222,9 +222,10 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
-        Material mat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
-                           ? scene.materials[si.materialIndex]
-                           : defaultMaterial();
+        Material baseMat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
+                               ? scene.materials[si.materialIndex]
+                               : defaultMaterial();
+        Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns);
 
         // Two sided shading for opaque surfaces. Winding order varies between
         // DCCs, so back faces are shaded as if their normals pointed at us.
@@ -233,19 +234,19 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             si.ng = -si.ng;
         }
 
-        // Stochastic opacity.
-        if (mat.opacity < 1.0f && rng.nextFloat() > mat.opacity) {
-            origin = offsetRayOrigin(si.p, si.ng, direction);
-            ++passThrough;
-            if (passThrough > 32) break;
-            continue;
-        }
-
-        // Emissive surfaces.
+        // Emissive surfaces (evaluated before opacity cutouts so glowing cutouts work).
         if (mat.emissionStrength > 0.0f && !isBlack(mat.emissionColor)) {
             const bool frontFacing = dot(si.ns, -direction) > 0.0f;
             if (frontFacing || mat.doubleSided)
                 radiance += throughput * mat.emissionColor * mat.emissionStrength;
+        }
+
+        // Stochastic opacity / cutout.
+        if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
+            origin = offsetRayOrigin(si.p, si.ng, direction);
+            ++passThrough;
+            if (passThrough > 32) break;
+            continue;
         }
 
         if (settings.integrator == kIntegratorAmbientOcclusion) {
@@ -262,6 +263,74 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
         const Vec3 wo = -direction;
         const Frame frame(si.ns);
+
+        // Random-walk subsurface scattering (MaterialX-style subsurface lobe).
+        if (mat.subsurface > 1e-4f && mat.transmission <= 1e-4f && mat.metallic < 0.999f &&
+            rng.nextFloat() < saturatef(mat.subsurface)) {
+            const float mfp = srMax(1e-4f, mat.subsurfaceScale);
+            Vec3 pWalk = si.p;
+            Vec3 nWalk = si.ns;
+            Vec3 ssThroughput = mat.subsurfaceColor;
+            bool escaped = false;
+            Vec3 escapeN = nWalk;
+            Vec3 escapeP = pWalk;
+            for (int step = 0; step < 6; ++step) {
+                const Vec3 walkDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
+                const float channel = rng.nextFloat();
+                float radiusScale = mat.subsurfaceRadius.y;
+                if (channel < 0.333f) radiusScale = mat.subsurfaceRadius.x;
+                else if (channel > 0.666f) radiusScale = mat.subsurfaceRadius.z;
+                const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) * mfp * srMax(1e-3f, radiusScale);
+                RayHit walkHit;
+                const Vec3 walkOrigin = offsetRayOrigin(pWalk, nWalk, walkDir);
+                if (!tracer.intersect(walkOrigin, walkDir, stepLen, walkHit)) {
+                    // Left the volume locally — shade diffuse at the entry with SS tint.
+                    escaped = true;
+                    escapeP = si.p;
+                    escapeN = si.ns;
+                    break;
+                }
+                SurfaceInteraction walkSi;
+                if (!buildSurfaceInteraction(scene, walkHit, walkOrigin, walkDir, walkSi)) break;
+                // Crossing into air: exit and shade at the exit point.
+                if (dot(walkSi.ng, walkDir) > 0.0f) {
+                    escaped = true;
+                    escapeP = walkSi.p;
+                    escapeN = -walkSi.ns;
+                    ssThroughput = ssThroughput * mat.subsurfaceColor;
+                    break;
+                }
+                pWalk = walkSi.p;
+                nWalk = walkSi.ns;
+                ssThroughput = ssThroughput * mat.subsurfaceColor;
+            }
+            if (escaped) {
+                Material ssMat = mat;
+                ssMat.subsurface = 0.0f;
+                ssMat.baseColor = vmax(Vec3(0.0f), mat.baseColor * ssThroughput);
+                ssMat.metallic = 0.0f;
+                ssMat.transmission = 0.0f;
+                SurfaceInteraction ssSi = si;
+                ssSi.p = escapeP;
+                ssSi.ns = escapeN;
+                ssSi.ng = escapeN;
+                const Frame ssFrame(escapeN);
+                radiance += throughput * nextEventEstimation(scene, tracer, ssSi, ssMat, ssFrame, wo, rng);
+                const BsdfSample ssBs =
+                    bsdfSampleLocal(ssMat, ssFrame.toLocal(wo), rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                    rng.nextFloat());
+                if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
+                    throughput *= ssBs.weight;
+                    origin = offsetRayOrigin(escapeP, escapeN, ssFrame.toWorld(ssBs.wi));
+                    direction = normalize(ssFrame.toWorld(ssBs.wi));
+                    bsdfPdf = ssBs.pdf;
+                    specularBounce = false;
+                    ++depth;
+                    continue;
+                }
+            }
+            break;
+        }
 
         radiance += throughput * nextEventEstimation(scene, tracer, si, mat, frame, wo, rng);
 

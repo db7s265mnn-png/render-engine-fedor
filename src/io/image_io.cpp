@@ -192,7 +192,11 @@ bool loadExr(const std::string& path, Image& out, std::string& error) {
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 const Imf::Rgba& p = pixels[size_t(y) * size_t(width) + size_t(x)];
-                out.setRgb(x, y, Vec3(float(p.r), float(p.g), float(p.b)), float(p.a));
+                // Clamp negatives: some EXRs store below-black values that turn
+                // the display path / env sampling black or NaN after tone map.
+                const Vec3 c(std::max(0.0f, float(p.r)), std::max(0.0f, float(p.g)),
+                             std::max(0.0f, float(p.b)));
+                out.setRgb(x, y, c, std::max(0.0f, float(p.a)));
             }
         }
         return true;

@@ -368,9 +368,30 @@ public:
                          .withGroup("Emission"));
         addParameter(
             Parameter::makeFloat("emission", "Emission Strength", 0.0, 0.0, 100.0, false).withGroup("Emission"));
+        addParameter(Parameter::makeFloat("subsurface", "Subsurface", 0.0, 0.0, 1.0).withGroup("Subsurface"));
+        addParameter(Parameter::makeColor("subsurface_color", "Subsurface Color", Vec3(1.0f, 0.75f, 0.55f))
+                         .withGroup("Subsurface"));
+        addParameter(Parameter::makeVec3("subsurface_radius", "Subsurface Radius", Vec3(1.0f, 0.35f, 0.2f))
+                         .withGroup("Subsurface"));
+
+        const QString textureFilter =
+            "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)";
+        addParameter(Parameter::makeFile("basecolor_texture", "Base Color Texture", "", textureFilter)
+                         .withGroup("Textures"));
+        addParameter(Parameter::makeFile("roughness_texture", "Roughness Texture", "", textureFilter)
+                         .withGroup("Textures"));
+        addParameter(Parameter::makeFile("metallic_texture", "Metallic Texture", "", textureFilter)
+                         .withGroup("Textures"));
+        addParameter(
+            Parameter::makeFile("opacity_texture", "Opacity Texture", "", textureFilter).withGroup("Textures"));
+        addParameter(
+            Parameter::makeFile("emission_texture", "Emission Texture", "", textureFilter).withGroup("Textures"));
+        addParameter(Parameter::makeFile("normal_texture", "Normal Texture", "", textureFilter).withGroup("Textures"));
+        addParameter(Parameter::makeFile("subsurface_texture", "Subsurface Texture", "", textureFilter)
+                         .withGroup("Textures"));
     }
 
-    void cook(CookContext&, const std::vector<StagePtr>&, Stage& stage) override {
+    void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
         Material material;
         material.baseColor = vec3Value("basecolor", Vec3(0.8f));
         material.roughness = float(floatValue("roughness", 0.35));
@@ -379,8 +400,44 @@ public:
         material.ior = float(floatValue("ior", 1.5));
         material.transmission = float(floatValue("transmission", 0.0));
         material.opacity = float(floatValue("opacity", 1.0));
-        material.emissionColor = vec3Value("emissioncolor", Vec3(1.0f));
+        material.emissionColor = vec3Value("emissioncolor", Vec3(1.0f, 1.0f, 1.0f));
         material.emissionStrength = float(floatValue("emission", 0.0));
+        material.subsurface = float(floatValue("subsurface", 0.0));
+        material.subsurfaceColor = vec3Value("subsurface_color", Vec3(1.0f, 0.75f, 0.55f));
+        material.subsurfaceRadius = vec3Value("subsurface_radius", Vec3(1.0f, 0.35f, 0.2f));
+        // Convert artistic radius into a world-space mean free path scale.
+        material.subsurfaceScale =
+            0.05f * srMax(1e-4f, maxComponent(material.subsurfaceRadius));
+
+        auto loadTex = [&](const char* paramName, QString& cachedPath,
+                           std::shared_ptr<Image>& cachedImage) -> std::shared_ptr<Image> {
+            const QString path = resolvePath(context, stringValue(paramName));
+            if (path.isEmpty()) {
+                cachedPath.clear();
+                cachedImage.reset();
+                return nullptr;
+            }
+            if (path == cachedPath && cachedImage) return cachedImage;
+            auto image = std::make_shared<Image>();
+            std::string error;
+            if (!loadImage(path.toStdString(), *image, error)) {
+                context.reportError(this, QString::fromStdString(error));
+                cachedPath.clear();
+                cachedImage.reset();
+                return nullptr;
+            }
+            cachedPath = path;
+            cachedImage = image;
+            return image;
+        };
+
+        const auto baseColorTex = loadTex("basecolor_texture", baseColorPath_, baseColorImage_);
+        const auto roughnessTex = loadTex("roughness_texture", roughnessPath_, roughnessImage_);
+        const auto metallicTex = loadTex("metallic_texture", metallicPath_, metallicImage_);
+        const auto opacityTex = loadTex("opacity_texture", opacityPath_, opacityImage_);
+        const auto emissionTex = loadTex("emission_texture", emissionPath_, emissionImage_);
+        const auto normalTex = loadTex("normal_texture", normalPath_, normalImage_);
+        const auto subsurfaceTex = loadTex("subsurface_texture", subsurfacePath_, subsurfaceImage_);
 
         const QString pattern = stringValue("pattern", "*");
         for (StagePrim& prim : stage.prims) {
@@ -389,8 +446,21 @@ public:
             prim.material = material;
             prim.materialAssigned = true;
             prim.materialName = name();
+            prim.baseColorTexture = baseColorTex;
+            prim.roughnessTexture = roughnessTex;
+            prim.metallicTexture = metallicTex;
+            prim.opacityTexture = opacityTex;
+            prim.emissionTexture = emissionTex;
+            prim.normalTexture = normalTex;
+            prim.subsurfaceTexture = subsurfaceTex;
         }
     }
+
+private:
+    QString baseColorPath_, roughnessPath_, metallicPath_, opacityPath_;
+    QString emissionPath_, normalPath_, subsurfacePath_;
+    std::shared_ptr<Image> baseColorImage_, roughnessImage_, metallicImage_, opacityImage_;
+    std::shared_ptr<Image> emissionImage_, normalImage_, subsurfaceImage_;
 };
 
 // ---------------------------------------------------------------------------
@@ -401,6 +471,9 @@ class LightNode : public Node {
 public:
     LightNode(const QString& typeName, const QString& name, LightType type) : Node(typeName, name), type_(type) {
         addParameter(Parameter::makeString("primname", "Prim Name", name));
+        addParameter(Parameter::makeBool("enabled", "Enabled", true)
+                         .withGroup("Light")
+                         .withTooltip("Uncheck to turn this light off without deleting the node"));
         addParameter(Parameter::makeColor("color", "Color", Vec3(1.0f, 1.0f, 1.0f)).withGroup("Light"));
         addParameter(Parameter::makeFloat("intensity", "Intensity", defaultIntensity(), 0.0, 100.0, false)
                          .withGroup("Light"));
@@ -454,6 +527,8 @@ public:
     }
 
     void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
+        if (!boolValue("enabled", true)) return;
+
         StagePrim prim;
         prim.type = PrimType::Light;
         prim.sourceNode = name();

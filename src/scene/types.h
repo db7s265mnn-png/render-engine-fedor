@@ -22,9 +22,35 @@ struct Material {
     float emissionStrength = 0.0f;
 
     float opacity = 1.0f;
-    float anisotropy = 0.0f;  // reserved, kept for layout stability
+    float subsurface = 0.0f;     // 0 = opaque BRDF, 1 = full random-walk SSS
     int doubleSided = 1;
     int pad0 = 0;
+
+    Vec3 subsurfaceColor{1.0f, 0.75f, 0.55f};
+    float subsurfaceScale = 0.15f;  // world-space mean free path scale
+
+    Vec3 subsurfaceRadius{1.0f, 0.35f, 0.2f};  // relative RGB scattering radii
+    float pad1 = 0.0f;
+
+    // Indices into SceneView::textures (-1 = none).
+    int baseColorTex = -1;
+    int roughnessTex = -1;
+    int metallicTex = -1;
+    int opacityTex = -1;
+
+    int emissionTex = -1;
+    int normalTex = -1;
+    int subsurfaceTex = -1;
+    int pad2 = 0;
+};
+
+// RGBA32F texture view shared by CPU / GPU shading.
+struct TextureView {
+    const float* pixels = nullptr;
+    int width = 0;
+    int height = 0;
+
+    SR_HD bool valid() const { return pixels != nullptr && width > 0 && height > 0; }
 };
 
 // ---------------------------------------------------------------------------
@@ -167,12 +193,14 @@ struct SceneView {
     const Material* materials = nullptr;
     const LightData* lights = nullptr;
     const EnvMapView* envMaps = nullptr;
+    const TextureView* textures = nullptr;
 
     int meshCount = 0;
     int instanceCount = 0;
     int materialCount = 0;
     int lightCount = 0;
     int envMapCount = 0;
+    int textureCount = 0;
     int domeLightIndex = -1;  // first dome light, used for ray misses
 
     CameraData camera;

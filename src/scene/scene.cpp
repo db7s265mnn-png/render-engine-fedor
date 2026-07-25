@@ -149,6 +149,12 @@ int Scene::addEnvMap(std::shared_ptr<EnvironmentMap> env) {
     return static_cast<int>(envMaps.size()) - 1;
 }
 
+int Scene::addTexture(std::shared_ptr<Image> image) {
+    if (!image || image->empty()) return -1;
+    textures.push_back(std::move(image));
+    return static_cast<int>(textures.size()) - 1;
+}
+
 size_t Scene::totalTriangles() const {
     size_t total = 0;
     for (const InstanceData& inst : instances) {
@@ -225,6 +231,18 @@ void Scene::finalize() {
     envViews_.reserve(envMaps.size());
     for (const std::shared_ptr<EnvironmentMap>& env : envMaps)
         envViews_.push_back(env ? env->view() : EnvMapView());
+
+    textureViews_.clear();
+    textureViews_.reserve(textures.size());
+    for (const std::shared_ptr<Image>& image : textures) {
+        TextureView view;
+        if (image && !image->empty()) {
+            view.pixels = image->data();
+            view.width = image->width();
+            view.height = image->height();
+        }
+        textureViews_.push_back(view);
+    }
 }
 
 SceneView Scene::view() const {
@@ -234,11 +252,13 @@ SceneView Scene::view() const {
     v.materials = materials.data();
     v.lights = lights.data();
     v.envMaps = envViews_.data();
+    v.textures = textureViews_.data();
     v.meshCount = static_cast<int>(meshViews_.size());
     v.instanceCount = static_cast<int>(instances.size());
     v.materialCount = static_cast<int>(materials.size());
     v.lightCount = static_cast<int>(lights.size());
     v.envMapCount = static_cast<int>(envViews_.size());
+    v.textureCount = static_cast<int>(textureViews_.size());
     v.domeLightIndex = domeLightIndex_;
     v.camera = camera;
     v.settings = settings;

@@ -74,6 +74,12 @@ void NodeGraphScene::updateConnections() {
     }
 }
 
+void NodeGraphScene::refreshAllNodeItems() {
+    for (auto it = nodeItems_.cbegin(); it != nodeItems_.cend(); ++it) {
+        if (it.value()) it.value()->refresh();
+    }
+}
+
 void NodeGraphScene::drawBackground(QPainter* painter, const QRectF& rect) {
     painter->fillRect(rect, theme::gridDark());
 
@@ -235,7 +241,7 @@ void NodeGraphView::setGraph(NodeGraph* graph) {
         // Rebuilt after removal completes so dangling items never get painted.
         QMetaObject::invokeMethod(this, [this] { graphScene_->rebuild(); }, Qt::QueuedConnection);
     });
-    connect(graph, &NodeGraph::displayNodeChanged, this, [this](Node*) { graphScene_->update(); });
+    connect(graph, &NodeGraph::displayNodeChanged, this, [this](Node*) { graphScene_->refreshAllNodeItems(); });
     // Framing needs the final widget size, which is only known once the layout
     // has run, so it is deferred to the first show/resize.
     pendingFrameAll_ = true;
@@ -328,7 +334,7 @@ void NodeGraphView::toggleDisplayFlagOnSelection() {
     Node* node = selectedNode();
     if (!graph_ || !node) return;
     graph_->setDisplayNode(node);
-    graphScene_->update();
+    graphScene_->refreshAllNodeItems();
     emit displayNodeRequested(node);
 }
 
@@ -337,7 +343,7 @@ void NodeGraphView::toggleBypassOnSelection() {
         if (auto* nodeItem = qgraphicsitem_cast<NodeItem*>(item))
             nodeItem->node()->setBypassed(!nodeItem->node()->isBypassed());
     }
-    graphScene_->update();
+    graphScene_->refreshAllNodeItems();
 }
 
 void NodeGraphView::layoutSelectionVertically() {
@@ -499,13 +505,13 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
                 case NodeItem::Hit::DisplayFlag:
                     if (graph_) {
                         graph_->setDisplayNode(item->node());
-                        graphScene_->update();
+                        graphScene_->refreshAllNodeItems();
                         emit displayNodeRequested(item->node());
                     }
                     return;
                 case NodeItem::Hit::BypassFlag:
                     item->node()->setBypassed(!item->node()->isBypassed());
-                    graphScene_->update();
+                    graphScene_->refreshAllNodeItems();
                     return;
                 case NodeItem::Hit::Output:
                     dragSource_ = item;
@@ -678,7 +684,7 @@ void NodeGraphView::contextMenuEvent(QContextMenuEvent* event) {
         Node* node = item->node();
         menu.addAction("Set Display Flag", this, [this, node] {
             if (graph_) graph_->setDisplayNode(node);
-            graphScene_->update();
+            graphScene_->refreshAllNodeItems();
             emit displayNodeRequested(node);
         });
         QAction* bypass = menu.addAction("Bypass");
@@ -686,7 +692,7 @@ void NodeGraphView::contextMenuEvent(QContextMenuEvent* event) {
         bypass->setChecked(node->isBypassed());
         connect(bypass, &QAction::triggered, this, [this, node](bool checked) {
             node->setBypassed(checked);
-            graphScene_->update();
+            graphScene_->refreshAllNodeItems();
         });
         menu.addAction("Delete", this, [this, node] {
             if (graph_) graph_->removeNode(node);
@@ -717,7 +723,7 @@ void NodeGraphView::drawForeground(QPainter* painter, const QRectF& rect) {
     painter->setFont(font);
     painter->setPen(theme::textDim());
     painter->drawText(QRect(8, height() - 22, width() - 16, 18), Qt::AlignLeft,
-                      "Tab: add   MMB/Alt+LMB/Space+LMB: pan   Wheel: zoom   D: display   Del: delete");
+                      "Tab: add   MMB/Alt+LMB/Space+LMB: pan   Wheel: zoom   D: display   B: bypass   Del: delete");
 }
 
 }  // namespace sol

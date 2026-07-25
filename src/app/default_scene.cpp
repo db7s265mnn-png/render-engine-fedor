@@ -1,5 +1,8 @@
 #include "app/default_scene.h"
 
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QVector3D>
 
 #include "nodes/node_registry.h"
@@ -11,11 +14,35 @@ void place(Node* node, double x, double y) {
     if (node) node->setPosition(QPointF(x, y));
 }
 
+QString findBundledAsset(const QString& fileName) {
+    QStringList roots = {
+        QDir::currentPath() + "/examples",
+        QDir::currentPath() + "/assets",
+        QDir::currentPath() + "/../examples",
+        QDir::currentPath() + "/../assets",
+    };
+    if (QCoreApplication::instance()) {
+        const QString appDir = QCoreApplication::applicationDirPath();
+        roots.prepend(appDir + "/../assets");
+        roots.prepend(appDir + "/../examples");
+        roots.prepend(appDir + "/assets");
+        roots.prepend(appDir + "/examples");
+    }
+    for (const QString& root : roots) {
+        const QFileInfo info(QDir(root).absoluteFilePath(fileName));
+        if (info.exists() && info.isFile()) return info.absoluteFilePath();
+    }
+    return {};
+}
+
 }  // namespace
 
 void buildDefaultGraph(NodeGraph& graph) {
     registerBuiltinNodes();
     graph.clear();
+
+    const QString buddhaPath = findBundledAsset("buddha.abc");
+    const QString hdriPath = findBundledAsset("ferndale_studio_07_2k.hdr");
 
     Node* ground = graph.createNode("grid", "ground1");
     place(ground, -320, -420);
@@ -33,21 +60,33 @@ void buildDefaultGraph(NodeGraph& graph) {
         groundMaterial->setParameterValue("roughness", 0.6);
     }
 
-    Node* sphere = graph.createNode("sphere", "sphere1");
-    place(sphere, -40, -420);
-    if (sphere) {
-        sphere->setParameterValue("radius", 1.2);
-        sphere->setParameterValue("primname", "sphere");
-        sphere->setParameterValue("translate", QVariant::fromValue(QVector3D(0.0f, 1.2f, 0.0f)));
+    Node* hero = nullptr;
+    if (!buddhaPath.isEmpty()) {
+        hero = graph.createNode("alembic", "buddha1");
+        place(hero, -40, -420);
+        if (hero) {
+            hero->setParameterValue("file", buddhaPath);
+            hero->setParameterValue("translate", QVariant::fromValue(QVector3D(0.0f, 0.0f, 0.0f)));
+            hero->setParameterValue("scale", QVariant::fromValue(QVector3D(1.0f, 1.0f, 1.0f)));
+        }
+    } else {
+        hero = graph.createNode("sphere", "sphere1");
+        place(hero, -40, -420);
+        if (hero) {
+            hero->setParameterValue("radius", 1.2);
+            hero->setParameterValue("primname", "sphere");
+            hero->setParameterValue("translate", QVariant::fromValue(QVector3D(0.0f, 1.2f, 0.0f)));
+        }
     }
 
-    Node* sphereMaterial = graph.createNode("material", "spheremat1");
-    place(sphereMaterial, -40, -320);
-    if (sphereMaterial) {
-        sphereMaterial->setParameterValue("pattern", "/geo/sphere");
-        sphereMaterial->setParameterValue("basecolor", QVariant::fromValue(QVector3D(0.85f, 0.35f, 0.2f)));
-        sphereMaterial->setParameterValue("roughness", 0.25);
-        sphereMaterial->setParameterValue("metallic", 0.0);
+    Node* heroMaterial = graph.createNode("material", "heromat1");
+    place(heroMaterial, -40, -320);
+    if (heroMaterial) {
+        heroMaterial->setParameterValue("pattern", "*");
+        heroMaterial->setParameterValue("basecolor", QVariant::fromValue(QVector3D(0.82f, 0.72f, 0.58f)));
+        heroMaterial->setParameterValue("roughness", 0.35);
+        heroMaterial->setParameterValue("subsurface", 0.35);
+        heroMaterial->setParameterValue("subsurface_color", QVariant::fromValue(QVector3D(0.9f, 0.55f, 0.35f)));
     }
 
     Node* merge = graph.createNode("merge", "merge1");
@@ -55,12 +94,16 @@ void buildDefaultGraph(NodeGraph& graph) {
 
     Node* dome = graph.createNode("domelight", "domelight1");
     place(dome, -180, -100);
-    if (dome) dome->setParameterValue("intensity", 0.6);
+    if (dome) {
+        dome->setParameterValue("intensity", hdriPath.isEmpty() ? 0.6 : 1.0);
+        if (!hdriPath.isEmpty()) dome->setParameterValue("texture", hdriPath);
+    }
 
     Node* sun = graph.createNode("distantlight", "sunlight1");
     place(sun, -180, -20);
     if (sun) {
-        sun->setParameterValue("intensity", 2.5);
+        sun->setParameterValue("enabled", true);
+        sun->setParameterValue("intensity", hdriPath.isEmpty() ? 2.5 : 0.35);
         sun->setParameterValue("angle", 1.5);
         sun->setParameterValue("rotate", QVariant::fromValue(QVector3D(-42.0f, -35.0f, 0.0f)));
     }
@@ -68,9 +111,10 @@ void buildDefaultGraph(NodeGraph& graph) {
     Node* key = graph.createNode("rectlight", "rectlight1");
     place(key, -180, 60);
     if (key) {
+        key->setParameterValue("enabled", true);
         key->setParameterValue("width", 4.0);
         key->setParameterValue("height", 3.0);
-        key->setParameterValue("intensity", 24.0);
+        key->setParameterValue("intensity", hdriPath.isEmpty() ? 24.0 : 4.0);
         key->setParameterValue("translate", QVariant::fromValue(QVector3D(-3.5f, 4.5f, 3.0f)));
         key->setParameterValue("rotate", QVariant::fromValue(QVector3D(-40.0f, -35.0f, 0.0f)));
     }
@@ -78,18 +122,18 @@ void buildDefaultGraph(NodeGraph& graph) {
     Node* camera = graph.createNode("camera", "camera1");
     place(camera, -180, 140);
     if (camera) {
-        camera->setParameterValue("eye", QVariant::fromValue(QVector3D(5.5f, 3.2f, 7.5f)));
-        camera->setParameterValue("target", QVariant::fromValue(QVector3D(0.0f, 1.1f, 0.0f)));
-        camera->setParameterValue("focal", 45.0);
+        camera->setParameterValue("eye", QVariant::fromValue(QVector3D(4.5f, 2.4f, 5.5f)));
+        camera->setParameterValue("target", QVariant::fromValue(QVector3D(0.0f, 1.0f, 0.0f)));
+        camera->setParameterValue("focal", 50.0);
     }
 
     Node* settings = graph.createNode("rendersettings", "rendersettings1");
     place(settings, -180, 220);
 
     graph.connectNodes(ground, groundMaterial, 0);
-    graph.connectNodes(sphere, sphereMaterial, 0);
+    graph.connectNodes(hero, heroMaterial, 0);
     graph.connectNodes(groundMaterial, merge, 0);
-    graph.connectNodes(sphereMaterial, merge, 1);
+    graph.connectNodes(heroMaterial, merge, 1);
     graph.connectNodes(merge, dome, 0);
     graph.connectNodes(dome, sun, 0);
     graph.connectNodes(sun, key, 0);

@@ -29,6 +29,7 @@ public:
 
     void rebuild();
     void updateConnections();
+    void refreshAllNodeItems();
     NodeItem* itemForNode(Node* node) const;
 
 protected:

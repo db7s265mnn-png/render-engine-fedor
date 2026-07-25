@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(Solstice VERSION 0.9.0 LANGUAGES CXX)
 
-set(SOLSTICE_APP_DISPLAY_NAME "Fedor Render" CACHE STRING "User-visible application name")
+set(SOLSTICE_APP_DISPLAY_NAME "Sonya_Render" CACHE STRING "User-visible application name")
 
 # ---------------------------------------------------------------------------
 # Options
@@ -150,6 +150,7 @@ target_link_libraries(solstice_lib PUBLIC Threads::Threads)
 set(SOLSTICE_APP_SOURCES
     src/main.cpp
     src/ui/main_window.cpp
+    src/ui/material_network_view.cpp
     src/ui/node_graph_view.cpp
     src/ui/node_item.cpp
     src/ui/connection_item.cpp
@@ -162,6 +163,7 @@ set(SOLSTICE_APP_SOURCES
 
 set(SOLSTICE_APP_HEADERS
     src/ui/main_window.h
+    src/ui/material_network_view.h
     src/ui/node_graph_view.h
     src/ui/node_item.h
     src/ui/connection_item.h
@@ -178,7 +180,7 @@ if(SOLSTICE_BUILD_APP)
     set_target_properties(Solstice PROPERTIES
         OUTPUT_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
         MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.fedor.render")
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.sonya.render")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -227,3 +229,9 @@ message(STATUS "  Alembic support : ${SOLSTICE_HAVE_ALEMBIC_01}")
 message(STATUS "  OpenEXR support : ${SOLSTICE_HAVE_OPENEXR_01}")
 message(STATUS "  OptiX backend   : ${SOLSTICE_HAVE_OPTIX_01}")
 message(STATUS "")
+
+# OBJ -> Alembic converter for shipping demo assets.
+if(SOLSTICE_BUILD_TOOLS AND SOLSTICE_HAVE_ALEMBIC_01)
+    add_executable(sol_obj_to_abc tools/obj_to_abc.cpp)
+    target_link_libraries(sol_obj_to_abc PRIVATE Alembic::Alembic)
+endif()
