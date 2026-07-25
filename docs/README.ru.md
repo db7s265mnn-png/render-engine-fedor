@@ -124,6 +124,14 @@ python3 tools/make_test_hdri.py examples/sky.hdr    # синтетическое
 ./build/bin/Solstice examples/alembic_hdri.solstice
 ```
 
+| Сцена | Что показывает |
+| --- | --- |
+| `studio_sphere.solstice` | студийная сборка по умолчанию: пол, сфера, dome, солнце и rect-свет |
+| `alembic_hdri.solstice` | импорт Alembic под HDRI-небом и солнцем |
+| `glass_sphere.solstice` | тот же импорт, но сфере назначено гладкое стекло |
+
+![Стекло](images/render_glass.png)
+
 ## Тесты
 
 ```bash

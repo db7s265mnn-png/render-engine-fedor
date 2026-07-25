@@ -28,9 +28,9 @@ light transport code.
   the viewport orbits with Houdini style Alt + mouse navigation.
 * **Batch rendering** — the same executable renders from the command line without a display.
 
-| Default scene | Alembic + HDRI |
-| --- | --- |
-| ![](docs/images/render_default.png) | ![](docs/images/render_hdri.png) |
+| Default scene | Alembic + HDRI | Rough dielectric glass |
+| --- | --- | --- |
+| ![](docs/images/render_default.png) | ![](docs/images/render_hdri.png) | ![](docs/images/render_glass.png) |
 
 ## Building
 
@@ -145,6 +145,12 @@ those first:
 python3 tools/make_test_hdri.py examples/sky.hdr    # writes a synthetic HDRI sky
 ./build/bin/Solstice examples/alembic_hdri.solstice
 ```
+
+| Scene | Shows |
+| --- | --- |
+| `studio_sphere.solstice` | the default studio setup: ground, sphere, dome, sun and a rect key light |
+| `alembic_hdri.solstice` | an Alembic import lit by an HDRI dome and a sun |
+| `glass_sphere.solstice` | the same import with a smooth dielectric assigned to the sphere |
 
 ## Tests
 
