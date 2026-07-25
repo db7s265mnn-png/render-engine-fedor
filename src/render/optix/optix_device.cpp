@@ -287,6 +287,27 @@ public:
                 envViews.push_back(view);
             }
 
+            // Upload textures (including UDIM atlases) — host pointers are not valid on device.
+            std::vector<TextureView> textureViews;
+            textureViews.reserve(scene_->textures.size());
+            for (const std::shared_ptr<Image>& image : scene_->textures) {
+                TextureView view;
+                if (image && !image->empty()) {
+                    DeviceBuffer pixels;
+                    pixels.upload(image->data(), size_t(image->width()) * size_t(image->height()) * 4);
+                    view.pixels = pixels.as<const float>();
+                    view.width = image->width();
+                    view.height = image->height();
+                    if (image->isUdimAtlas()) {
+                        view.udimGridU = image->udimGridU();
+                        view.udimGridV = image->udimGridV();
+                    }
+                    geometryBuffers_.push_back(std::move(pixels));
+                }
+                textureViews.push_back(view);
+            }
+            textureViewBuffer_.upload(textureViews);
+
             meshViewBuffer_.upload(meshViews);
             instanceBuffer_.upload(scene_->instances);
             materialBuffer_.upload(scene_->materials);
@@ -299,9 +320,12 @@ public:
             deviceScene_.materials = materialBuffer_.as<const Material>();
             deviceScene_.lights = lightBuffer_.as<const LightData>();
             deviceScene_.envMaps = envViewBuffer_.as<const EnvMapView>();
+            deviceScene_.textures = textureViewBuffer_.as<const TextureView>();
+            deviceScene_.textureCount = int(textureViews.size());
 
             logInfo("OptiX: uploaded " + std::to_string(scene_->instances.size()) + " instances, " +
-                    std::to_string(scene_->totalTriangles()) + " triangles");
+                    std::to_string(scene_->totalTriangles()) + " triangles, " +
+                    std::to_string(textureViews.size()) + " textures");
             return true;
         } catch (const std::exception& e) {
             error = e.what();
@@ -559,6 +583,7 @@ private:
         materialBuffer_.free();
         lightBuffer_.free();
         envViewBuffer_.free();
+        textureViewBuffer_.free();
         iasHandle_ = 0;
         deviceScene_ = SceneView();
         scene_.reset();
@@ -604,6 +629,7 @@ private:
     DeviceBuffer raygenRecordBuffer_, missRecordBuffer_, hitRecordBuffer_;
     DeviceBuffer launchParamsBuffer_, accumBuffer_;
     DeviceBuffer meshViewBuffer_, instanceBuffer_, materialBuffer_, lightBuffer_, envViewBuffer_;
+    DeviceBuffer textureViewBuffer_;
     DeviceBuffer instanceDescBuffer_;
     std::vector<DeviceBuffer> geometryBuffers_;
     std::vector<DeviceBuffer> accelBuffers_;

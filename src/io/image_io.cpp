@@ -410,7 +410,9 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
         const int gridU = maxU + 1;
         const int gridV = maxV + 1;
 
-        // Bake atlas (MaterialX hwNormalizeUdimTexCoords equivalent for CPU path tracer).
+        // Bake tiles into a UV-space atlas (Mari: UDIM = 1001 + U + V*10).
+        // Each tile is V-flipped so OpenGL/MaterialX/Alembic UVs (V=0 at bottom)
+        // sample the file correctly when using floor/fract tiling.
         auto atlas = std::make_shared<Image>(tileW * gridU, tileH * gridV, Vec4(0.0f, 0.0f, 0.0f, 0.0f));
         atlas->setUdimGrid(gridU, gridV);
         for (const Tile& tile : tiles) {
@@ -421,9 +423,10 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
             const Image& src = *tile.image;
             for (int y = 0; y < tileH; ++y) {
                 const int sy = std::min(y, src.height() - 1);
+                const int dy = dstY0 + (tileH - 1 - y);  // V-flip within tile
                 for (int x = 0; x < tileW; ++x) {
                     const int sx = std::min(x, src.width() - 1);
-                    atlas->at(dstX0 + x, dstY0 + y) = src.at(sx, sy);
+                    atlas->at(dstX0 + x, dy) = src.at(sx, sy);
                 }
             }
         }

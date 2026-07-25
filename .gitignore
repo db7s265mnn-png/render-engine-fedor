@@ -6,9 +6,11 @@ artifacts/
 .DS_Store
 *.png
 !docs/images/*.png
+!examples/udim_cube/*.png
 *.abc
 !examples/buddha.abc
 !examples/kit.abc
+!examples/udim_cube/cube.abc
 
 # Generated example assets (see tools/)
 examples/*.hdr

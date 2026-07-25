@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!-- MaterialX UDIM example (from Academy SoftWare Foundation MaterialX TestSuite).
+     file keeps unresolved <UDIM>; geominfo/udimset lists tiles. -->
+<materialx version="1.38">
+  <image name="image_color" type="color3">
+    <input name="file" type="filename" value="grid.<UDIM>.png" colorspace="srgb_texture" />
+  </image>
+  <geominfo name="cube_geom" geom="/">
+    <geomprop name="udimset" type="stringarray" value="1001, 1002, 1003, 1011, 1012, 1013" />
+  </geominfo>
+  <standard_surface name="standard_surface1" type="surfaceshader">
+    <input name="base_color" type="color3" nodename="image_color" />
+    <input name="specular_roughness" type="float" value="0.4" />
+  </standard_surface>
+  <surfacematerial name="surface" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="standard_surface1" />
+  </surfacematerial>
+</materialx>

@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 
+#include <QColor>
 #include <QDir>
 #include <QImage>
 #include <QTemporaryDir>
@@ -369,10 +370,19 @@ void testUdimMaterialX() {
     check(atlas && atlas->isUdimAtlas(), "atlas marked as UDIM");
     check(atlas && atlas->udimGridU() == 2 && atlas->udimGridV() == 2, "atlas grid covers U0..1 V0..1");
     if (atlas) {
-        // 1001 → red at UV tile (0,0); 1002 → green at (1,0); 1011 → blue at (0,1)
-        checkNear(atlas->at(0, 0).x, 1.0f, 0.05f, "tile 1001 baked into atlas origin");
-        checkNear(atlas->at(4, 0).y, 1.0f, 0.05f, "tile 1002 baked into U=1");
-        checkNear(atlas->at(0, 4).z, 1.0f, 0.05f, "tile 1011 baked into V=1");
+        // MaterialX View style: floor(uv) selects tile, fract samples inside (with V-flip bake).
+        TextureView view;
+        view.pixels = atlas->data();
+        view.width = atlas->width();
+        view.height = atlas->height();
+        view.udimGridU = atlas->udimGridU();
+        view.udimGridV = atlas->udimGridV();
+        const Vec4 c1001 = sampleTextureRGBA(view, Vec2(0.5f, 0.5f));
+        const Vec4 c1002 = sampleTextureRGBA(view, Vec2(1.5f, 0.5f));
+        const Vec4 c1011 = sampleTextureRGBA(view, Vec2(0.5f, 1.5f));
+        check(c1001.x > 0.8f && c1001.y < 0.2f && c1001.z < 0.2f, "sample UV(0.5,0.5) → tile 1001 red");
+        check(c1002.y > 0.8f && c1002.x < 0.2f && c1002.z < 0.2f, "sample UV(1.5,0.5) → tile 1002 green");
+        check(c1011.z > 0.8f && c1011.x < 0.2f && c1011.y < 0.2f, "sample UV(0.5,1.5) → tile 1011 blue");
     }
 
     if (!materialXAvailable()) {
@@ -381,12 +391,12 @@ void testUdimMaterialX() {
     }
 
     QVector<MaterialXGraphNode> nodes;
-    MaterialXGraphNode image;
-    image.name = "image_color";
-    image.category = "image";
-    image.type = "color3";
-    image.inputs.push_back({"file", "filename", pattern, {}});
-    nodes.push_back(image);
+    MaterialXGraphNode imageNode;
+    imageNode.name = "image_color";
+    imageNode.category = "image";
+    imageNode.type = "color3";
+    imageNode.inputs.push_back({"file", "filename", pattern, {}});
+    nodes.push_back(imageNode);
     MaterialXGraphNode ss;
     ss.name = "standard_surface1";
     ss.category = "standard_surface";
@@ -428,6 +438,96 @@ void testUdimMaterialX() {
           "cook binds multi-tile UDIM atlas");
     check(evaluated.baseColorTexture && evaluated.baseColorTexture->udimGridU() >= 2,
           "cooked atlas spans multiple U tiles");
+
+    // End-to-end: plane spanning UDIM 1001/1002 with the cooked atlas must show
+    // different base colors on the left (1001) and right (1002) halves.
+    auto scene = std::make_shared<Scene>();
+    auto mesh = std::make_shared<Mesh>();
+    // Two quads: UV [0,1]x[0,1] and [1,2]x[0,1]
+    mesh->positions = {Vec3(-2, 0, -1), Vec3(0, 0, -1), Vec3(0, 0, 1), Vec3(-2, 0, 1),
+                       Vec3(0, 0, -1), Vec3(2, 0, -1), Vec3(2, 0, 1), Vec3(0, 0, 1)};
+    mesh->uvs = {Vec2(0, 0), Vec2(1, 0), Vec2(1, 1), Vec2(0, 1), Vec2(1, 0), Vec2(2, 0), Vec2(2, 1),
+                 Vec2(1, 1)};
+    mesh->normals.assign(8, Vec3(0, 1, 0));
+    mesh->indices = {0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7};
+    mesh->validate();
+    const int meshIndex = scene->addMesh(mesh);
+
+    Material mat = evaluated.material;
+    mat.roughness = 1.0f;
+    mat.metallic = 0.0f;
+    mat.baseColor = Vec3(1.0f);
+    mat.baseColorTex = scene->addTexture(evaluated.baseColorTexture);
+    const int matIndex = scene->addMaterial(mat);
+
+    InstanceData inst;
+    inst.xform = Mat4::identity();
+    inst.xformInv = Mat4::identity();
+    inst.meshIndex = meshIndex;
+    inst.materialIndex = matIndex;
+    scene->instances.push_back(inst);
+
+    LightData key;
+    key.type = kLightDistant;
+    key.color = Vec3(1.0f);
+    key.intensity = 4.0f;
+    key.xform = lookAtMatrix(Vec3(0, 5, 0), Vec3(0, 0, 0), Vec3(0, 0, 1));
+    scene->lights.push_back(key);
+
+    scene->settings.resolutionX = 64;
+    scene->settings.resolutionY = 32;
+    scene->settings.samplesPerPixel = 8;
+    scene->settings.envVisibleCamera = 0;
+    scene->camera.cameraToWorld = lookAtMatrix(Vec3(0, 6, 0), Vec3(0, 0, 0), Vec3(0, 0, 1));
+    scene->cameraAuthored = true;
+    scene->finalize();
+
+    RenderSession session;
+    session.setScene(scene);
+    session.start();
+    session.waitForCompletion();
+    const Image rendered = session.linearImage();
+    // Camera looks down; screen X may flip world X — just require both UDIM colors present.
+    bool sawRed = false;
+    bool sawGreen = false;
+    for (int y = 0; y < rendered.height(); ++y) {
+        for (int x = 0; x < rendered.width(); ++x) {
+            const Vec3 c = rendered.rgb(x, y);
+            if (c.x > 0.5f && c.x > c.y * 2.0f && c.x > c.z * 2.0f) sawRed = true;
+            if (c.y > 0.5f && c.y > c.x * 2.0f && c.y > c.z * 2.0f) sawGreen = true;
+        }
+    }
+    check(sawRed, "render shows UDIM 1001 red");
+    check(sawGreen, "render shows UDIM 1002 green");
+}
+
+void testMaterialXUdimCubeAsset() {
+    std::printf("udim-materialx-cube-asset\n");
+    const QString root = QStringLiteral("/workspace/examples/udim_cube");
+    if (!QDir(root).exists()) {
+        std::printf("  skip (examples/udim_cube missing)\n");
+        return;
+    }
+    std::string error;
+    auto atlas = loadImageOrUdim(root + "/grid.<UDIM>.png", QString(), error,
+                                 {1001, 1002, 1003, 1011, 1012, 1013});
+    check(atlas != nullptr, "MaterialX grid_udim tiles load");
+    check(atlas && atlas->udimGridU() == 3 && atlas->udimGridV() == 2, "MaterialX set is 3x2 atlas");
+    if (!atlas) return;
+
+    TextureView view;
+    view.pixels = atlas->data();
+    view.width = atlas->width();
+    view.height = atlas->height();
+    view.udimGridU = atlas->udimGridU();
+    view.udimGridV = atlas->udimGridV();
+
+    const Vec4 c1001 = sampleTextureRGBA(view, Vec2(0.5f, 0.5f));
+    const Vec4 c1002 = sampleTextureRGBA(view, Vec2(1.5f, 0.5f));
+    const Vec4 c1011 = sampleTextureRGBA(view, Vec2(0.5f, 1.5f));
+    // Official MaterialX tiles are distinctly tinted; centers must differ.
+    check(length(c1001.xyz() - c1002.xyz()) > 0.15f, "1001 vs 1002 centers differ");
+    check(length(c1001.xyz() - c1011.xyz()) > 0.15f, "1001 vs 1011 centers differ");
 }
 
 }  // namespace
@@ -443,6 +543,7 @@ int main() {
     testRender();
     testInstanceTransform();
     testUdimMaterialX();
+    testMaterialXUdimCubeAsset();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

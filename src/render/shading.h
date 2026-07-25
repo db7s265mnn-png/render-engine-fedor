@@ -63,16 +63,33 @@ SR_INL SR_HD Vec4 sampleTextureClampedRGBA(const float* pixels, int width, int h
 }
 
 // Bilinear texture fetch for MaterialX image maps.
-// Regular maps wrap U / clamp V. UDIM atlases map unwrapped UV into the baked grid.
+// Regular maps wrap U / clamp V.
+// UDIM atlases follow MaterialX View: floor(uv) selects the tile (Mari 1001+U+V*10),
+// fract(uv) samples inside that tile — equivalent to setUdimString + wrap.
 SR_INL SR_HD Vec4 sampleTextureRGBA(const TextureView& tex, Vec2 uv) {
     if (!tex.valid()) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
 
     if (tex.isUdimAtlas()) {
-        // Atlas covers UV [0, gridU] x [0, gridV]. Outside → transparent black.
-        if (uv.x < 0.0f || uv.y < 0.0f || uv.x >= float(tex.udimGridU) || uv.y >= float(tex.udimGridV))
-            return Vec4(0.0f, 0.0f, 0.0f, 0.0f);
-        const float u = uv.x / float(tex.udimGridU);
-        const float v = uv.y / float(tex.udimGridV);
+        const int gridU = tex.udimGridU;
+        const int gridV = tex.udimGridV;
+        // Select tile the same way MaterialX Mesh::splitByUdims does.
+        int tileU = int(floorf(uv.x));
+        int tileV = int(floorf(uv.y));
+        float fu = uv.x - float(tileU);
+        float fv = uv.y - float(tileV);
+        // Keep fractional part in [0,1) even for negative UVs.
+        if (fu < 0.0f) fu += 1.0f;
+        if (fv < 0.0f) fv += 1.0f;
+        if (tileU < 0 || tileV < 0 || tileU >= gridU || tileV >= gridV) {
+            // Missing tile (or UV authored slightly past the set) → opaque black.
+            return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+        }
+        // Sample strictly inside the tile cell to avoid cross-tile bilinear bleed.
+        // Atlas is baked with OpenGL/MaterialX V (V=0 at bottom of each tile image).
+        const float cellW = 1.0f / float(gridU);
+        const float cellH = 1.0f / float(gridV);
+        const float u = (float(tileU) + clampf(fu, 0.0f, 0.999999f)) * cellW;
+        const float v = (float(tileV) + clampf(fv, 0.0f, 0.999999f)) * cellH;
         return sampleTextureClampedRGBA(tex.pixels, tex.width, tex.height, u, v);
     }
 
