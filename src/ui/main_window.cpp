@@ -51,7 +51,7 @@ QImage toQImage(const Image& image) {
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     registerBuiltinNodes();
-    setWindowTitle("Solstice");
+    setWindowTitle(SOLSTICE_APP_NAME);
     resize(1720, 1000);
 
     renderView_ = new RenderView(this);
@@ -148,7 +148,7 @@ void MainWindow::createMenus() {
 
     QMenu* helpMenu = menuBar()->addMenu("&Help");
     helpMenu->addAction("Keyboard Shortcuts", this, &MainWindow::onShowShortcuts);
-    helpMenu->addAction("About Solstice", this, &MainWindow::onShowAbout);
+    helpMenu->addAction(QString("About %1").arg(SOLSTICE_APP_NAME), this, &MainWindow::onShowAbout);
 }
 
 void MainWindow::createToolBar() {
@@ -452,7 +452,8 @@ void MainWindow::onCopyViewToCameraNode() {
 
 void MainWindow::updateWindowTitle() {
     const QString file = graph_.filePath().isEmpty() ? QString("untitled") : QFileInfo(graph_.filePath()).fileName();
-    setWindowTitle(QString("Solstice %1 - %2%3").arg(SOLSTICE_VERSION, file, graph_.isModified() ? "*" : ""));
+    setWindowTitle(QString("%1 %2 - %3%4")
+                       .arg(SOLSTICE_APP_NAME, SOLSTICE_VERSION, file, graph_.isModified() ? "*" : ""));
 }
 
 void MainWindow::updateStatusBar() {
@@ -484,7 +485,7 @@ void MainWindow::updateStatusBar() {
 bool MainWindow::maybeSaveChanges() {
     if (!graph_.isModified()) return true;
     const QMessageBox::StandardButton answer =
-        QMessageBox::question(this, "Solstice", "The current scene has unsaved changes. Save it?",
+        QMessageBox::question(this, SOLSTICE_APP_NAME, "The current scene has unsaved changes. Save it?",
                               QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
     if (answer == QMessageBox::Cancel) return false;
     if (answer == QMessageBox::Save) {
@@ -505,16 +506,17 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 
 void MainWindow::onShowAbout() {
     QMessageBox::about(
-        this, "About Solstice",
-        QString("<h3>Solstice %1</h3>"
+        this, QString("About %1").arg(SOLSTICE_APP_NAME),
+        QString("<h3>%1 %2</h3>"
                 "<p>A node based path tracer in the spirit of Houdini Solaris.</p>"
                 "<ul>"
-                "<li>Alembic geometry import</li>"
+                "<li>Alembic and USD geometry import</li>"
                 "<li>Area, distant and HDRI dome lights</li>"
                 "<li>Progressive path tracing on the CPU with Intel Embree</li>"
-                "<li>GPU path tracing with NVIDIA OptiX%2</li>"
+                "<li>GPU path tracing with NVIDIA OptiX%3</li>"
                 "</ul>")
-            .arg(SOLSTICE_VERSION, optixBackendCompiledIn() ? "" : " (not compiled into this build)"));
+            .arg(SOLSTICE_APP_NAME, SOLSTICE_VERSION,
+                 optixBackendCompiledIn() ? "" : " (not compiled into this build)"));
 }
 
 void MainWindow::onShowShortcuts() {

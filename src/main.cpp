@@ -1,7 +1,8 @@
-// Solstice - node based path tracer with Embree and OptiX backends.
+// Fedor Render - node based path tracer with Embree and OptiX backends.
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QCoreApplication>
+#include <QGuiApplication>
 #include <QStringList>
 
 #include "app/headless.h"
@@ -41,8 +42,8 @@ bool wantsHeadless(int argc, char** argv) {
 
 void configureParser(QCommandLineParser& parser) {
     parser.setApplicationDescription(
-        "Solstice - a node based path tracer.\n"
-        "Loads Alembic geometry, lights it with area and HDRI dome lights and renders\n"
+        SOLSTICE_APP_NAME " - a node based path tracer.\n"
+        "Loads Alembic and USD geometry, lights it with area and HDRI dome lights and renders\n"
         "with the Embree CPU backend or the OptiX GPU backend.");
     parser.addHelpOption();
     parser.addVersionOption();
@@ -71,7 +72,7 @@ int main(int argc, char** argv) {
     if (wantsHeadless(argc, argv)) {
         attachParentConsole();
         QCoreApplication application(argc, argv);
-        QCoreApplication::setApplicationName("Solstice");
+        QCoreApplication::setApplicationName(SOLSTICE_APP_NAME);
         QCoreApplication::setApplicationVersion(SOLSTICE_VERSION);
 
         QCommandLineParser parser;
@@ -99,9 +100,10 @@ int main(int argc, char** argv) {
     }
 
     QApplication application(argc, argv);
-    QCoreApplication::setApplicationName("Solstice");
-    QCoreApplication::setOrganizationName("Solstice");
+    QCoreApplication::setApplicationName(SOLSTICE_APP_NAME);
+    QCoreApplication::setOrganizationName("Fedor");
     QCoreApplication::setApplicationVersion(SOLSTICE_VERSION);
+    QGuiApplication::setApplicationDisplayName(QString::fromUtf8(SOLSTICE_APP_NAME));
 
     QCommandLineParser parser;
     configureParser(parser);

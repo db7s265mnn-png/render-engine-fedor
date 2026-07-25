@@ -6,6 +6,7 @@
 
 #include "core/log.h"
 #include "nodes/node_registry.h"
+#include "solstice_config.h"
 
 namespace sol {
 
@@ -227,7 +228,7 @@ StagePtr NodeGraph::cookInternal(Node* node, CookContext& context, std::vector<c
 
 QJsonObject NodeGraph::toJson() const {
     QJsonObject root;
-    root["application"] = "Solstice";
+    root["application"] = SOLSTICE_APP_NAME;
     root["version"] = 1;
 
     QJsonArray nodesArray;

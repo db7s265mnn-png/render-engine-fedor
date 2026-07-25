@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(Solstice VERSION 0.9.0 LANGUAGES CXX)
 
+set(SOLSTICE_APP_DISPLAY_NAME "Fedor Render" CACHE STRING "User-visible application name")
+
 # ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
@@ -173,7 +175,10 @@ set(SOLSTICE_APP_HEADERS
 if(SOLSTICE_BUILD_APP)
     qt_add_executable(Solstice WIN32 MACOSX_BUNDLE ${SOLSTICE_APP_SOURCES} ${SOLSTICE_APP_HEADERS})
     target_link_libraries(Solstice PRIVATE solstice_lib Qt6::Widgets)
-    set_target_properties(Solstice PROPERTIES OUTPUT_NAME "Solstice")
+    set_target_properties(Solstice PROPERTIES
+        OUTPUT_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
+        MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.fedor.render")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -201,13 +206,13 @@ if(SOLSTICE_BUILD_APP)
 endif()
 
 if(WIN32 AND SOLSTICE_BUILD_APP)
-    # Produces a self contained folder with the Qt runtime next to Solstice.exe.
+    # Produces a self contained folder with the Qt runtime next to the executable.
     get_target_property(SOLSTICE_QMAKE_EXECUTABLE Qt6::qmake IMPORTED_LOCATION)
     get_filename_component(SOLSTICE_QT_BIN_DIR "${SOLSTICE_QMAKE_EXECUTABLE}" DIRECTORY)
     find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS "${SOLSTICE_QT_BIN_DIR}" ${Qt6_DIR}/../../../bin)
     if(WINDEPLOYQT_EXECUTABLE)
         add_custom_target(deploy
-            COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to Solstice.exe"
+            COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to ${SOLSTICE_APP_DISPLAY_NAME}"
             COMMAND ${WINDEPLOYQT_EXECUTABLE} --release --no-translations --no-system-d3d-compiler
                     --compiler-runtime $<TARGET_FILE:Solstice>
             DEPENDS Solstice)
@@ -215,7 +220,7 @@ if(WIN32 AND SOLSTICE_BUILD_APP)
 endif()
 
 message(STATUS "")
-message(STATUS "Solstice ${PROJECT_VERSION}")
+message(STATUS "${SOLSTICE_APP_DISPLAY_NAME} ${PROJECT_VERSION}")
 message(STATUS "  Qt              : ${Qt6_VERSION}")
 message(STATUS "  Embree          : ${EMBREE_VERSION}")
 message(STATUS "  Alembic support : ${SOLSTICE_HAVE_ALEMBIC_01}")
