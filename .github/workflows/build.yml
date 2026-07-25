@@ -90,6 +90,12 @@ jobs:
   windows:
     name: Windows (standalone exe)
     runs-on: windows-2022
+    env:
+      EMBREE_VERSION: "4.4.0"
+      IMATH_VERSION: "v3.1.12"
+      ALEMBIC_VERSION: "1.8.6"
+      OPENEXR_VERSION: "v3.2.4"
+      DEPS_PREFIX: "C:/solstice-deps"
     steps:
       - uses: actions/checkout@v4
 
@@ -100,31 +106,87 @@ jobs:
           arch: win64_msvc2019_64
           cache: true
 
-      - name: Set up vcpkg
-        uses: lukka/run-vcpkg@v11
+      - name: Cache the third party dependencies
+        id: deps-cache
+        uses: actions/cache@v4
         with:
-          vcpkgGitCommitId: "3508985146f1b1d248c67ead13f8f54be5b4f5da"
+          path: ${{ env.DEPS_PREFIX }}
+          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}
 
-      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Fetch Embree
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          $url = "https://github.com/RenderKit/embree/releases/download/v$env:EMBREE_VERSION/embree-$env:EMBREE_VERSION.x64.windows.zip"
+          Invoke-WebRequest -Uri $url -OutFile embree.zip
+          Expand-Archive embree.zip -DestinationPath "$env:DEPS_PREFIX/embree"
+
+      - name: Build Imath
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch $env:IMATH_VERSION https://github.com/AcademySoftwareFoundation/Imath.git imath-src
+          cmake -S imath-src -B imath-src/build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:DEPS_PREFIX" -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF
+          cmake --build imath-src/build --config Release --target install
+
+      - name: Build OpenEXR
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          git clone --depth 1 --branch $env:OPENEXR_VERSION https://github.com/AcademySoftwareFoundation/openexr.git openexr-src
+          cmake -S openexr-src -B openexr-src/build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:DEPS_PREFIX" -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX" `
+            -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DOPENEXR_BUILD_TOOLS=OFF `
+            -DOPENEXR_INSTALL_EXAMPLES=OFF -DOPENEXR_FORCE_INTERNAL_DEFLATE=ON
+          cmake --build openexr-src/build --config Release --target install
+
+      - name: Build Alembic
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch $env:ALEMBIC_VERSION https://github.com/alembic/alembic.git alembic-src
+          cmake -S alembic-src -B alembic-src/build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:DEPS_PREFIX" -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX" `
+            -DUSE_HDF5=OFF -DALEMBIC_SHARED_LIBS=OFF -DUSE_TESTS=OFF -DUSE_BINARIES=OFF `
+            -DUSE_EXAMPLES=OFF -DALEMBIC_BUILD_LIBS=ON
+          cmake --build alembic-src/build --config Release --target install
 
       - name: Configure
         run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
-          -DVCPKG_TARGET_TRIPLET=x64-windows
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_PREFIX_PATH="${{ env.DEPS_PREFIX }};${{ env.DEPS_PREFIX }}/embree"
 
       - name: Build
-        run: cmake --build build
-
-      - name: Deploy the Qt runtime
-        run: |
-          cmake --build build --target deploy
-          Copy-Item build/bin/*.dll build/bin/ -ErrorAction SilentlyContinue
+        run: cmake --build build --config Release --parallel
 
       - name: Run the tests
-        run: ./build/bin/solstice_tests.exe
+        run: ./build/bin/Release/solstice_tests.exe
+
+      - name: Assemble the distribution
+        run: |
+          cmake --build build --config Release --target deploy
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item build/bin/Release/* dist/ -Recurse -Force
+          Get-ChildItem "$env:DEPS_PREFIX/embree" -Recurse -Filter *.dll |
+            ForEach-Object { Copy-Item $_.FullName dist/ -Force }
+          Copy-Item README.md dist/
+          Copy-Item -Recurse docs dist/docs
+          Copy-Item -Recurse examples dist/examples
+          Remove-Item dist/solstice_tests.exe -ErrorAction SilentlyContinue
+          Get-ChildItem dist
+
+      - name: Render a frame with the packaged exe
+        run: |
+          Start-Process -FilePath dist/Solstice.exe `
+            -ArgumentList '--headless','-o','windows-smoke.png','-s','16','--width','480','--height','270' `
+            -Wait -NoNewWindow
+          if (-not (Test-Path windows-smoke.png)) { throw "the packaged exe did not produce an image" }
+          Get-Item windows-smoke.png
 
       - uses: actions/upload-artifact@v4
         with:
           name: Solstice-windows-x64
-          path: build/bin/
+          path: dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-render
+          path: windows-smoke.png

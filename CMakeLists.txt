@@ -205,7 +205,7 @@ if(WIN32 AND SOLSTICE_BUILD_APP)
         add_custom_target(deploy
             COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to Solstice.exe"
             COMMAND ${WINDEPLOYQT_EXECUTABLE} --release --no-translations --no-system-d3d-compiler
-                    $<TARGET_FILE:Solstice>
+                    --compiler-runtime $<TARGET_FILE:Solstice>
             DEPENDS Solstice)
     endif()
 endif()
