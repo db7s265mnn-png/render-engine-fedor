@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QVector3D>
 
+#include "io/alembic_loader.h"
 #include "io/materialx_graph.h"
 #include "nodes/node_registry.h"
 
@@ -42,7 +43,8 @@ void buildDefaultGraph(NodeGraph& graph) {
     registerBuiltinNodes();
     graph.clear();
 
-    const QString buddhaPath = findBundledAsset("buddha.abc");
+    const QString buddhaPath =
+        alembicSupportAvailable() ? findBundledAsset("buddha.abc") : QString();
     const QString hdriPath = findBundledAsset("ferndale_studio_07_2k.hdr");
 
     Node* ground = graph.createNode("grid", "ground1");

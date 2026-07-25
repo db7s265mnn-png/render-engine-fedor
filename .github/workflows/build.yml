@@ -67,7 +67,8 @@ jobs:
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$HOME/alembic-install:$HOME/materialx-install" \
+            -DAlembic_DIR=$HOME/alembic-install/lib/cmake/Alembic \
+            -DCMAKE_PREFIX_PATH="$HOME/alembic-install;$HOME/materialx-install" \
             -DSOLSTICE_MATERIALX_LIBRARIES=$HOME/materialx-install/libraries
 
       - name: Build
