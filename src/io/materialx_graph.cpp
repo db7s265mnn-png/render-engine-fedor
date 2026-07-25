@@ -3,6 +3,8 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <algorithm>
+#include <map>
 
 #include "core/log.h"
 #include "io/image_io.h"
@@ -231,6 +233,140 @@ QString materialXLibraryRoot() {
     return findLibraryRoot();
 #else
     return {};
+#endif
+}
+
+namespace {
+
+QString catalogGroupFor(const QString& category, const QString& type, const QString& nodeGroup) {
+    const QString group = nodeGroup.toLower();
+    const QString cat = category.toLower();
+    if (!group.isEmpty()) {
+        if (group.contains("texture") || group.contains("image")) return "Texture";
+        if (group.contains("pbr") || group.contains("shader") || group.contains("bxdf") ||
+            group.contains("material"))
+            return "PBR / Shading";
+        if (group.contains("geometric") || group.contains("geometry")) return "Geometric";
+        if (group.contains("procedural") || group.contains("noise")) return "Procedural";
+        if (group.contains("color") || group.contains("adjustment")) return "Color";
+        if (group.contains("math") || group.contains("commutative") || group.contains("conditional"))
+            return "Math";
+        if (group.contains("compositing") || group.contains("channel")) return "Compositing";
+        if (group.contains("light")) return "Lights";
+        return nodeGroup;
+    }
+    if (type == "surfaceshader" || type == "material" || type == "displacementshader" ||
+        type == "volumeshader" || type == "lightshader" || cat.contains("surface") ||
+        cat.contains("material") || cat.contains("bsdf") || cat.contains("edf") || cat.contains("vdf"))
+        return "PBR / Shading";
+    if (cat.contains("image") || cat.contains("texture") || cat.contains("triplanar") ||
+        cat == "normalmap" || cat == "tangent")
+        return "Texture";
+    if (cat.contains("noise") || cat.contains("fractal") || cat.contains("cell") || cat.contains("ramp") ||
+        cat.contains("checker") || cat.contains("worley"))
+        return "Procedural";
+    if (cat.contains("position") || cat.contains("normal") || cat.contains("tangent") ||
+        cat.contains("texcoord") || cat.contains("geom") || cat == "viewdirection" || cat == "time")
+        return "Geometric";
+    if (type.startsWith("color") || cat.contains("hsv") || cat.contains("luminance") ||
+        cat.contains("saturate") || cat.contains("contrast"))
+        return "Color";
+    if (type.startsWith("float") || type.startsWith("vector") || type.startsWith("matrix") ||
+        cat.contains("add") || cat.contains("multiply") || cat.contains("mix") || cat.contains("clamp") ||
+        cat.contains("dot") || cat.contains("cross") || cat.contains("normalize"))
+        return "Math";
+    return "Utility";
+}
+
+QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
+    const auto entry = [](const char* category, const char* type, const char* group,
+                          std::initializer_list<MaterialXNodeInputDef> inputs) {
+        MaterialXNodeCatalogEntry e;
+        e.category = QString::fromUtf8(category);
+        e.type = QString::fromUtf8(type);
+        e.group = QString::fromUtf8(group);
+        e.label = e.category + " (" + e.type + ")";
+        for (const MaterialXNodeInputDef& input : inputs) e.inputs.push_back(input);
+        return e;
+    };
+    return {
+        entry("image", "color3", "Texture", {{"file", "filename", {}}, {"default", "color3", "0, 0, 0"}}),
+        entry("tiledimage", "color3", "Texture",
+              {{"file", "filename", {}}, {"uvtiling", "vector2", "1, 1"}, {"default", "color3", "0, 0, 0"}}),
+        entry("constant", "color3", "Math", {{"value", "color3", "1, 1, 1"}}),
+        entry("multiply", "color3", "Math",
+              {{"in1", "color3", "1, 1, 1"}, {"in2", "color3", "1, 1, 1"}}),
+        entry("add", "color3", "Math", {{"in1", "color3", "0, 0, 0"}, {"in2", "color3", "0, 0, 0"}}),
+        entry("mix", "color3", "Math",
+              {{"bg", "color3", "0, 0, 0"}, {"fg", "color3", "1, 1, 1"}, {"mix", "float", "0.5"}}),
+        entry("normalmap", "vector3", "Texture", {{"in", "vector3", {}}, {"scale", "float", "1"}}),
+        entry("texcoord", "vector2", "Geometric", {{"index", "integer", "0"}}),
+        entry("standard_surface", "surfaceshader", "PBR / Shading",
+              {{"base_color", "color3", "0.8, 0.8, 0.8"},
+               {"specular_roughness", "float", "0.35"},
+               {"metalness", "float", "0"},
+               {"normal", "vector3", {}}}),
+        entry("surfacematerial", "material", "PBR / Shading", {{"surfaceshader", "surfaceshader", {}}}),
+    };
+}
+
+}  // namespace
+
+QVector<MaterialXNodeCatalogEntry> listMaterialXNodeCatalog() {
+#if SOLSTICE_HAVE_MATERIALX
+    std::string error;
+    auto doc = makeLibraryDocument(error);
+    if (!doc) {
+        logWarning("MaterialX catalog: " + error);
+        return fallbackMaterialXCatalog();
+    }
+
+    // Prefer useful typed variants: for a category keep one nodedef per output type,
+    // preferring color3 / float / vector3 / surfaceshader / material when available.
+    std::map<std::pair<std::string, std::string>, mx::NodeDefPtr> chosen;
+    for (const mx::NodeDefPtr& def : doc->getNodeDefs()) {
+        if (!def) continue;
+        const std::string category = def->getNodeString().empty() ? def->getName() : def->getNodeString();
+        if (category.empty()) continue;
+        // Skip interface / token helpers that are not graph nodes.
+        if (category == "backdrop" || category == "tokengraph" || category == "nodedef") continue;
+        const std::string type = def->getType();
+        if (type.empty() || type == "none" || type == "multioutput") continue;
+        const auto key = std::make_pair(category, type);
+        if (!chosen.count(key)) chosen.emplace(key, def);
+    }
+
+    QVector<MaterialXNodeCatalogEntry> entries;
+    entries.reserve(int(chosen.size()));
+    for (const auto& [key, def] : chosen) {
+        MaterialXNodeCatalogEntry entry;
+        entry.category = QString::fromStdString(key.first);
+        entry.type = QString::fromStdString(key.second);
+        entry.group = catalogGroupFor(entry.category, entry.type, QString::fromStdString(def->getNodeGroup()));
+        entry.label = entry.category + " (" + entry.type + ")";
+        for (const mx::InputPtr& input : def->getActiveInputs()) {
+            if (!input) continue;
+            MaterialXNodeInputDef in;
+            in.name = QString::fromStdString(input->getName());
+            in.type = QString::fromStdString(input->getType());
+            if (input->hasValueString()) in.value = QString::fromStdString(input->getValueString());
+            else if (input->getValue()) in.value = QString::fromStdString(input->getValue()->getValueString());
+            // Filename defaults are usually empty placeholders — keep empty for dialogs.
+            if (in.type == "filename") in.value.clear();
+            entry.inputs.push_back(in);
+        }
+        entries.push_back(entry);
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const MaterialXNodeCatalogEntry& a,
+                                                 const MaterialXNodeCatalogEntry& b) {
+        if (a.group != b.group) return a.group < b.group;
+        if (a.category != b.category) return a.category < b.category;
+        return a.type < b.type;
+    });
+    return entries;
+#else
+    return fallbackMaterialXCatalog();
 #endif
 }
 

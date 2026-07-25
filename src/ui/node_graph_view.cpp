@@ -679,6 +679,25 @@ void NodeGraphView::contextMenuEvent(QContextMenuEvent* event) {
     lastScenePosition_ = mapToScene(event->pos());
     QMenu menu(this);
 
+    ConnectionItem* wire = nullptr;
+    for (QGraphicsItem* graphicsItem : items(event->pos())) {
+        if (auto* connection = qgraphicsitem_cast<ConnectionItem*>(graphicsItem)) {
+            wire = connection;
+            break;
+        }
+    }
+    if (wire && wire->destination() && graph_) {
+        Node* destination = wire->destination()->node();
+        const int inputIndex = wire->inputIndex();
+        menu.addAction("Disconnect", this, [this, destination, inputIndex] {
+            if (!graph_ || !destination) return;
+            graph_->disconnectInput(destination, inputIndex);
+            graphScene_->updateConnections();
+            emit statusMessage("Disconnected " + destination->name());
+        });
+        menu.addSeparator();
+    }
+
     NodeItem* item = nodeItemAt(event->pos());
     if (item) {
         Node* node = item->node();

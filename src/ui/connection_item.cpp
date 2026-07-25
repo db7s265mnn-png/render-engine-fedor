@@ -1,6 +1,7 @@
 #include "ui/connection_item.h"
 
 #include <QPainterPath>
+#include <QPainterPathStroker>
 #include <QPen>
 #include <cmath>
 
@@ -20,8 +21,16 @@ ConnectionItem::ConnectionItem(NodeItem* source, NodeItem* destination, int inpu
     : source_(source), destination_(destination), inputIndex_(inputIndex) {
     setZValue(0.0);
     setPen(QPen(theme::wire(), 1.8, Qt::SolidLine, Qt::RoundCap));
-    setFlag(ItemIsSelectable, false);
+    setFlag(ItemIsSelectable, true);
+    setAcceptHoverEvents(true);
     updateGeometry();
+}
+
+QPainterPath ConnectionItem::shape() const {
+    QPainterPathStroker stroker;
+    stroker.setWidth(14.0);
+    stroker.setCapStyle(Qt::RoundCap);
+    return stroker.createStroke(path());
 }
 
 void ConnectionItem::updateGeometry() {

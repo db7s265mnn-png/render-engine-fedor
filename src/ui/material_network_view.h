@@ -65,8 +65,9 @@ private:
     void writeModel(bool emitEdited);
     void frameGraph();
     void showAddNodeMenu(const QPoint& viewPosition);
-    void addNode(const QString& category, QPointF scenePosition);
+    void addNode(const QString& category, const QString& type, QPointF scenePosition);
     void connectNodes(const QString& sourceName, const QString& targetName, int inputIndex);
+    void disconnectInput(const QString& targetName, const QString& inputName);
     void deleteSelectedNodes();
     bool openTextureDialogAt(const QPoint& viewPosition);
     void chooseTexture(const QString& nodeName);
@@ -80,7 +81,8 @@ private:
     QString uniqueNodeName(const QString& baseName) const;
     static void ensureInput(QVector<MtlxInput>& inputs, const QString& name, const QString& type,
                             const QString& value = QString());
-    static QVector<MtlxInput> defaultInputsForCategory(const QString& category);
+    static QVector<MtlxInput> defaultInputsForCategory(const QString& category, const QString& type = QString());
+    static QString defaultTypeForCategory(const QString& category);
     MtlxNode* findModelNode(const QString& name);
     const MtlxNode* findModelNode(const QString& name) const;
 

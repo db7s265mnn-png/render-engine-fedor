@@ -2,6 +2,7 @@
 #pragma once
 
 #include <QGraphicsPathItem>
+#include <QPainterPath>
 
 namespace sol {
 
@@ -18,6 +19,7 @@ public:
     NodeItem* destination() const { return destination_; }
     int inputIndex() const { return inputIndex_; }
 
+    QPainterPath shape() const override;
     void updateGeometry();
 
 private:

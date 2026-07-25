@@ -7,6 +7,7 @@
 #include <QGraphicsScene>
 #include <QKeyEvent>
 #include <QLineF>
+#include <QMap>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
@@ -22,6 +23,7 @@
 #include "io/materialx_graph.h"
 #include "nodes/node.h"
 #include "nodes/parameter.h"
+#include "ui/material_wire_item.h"
 #include "ui/theme.h"
 
 namespace sol {
@@ -30,36 +32,60 @@ namespace {
 constexpr qreal kLayoutScale = 80.0;
 constexpr qreal kPortRadius = 4.8;
 constexpr qreal kPortHitRadius = 11.0;
+constexpr qreal kPortSnapRadius = 28.0;
 
-struct NodeCategoryInfo {
-    QString type;
-    QColor color;
-};
+const QVector<MaterialXNodeCatalogEntry>& catalogCache() {
+    static const QVector<MaterialXNodeCatalogEntry> cache = listMaterialXNodeCatalog();
+    return cache;
+}
 
-bool isSupportedCategory(const QString& category) {
+const MaterialXNodeCatalogEntry* findCatalogEntry(const QString& category, const QString& type = QString()) {
+    const QVector<MaterialXNodeCatalogEntry>& catalog = catalogCache();
+    const MaterialXNodeCatalogEntry* fallback = nullptr;
+    for (const MaterialXNodeCatalogEntry& entry : catalog) {
+        if (entry.category != category) continue;
+        if (!type.isEmpty() && entry.type == type) return &entry;
+        if (!fallback) fallback = &entry;
+        // Prefer color3 / surfaceshader / material / float variants when type omitted.
+        if (type.isEmpty()) {
+            if (entry.type == "color3" || entry.type == "surfaceshader" || entry.type == "material")
+                return &entry;
+        }
+    }
+    return fallback;
+}
+
+bool isKnownMaterialXCategory(const QString& category) {
+    if (category.isEmpty() || category == "materialx" || category == "nodegraph" || category == "nodedef" ||
+        category == "implementation" || category == "backdrop")
+        return false;
+    if (findCatalogEntry(category)) return true;
+    // Keep previously hardcoded essentials even if libraries failed to load.
     return category == "standard_surface" || category == "surfacematerial" || category == "image" ||
-           category == "constant" || category == "multiply" || category == "mix" || category == "normalmap";
+           category == "constant" || category == "multiply" || category == "mix" || category == "normalmap" ||
+           category == "tiledimage" || category == "add" || category == "texcoord";
 }
 
-bool isMathCategory(const QString& category) {
-    return category == "constant" || category == "multiply" || category == "mix" || category == "normalmap";
+QColor colorForCategory(const QString& category) {
+    if (category == "image" || category == "tiledimage") return QColor(42, 132, 132);
+    if (category == "standard_surface") return QColor(189, 116, 45);
+    if (category == "surfacematerial") return QColor(126, 82, 170);
+    if (category == "normalmap") return QColor(96, 101, 108);
+    const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category);
+    if (entry) {
+        if (entry->group.startsWith("PBR")) return QColor(189, 116, 45);
+        if (entry->group == "Texture") return QColor(42, 132, 132);
+        if (entry->group == "Geometric") return QColor(72, 120, 168);
+        if (entry->group == "Procedural") return QColor(58, 140, 98);
+        if (entry->group == "Color") return QColor(150, 90, 120);
+        if (entry->group == "Lights") return QColor(180, 150, 60);
+    }
+    return QColor(96, 101, 108);
 }
-
-NodeCategoryInfo categoryInfo(const QString& category) {
-    if (category == "image") return {"color3", QColor(42, 132, 132)};
-    if (category == "standard_surface") return {"surfaceshader", QColor(189, 116, 45)};
-    if (category == "surfacematerial") return {"material", QColor(126, 82, 170)};
-    if (category == "normalmap") return {"vector3", QColor(96, 101, 108)};
-    if (isMathCategory(category)) return {"color3", QColor(96, 101, 108)};
-    return {"color3", QColor(96, 101, 108)};
-}
-
-QString defaultTypeForCategory(const QString& category) { return categoryInfo(category).type; }
-
-QColor colorForCategory(const QString& category) { return categoryInfo(category).color; }
 
 bool isConnectableInput(const QString& name, const QString& type) {
-    return name != "file" && type != "filename";
+    Q_UNUSED(name);
+    return type != "filename";
 }
 
 QString fallbackDefaultDocument() {
@@ -192,15 +218,35 @@ public:
     int inputCount() const { return inputs_.size(); }
     int inputModelIndex(int portIndex) const { return inputs_.value(portIndex).modelIndex; }
 
-    int hitInputPort(QPointF scenePosition) const {
+    int hitInputPort(QPointF scenePosition, qreal radius = kPortHitRadius) const {
+        int best = -1;
+        qreal bestDist = radius;
         for (int i = 0; i < inputs_.size(); ++i) {
-            if (QLineF(scenePosition, inputPortScene(i)).length() <= kPortHitRadius) return i;
+            const qreal dist = QLineF(scenePosition, inputPortScene(i)).length();
+            if (dist <= bestDist) {
+                bestDist = dist;
+                best = i;
+            }
         }
-        return -1;
+        return best;
     }
 
-    bool hitOutputPort(QPointF scenePosition) const {
-        return QLineF(scenePosition, outputPortScene()).length() <= kPortHitRadius;
+    bool hitOutputPort(QPointF scenePosition, qreal radius = kPortHitRadius) const {
+        return QLineF(scenePosition, outputPortScene()).length() <= radius;
+    }
+
+    qreal nearestInputDistance(QPointF scenePosition, int* portOut = nullptr) const {
+        qreal best = 1e9;
+        int bestPort = -1;
+        for (int i = 0; i < inputs_.size(); ++i) {
+            const qreal dist = QLineF(scenePosition, inputPortScene(i)).length();
+            if (dist < best) {
+                best = dist;
+                bestPort = i;
+            }
+        }
+        if (portOut) *portOut = bestPort;
+        return best;
     }
 
 private:
@@ -261,15 +307,19 @@ MaterialNetworkNodeItem* nodeItemByName(QGraphicsScene* scene, const QString& na
     return nullptr;
 }
 
-MaterialNetworkNodeItem* outputPortAt(QGraphicsView* view, const QPoint& viewPosition) {
-    const QPointF scenePosition = view->mapToScene(viewPosition);
-    const QList<QGraphicsItem*> items = view->items(viewPosition);
-    for (QGraphicsItem* item : items) {
-        if (auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item)) {
-            if (nodeItem->hitOutputPort(scenePosition)) return nodeItem;
+MaterialNetworkNodeItem* outputPortAt(QGraphicsScene* scene, QPointF scenePosition, qreal radius = kPortSnapRadius) {
+    MaterialNetworkNodeItem* best = nullptr;
+    qreal bestDist = radius;
+    for (QGraphicsItem* item : scene->items()) {
+        auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item);
+        if (!nodeItem) continue;
+        const qreal dist = QLineF(scenePosition, nodeItem->outputPortScene()).length();
+        if (dist <= bestDist) {
+            bestDist = dist;
+            best = nodeItem;
         }
     }
-    return nullptr;
+    return best;
 }
 
 struct InputHit {
@@ -277,23 +327,47 @@ struct InputHit {
     int inputIndex = -1;
 };
 
-InputHit inputPortAt(QGraphicsView* view, const QPoint& viewPosition) {
-    const QPointF scenePosition = view->mapToScene(viewPosition);
-    const QList<QGraphicsItem*> items = view->items(viewPosition);
-    for (QGraphicsItem* item : items) {
-        if (auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item)) {
-            const int port = nodeItem->hitInputPort(scenePosition);
-            if (port >= 0) return {nodeItem, port};
+InputHit inputPortAt(QGraphicsScene* scene, QPointF scenePosition, qreal radius = kPortSnapRadius) {
+    InputHit best;
+    qreal bestDist = radius;
+    for (QGraphicsItem* item : scene->items()) {
+        auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item);
+        if (!nodeItem) continue;
+        int port = -1;
+        const qreal dist = nodeItem->nearestInputDistance(scenePosition, &port);
+        if (port >= 0 && dist <= bestDist) {
+            bestDist = dist;
+            best = {nodeItem, port};
         }
     }
-    return {};
+    return best;
 }
 
-void addWire(QGraphicsScene* scene, QPointF from, QPointF to, bool active) {
-    auto* wire = scene->addPath(makeWirePath(from, to),
-                                QPen(active ? theme::wireActive() : theme::wire(), active ? 2.0 : 1.4,
-                                     Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    wire->setZValue(0.0);
+MaterialWireItem* wireItemAt(QGraphicsView* view, const QPoint& viewPosition) {
+    for (QGraphicsItem* item : view->items(viewPosition)) {
+        if (auto* wire = qgraphicsitem_cast<MaterialWireItem*>(item)) return wire;
+    }
+    // Fat hit-test via shape even when the thin stroke misses the exact pixel.
+    const QPointF scenePosition = view->mapToScene(viewPosition);
+    MaterialWireItem* best = nullptr;
+    qreal bestDist = 10.0;
+    for (QGraphicsItem* item : view->scene()->items()) {
+        auto* wire = qgraphicsitem_cast<MaterialWireItem*>(item);
+        if (!wire) continue;
+        if (!wire->shape().contains(wire->mapFromScene(scenePosition))) continue;
+        const qreal dist = QLineF(scenePosition, wire->path().pointAtPercent(0.5)).length();
+        if (dist < bestDist || !best) {
+            best = wire;
+            bestDist = dist;
+        }
+    }
+    return best;
+}
+
+void addWire(QGraphicsScene* scene, QPointF from, QPointF to, const QString& targetName, const QString& inputName) {
+    auto* wire = new MaterialWireItem(targetName, inputName);
+    wire->setWirePath(makeWirePath(from, to));
+    scene->addItem(wire);
 }
 
 }  // namespace
@@ -407,18 +481,45 @@ void MaterialNetworkView::ensureInput(QVector<MtlxInput>& inputs, const QString&
     inputs.push_back({name, type, value, {}});
 }
 
-QVector<MaterialNetworkView::MtlxInput> MaterialNetworkView::defaultInputsForCategory(const QString& category) {
+QString MaterialNetworkView::defaultTypeForCategory(const QString& category) {
+    if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) return entry->type;
+    if (category == "standard_surface") return "surfaceshader";
+    if (category == "surfacematerial") return "material";
+    if (category == "normalmap") return "vector3";
+    if (category == "texcoord") return "vector2";
+    return "color3";
+}
+
+QVector<MaterialNetworkView::MtlxInput> MaterialNetworkView::defaultInputsForCategory(const QString& category,
+                                                                                      const QString& type) {
     QVector<MtlxInput> inputs;
-    if (category == "image") {
+    if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category, type)) {
+        for (const MaterialXNodeInputDef& def : entry->inputs) {
+            // Keep standard_surface UI focused on the common shading ports; full nodedef is huge.
+            if (category == "standard_surface") {
+                static const QStringList keep = {"base_color", "specular_roughness", "metalness", "specular",
+                                                 "specular_IOR", "transmission", "opacity", "emission",
+                                                 "emission_color", "normal", "subsurface", "subsurface_color",
+                                                 "subsurface_radius"};
+                if (!keep.contains(def.name)) continue;
+            }
+            inputs.push_back({def.name, def.type, def.value, {}});
+        }
+        if (!inputs.isEmpty()) return inputs;
+    }
+
+    if (category == "image" || category == "tiledimage") {
         inputs.push_back({"file", "filename", {}, {}});
     } else if (category == "constant") {
-        inputs.push_back({"value", "color3", "1, 1, 1", {}});
-    } else if (category == "multiply") {
-        inputs.push_back({"in1", "color3", "1, 1, 1", {}});
-        inputs.push_back({"in2", "color3", "1, 1, 1", {}});
+        inputs.push_back({"value", type.isEmpty() ? QString("color3") : type, "1, 1, 1", {}});
+    } else if (category == "multiply" || category == "add") {
+        const QString t = type.isEmpty() ? QString("color3") : type;
+        inputs.push_back({"in1", t, t.startsWith("color") || t.startsWith("vector") ? "1, 1, 1" : "1", {}});
+        inputs.push_back({"in2", t, t.startsWith("color") || t.startsWith("vector") ? "1, 1, 1" : "1", {}});
     } else if (category == "mix") {
-        inputs.push_back({"bg", "color3", "0, 0, 0", {}});
-        inputs.push_back({"fg", "color3", "1, 1, 1", {}});
+        const QString t = type.isEmpty() ? QString("color3") : type;
+        inputs.push_back({"bg", t, "0, 0, 0", {}});
+        inputs.push_back({"fg", t, "1, 1, 1", {}});
         inputs.push_back({"mix", "float", "0.5", {}});
     } else if (category == "normalmap") {
         inputs.push_back({"in", "vector3", {}, {}});
@@ -452,7 +553,7 @@ void MaterialNetworkView::rebuildFromXml(const QString& xml, bool rewriteRepaire
         parsedMaterialX = true;
         while (reader.readNextStartElement()) {
             const QString category = reader.name().toString();
-            if (!isSupportedCategory(category)) {
+            if (!isKnownMaterialXCategory(category)) {
                 reader.skipCurrentElement();
                 continue;
             }
@@ -598,7 +699,7 @@ void MaterialNetworkView::rebuild() {
         }
 
         QString subtitle = node.category;
-        if (node.category == "image") {
+        if (node.category == "image" || node.category == "tiledimage") {
             for (const MtlxInput& input : node.inputs) {
                 if (input.name == "file") {
                     subtitle = input.value.trimmed().isEmpty() ? QString("choose texture")
@@ -624,7 +725,9 @@ void MaterialNetworkView::rebuild() {
             if (!isConnectableInput(input.name, input.type)) continue;
             if (!input.nodename.isEmpty()) {
                 MaterialNetworkNodeItem* sourceItem = nodeItemByName(graphScene_, input.nodename);
-                if (sourceItem) addWire(graphScene_, sourceItem->outputPortScene(), targetItem->inputPortScene(visiblePort), true);
+                if (sourceItem)
+                    addWire(graphScene_, sourceItem->outputPortScene(), targetItem->inputPortScene(visiblePort),
+                            target.name, input.name);
             }
             ++visiblePort;
         }
@@ -746,6 +849,17 @@ void MaterialNetworkView::keyReleaseEvent(QKeyEvent* event) {
 
 void MaterialNetworkView::contextMenuEvent(QContextMenuEvent* event) {
     lastMousePoint_ = event->pos();
+
+    if (MaterialWireItem* wire = wireItemAt(this, event->pos())) {
+        QMenu menu(this);
+        const QString target = wire->targetNodeName();
+        const QString input = wire->inputName();
+        menu.addAction("Disconnect", this, [this, target, input] { disconnectInput(target, input); });
+        menu.exec(event->globalPos());
+        event->accept();
+        return;
+    }
+
     if (!nodeItemAt(this, event->pos())) {
         showAddNodeMenu(event->pos());
         event->accept();
@@ -761,41 +875,68 @@ void MaterialNetworkView::showAddNodeMenu(const QPoint& viewPosition) {
     }
 
     QMenu menu(this);
-    const QStringList categories = {"image", "constant", "multiply", "mix", "normalmap", "standard_surface",
-                                    "surfacematerial"};
-    for (const QString& category : categories) {
-        QAction* action = menu.addAction(category);
-        action->setData(category);
+    QMap<QString, QMenu*> groupMenus;
+    const QVector<MaterialXNodeCatalogEntry>& catalog = catalogCache();
+    if (catalog.isEmpty()) {
+        emit statusMessage("MaterialX node catalog is empty");
+        return;
+    }
+
+    for (const MaterialXNodeCatalogEntry& entry : catalog) {
+        QMenu* groupMenu = groupMenus.value(entry.group);
+        if (!groupMenu) {
+            groupMenu = menu.addMenu(entry.group);
+            groupMenus.insert(entry.group, groupMenu);
+        }
+        QAction* action = groupMenu->addAction(entry.label);
+        action->setData(QStringList{entry.category, entry.type});
     }
 
     QAction* chosen = menu.exec(viewport()->mapToGlobal(viewPosition));
     if (!chosen) return;
-    addNode(chosen->data().toString(), mapToScene(viewPosition));
+    const QStringList data = chosen->data().toStringList();
+    if (data.size() < 2) return;
+    addNode(data[0], data[1], mapToScene(viewPosition));
 }
 
-void MaterialNetworkView::addNode(const QString& category, QPointF scenePosition) {
-    if (!materialNode_ || !isSupportedCategory(category)) return;
+void MaterialNetworkView::addNode(const QString& category, const QString& type, QPointF scenePosition) {
+    if (!materialNode_ || !isKnownMaterialXCategory(category)) return;
     MtlxNode node;
     node.category = category;
-    node.type = defaultTypeForCategory(category);
+    node.type = type.isEmpty() ? defaultTypeForCategory(category) : type;
     node.name = uniqueNodeName(category == "surfacematerial" ? "surfacematerial" : category);
     node.layout = scenePosition / kLayoutScale;
-    node.inputs = defaultInputsForCategory(category);
+    node.inputs = defaultInputsForCategory(category, node.type);
     graphNodes_.push_back(node);
     writeModel(true);
     rebuild();
-    emit statusMessage("Added " + category);
+    emit statusMessage("Added " + category + " (" + node.type + ")");
 }
 
 void MaterialNetworkView::connectNodes(const QString& sourceName, const QString& targetName, int inputIndex) {
     if (sourceName.isEmpty() || targetName.isEmpty() || sourceName == targetName) return;
     MtlxNode* target = findModelNode(targetName);
     if (!target || inputIndex < 0 || inputIndex >= target->inputs.size()) return;
+    if (!isConnectableInput(target->inputs[inputIndex].name, target->inputs[inputIndex].type)) return;
     target->inputs[inputIndex].nodename = sourceName;
     target->inputs[inputIndex].value.clear();
     writeModel(true);
     rebuild();
     emit statusMessage(QString("Connected %1 to %2.%3").arg(sourceName, targetName, target->inputs[inputIndex].name));
+}
+
+void MaterialNetworkView::disconnectInput(const QString& targetName, const QString& inputName) {
+    MtlxNode* target = findModelNode(targetName);
+    if (!target || inputName.isEmpty()) return;
+    for (MtlxInput& input : target->inputs) {
+        if (input.name != inputName) continue;
+        if (input.nodename.isEmpty()) return;
+        input.nodename.clear();
+        writeModel(true);
+        rebuild();
+        emit statusMessage(QString("Disconnected %1.%2").arg(targetName, inputName));
+        return;
+    }
 }
 
 void MaterialNetworkView::deleteSelectedNodes() {
@@ -847,13 +988,35 @@ void MaterialNetworkView::mousePressEvent(QMouseEvent* event) {
     }
 
     if (event->button() == Qt::LeftButton) {
-        if (MaterialNetworkNodeItem* source = outputPortAt(this, event->pos())) {
+        if (MaterialNetworkNodeItem* source =
+                outputPortAt(graphScene_, mapToScene(event->pos()), kPortHitRadius * 1.8)) {
             beginWire(source->nodeName(), source->outputPortScene());
             event->accept();
             return;
         }
+        // Pull existing wire off an input (rewire), matching the Network Editor.
+        if (const InputHit hit = inputPortAt(graphScene_, mapToScene(event->pos()), kPortHitRadius * 1.8);
+            hit.item) {
+            const int modelInput = hit.item->inputModelIndex(hit.inputIndex);
+            if (MtlxNode* target = findModelNode(hit.item->nodeName());
+                target && modelInput >= 0 && modelInput < target->inputs.size()) {
+                const QString existing = target->inputs[modelInput].nodename;
+                if (!existing.isEmpty()) {
+                    target->inputs[modelInput].nodename.clear();
+                    writeModel(false);
+                    rebuild();
+                    if (MaterialNetworkNodeItem* sourceItem = nodeItemByName(graphScene_, existing)) {
+                        beginWire(existing, sourceItem->outputPortScene());
+                        updateWire(mapToScene(event->pos()));
+                        event->accept();
+                        return;
+                    }
+                }
+            }
+        }
         if (MaterialNetworkNodeItem* item = nodeItemAt(this, event->pos())) {
-            if (item->category() == "image") clickImageNode_ = item->nodeName();
+            if (item->category() == "image" || item->category() == "tiledimage")
+                clickImageNode_ = item->nodeName();
         }
     }
 
@@ -910,7 +1073,7 @@ void MaterialNetworkView::mouseDoubleClickEvent(QMouseEvent* event) {
 
 bool MaterialNetworkView::openTextureDialogAt(const QPoint& viewPosition) {
     MaterialNetworkNodeItem* item = nodeItemAt(this, viewPosition);
-    if (!item || item->category() != "image") return false;
+    if (!item || (item->category() != "image" && item->category() != "tiledimage")) return false;
     graphScene_->clearSelection();
     item->setSelected(true);
     chooseTexture(item->nodeName());
@@ -919,7 +1082,7 @@ bool MaterialNetworkView::openTextureDialogAt(const QPoint& viewPosition) {
 
 void MaterialNetworkView::chooseTexture(const QString& nodeName) {
     MtlxNode* node = findModelNode(nodeName);
-    if (!node || node->category != "image") return;
+    if (!node || (node->category != "image" && node->category != "tiledimage")) return;
 
     int fileInput = -1;
     for (int i = 0; i < node->inputs.size(); ++i) {
@@ -1000,7 +1163,9 @@ void MaterialNetworkView::updateWire(QPointF scenePosition) {
 }
 
 void MaterialNetworkView::endWire(const QPoint& viewPosition) {
-    InputHit hit = inputPortAt(this, viewPosition);
+    const QString sourceName = wireSourceNode_;
+    const QPointF scenePosition = mapToScene(viewPosition);
+    InputHit hit = inputPortAt(graphScene_, scenePosition, kPortSnapRadius);
     if (previewWire_) {
         graphScene_->removeItem(previewWire_);
         delete previewWire_;
@@ -1008,14 +1173,22 @@ void MaterialNetworkView::endWire(const QPoint& viewPosition) {
     }
     wiring_ = false;
     setDragMode(QGraphicsView::RubberBandDrag);
-
-    if (!hit.item) {
-        wireSourceNode_.clear();
-        return;
-    }
-    const int modelInput = hit.item->inputModelIndex(hit.inputIndex);
-    connectNodes(wireSourceNode_, hit.item->nodeName(), modelInput);
     wireSourceNode_.clear();
+
+    if (sourceName.isEmpty()) return;
+    if (!hit.item) {
+        // Soft snap: drop on a node body and pick nearest free/connectable input.
+        if (MaterialNetworkNodeItem* item = nodeItemAt(this, viewPosition)) {
+            if (item->nodeName() != sourceName && item->inputCount() > 0) {
+                int port = item->hitInputPort(scenePosition, kPortSnapRadius * 2.0);
+                if (port < 0) port = 0;
+                hit = {item, port};
+            }
+        }
+    }
+    if (!hit.item || hit.item->nodeName() == sourceName) return;
+    const int modelInput = hit.item->inputModelIndex(hit.inputIndex);
+    connectNodes(sourceName, hit.item->nodeName(), modelInput);
 }
 
 void MaterialNetworkView::drawBackground(QPainter* painter, const QRectF& rect) {

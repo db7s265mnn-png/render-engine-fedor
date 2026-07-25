@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QString>
+#include <QVector>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -26,10 +27,27 @@ struct MaterialXEvalResult {
     bool ok = false;
 };
 
+struct MaterialXNodeInputDef {
+    QString name;
+    QString type;
+    QString value;
+};
+
+struct MaterialXNodeCatalogEntry {
+    QString category;
+    QString type;
+    QString group;
+    QString label;
+    QVector<MaterialXNodeInputDef> inputs;
+};
+
 bool materialXAvailable();
 
 // Absolute path to the MaterialX data libraries (stdlib/pbrlib/bxdf).
 QString materialXLibraryRoot();
+
+// All instantiable MaterialX nodedefs from the loaded libraries (stdlib/pbrlib/bxdf).
+QVector<MaterialXNodeCatalogEntry> listMaterialXNodeCatalog();
 
 // Default Houdini-like MaterialX graph: image* → standard_surface → surfacematerial("surface").
 QString createDefaultMaterialXDocument();
