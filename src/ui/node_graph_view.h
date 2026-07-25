@@ -95,6 +95,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void keyReleaseEvent(QKeyEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
     // Tab must reach keyPressEvent instead of moving the focus.
     bool focusNextPrevChild(bool next) override { return false; }
@@ -105,6 +106,7 @@ private:
     void finishWireDrag(QPoint viewPosition);
     QPointF snapWireEndpoint(QPoint viewPosition, bool draggingFromOutput);
     void updateDragWire(QPoint viewPosition);
+    bool shouldBeginPan(const QMouseEvent* event) const;
     void beginPan(const QPoint& viewPos);
     void updatePan(const QPoint& viewPos);
     void endPan();
@@ -115,11 +117,12 @@ private:
     NodeCreateMenu* createMenu_ = nullptr;
 
     bool panning_ = false;
+    bool spaceHeld_ = false;
     bool pendingFrameAll_ = true;
     QPoint lastPanPoint_;
     QPointF lastScenePosition_;
-    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::AnchorUnderMouse;
     QGraphicsView::DragMode savedDragMode_ = QGraphicsView::RubberBandDrag;
+    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::AnchorUnderMouse;
 
     // Wire dragging state.
     NodeItem* dragSource_ = nullptr;

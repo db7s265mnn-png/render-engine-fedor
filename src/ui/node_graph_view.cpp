@@ -374,39 +374,50 @@ void NodeGraphView::wheelEvent(QWheelEvent* event) {
     event->accept();
 }
 
+bool NodeGraphView::shouldBeginPan(const QMouseEvent* event) const {
+    // Houdini network editor style:
+    //   MMB drag       — pan
+    //   Alt+LMB drag   — pan
+    //   Space+LMB drag — pan
+    if (event->button() == Qt::MiddleButton) return true;
+    if (event->button() == Qt::LeftButton && (event->modifiers() & Qt::AltModifier)) return true;
+    if (event->button() == Qt::LeftButton && spaceHeld_) return true;
+    return false;
+}
+
 void NodeGraphView::beginPan(const QPoint& viewPos) {
     panning_ = true;
     lastPanPoint_ = viewPos;
-    savedAnchor_ = transformationAnchor();
     savedDragMode_ = dragMode();
+    savedAnchor_ = transformationAnchor();
     setDragMode(QGraphicsView::NoDrag);
-    // NoAnchor is required so 1:1 translate is not warped by AnchorUnderMouse.
+    // NoAnchor keeps 1:1 hand-drag — AnchorUnderMouse would warp the pan.
     setTransformationAnchor(QGraphicsView::NoAnchor);
-    setCursor(Qt::ClosedHandCursor);
-    grabMouse();
+    // Grab the viewport (not the view): coords stay viewport-local and match
+    // mapToScene / mouse*Event. Grabbing QGraphicsView itself breaks pan.
+    viewport()->grabMouse();
+    viewport()->setCursor(Qt::ClosedHandCursor);
 }
 
 void NodeGraphView::updatePan(const QPoint& viewPos) {
     if (!panning_) return;
-    const QPoint delta = viewPos - lastPanPoint_;
-    lastPanPoint_ = viewPos;
-    if (delta.isNull()) return;
+    if (viewPos == lastPanPoint_) return;
 
-    // Classic hand-drag, 1:1 in screen pixels with NoAnchor:
-    // mouse right → graph moves right (the view pans the opposite way).
-    const qreal sx = transform().m11();
-    const qreal sy = transform().m22();
-    if (std::abs(sx) < 1e-8 || std::abs(sy) < 1e-8) return;
-    translate(delta.x() / sx, delta.y() / sy);
+    // Sticky hand: keep the scene point that was under the cursor glued to it.
+    // mapToScene delta is already in scene units, so no manual /scale needed.
+    const QPointF delta = mapToScene(viewPos) - mapToScene(lastPanPoint_);
+    translate(delta.x(), delta.y());
+    lastPanPoint_ = viewPos;
 }
 
 void NodeGraphView::endPan() {
     if (!panning_) return;
     panning_ = false;
-    releaseMouse();
-    unsetCursor();
+    if (QWidget::mouseGrabber() == viewport())
+        viewport()->releaseMouse();
     setDragMode(savedDragMode_);
     setTransformationAnchor(savedAnchor_);
+    viewport()->unsetCursor();
 }
 
 qreal NodeGraphView::zoomFactorFromWheel(const QWheelEvent* event) const {
@@ -476,9 +487,7 @@ void NodeGraphView::updateDragWire(QPoint viewPosition) {
 void NodeGraphView::mousePressEvent(QMouseEvent* event) {
     lastScenePosition_ = mapToScene(event->pos());
 
-    // Middle-mouse (or Alt+LMB) hand-drag pan — 1:1, opposite to mouse motion.
-    if (event->button() == Qt::MiddleButton ||
-        (event->button() == Qt::LeftButton && (event->modifiers() & Qt::AltModifier))) {
+    if (shouldBeginPan(event)) {
         beginPan(event->pos());
         event->accept();
         return;
@@ -622,6 +631,11 @@ void NodeGraphView::mouseReleaseEvent(QMouseEvent* event) {
 
 void NodeGraphView::keyPressEvent(QKeyEvent* event) {
     switch (event->key()) {
+        case Qt::Key_Space:
+            spaceHeld_ = true;
+            if (!panning_) viewport()->setCursor(Qt::OpenHandCursor);
+            event->accept();
+            return;
         case Qt::Key_Tab:
             createMenu_->popupAt(QCursor::pos());
             return;
@@ -644,6 +658,16 @@ void NodeGraphView::keyPressEvent(QKeyEvent* event) {
         default: break;
     }
     QGraphicsView::keyPressEvent(event);
+}
+
+void NodeGraphView::keyReleaseEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Space) {
+        spaceHeld_ = false;
+        if (!panning_) viewport()->unsetCursor();
+        event->accept();
+        return;
+    }
+    QGraphicsView::keyReleaseEvent(event);
 }
 
 void NodeGraphView::contextMenuEvent(QContextMenuEvent* event) {
@@ -694,7 +718,7 @@ void NodeGraphView::drawForeground(QPainter* painter, const QRectF& rect) {
     painter->setFont(font);
     painter->setPen(theme::textDim());
     painter->drawText(QRect(8, height() - 22, width() - 16, 18), Qt::AlignLeft,
-                      "Tab: add   MMB drag: pan   Wheel: zoom   D: display   Del: delete");
+                      "Tab: add   MMB/Alt+LMB/Space+LMB: pan   Wheel: zoom   D: display   Del: delete");
 }
 
 }  // namespace sol
