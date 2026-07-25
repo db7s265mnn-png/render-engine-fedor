@@ -177,12 +177,14 @@ void ParameterPanel::rebuild() {
     QStringList groups;
     groups << QString();
     for (const Parameter& parameter : node_->parameters()) {
+        if (parameter.name == "mtlx") continue;
         if (!groups.contains(parameter.group)) groups << parameter.group;
     }
 
     for (const QString& group : groups) {
         QFormLayout* form = nullptr;
         for (Parameter& parameter : node_->parameters()) {
+            if (parameter.name == "mtlx") continue;
             if (parameter.group != group) continue;
             if (!form) {
                 auto* box = new QGroupBox(group.isEmpty() ? QString("Parameters") : group);

@@ -53,6 +53,7 @@ public:
     static Parameter makeFile(const QString& name, const QString& label, const QString& value,
                               const QString& filter);
     static Parameter makeMenu(const QString& name, const QString& label, const QStringList& items, int index);
+    static Parameter makeLabel(const QString& name, const QString& text);
 
     Parameter& withGroup(const QString& groupName);
     Parameter& withTooltip(const QString& text);

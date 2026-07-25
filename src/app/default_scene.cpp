@@ -5,6 +5,7 @@
 #include <QFileInfo>
 #include <QVector3D>
 
+#include "io/materialx_graph.h"
 #include "nodes/node_registry.h"
 
 namespace sol {
@@ -56,8 +57,20 @@ void buildDefaultGraph(NodeGraph& graph) {
     place(groundMaterial, -320, -320);
     if (groundMaterial) {
         groundMaterial->setParameterValue("pattern", "/geo/ground");
-        groundMaterial->setParameterValue("basecolor", QVariant::fromValue(QVector3D(0.55f, 0.55f, 0.58f)));
-        groundMaterial->setParameterValue("roughness", 0.6);
+        groundMaterial->setParameterValue(
+            "mtlx",
+            QStringLiteral(
+                "<?xml version=\"1.0\"?>\n"
+                "<materialx version=\"1.39\">\n"
+                "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.55, 0.55, 0.58\" />\n"
+                "    <input name=\"specular_roughness\" type=\"float\" value=\"0.6\" />\n"
+                "    <input name=\"metalness\" type=\"float\" value=\"0\" />\n"
+                "  </standard_surface>\n"
+                "  <surfacematerial name=\"surface\" type=\"material\">\n"
+                "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\" />\n"
+                "  </surfacematerial>\n"
+                "</materialx>\n"));
     }
 
     Node* hero = nullptr;
@@ -83,10 +96,30 @@ void buildDefaultGraph(NodeGraph& graph) {
     place(heroMaterial, -40, -320);
     if (heroMaterial) {
         heroMaterial->setParameterValue("pattern", "*");
-        heroMaterial->setParameterValue("basecolor", QVariant::fromValue(QVector3D(0.82f, 0.72f, 0.58f)));
-        heroMaterial->setParameterValue("roughness", 0.35);
-        heroMaterial->setParameterValue("subsurface", 0.35);
-        heroMaterial->setParameterValue("subsurface_color", QVariant::fromValue(QVector3D(0.9f, 0.55f, 0.35f)));
+        // MaterialX graph (Solaris-style): standard_surface → surfacematerial "surface".
+        QString mtlx = createDefaultMaterialXDocument();
+        if (mtlx.isEmpty()) {
+            mtlx = QStringLiteral(
+                "<?xml version=\"1.0\"?>\n"
+                "<materialx version=\"1.39\">\n"
+                "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.82, 0.72, 0.58\" />\n"
+                "    <input name=\"specular_roughness\" type=\"float\" value=\"0.35\" />\n"
+                "    <input name=\"subsurface\" type=\"float\" value=\"0.35\" />\n"
+                "    <input name=\"subsurface_color\" type=\"color3\" value=\"0.9, 0.55, 0.35\" />\n"
+                "  </standard_surface>\n"
+                "  <surfacematerial name=\"surface\" type=\"material\">\n"
+                "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\" />\n"
+                "  </surfacematerial>\n"
+                "</materialx>\n");
+        } else {
+            mtlx.replace("0.8, 0.8, 0.8", "0.82, 0.72, 0.58");
+            mtlx.replace("name=\"subsurface\" type=\"float\" value=\"0\"",
+                         "name=\"subsurface\" type=\"float\" value=\"0.35\"");
+            mtlx.replace("name=\"subsurface_color\" type=\"color3\" value=\"1, 0.75, 0.55\"",
+                         "name=\"subsurface_color\" type=\"color3\" value=\"0.9, 0.55, 0.35\"");
+        }
+        heroMaterial->setParameterValue("mtlx", mtlx);
     }
 
     Node* merge = graph.createNode("merge", "merge1");

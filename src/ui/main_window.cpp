@@ -168,18 +168,19 @@ void MainWindow::createDocks() {
     setDockOptions(QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks |
                    QMainWindow::AllowTabbedDocks);
 
+    // Network + MaterialX tabs sit ABOVE the render view (Houdini-style pane tabs).
     auto* networkDock = new QDockWidget("Network Editor", this);
     networkDock->setObjectName("networkDock");
     networkView_ = new NodeGraphView(networkDock);
     networkView_->setGraph(&graph_);
     networkDock->setWidget(networkView_);
-    addDockWidget(Qt::BottomDockWidgetArea, networkDock);
+    addDockWidget(Qt::TopDockWidgetArea, networkDock);
 
     auto* materialNetworkDock = new QDockWidget("Material Network", this);
     materialNetworkDock->setObjectName("materialNetworkDock");
     materialNetworkView_ = new MaterialNetworkView(materialNetworkDock);
     materialNetworkDock->setWidget(materialNetworkView_);
-    addDockWidget(Qt::BottomDockWidgetArea, materialNetworkDock);
+    addDockWidget(Qt::TopDockWidgetArea, materialNetworkDock);
 
     auto* parameterDock = new QDockWidget("Parameters", this);
     parameterDock->setObjectName("parameterDock");
@@ -200,11 +201,12 @@ void MainWindow::createDocks() {
     logPanel_->installAsLogSink();
     logDock->setWidget(logPanel_);
     addDockWidget(Qt::BottomDockWidgetArea, logDock);
+
     tabifyDockWidget(networkDock, materialNetworkDock);
-    tabifyDockWidget(networkDock, logDock);
     networkDock->raise();
 
-    resizeDocks({networkDock}, {330}, Qt::Vertical);
+    resizeDocks({networkDock}, {360}, Qt::Vertical);
+    resizeDocks({logDock}, {140}, Qt::Vertical);
 
     connect(networkView_, &NodeGraphView::nodeSelected, this, [this](Node* node) {
         parameterPanel_->setNode(node);

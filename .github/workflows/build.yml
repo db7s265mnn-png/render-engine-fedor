@@ -37,10 +37,38 @@ jobs:
           cmake --build /tmp/alembic/build -j$(nproc)
           cmake --install /tmp/alembic/build
 
+      - name: Cache MaterialX
+        id: materialx-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/materialx-install
+          key: materialx-1.39.4-${{ runner.os }}-core
+
+      - name: Build MaterialX
+        if: steps.materialx-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -L -o /tmp/mtlx.tgz \
+            https://github.com/AcademySoftwareFoundation/MaterialX/archive/refs/tags/v1.39.4.tar.gz
+          tar xzf /tmp/mtlx.tgz -C /tmp
+          cmake -S /tmp/MaterialX-1.39.4 -B /tmp/mtlx-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/materialx-install \
+            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
+            -DMATERIALX_BUILD_PYTHON=OFF -DMATERIALX_BUILD_VIEWER=OFF \
+            -DMATERIALX_BUILD_GRAPH_EDITOR=OFF -DMATERIALX_BUILD_TESTS=OFF \
+            -DMATERIALX_BUILD_JS=OFF -DMATERIALX_BUILD_RENDER=OFF \
+            -DMATERIALX_BUILD_GEN_GLSL=OFF -DMATERIALX_BUILD_GEN_OSL=OFF \
+            -DMATERIALX_BUILD_GEN_MDL=OFF -DMATERIALX_BUILD_GEN_MSL=OFF \
+            -DMATERIALX_INSTALL_PYTHON=OFF -DMATERIALX_INSTALL_RESOURCES=OFF
+          cmake --build /tmp/mtlx-build -j$(nproc)
+          cmake --install /tmp/mtlx-build
+          mkdir -p $HOME/materialx-install/libraries
+          cp -a /tmp/MaterialX-1.39.4/libraries/. $HOME/materialx-install/libraries/
+
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH=$HOME/alembic-install
+            -DCMAKE_PREFIX_PATH="$HOME/alembic-install:$HOME/materialx-install" \
+            -DSOLSTICE_MATERIALX_LIBRARIES=$HOME/materialx-install/libraries
 
       - name: Build
         run: cmake --build build -j$(nproc)
@@ -111,7 +139,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_PREFIX }}
-          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}
+          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}-mtlx1.39.4
 
       - name: Fetch Embree
         if: steps.deps-cache.outputs.cache-hit != 'true'
@@ -149,10 +177,27 @@ jobs:
             -DUSE_EXAMPLES=OFF -DALEMBIC_BUILD_LIBS=ON
           cmake --build alembic-src/build --config Release --target install
 
+      - name: Build MaterialX
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v1.39.4 https://github.com/AcademySoftwareFoundation/MaterialX.git materialx-src
+          cmake -S materialx-src -B materialx-src/build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:DEPS_PREFIX" `
+            -DMATERIALX_BUILD_PYTHON=OFF -DMATERIALX_BUILD_VIEWER=OFF `
+            -DMATERIALX_BUILD_GRAPH_EDITOR=OFF -DMATERIALX_BUILD_TESTS=OFF `
+            -DMATERIALX_BUILD_JS=OFF -DMATERIALX_BUILD_RENDER=OFF `
+            -DMATERIALX_BUILD_GEN_GLSL=OFF -DMATERIALX_BUILD_GEN_OSL=OFF `
+            -DMATERIALX_BUILD_GEN_MDL=OFF -DMATERIALX_BUILD_GEN_MSL=OFF `
+            -DMATERIALX_INSTALL_PYTHON=OFF -DMATERIALX_INSTALL_RESOURCES=OFF
+          cmake --build materialx-src/build --config Release --target install
+          New-Item -ItemType Directory -Force -Path "$env:DEPS_PREFIX/libraries" | Out-Null
+          Copy-Item -Recurse materialx-src/libraries/* "$env:DEPS_PREFIX/libraries/"
+
       - name: Configure
         run: >
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64
           -DCMAKE_PREFIX_PATH="${{ env.DEPS_PREFIX }};${{ env.DEPS_PREFIX }}/embree"
+          -DSOLSTICE_MATERIALX_LIBRARIES="${{ env.DEPS_PREFIX }}/libraries"
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -168,6 +213,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item build/bin/Release/* dist/ -Recurse -Force
           Copy-Item "$env:DEPS_PREFIX/embree/bin/*.dll" dist/ -Force
+          if (Test-Path "$env:DEPS_PREFIX/libraries") {
+            New-Item -ItemType Directory -Force -Path dist/materialx | Out-Null
+            Copy-Item -Recurse "$env:DEPS_PREFIX/libraries" dist/materialx/libraries
+          }
           Copy-Item README.md dist/
           Copy-Item -Recurse docs dist/docs
           Copy-Item -Recurse examples dist/examples

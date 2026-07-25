@@ -10,6 +10,7 @@
 #include "core/log.h"
 #include "io/alembic_loader.h"
 #include "io/image_io.h"
+#include "io/materialx_graph.h"
 #include "io/usd_loader.h"
 #include "nodes/node_registry.h"
 
@@ -355,112 +356,46 @@ public:
         addParameter(Parameter::makeString("pattern", "Assign To", "*")
                          .withTooltip("Prim path or glob (e.g. /geo/sphere1). Copy from Scene Graph with "
                                       "Ctrl+C and paste here with Ctrl+V, or drag the prim name into this field"));
-        addParameter(Parameter::makeColor("basecolor", "Base Color", Vec3(0.8f, 0.8f, 0.8f)).withGroup("Surface"));
-        addParameter(Parameter::makeFloat("roughness", "Roughness", 0.35, 0.0, 1.0).withGroup("Surface"));
-        addParameter(Parameter::makeFloat("metallic", "Metallic", 0.0, 0.0, 1.0).withGroup("Surface"));
-        addParameter(Parameter::makeFloat("specular", "Specular", 0.5, 0.0, 1.0)
-                         .withGroup("Surface")
-                         .withTooltip("Dielectric reflection amount. 0 disables reflections entirely"));
-        addParameter(Parameter::makeFloat("ior", "IOR", 1.5, 1.0, 3.0).withGroup("Surface"));
-        addParameter(Parameter::makeFloat("transmission", "Transmission", 0.0, 0.0, 1.0).withGroup("Surface"));
-        addParameter(Parameter::makeFloat("opacity", "Opacity", 1.0, 0.0, 1.0).withGroup("Surface"));
-        addParameter(Parameter::makeColor("emissioncolor", "Emission Color", Vec3(1.0f, 1.0f, 1.0f))
-                         .withGroup("Emission"));
-        addParameter(
-            Parameter::makeFloat("emission", "Emission Strength", 0.0, 0.0, 100.0, false).withGroup("Emission"));
-        addParameter(Parameter::makeFloat("subsurface", "Subsurface", 0.0, 0.0, 1.0).withGroup("Subsurface"));
-        addParameter(Parameter::makeColor("subsurface_color", "Subsurface Color", Vec3(1.0f, 0.75f, 0.55f))
-                         .withGroup("Subsurface"));
-        addParameter(Parameter::makeVec3("subsurface_radius", "Subsurface Radius", Vec3(1.0f, 0.35f, 0.2f))
-                         .withGroup("Subsurface"));
-
-        const QString textureFilter =
-            "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)";
-        addParameter(Parameter::makeFile("basecolor_texture", "Base Color Texture", "", textureFilter)
-                         .withGroup("Textures"));
-        addParameter(Parameter::makeFile("roughness_texture", "Roughness Texture", "", textureFilter)
-                         .withGroup("Textures"));
-        addParameter(Parameter::makeFile("metallic_texture", "Metallic Texture", "", textureFilter)
-                         .withGroup("Textures"));
-        addParameter(
-            Parameter::makeFile("opacity_texture", "Opacity Texture", "", textureFilter).withGroup("Textures"));
-        addParameter(
-            Parameter::makeFile("emission_texture", "Emission Texture", "", textureFilter).withGroup("Textures"));
-        addParameter(Parameter::makeFile("normal_texture", "Normal Texture", "", textureFilter).withGroup("Textures"));
-        addParameter(Parameter::makeFile("subsurface_texture", "Subsurface Texture", "", textureFilter)
-                         .withGroup("Textures"));
+        addParameter(Parameter::makeLabel("mtlx_hint",
+                                          "Edit shading in the Material Network tab "
+                                          "(MaterialX, left → right like Houdini Solaris)")
+                         .withGroup("MaterialX"));
+        // Hidden from the parameter panel; edited by MaterialNetworkView.
+        addParameter(Parameter::makeString("mtlx", "MaterialX Document", ""));
     }
 
     void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
-        Material material;
-        material.baseColor = vec3Value("basecolor", Vec3(0.8f));
-        material.roughness = float(floatValue("roughness", 0.35));
-        material.metallic = float(floatValue("metallic", 0.0));
-        material.specular = float(floatValue("specular", 0.5));
-        material.ior = float(floatValue("ior", 1.5));
-        material.transmission = float(floatValue("transmission", 0.0));
-        material.opacity = float(floatValue("opacity", 1.0));
-        material.emissionColor = vec3Value("emissioncolor", Vec3(1.0f, 1.0f, 1.0f));
-        material.emissionStrength = float(floatValue("emission", 0.0));
-        material.subsurface = float(floatValue("subsurface", 0.0));
-        material.subsurfaceColor = vec3Value("subsurface_color", Vec3(1.0f, 0.75f, 0.55f));
-        material.subsurfaceRadius = vec3Value("subsurface_radius", Vec3(1.0f, 0.35f, 0.2f));
-        // Convert artistic radius into a world-space mean free path scale.
-        material.subsurfaceScale =
-            0.05f * srMax(1e-4f, maxComponent(material.subsurfaceRadius));
+        QString xml = stringValue("mtlx");
+        if (xml.trimmed().isEmpty()) {
+            xml = createDefaultMaterialXDocument();
+            if (!xml.isEmpty()) setParameterValue("mtlx", xml);
+        }
 
-        auto loadTex = [&](const char* paramName, QString& cachedPath,
-                           std::shared_ptr<Image>& cachedImage) -> std::shared_ptr<Image> {
-            const QString path = resolvePath(context, stringValue(paramName));
-            if (path.isEmpty()) {
-                cachedPath.clear();
-                cachedImage.reset();
-                return nullptr;
-            }
-            if (path == cachedPath && cachedImage) return cachedImage;
-            auto image = std::make_shared<Image>();
-            std::string error;
-            if (!loadImage(path.toStdString(), *image, error)) {
-                context.reportError(this, QString::fromStdString(error));
-                cachedPath.clear();
-                cachedImage.reset();
-                return nullptr;
-            }
-            cachedPath = path;
-            cachedImage = image;
-            return image;
-        };
-
-        const auto baseColorTex = loadTex("basecolor_texture", baseColorPath_, baseColorImage_);
-        const auto roughnessTex = loadTex("roughness_texture", roughnessPath_, roughnessImage_);
-        const auto metallicTex = loadTex("metallic_texture", metallicPath_, metallicImage_);
-        const auto opacityTex = loadTex("opacity_texture", opacityPath_, opacityImage_);
-        const auto emissionTex = loadTex("emission_texture", emissionPath_, emissionImage_);
-        const auto normalTex = loadTex("normal_texture", normalPath_, normalImage_);
-        const auto subsurfaceTex = loadTex("subsurface_texture", subsurfacePath_, subsurfaceImage_);
+        MaterialXEvalResult evaluated = evaluateMaterialXDocument(xml, context.sceneDirectory);
+        if (!evaluated.ok) {
+            if (!evaluated.error.isEmpty()) context.reportError(this, evaluated.error);
+            // Fallback constant material so the scene still renders.
+            evaluated.material = Material{};
+            evaluated.material.baseColor = Vec3(0.8f);
+            evaluated.material.roughness = 0.35f;
+        }
 
         const QString pattern = stringValue("pattern", "*");
         for (StagePrim& prim : stage.prims) {
             if (prim.type != PrimType::Mesh) continue;
             if (!matchesPattern(pattern, prim.path)) continue;
-            prim.material = material;
+            prim.material = evaluated.material;
             prim.materialAssigned = true;
             prim.materialName = name();
-            prim.baseColorTexture = baseColorTex;
-            prim.roughnessTexture = roughnessTex;
-            prim.metallicTexture = metallicTex;
-            prim.opacityTexture = opacityTex;
-            prim.emissionTexture = emissionTex;
-            prim.normalTexture = normalTex;
-            prim.subsurfaceTexture = subsurfaceTex;
+            prim.baseColorTexture = evaluated.baseColorTexture;
+            prim.roughnessTexture = evaluated.roughnessTexture;
+            prim.metallicTexture = evaluated.metallicTexture;
+            prim.opacityTexture = evaluated.opacityTexture;
+            prim.emissionTexture = evaluated.emissionTexture;
+            prim.normalTexture = evaluated.normalTexture;
+            prim.subsurfaceTexture = evaluated.subsurfaceTexture;
         }
     }
-
-private:
-    QString baseColorPath_, roughnessPath_, metallicPath_, opacityPath_;
-    QString emissionPath_, normalPath_, subsurfacePath_;
-    std::shared_ptr<Image> baseColorImage_, roughnessImage_, metallicImage_, opacityImage_;
-    std::shared_ptr<Image> emissionImage_, normalImage_, subsurfaceImage_;
 };
 
 // ---------------------------------------------------------------------------

@@ -99,6 +99,16 @@ Parameter Parameter::makeMenu(const QString& name, const QString& label, const Q
     return p;
 }
 
+Parameter Parameter::makeLabel(const QString& name, const QString& text) {
+    Parameter p;
+    p.name = name;
+    p.label = text;
+    p.type = ParamType::Label;
+    p.value = text;
+    p.defaultValue = text;
+    return p;
+}
+
 Parameter& Parameter::withGroup(const QString& groupName) {
     group = groupName;
     return *this;

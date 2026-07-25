@@ -9,6 +9,7 @@ set(SOLSTICE_APP_DISPLAY_NAME "Sonya_Render" CACHE STRING "User-visible applicat
 option(SOLSTICE_ENABLE_OPTIX "Build the OptiX GPU path tracing backend" OFF)
 option(SOLSTICE_ENABLE_ALEMBIC "Build with Alembic geometry import" ON)
 option(SOLSTICE_ENABLE_OPENEXR "Build with OpenEXR image support" ON)
+option(SOLSTICE_ENABLE_MATERIALX "Build with Academy Software Foundation MaterialX" ON)
 option(SOLSTICE_BUILD_TESTS "Build unit tests" ON)
 option(SOLSTICE_BUILD_APP "Build the Qt desktop application" ON)
 option(SOLSTICE_BUILD_TOOLS "Build helper tools (test scene generators)" ON)
@@ -67,6 +68,62 @@ if(SOLSTICE_ENABLE_OPTIX)
     include(cmake/OptiXBackend.cmake)
 endif()
 
+# MaterialX (https://github.com/AcademySoftwareFoundation/MaterialX)
+set(SOLSTICE_HAVE_MATERIALX_01 0)
+set(SOLSTICE_MATERIALX_LIBRARIES "" CACHE PATH "Path to MaterialX libraries/ (stdlib, pbrlib, bxdf)")
+if(SOLSTICE_ENABLE_MATERIALX)
+    list(APPEND CMAKE_PREFIX_PATH "/tmp/mtlx-install")
+    find_package(MaterialX CONFIG QUIET)
+    if(NOT MaterialX_FOUND)
+        include(FetchContent)
+        set(MATERIALX_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_VIEWER OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GRAPH_EDITOR OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_JS OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_GLSL OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_OSL OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_MDL OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_MSL OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_RENDER OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_INSTALL_PYTHON OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_INSTALL_RESOURCES OFF CACHE BOOL "" FORCE)
+        if(EXISTS "/tmp/mtlx.tgz")
+            set(_solstice_mtlx_url "file:///tmp/mtlx.tgz")
+        else()
+            set(_solstice_mtlx_url
+                "https://github.com/AcademySoftwareFoundation/MaterialX/archive/refs/tags/v1.39.4.tar.gz")
+        endif()
+        FetchContent_Declare(MaterialX
+            URL ${_solstice_mtlx_url}
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(MaterialX)
+        set(MaterialX_FOUND TRUE)
+    endif()
+    if(MaterialX_FOUND)
+        set(SOLSTICE_HAVE_MATERIALX_01 1)
+        if(NOT SOLSTICE_MATERIALX_LIBRARIES)
+            if(DEFINED materialx_SOURCE_DIR AND EXISTS "${materialx_SOURCE_DIR}/libraries")
+                set(SOLSTICE_MATERIALX_LIBRARIES "${materialx_SOURCE_DIR}/libraries" CACHE PATH "" FORCE)
+            elseif(EXISTS "/tmp/mtlx-src/libraries")
+                set(SOLSTICE_MATERIALX_LIBRARIES "/tmp/mtlx-src/libraries" CACHE PATH "" FORCE)
+            elseif(EXISTS "${CMAKE_PREFIX_PATH}/libraries/stdlib")
+                set(SOLSTICE_MATERIALX_LIBRARIES "${CMAKE_PREFIX_PATH}/libraries" CACHE PATH "" FORCE)
+            endif()
+        endif()
+        # Also expose libraries next to the runtime binary for shipped builds.
+        if(SOLSTICE_MATERIALX_LIBRARIES AND EXISTS "${SOLSTICE_MATERIALX_LIBRARIES}")
+            file(COPY "${SOLSTICE_MATERIALX_LIBRARIES}/"
+                 DESTINATION "${CMAKE_BINARY_DIR}/bin/materialx/libraries")
+            # Multi-config generators (VS) put the exe under bin/Release.
+            file(COPY "${SOLSTICE_MATERIALX_LIBRARIES}/"
+                 DESTINATION "${CMAKE_BINARY_DIR}/bin/Release/materialx/libraries")
+        endif()
+    else()
+        message(WARNING "MaterialX not found - Material Network will be disabled")
+    endif()
+endif()
+
 configure_file(${CMAKE_SOURCE_DIR}/cmake/solstice_config.h.in
                ${CMAKE_BINARY_DIR}/generated/solstice_config.h @ONLY)
 
@@ -80,6 +137,7 @@ set(SOLSTICE_LIB_SOURCES
     src/io/image_io.cpp
     src/io/alembic_loader.cpp
     src/io/usd_loader.cpp
+    src/io/materialx_graph.cpp
     src/render/framebuffer.cpp
     src/render/render_session.cpp
     src/render/scene_picker.cpp
@@ -107,6 +165,7 @@ set(SOLSTICE_LIB_HEADERS
     src/io/image_io.h
     src/io/alembic_loader.h
     src/io/usd_loader.h
+    src/io/materialx_graph.h
     src/render/shading.h
     src/render/lights.h
     src/render/integrator.h
@@ -133,6 +192,17 @@ if(SOLSTICE_HAVE_ALEMBIC_01)
 endif()
 if(SOLSTICE_HAVE_OPENEXR_01)
     target_link_libraries(solstice_lib PUBLIC OpenEXR::OpenEXR)
+endif()
+if(SOLSTICE_HAVE_MATERIALX_01)
+    if(TARGET MaterialX::MaterialXCore)
+        target_link_libraries(solstice_lib PUBLIC MaterialX::MaterialXCore MaterialX::MaterialXFormat)
+    elseif(TARGET MaterialXCore)
+        target_link_libraries(solstice_lib PUBLIC MaterialXCore MaterialXFormat)
+    else()
+        target_include_directories(solstice_lib PUBLIC /tmp/mtlx-install/include)
+        target_link_directories(solstice_lib PUBLIC /tmp/mtlx-install/lib)
+        target_link_libraries(solstice_lib PUBLIC MaterialXFormat MaterialXCore)
+    endif()
 endif()
 if(SOLSTICE_HAVE_OPTIX_01)
     target_sources(solstice_lib PRIVATE src/render/optix/optix_device.cpp ${SOLSTICE_OPTIX_EMBED_SOURCE})
@@ -227,6 +297,7 @@ message(STATUS "  Qt              : ${Qt6_VERSION}")
 message(STATUS "  Embree          : ${EMBREE_VERSION}")
 message(STATUS "  Alembic support : ${SOLSTICE_HAVE_ALEMBIC_01}")
 message(STATUS "  OpenEXR support : ${SOLSTICE_HAVE_OPENEXR_01}")
+message(STATUS "  MaterialX       : ${SOLSTICE_HAVE_MATERIALX_01}")
 message(STATUS "  OptiX backend   : ${SOLSTICE_HAVE_OPTIX_01}")
 message(STATUS "")
 

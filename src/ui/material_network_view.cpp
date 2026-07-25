@@ -1,19 +1,25 @@
 #include "ui/material_network_view.h"
 
+#include <QContextMenuEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGraphicsPathItem>
 #include <QGraphicsScene>
+#include <QKeyEvent>
+#include <QLineF>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QScrollBar>
 #include <QStyleOptionGraphicsItem>
 #include <QWheelEvent>
+#include <QXmlStreamReader>
+#include <QXmlStreamWriter>
 #include <algorithm>
-#include <array>
 #include <cmath>
 
+#include "io/materialx_graph.h"
 #include "nodes/node.h"
 #include "nodes/parameter.h"
 #include "ui/theme.h"
@@ -21,226 +27,224 @@
 namespace sol {
 namespace {
 
-struct TextureSlot {
-    const char* inputName;
-    const char* parameterName;
-    const char* label;
+constexpr qreal kLayoutScale = 80.0;
+constexpr qreal kPortRadius = 4.8;
+constexpr qreal kPortHitRadius = 11.0;
+
+struct NodeCategoryInfo {
+    QString type;
+    QColor color;
 };
 
-constexpr std::array<TextureSlot, 7> kTextureSlots{{
-    {"base_color", "basecolor_texture", "Base Color"},
-    {"roughness", "roughness_texture", "Roughness"},
-    {"metallic", "metallic_texture", "Metallic"},
-    {"opacity", "opacity_texture", "Opacity"},
-    {"emission_color", "emission_texture", "Emission"},
-    {"normal", "normal_texture", "Normal"},
-    {"subsurface_color", "subsurface_texture", "Subsurface"},
-}};
-
-enum class MaterialItemRole { Surface, StandardSurface, Image };
-
-QPainterPath makeMaterialWirePath(QPointF from, QPointF to) {
-    QPainterPath path(from);
-    if (std::abs(to.x() - from.x()) > std::abs(to.y() - from.y())) {
-        const qreal dx = std::max(qreal(36.0), std::abs(to.x() - from.x()) * 0.5);
-        path.cubicTo(from + QPointF(dx, 0.0), to - QPointF(dx, 0.0), to);
-    } else {
-        const qreal dy = std::max(qreal(34.0), std::abs(to.y() - from.y()) * 0.45);
-        path.cubicTo(from + QPointF(0.0, dy), to - QPointF(0.0, dy), to);
-    }
-    return path;
+bool isSupportedCategory(const QString& category) {
+    return category == "standard_surface" || category == "surfacematerial" || category == "image" ||
+           category == "constant" || category == "multiply" || category == "mix" || category == "normalmap";
 }
 
-QRectF centeredRect(qreal width, qreal height) {
-    return QRectF(-width * 0.5, -height * 0.5, width, height);
+bool isMathCategory(const QString& category) {
+    return category == "constant" || category == "multiply" || category == "mix" || category == "normalmap";
+}
+
+NodeCategoryInfo categoryInfo(const QString& category) {
+    if (category == "image") return {"color3", QColor(42, 132, 132)};
+    if (category == "standard_surface") return {"surfaceshader", QColor(189, 116, 45)};
+    if (category == "surfacematerial") return {"material", QColor(126, 82, 170)};
+    if (category == "normalmap") return {"vector3", QColor(96, 101, 108)};
+    if (isMathCategory(category)) return {"color3", QColor(96, 101, 108)};
+    return {"color3", QColor(96, 101, 108)};
+}
+
+QString defaultTypeForCategory(const QString& category) { return categoryInfo(category).type; }
+
+QColor colorForCategory(const QString& category) { return categoryInfo(category).color; }
+
+bool isConnectableInput(const QString& name, const QString& type) {
+    return name != "file" && type != "filename";
+}
+
+QString fallbackDefaultDocument() {
+    return QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\" xpos=\"0\" ypos=\"0\">\n"
+        "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\"/>\n"
+        "    <input name=\"specular_roughness\" type=\"float\" value=\"0.35\"/>\n"
+        "    <input name=\"metalness\" type=\"float\" value=\"0\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\" xpos=\"4\" ypos=\"0\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n");
+}
+
+QPointF defaultLayoutForCategory(const QString& category, int ordinal) {
+    if (category == "surfacematerial") return QPointF(4.0, 0.0);
+    if (category == "standard_surface") return QPointF(0.0, 0.0);
+    if (category == "image") return QPointF(-4.0, qreal(ordinal) * 1.2);
+    if (category == "normalmap") return QPointF(-2.0, qreal(ordinal) * 1.2);
+    return QPointF(-2.5, qreal(ordinal) * 1.2);
+}
+
+QPainterPath makeWirePath(QPointF from, QPointF to) {
+    QPainterPath path(from);
+    const qreal dx = std::max(qreal(48.0), std::abs(to.x() - from.x()) * 0.5);
+    path.cubicTo(from + QPointF(dx, 0.0), to - QPointF(dx, 0.0), to);
+    return path;
 }
 
 class MaterialNetworkNodeItem : public QGraphicsItem {
 public:
-    enum { Type = UserType + 40 };
+    enum { Type = UserType + 71 };
 
-    MaterialNetworkNodeItem(MaterialItemRole role, QString name, QString typeName)
-        : role_(role), name_(std::move(name)), typeName_(std::move(typeName)) {
+    struct InputPort {
+        QString name;
+        int modelIndex = -1;
+        bool connected = false;
+    };
+
+    MaterialNetworkNodeItem(QString nodeName, QString category, QString typeName, QVector<InputPort> inputs,
+                            QString subtitle)
+        : nodeName_(std::move(nodeName)),
+          category_(std::move(category)),
+          typeName_(std::move(typeName)),
+          inputs_(std::move(inputs)),
+          subtitle_(std::move(subtitle)) {
         setFlag(ItemIsSelectable, true);
-        setZValue(1.0);
+        setFlag(ItemIsMovable, true);
+        setFlag(ItemSendsGeometryChanges, true);
+        setCursor(Qt::OpenHandCursor);
+        setZValue(2.0);
     }
 
     int type() const override { return Type; }
+    const QString& nodeName() const { return nodeName_; }
+    const QString& category() const { return category_; }
 
-    MaterialItemRole role() const { return role_; }
-    const QString& parameterName() const { return parameterName_; }
-    const QString& inputName() const { return inputName_; }
-    bool parameterExists() const { return parameterExists_; }
-
-    void setTextureSlot(const TextureSlot& slot, bool parameterExists, QString filePath) {
-        inputName_ = QString::fromUtf8(slot.inputName);
-        parameterName_ = QString::fromUtf8(slot.parameterName);
-        slotLabel_ = QString::fromUtf8(slot.label);
-        parameterExists_ = parameterExists;
-        filePath_ = std::move(filePath);
-        if (parameterExists_) setCursor(Qt::PointingHandCursor);
-    }
-
-    QRectF boundingRect() const override { return bodyRect().adjusted(-8.0, -8.0, 8.0, 8.0); }
+    QRectF boundingRect() const override { return bodyRect().adjusted(-16.0, -14.0, 16.0, 14.0); }
 
     QPainterPath shape() const override {
         QPainterPath path;
-        path.addRoundedRect(bodyRect(), 5.0, 5.0);
-        if (hasInputPort()) path.addEllipse(inputPortPosition() - pos(), kPortHitRadius, kPortHitRadius);
-        if (hasOutputPort()) path.addEllipse(outputPortPosition() - pos(), kPortHitRadius, kPortHitRadius);
-        if (role_ == MaterialItemRole::StandardSurface) {
-            for (int i = 0; i < int(kTextureSlots.size()); ++i)
-                path.addEllipse(inputPortPosition(i) - pos(), kPortHitRadius, kPortHitRadius);
-        }
+        path.addRoundedRect(bodyRect(), 6.0, 6.0);
+        for (int i = 0; i < inputs_.size(); ++i) path.addEllipse(inputPortLocal(i), kPortHitRadius, kPortHitRadius);
+        path.addEllipse(outputPortLocal(), kPortHitRadius, kPortHitRadius);
         return path;
     }
 
     void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override {
         painter->setRenderHint(QPainter::Antialiasing, true);
-
         const QRectF body = bodyRect();
         painter->setPen(Qt::NoPen);
-        painter->setBrush(QColor(0, 0, 0, 72));
-        painter->drawRoundedRect(body.translated(2.0, 3.0), 5.0, 5.0);
+        painter->setBrush(QColor(0, 0, 0, 78));
+        painter->drawRoundedRect(body.translated(2.0, 3.0), 6.0, 6.0);
 
         QLinearGradient gradient(body.topLeft(), body.bottomLeft());
-        gradient.setColorAt(0.0, theme::panelLight().lighter(role_ == MaterialItemRole::Image ? 112 : 108));
+        gradient.setColorAt(0.0, theme::panelLight().lighter(110));
         gradient.setColorAt(1.0, theme::panel().darker(112));
         painter->setBrush(gradient);
-
-        QPen border(parameterExists_ || role_ != MaterialItemRole::Image ? QColor(20, 21, 24)
-                                                                         : theme::gridLine().lighter(130),
-                    isSelected() ? 2.0 : 1.2);
-        if (isSelected()) border.setColor(theme::selection());
-        if (role_ == MaterialItemRole::Image && !parameterExists_) border.setStyle(Qt::DashLine);
+        QPen border(isSelected() ? theme::selection() : QColor(20, 21, 24), isSelected() ? 2.0 : 1.0);
         painter->setPen(border);
-        painter->drawRoundedRect(body, 5.0, 5.0);
+        painter->drawRoundedRect(body, 6.0, 6.0);
 
-        QPainterPath clip;
-        clip.addRoundedRect(body, 5.0, 5.0);
         painter->save();
+        QPainterPath clip;
+        clip.addRoundedRect(body, 6.0, 6.0);
         painter->setClipPath(clip);
         painter->setPen(Qt::NoPen);
-        painter->setBrush(headerColor());
-        painter->drawRect(QRectF(body.left(), body.top(), body.width(), 10.0));
+        painter->setBrush(colorForCategory(category_));
+        painter->drawRect(QRectF(body.left(), body.top(), body.width(), 20.0));
         painter->restore();
 
-        paintLabels(painter, body);
+        QFont nameFont = painter->font();
+        nameFont.setPointSizeF(8.2);
+        nameFont.setBold(true);
+        painter->setFont(nameFont);
+        painter->setPen(theme::text());
+        const QRectF nameRect(body.left() + 8.0, body.top() + 2.0, body.width() - 16.0, 16.0);
+        painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(nameFont).elidedText(nodeName_, Qt::ElideRight, int(nameRect.width())));
+
+        QFont small = painter->font();
+        small.setBold(false);
+        small.setPointSizeF(7.0);
+        painter->setFont(small);
+        painter->setPen(theme::textDim());
+        const QString typeLabel = subtitle_.isEmpty() ? category_ : subtitle_;
+        const QRectF typeRect(body.left() + 8.0, body.top() + 21.0, body.width() - 16.0, 14.0);
+        painter->drawText(typeRect, Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(small).elidedText(typeLabel, Qt::ElideRight, int(typeRect.width())));
+
+        for (int i = 0; i < inputs_.size(); ++i) {
+            const QPointF port = inputPortLocal(i);
+            const QRectF labelRect(port.x() + 9.0, port.y() - 8.0, body.width() - 20.0, 16.0);
+            painter->drawText(labelRect, Qt::AlignLeft | Qt::AlignVCenter,
+                              QFontMetrics(small).elidedText(inputs_[i].name, Qt::ElideRight,
+                                                            int(labelRect.width())));
+        }
+        const QPointF out = outputPortLocal();
+        painter->drawText(QRectF(out.x() - 34.0, out.y() - 8.0, 28.0, 16.0), Qt::AlignRight | Qt::AlignVCenter,
+                          "out");
+
         paintPorts(painter);
     }
 
-    QPointF inputPortPosition() const { return pos() + QPointF(0.0, -bodyRect().height() * 0.5 - 2.0); }
+    QPointF inputPortScene(int portIndex) const { return mapToScene(inputPortLocal(portIndex)); }
+    QPointF outputPortScene() const { return mapToScene(outputPortLocal()); }
+    int inputCount() const { return inputs_.size(); }
+    int inputModelIndex(int portIndex) const { return inputs_.value(portIndex).modelIndex; }
 
-    QPointF inputPortPosition(int index) const {
-        if (role_ != MaterialItemRole::StandardSurface) return inputPortPosition();
-        const qreal top = -108.0;
-        return pos() + QPointF(-bodyRect().width() * 0.5 - 2.0, top + qreal(index) * 36.0);
+    int hitInputPort(QPointF scenePosition) const {
+        for (int i = 0; i < inputs_.size(); ++i) {
+            if (QLineF(scenePosition, inputPortScene(i)).length() <= kPortHitRadius) return i;
+        }
+        return -1;
     }
 
-    QPointF outputPortPosition() const {
-        if (role_ == MaterialItemRole::Image) return pos() + QPointF(bodyRect().width() * 0.5 + 2.0, 0.0);
-        return pos() + QPointF(0.0, bodyRect().height() * 0.5 + 2.0);
+    bool hitOutputPort(QPointF scenePosition) const {
+        return QLineF(scenePosition, outputPortScene()).length() <= kPortHitRadius;
     }
 
 private:
-    static constexpr qreal kPortRadius = 5.2;
-    static constexpr qreal kPortHitRadius = 15.0;
-
     QRectF bodyRect() const {
-        switch (role_) {
-            case MaterialItemRole::Surface: return centeredRect(112.0, 50.0);
-            case MaterialItemRole::StandardSurface: return centeredRect(154.0, 300.0);
-            case MaterialItemRole::Image: return centeredRect(118.0, 38.0);
-        }
-        return centeredRect(100.0, 44.0);
+        const qreal width = category_ == "standard_surface" ? 172.0 : (category_ == "surfacematerial" ? 156.0 : 146.0);
+        const qreal rowCount = qreal(std::max<qsizetype>(1, inputs_.size()));
+        const qreal height = std::max(qreal(54.0), 40.0 + rowCount * 18.0);
+        return QRectF(-width * 0.5, -height * 0.5, width, height);
     }
 
-    QColor headerColor() const {
-        switch (role_) {
-            case MaterialItemRole::Surface: return QColor(68, 92, 118);
-            case MaterialItemRole::StandardSurface: return QColor(138, 106, 63);
-            case MaterialItemRole::Image:
-                if (!parameterExists_) return theme::gridLine().lighter(120);
-                return filePath_.trimmed().isEmpty() ? QColor(82, 91, 104) : QColor(68, 116, 138);
-        }
-        return theme::panelLight();
+    QPointF inputPortLocal(int index) const {
+        const QRectF body = bodyRect();
+        const qreal y = body.top() + 43.0 + qreal(index) * 18.0;
+        return QPointF(body.left() - 4.0, std::min(y, body.bottom() - 14.0));
     }
 
-    bool hasInputPort() const { return role_ == MaterialItemRole::Surface; }
-    bool hasOutputPort() const {
-        return role_ == MaterialItemRole::StandardSurface || role_ == MaterialItemRole::Image;
-    }
-
-    void paintLabels(QPainter* painter, const QRectF& body) const {
-        QFont nameFont = painter->font();
-        nameFont.setPointSizeF(8.3);
-        nameFont.setBold(true);
-        painter->setFont(nameFont);
-        painter->setPen(parameterExists_ || role_ != MaterialItemRole::Image ? theme::text() : theme::textDim());
-        const QRectF nameRect = body.adjusted(8.0, 8.0, -8.0, -body.height() + 27.0);
-        painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
-                          QFontMetrics(nameFont).elidedText(name_, Qt::ElideRight, int(nameRect.width())));
-
-        QFont typeFont = painter->font();
-        typeFont.setBold(false);
-        typeFont.setPointSizeF(7.0);
-        painter->setFont(typeFont);
-        painter->setPen(theme::textDim());
-        QRectF typeRect(body.left() + 8.0, body.top() + 25.0, body.width() - 16.0, 14.0);
-
-        QString subtitle = typeName_;
-        if (role_ == MaterialItemRole::Image) {
-            if (!parameterExists_)
-                subtitle = "missing " + parameterName_;
-            else if (filePath_.trimmed().isEmpty())
-                subtitle = "click to choose";
-            else
-                subtitle = QFileInfo(filePath_).fileName();
-        }
-        painter->drawText(typeRect, Qt::AlignLeft | Qt::AlignVCenter,
-                          QFontMetrics(typeFont).elidedText(subtitle, Qt::ElideRight, int(typeRect.width())));
-
-        if (role_ == MaterialItemRole::StandardSurface) {
-            for (int i = 0; i < int(kTextureSlots.size()); ++i) {
-                const QPointF port = inputPortPosition(i) - pos();
-                const QString label = QString::fromUtf8(kTextureSlots[size_t(i)].inputName);
-                const QRectF labelRect(port.x() + 10.0, port.y() - 8.0, body.width() - 16.0, 16.0);
-                painter->drawText(labelRect, Qt::AlignLeft | Qt::AlignVCenter,
-                                  QFontMetrics(typeFont).elidedText(label, Qt::ElideRight,
-                                                                    int(labelRect.width())));
-            }
-        }
+    QPointF outputPortLocal() const {
+        const QRectF body = bodyRect();
+        return QPointF(body.right() + 4.0, body.center().y());
     }
 
     void paintPorts(QPainter* painter) const {
-        auto drawPort = [painter](QPointF local, bool connected) {
+        auto drawPort = [painter](QPointF local, bool connected, QColor color) {
             painter->setPen(Qt::NoPen);
-            painter->setBrush(QColor(120, 170, 255, connected ? 58 : 35));
+            painter->setBrush(QColor(color.red(), color.green(), color.blue(), connected ? 76 : 42));
             painter->drawEllipse(local, kPortRadius + 3.0, kPortRadius + 3.0);
-            painter->setPen(QPen(QColor(20, 21, 24), 1.0));
-            painter->setBrush(connected ? theme::wireActive() : QColor(120, 125, 133));
+            painter->setPen(QPen(QColor(17, 18, 22), 1.0));
+            painter->setBrush(connected ? theme::wireActive() : QColor(128, 132, 140));
             painter->drawEllipse(local, kPortRadius, kPortRadius);
         };
 
-        if (role_ == MaterialItemRole::Surface) drawPort(inputPortPosition() - pos(), true);
-        if (role_ == MaterialItemRole::StandardSurface) {
-            for (int i = 0; i < int(kTextureSlots.size()); ++i) drawPort(inputPortPosition(i) - pos(), false);
-            drawPort(outputPortPosition() - pos(), true);
-        }
-        if (role_ == MaterialItemRole::Image) drawPort(outputPortPosition() - pos(), !filePath_.trimmed().isEmpty());
+        const QColor categoryColor = colorForCategory(category_);
+        for (int i = 0; i < inputs_.size(); ++i) drawPort(inputPortLocal(i), inputs_[i].connected, categoryColor);
+        drawPort(outputPortLocal(), true, categoryColor);
     }
 
-    MaterialItemRole role_;
-    QString name_;
+    QString nodeName_;
+    QString category_;
     QString typeName_;
-    QString slotLabel_;
-    QString inputName_;
-    QString parameterName_;
-    QString filePath_;
-    bool parameterExists_ = true;
+    QVector<InputPort> inputs_;
+    QString subtitle_;
 };
 
-MaterialNetworkNodeItem* materialItemAt(QGraphicsView* view, QPoint viewPosition) {
+MaterialNetworkNodeItem* nodeItemAt(QGraphicsView* view, const QPoint& viewPosition) {
     const QList<QGraphicsItem*> items = view->items(viewPosition);
     for (QGraphicsItem* item : items) {
         if (auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item)) return nodeItem;
@@ -248,10 +252,47 @@ MaterialNetworkNodeItem* materialItemAt(QGraphicsView* view, QPoint viewPosition
     return nullptr;
 }
 
+MaterialNetworkNodeItem* nodeItemByName(QGraphicsScene* scene, const QString& name) {
+    for (QGraphicsItem* item : scene->items()) {
+        if (auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item)) {
+            if (nodeItem->nodeName() == name) return nodeItem;
+        }
+    }
+    return nullptr;
+}
+
+MaterialNetworkNodeItem* outputPortAt(QGraphicsView* view, const QPoint& viewPosition) {
+    const QPointF scenePosition = view->mapToScene(viewPosition);
+    const QList<QGraphicsItem*> items = view->items(viewPosition);
+    for (QGraphicsItem* item : items) {
+        if (auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item)) {
+            if (nodeItem->hitOutputPort(scenePosition)) return nodeItem;
+        }
+    }
+    return nullptr;
+}
+
+struct InputHit {
+    MaterialNetworkNodeItem* item = nullptr;
+    int inputIndex = -1;
+};
+
+InputHit inputPortAt(QGraphicsView* view, const QPoint& viewPosition) {
+    const QPointF scenePosition = view->mapToScene(viewPosition);
+    const QList<QGraphicsItem*> items = view->items(viewPosition);
+    for (QGraphicsItem* item : items) {
+        if (auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item)) {
+            const int port = nodeItem->hitInputPort(scenePosition);
+            if (port >= 0) return {nodeItem, port};
+        }
+    }
+    return {};
+}
+
 void addWire(QGraphicsScene* scene, QPointF from, QPointF to, bool active) {
-    auto* wire = scene->addPath(makeMaterialWirePath(from, to),
-                                QPen(active ? theme::wireActive() : theme::wire(), active ? 2.0 : 1.6,
-                                     Qt::SolidLine, Qt::RoundCap));
+    auto* wire = scene->addPath(makeWirePath(from, to),
+                                QPen(active ? theme::wireActive() : theme::wire(), active ? 2.0 : 1.4,
+                                     Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     wire->setZValue(0.0);
 }
 
@@ -269,6 +310,7 @@ MaterialNetworkView::MaterialNetworkView(QWidget* parent) : QGraphicsView(parent
     setDragMode(QGraphicsView::RubberBandDrag);
     setFocusPolicy(Qt::StrongFocus);
     setMinimumHeight(180);
+    lastMousePoint_ = viewport()->rect().center();
     rebuild();
 }
 
@@ -281,18 +323,257 @@ void MaterialNetworkView::setMaterialNode(Node* node) {
     materialNode_ = node;
 
     if (materialNode_) {
+        ensureMtlxParameter();
+        QString xml = materialNode_->stringValue("mtlx");
+        if (xml.trimmed().isEmpty()) {
+            xml = defaultDocument();
+            writeXmlToMaterial(xml, false);
+        } else {
+            const QString normalized = normalizeMaterialXDocument(xml);
+            if (!normalized.trimmed().isEmpty() && normalized != xml) {
+                xml = normalized;
+                writeXmlToMaterial(xml, false);
+            }
+        }
+
         materialChangedConnection_ =
-            connect(materialNode_, &Node::parameterChanged, this,
-                    [this](Node* node, const QString&) {
-                        if (node == materialNode_) rebuild();
-                    });
+            connect(materialNode_, &Node::parameterChanged, this, [this](Node* node, const QString& parameterName) {
+                if (suppressMaterialSignal_) return;
+                if (node == materialNode_ && parameterName == "mtlx") rebuild();
+            });
+
+        if (!materialXAvailable()) emit statusMessage("MaterialX libraries unavailable; editing stored XML directly");
     }
 
     rebuild();
 }
 
+void MaterialNetworkView::ensureMtlxParameter() {
+    if (!materialNode_ || materialNode_->findParameter("mtlx")) return;
+    materialNode_->addParameter(
+        Parameter::makeString("mtlx", "MaterialX XML", QString()).withGroup("MaterialX").withTooltip(
+            "Stored MaterialX XML edited by the Material Network view"));
+}
+
+QString MaterialNetworkView::defaultDocument() const {
+    const QString helperXml = createDefaultMaterialXDocument();
+    return helperXml.trimmed().isEmpty() ? fallbackDefaultDocument() : helperXml;
+}
+
+void MaterialNetworkView::writeXmlToMaterial(const QString& xml, bool emitEdited) {
+    if (!materialNode_) return;
+    ensureMtlxParameter();
+    suppressMaterialSignal_ = true;
+    materialNode_->setParameterValue("mtlx", xml);
+    suppressMaterialSignal_ = false;
+    if (emitEdited) emit materialEdited(materialNode_);
+}
+
+MaterialNetworkView::MtlxNode* MaterialNetworkView::findModelNode(const QString& name) {
+    for (MtlxNode& node : graphNodes_) {
+        if (node.name == name) return &node;
+    }
+    return nullptr;
+}
+
+const MaterialNetworkView::MtlxNode* MaterialNetworkView::findModelNode(const QString& name) const {
+    for (const MtlxNode& node : graphNodes_) {
+        if (node.name == name) return &node;
+    }
+    return nullptr;
+}
+
+QString MaterialNetworkView::uniqueNodeName(const QString& baseName) const {
+    auto exists = [this](const QString& name) {
+        return std::any_of(graphNodes_.begin(), graphNodes_.end(),
+                           [&name](const MtlxNode& node) { return node.name == name; });
+    };
+    if (!exists(baseName)) return baseName;
+    for (int i = 1; i < 10000; ++i) {
+        const QString candidate = baseName + QString::number(i);
+        if (!exists(candidate)) return candidate;
+    }
+    return baseName + QString::number(graphNodes_.size() + 1);
+}
+
+void MaterialNetworkView::ensureInput(QVector<MtlxInput>& inputs, const QString& name, const QString& type,
+                                      const QString& value) {
+    for (MtlxInput& input : inputs) {
+        if (input.name == name) {
+            if (input.type.isEmpty()) input.type = type;
+            return;
+        }
+    }
+    inputs.push_back({name, type, value, {}});
+}
+
+QVector<MaterialNetworkView::MtlxInput> MaterialNetworkView::defaultInputsForCategory(const QString& category) {
+    QVector<MtlxInput> inputs;
+    if (category == "image") {
+        inputs.push_back({"file", "filename", {}, {}});
+    } else if (category == "constant") {
+        inputs.push_back({"value", "color3", "1, 1, 1", {}});
+    } else if (category == "multiply") {
+        inputs.push_back({"in1", "color3", "1, 1, 1", {}});
+        inputs.push_back({"in2", "color3", "1, 1, 1", {}});
+    } else if (category == "mix") {
+        inputs.push_back({"bg", "color3", "0, 0, 0", {}});
+        inputs.push_back({"fg", "color3", "1, 1, 1", {}});
+        inputs.push_back({"mix", "float", "0.5", {}});
+    } else if (category == "normalmap") {
+        inputs.push_back({"in", "vector3", {}, {}});
+        inputs.push_back({"scale", "float", "1", {}});
+    } else if (category == "standard_surface") {
+        inputs.push_back({"base_color", "color3", "0.8, 0.8, 0.8", {}});
+        inputs.push_back({"specular_roughness", "float", "0.35", {}});
+        inputs.push_back({"metalness", "float", "0", {}});
+        inputs.push_back({"normal", "vector3", {}, {}});
+    } else if (category == "surfacematerial") {
+        inputs.push_back({"surfaceshader", "surfaceshader", {}, {}});
+    }
+    return inputs;
+}
+
+void MaterialNetworkView::rebuildFromXml(const QString& xml, bool rewriteRepaired) {
+    graphNodes_.clear();
+    bool repaired = false;
+    bool parsedMaterialX = false;
+    int ordinal = 0;
+
+    QXmlStreamReader reader(xml);
+    while (!reader.atEnd()) {
+        reader.readNext();
+        if (!reader.isStartElement()) continue;
+        if (reader.name() != QLatin1String("materialx")) {
+            reader.skipCurrentElement();
+            continue;
+        }
+
+        parsedMaterialX = true;
+        while (reader.readNextStartElement()) {
+            const QString category = reader.name().toString();
+            if (!isSupportedCategory(category)) {
+                reader.skipCurrentElement();
+                continue;
+            }
+
+            MtlxNode node;
+            node.category = category;
+            const QXmlStreamAttributes attrs = reader.attributes();
+            node.name = attrs.value("name").toString();
+            if (node.name.isEmpty()) {
+                node.name = uniqueNodeName(category);
+                repaired = true;
+            }
+            node.type = attrs.value("type").toString();
+            if (node.type.isEmpty()) node.type = defaultTypeForCategory(category);
+
+            bool okX = false;
+            bool okY = false;
+            const qreal x = attrs.value("xpos").toDouble(&okX);
+            const qreal y = attrs.value("ypos").toDouble(&okY);
+            node.layout = okX && okY ? QPointF(x, y) : defaultLayoutForCategory(category, ordinal);
+            if (!okX || !okY) repaired = true;
+
+            while (reader.readNextStartElement()) {
+                if (reader.name() == QLatin1String("input")) {
+                    MtlxInput input;
+                    const QXmlStreamAttributes inputAttrs = reader.attributes();
+                    input.name = inputAttrs.value("name").toString();
+                    input.type = inputAttrs.value("type").toString();
+                    input.value = inputAttrs.value("value").toString();
+                    input.nodename = inputAttrs.value("nodename").toString();
+                    if (!input.name.isEmpty()) node.inputs.push_back(input);
+                    reader.skipCurrentElement();
+                } else {
+                    reader.skipCurrentElement();
+                }
+            }
+
+            for (const MtlxInput& input : defaultInputsForCategory(category))
+                ensureInput(node.inputs, input.name, input.type, input.value);
+            graphNodes_.push_back(node);
+            ++ordinal;
+        }
+    }
+
+    if (!parsedMaterialX || reader.hasError()) {
+        graphNodes_.clear();
+        repaired = true;
+    }
+
+    if (graphNodes_.isEmpty()) {
+        MtlxNode standard;
+        standard.name = "standard_surface1";
+        standard.category = "standard_surface";
+        standard.type = "surfaceshader";
+        standard.layout = QPointF(0.0, 0.0);
+        standard.inputs = defaultInputsForCategory(standard.category);
+        graphNodes_.push_back(standard);
+
+        MtlxNode surface;
+        surface.name = "surface";
+        surface.category = "surfacematerial";
+        surface.type = "material";
+        surface.layout = QPointF(4.0, 0.0);
+        surface.inputs = defaultInputsForCategory(surface.category);
+        surface.inputs[0].nodename = standard.name;
+        graphNodes_.push_back(surface);
+        repaired = true;
+    }
+
+    MtlxNode* standard = nullptr;
+    for (MtlxNode& node : graphNodes_) {
+        if (node.category == "standard_surface") {
+            standard = &node;
+            break;
+        }
+    }
+    if (!standard) {
+        MtlxNode node;
+        node.name = uniqueNodeName("standard_surface1");
+        node.category = "standard_surface";
+        node.type = "surfaceshader";
+        node.layout = QPointF(0.0, 0.0);
+        node.inputs = defaultInputsForCategory(node.category);
+        graphNodes_.push_back(node);
+        standard = &graphNodes_.back();
+        repaired = true;
+    }
+
+    MtlxNode* surface = findModelNode("surface");
+    if (!surface || surface->category != "surfacematerial") {
+        MtlxNode node;
+        node.name = surface ? uniqueNodeName("surface") : QString("surface");
+        node.category = "surfacematerial";
+        node.type = "material";
+        node.layout = QPointF(4.0, 0.0);
+        node.inputs = defaultInputsForCategory(node.category);
+        graphNodes_.push_back(node);
+        surface = &graphNodes_.back();
+        repaired = true;
+    }
+    ensureInput(surface->inputs, "surfaceshader", "surfaceshader");
+    MtlxInput* surfaceShaderInput = nullptr;
+    for (MtlxInput& input : surface->inputs) {
+        if (input.name == "surfaceshader") {
+            surfaceShaderInput = &input;
+            break;
+        }
+    }
+    if (surfaceShaderInput && surfaceShaderInput->nodename.isEmpty()) {
+        surfaceShaderInput->nodename = standard->name;
+        surfaceShaderInput->value.clear();
+        repaired = true;
+    }
+
+    if (rewriteRepaired && repaired) writeModel(false);
+}
+
 void MaterialNetworkView::rebuild() {
     graphScene_->clear();
+    previewWire_ = nullptr;
+    graphNodes_.clear();
 
     if (!materialNode_) {
         graphScene_->setSceneRect(-700, -450, 1400, 900);
@@ -300,36 +581,93 @@ void MaterialNetworkView::rebuild() {
         return;
     }
 
-    auto* standard = new MaterialNetworkNodeItem(MaterialItemRole::StandardSurface, "standard_surface",
-                                                "MaterialX");
-    standard->setPos(80.0, 0.0);
-    graphScene_->addItem(standard);
+    ensureMtlxParameter();
+    QString xml = materialNode_->stringValue("mtlx");
+    if (xml.trimmed().isEmpty()) {
+        xml = defaultDocument();
+        writeXmlToMaterial(xml, false);
+    }
+    rebuildFromXml(xml, true);
 
-    auto* surface = new MaterialNetworkNodeItem(MaterialItemRole::Surface, "surface", "output");
-    surface->setPos(80.0, 210.0);
-    graphScene_->addItem(surface);
-    addWire(graphScene_, standard->outputPortPosition(), surface->inputPortPosition(), true);
+    for (const MtlxNode& node : graphNodes_) {
+        QVector<MaterialNetworkNodeItem::InputPort> ports;
+        for (int i = 0; i < node.inputs.size(); ++i) {
+            const MtlxInput& input = node.inputs[i];
+            if (!isConnectableInput(input.name, input.type)) continue;
+            ports.push_back({input.name, i, !input.nodename.isEmpty()});
+        }
 
-    for (int i = 0; i < int(kTextureSlots.size()); ++i) {
-        const TextureSlot& slot = kTextureSlots[size_t(i)];
-        const Parameter* parameter = materialNode_->findParameter(QString::fromUtf8(slot.parameterName));
-        const QString filePath = parameter ? parameter->toString() : QString();
+        QString subtitle = node.category;
+        if (node.category == "image") {
+            for (const MtlxInput& input : node.inputs) {
+                if (input.name == "file") {
+                    subtitle = input.value.trimmed().isEmpty() ? QString("choose texture")
+                                                               : QFileInfo(input.value).fileName();
+                    break;
+                }
+            }
+        } else if (!node.type.isEmpty()) {
+            subtitle = node.category + " / " + node.type;
+        }
 
-        auto* image =
-            new MaterialNetworkNodeItem(MaterialItemRole::Image, "image", QString::fromUtf8(slot.label));
-        image->setTextureSlot(slot, parameter != nullptr, filePath);
-        image->setPos(-220.0, standard->inputPortPosition(i).y());
-        graphScene_->addItem(image);
-
-        if (parameter && !filePath.trimmed().isEmpty())
-            addWire(graphScene_, image->outputPortPosition(), standard->inputPortPosition(i), true);
+        auto* item = new MaterialNetworkNodeItem(node.name, node.category, node.type, ports, subtitle);
+        item->setPos(node.layout * kLayoutScale);
+        graphScene_->addItem(item);
     }
 
-    const QRectF bounds = graphScene_->itemsBoundingRect().adjusted(-160.0, -120.0, 180.0, 120.0);
-    graphScene_->setSceneRect(bounds);
+    for (const MtlxNode& target : graphNodes_) {
+        MaterialNetworkNodeItem* targetItem = nodeItemByName(graphScene_, target.name);
+        if (!targetItem) continue;
+        int visiblePort = 0;
+        for (int i = 0; i < target.inputs.size(); ++i) {
+            const MtlxInput& input = target.inputs[i];
+            if (!isConnectableInput(input.name, input.type)) continue;
+            if (!input.nodename.isEmpty()) {
+                MaterialNetworkNodeItem* sourceItem = nodeItemByName(graphScene_, input.nodename);
+                if (sourceItem) addWire(graphScene_, sourceItem->outputPortScene(), targetItem->inputPortScene(visiblePort), true);
+            }
+            ++visiblePort;
+        }
+    }
+
+    const QRectF bounds = graphScene_->itemsBoundingRect().adjusted(-180.0, -130.0, 180.0, 130.0);
+    graphScene_->setSceneRect(bounds.isEmpty() ? QRectF(-700, -450, 1400, 900) : bounds);
     pendingFrame_ = true;
     if (isVisible() && width() > 50) frameGraph();
 }
+
+QString MaterialNetworkView::serializeGraph() const {
+    QString xml;
+    QXmlStreamWriter writer(&xml);
+    writer.setAutoFormatting(true);
+    writer.writeStartDocument();
+    writer.writeStartElement("materialx");
+    writer.writeAttribute("version", "1.38");
+    for (const MtlxNode& node : graphNodes_) {
+        writer.writeStartElement(node.category);
+        writer.writeAttribute("name", node.name);
+        writer.writeAttribute("type", node.type.isEmpty() ? defaultTypeForCategory(node.category) : node.type);
+        writer.writeAttribute("xpos", QString::number(node.layout.x(), 'f', 3));
+        writer.writeAttribute("ypos", QString::number(node.layout.y(), 'f', 3));
+        for (const MtlxInput& input : node.inputs) {
+            if (input.name.isEmpty()) continue;
+            writer.writeEmptyElement("input");
+            writer.writeAttribute("name", input.name);
+            if (!input.type.isEmpty()) writer.writeAttribute("type", input.type);
+            if (!input.nodename.isEmpty()) {
+                writer.writeAttribute("nodename", input.nodename);
+            } else if (!input.value.isEmpty()) {
+                writer.writeAttribute("value", input.value);
+            }
+        }
+        writer.writeEndElement();
+    }
+    writer.writeEndElement();
+    writer.writeEndDocument();
+    return xml;
+}
+
+void MaterialNetworkView::writeModel(bool emitEdited) { writeXmlToMaterial(serializeGraph(), emitEdited); }
 
 void MaterialNetworkView::showEvent(QShowEvent* event) {
     QGraphicsView::showEvent(event);
@@ -349,11 +687,12 @@ void MaterialNetworkView::frameGraph() {
         centerOn(0.0, 0.0);
         return;
     }
-    fitInView(bounds.adjusted(-70.0, -70.0, 70.0, 70.0), Qt::KeepAspectRatio);
-    const double scale = transform().m11();
-    if (scale > 1.0 || scale < 0.55) {
+    fitInView(bounds.adjusted(-80.0, -80.0, 80.0, 80.0), Qt::KeepAspectRatio);
+    const double scaleValue = transform().m11();
+    if (scaleValue > 1.0 || scaleValue < 0.55) {
         resetTransform();
-        this->scale(std::clamp(scale, 0.55, 1.0), std::clamp(scale, 0.55, 1.0));
+        const double clamped = std::clamp(scaleValue, 0.55, 1.0);
+        scale(clamped, clamped);
         centerOn(bounds.center());
     }
 }
@@ -376,28 +715,162 @@ void MaterialNetworkView::wheelEvent(QWheelEvent* event) {
     event->accept();
 }
 
+void MaterialNetworkView::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
+        spacePressed_ = true;
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Tab) {
+        const QPoint position = viewport()->rect().contains(lastMousePoint_) ? lastMousePoint_ : viewport()->rect().center();
+        showAddNodeMenu(position);
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
+        deleteSelectedNodes();
+        event->accept();
+        return;
+    }
+    QGraphicsView::keyPressEvent(event);
+}
+
+void MaterialNetworkView::keyReleaseEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
+        spacePressed_ = false;
+        event->accept();
+        return;
+    }
+    QGraphicsView::keyReleaseEvent(event);
+}
+
+void MaterialNetworkView::contextMenuEvent(QContextMenuEvent* event) {
+    lastMousePoint_ = event->pos();
+    if (!nodeItemAt(this, event->pos())) {
+        showAddNodeMenu(event->pos());
+        event->accept();
+        return;
+    }
+    QGraphicsView::contextMenuEvent(event);
+}
+
+void MaterialNetworkView::showAddNodeMenu(const QPoint& viewPosition) {
+    if (!materialNode_) {
+        emit statusMessage("Select a Material node in the Network Editor");
+        return;
+    }
+
+    QMenu menu(this);
+    const QStringList categories = {"image", "constant", "multiply", "mix", "normalmap", "standard_surface",
+                                    "surfacematerial"};
+    for (const QString& category : categories) {
+        QAction* action = menu.addAction(category);
+        action->setData(category);
+    }
+
+    QAction* chosen = menu.exec(viewport()->mapToGlobal(viewPosition));
+    if (!chosen) return;
+    addNode(chosen->data().toString(), mapToScene(viewPosition));
+}
+
+void MaterialNetworkView::addNode(const QString& category, QPointF scenePosition) {
+    if (!materialNode_ || !isSupportedCategory(category)) return;
+    MtlxNode node;
+    node.category = category;
+    node.type = defaultTypeForCategory(category);
+    node.name = uniqueNodeName(category == "surfacematerial" ? "surfacematerial" : category);
+    node.layout = scenePosition / kLayoutScale;
+    node.inputs = defaultInputsForCategory(category);
+    graphNodes_.push_back(node);
+    writeModel(true);
+    rebuild();
+    emit statusMessage("Added " + category);
+}
+
+void MaterialNetworkView::connectNodes(const QString& sourceName, const QString& targetName, int inputIndex) {
+    if (sourceName.isEmpty() || targetName.isEmpty() || sourceName == targetName) return;
+    MtlxNode* target = findModelNode(targetName);
+    if (!target || inputIndex < 0 || inputIndex >= target->inputs.size()) return;
+    target->inputs[inputIndex].nodename = sourceName;
+    target->inputs[inputIndex].value.clear();
+    writeModel(true);
+    rebuild();
+    emit statusMessage(QString("Connected %1 to %2.%3").arg(sourceName, targetName, target->inputs[inputIndex].name));
+}
+
+void MaterialNetworkView::deleteSelectedNodes() {
+    if (!materialNode_) return;
+    QStringList toDelete;
+    bool skippedSurface = false;
+    for (QGraphicsItem* item : graphScene_->selectedItems()) {
+        if (auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item)) {
+            if (nodeItem->nodeName() == "surface" && nodeItem->category() == "surfacematerial") {
+                skippedSurface = true;
+                continue;
+            }
+            toDelete << nodeItem->nodeName();
+        }
+    }
+    toDelete.removeDuplicates();
+    if (toDelete.isEmpty()) {
+        if (skippedSurface) emit statusMessage("The terminal surface material is kept");
+        return;
+    }
+
+    graphNodes_.erase(std::remove_if(graphNodes_.begin(), graphNodes_.end(), [&toDelete](const MtlxNode& node) {
+                          return toDelete.contains(node.name);
+                      }),
+                      graphNodes_.end());
+    for (MtlxNode& node : graphNodes_) {
+        for (MtlxInput& input : node.inputs) {
+            if (toDelete.contains(input.nodename)) input.nodename.clear();
+        }
+    }
+    writeModel(true);
+    rebuild();
+    emit statusMessage("Deleted " + toDelete.join(", "));
+}
+
 void MaterialNetworkView::mousePressEvent(QMouseEvent* event) {
-    if (event->button() == Qt::MiddleButton ||
-        (event->button() == Qt::LeftButton && (event->modifiers() & Qt::AltModifier))) {
+    lastMousePoint_ = event->pos();
+    mousePressPoint_ = event->pos();
+    mouseMovedSincePress_ = false;
+    clickImageNode_.clear();
+
+    const bool panButton = event->button() == Qt::MiddleButton ||
+                           (event->button() == Qt::LeftButton &&
+                            ((event->modifiers() & Qt::AltModifier) || spacePressed_));
+    if (panButton) {
         beginPan(event->pos());
         event->accept();
         return;
     }
 
-    if (event->button() == Qt::LeftButton && openTextureDialogAt(event->pos())) {
-        event->accept();
-        return;
+    if (event->button() == Qt::LeftButton) {
+        if (MaterialNetworkNodeItem* source = outputPortAt(this, event->pos())) {
+            beginWire(source->nodeName(), source->outputPortScene());
+            event->accept();
+            return;
+        }
+        if (MaterialNetworkNodeItem* item = nodeItemAt(this, event->pos())) {
+            if (item->category() == "image") clickImageNode_ = item->nodeName();
+        }
     }
 
     QGraphicsView::mousePressEvent(event);
-    if (auto* item = materialItemAt(this, event->pos())) {
-        if (item->role() == MaterialItemRole::StandardSurface) emit statusMessage("standard_surface");
-    }
 }
 
 void MaterialNetworkView::mouseMoveEvent(QMouseEvent* event) {
+    lastMousePoint_ = event->pos();
+    if (QLineF(event->pos(), mousePressPoint_).length() > 4.0) mouseMovedSincePress_ = true;
+
     if (panning_) {
         updatePan(event->pos());
+        event->accept();
+        return;
+    }
+    if (wiring_) {
+        updateWire(mapToScene(event->pos()));
         event->accept();
         return;
     }
@@ -405,12 +878,26 @@ void MaterialNetworkView::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void MaterialNetworkView::mouseReleaseEvent(QMouseEvent* event) {
+    lastMousePoint_ = event->pos();
     if (panning_) {
         endPan();
         event->accept();
         return;
     }
+    if (wiring_) {
+        endWire(event->pos());
+        event->accept();
+        return;
+    }
+
     QGraphicsView::mouseReleaseEvent(event);
+    syncNodePositions();
+
+    if (event->button() == Qt::LeftButton && !mouseMovedSincePress_ && !clickImageNode_.isEmpty()) {
+        MaterialNetworkNodeItem* item = nodeItemAt(this, event->pos());
+        if (item && item->nodeName() == clickImageNode_) chooseTexture(clickImageNode_);
+    }
+    clickImageNode_.clear();
 }
 
 void MaterialNetworkView::mouseDoubleClickEvent(QMouseEvent* event) {
@@ -422,39 +909,58 @@ void MaterialNetworkView::mouseDoubleClickEvent(QMouseEvent* event) {
 }
 
 bool MaterialNetworkView::openTextureDialogAt(const QPoint& viewPosition) {
-    MaterialNetworkNodeItem* item = materialItemAt(this, viewPosition);
-    if (!item || item->role() != MaterialItemRole::Image) return false;
-
+    MaterialNetworkNodeItem* item = nodeItemAt(this, viewPosition);
+    if (!item || item->category() != "image") return false;
     graphScene_->clearSelection();
     item->setSelected(true);
-    if (!item->parameterExists()) {
-        emit statusMessage("Material parameter is not available: " + item->parameterName());
-        return true;
-    }
-
-    chooseTexture(item->parameterName(), item->inputName());
+    chooseTexture(item->nodeName());
     return true;
 }
 
-void MaterialNetworkView::chooseTexture(const QString& parameterName, const QString& inputName) {
-    if (!materialNode_) return;
-    Parameter* parameter = materialNode_->findParameter(parameterName);
-    if (!parameter) {
-        emit statusMessage("Material parameter is not available: " + parameterName);
-        return;
+void MaterialNetworkView::chooseTexture(const QString& nodeName) {
+    MtlxNode* node = findModelNode(nodeName);
+    if (!node || node->category != "image") return;
+
+    int fileInput = -1;
+    for (int i = 0; i < node->inputs.size(); ++i) {
+        if (node->inputs[i].name == "file") {
+            fileInput = i;
+            break;
+        }
+    }
+    if (fileInput < 0) {
+        node->inputs.push_back({"file", "filename", {}, {}});
+        fileInput = node->inputs.size() - 1;
     }
 
-    const QString filter = parameter->fileFilter.isEmpty()
-                               ? QString("Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;"
-                                         "All Files (*)")
-                               : parameter->fileFilter;
+    const QString filter = "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)";
     const QString path =
-        QFileDialog::getOpenFileName(this, "Choose texture for " + inputName, parameter->toString(), filter);
+        QFileDialog::getOpenFileName(this, "Choose texture for " + nodeName, node->inputs[fileInput].value, filter);
     if (path.isEmpty()) return;
 
-    materialNode_->setParameterValue(parameterName, path);
-    emit materialEdited(materialNode_);
-    emit statusMessage(QString("%1 texture set to %2").arg(inputName, QFileInfo(path).fileName()));
+    node->inputs[fileInput].value = path;
+    node->inputs[fileInput].nodename.clear();
+    writeModel(true);
+    rebuild();
+    emit statusMessage(QString("%1 file set to %2").arg(nodeName, QFileInfo(path).fileName()));
+}
+
+void MaterialNetworkView::syncNodePositions() {
+    bool changed = false;
+    for (QGraphicsItem* item : graphScene_->items()) {
+        auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item);
+        if (!nodeItem) continue;
+        MtlxNode* node = findModelNode(nodeItem->nodeName());
+        if (!node) continue;
+        const QPointF layout = nodeItem->pos() / kLayoutScale;
+        if (QLineF(node->layout, layout).length() > 0.001) {
+            node->layout = layout;
+            changed = true;
+        }
+    }
+    if (!changed) return;
+    writeModel(true);
+    rebuild();
 }
 
 void MaterialNetworkView::beginPan(const QPoint& viewPosition) {
@@ -467,8 +973,8 @@ void MaterialNetworkView::beginPan(const QPoint& viewPosition) {
 
 void MaterialNetworkView::updatePan(const QPoint& viewPosition) {
     if (viewPosition == lastPanPoint_) return;
-    const QPointF delta = mapToScene(viewPosition) - mapToScene(lastPanPoint_);
-    translate(delta.x(), delta.y());
+    horizontalScrollBar()->setValue(horizontalScrollBar()->value() - (viewPosition.x() - lastPanPoint_.x()));
+    verticalScrollBar()->setValue(verticalScrollBar()->value() - (viewPosition.y() - lastPanPoint_.y()));
     lastPanPoint_ = viewPosition;
 }
 
@@ -477,6 +983,39 @@ void MaterialNetworkView::endPan() {
     if (QWidget::mouseGrabber() == viewport()) viewport()->releaseMouse();
     setDragMode(QGraphicsView::RubberBandDrag);
     viewport()->unsetCursor();
+}
+
+void MaterialNetworkView::beginWire(const QString& sourceName, QPointF sourcePosition) {
+    wiring_ = true;
+    wireSourceNode_ = sourceName;
+    wireSourcePosition_ = sourcePosition;
+    setDragMode(QGraphicsView::NoDrag);
+    previewWire_ = graphScene_->addPath(makeWirePath(sourcePosition, sourcePosition),
+                                        QPen(theme::wireActive(), 1.8, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin));
+    previewWire_->setZValue(4.0);
+}
+
+void MaterialNetworkView::updateWire(QPointF scenePosition) {
+    if (previewWire_) previewWire_->setPath(makeWirePath(wireSourcePosition_, scenePosition));
+}
+
+void MaterialNetworkView::endWire(const QPoint& viewPosition) {
+    InputHit hit = inputPortAt(this, viewPosition);
+    if (previewWire_) {
+        graphScene_->removeItem(previewWire_);
+        delete previewWire_;
+        previewWire_ = nullptr;
+    }
+    wiring_ = false;
+    setDragMode(QGraphicsView::RubberBandDrag);
+
+    if (!hit.item) {
+        wireSourceNode_.clear();
+        return;
+    }
+    const int modelInput = hit.item->inputModelIndex(hit.inputIndex);
+    connectNodes(wireSourceNode_, hit.item->nodeName(), modelInput);
+    wireSourceNode_.clear();
 }
 
 void MaterialNetworkView::drawBackground(QPainter* painter, const QRectF& rect) {
@@ -521,7 +1060,7 @@ void MaterialNetworkView::drawForeground(QPainter* painter, const QRectF& rect) 
     painter->setFont(font);
     painter->setPen(theme::textDim());
     painter->drawText(QRect(8, height() - 22, width() - 16, 18), Qt::AlignLeft,
-                      "Material subnet   click image: choose texture   MMB/Alt+LMB: pan   Wheel: zoom");
+                      "Tab: add node   LMB wire   MMB pan   Del: delete   image dbl-click: file");
 }
 
 }  // namespace sol
