@@ -75,7 +75,7 @@ private:
     int resolutionX_ = 960;
     int resolutionY_ = 540;
 
-    // World-space tumble center for the current Alt+LMB drag (may differ from look-at).
+    // World-space tumble center for the current Alt+LMB / RMB drag (may differ from look-at).
     Vec3 tumbleCenter_{0.0f, 1.0f, 0.0f};
     bool showPivotMarker_ = false;
     Vec3 pivotMarkerWorld_{0.0f};

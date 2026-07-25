@@ -232,7 +232,9 @@ void RenderView::mousePressEvent(QMouseEvent* event) {
     }
 
     const bool alt = event->modifiers() & Qt::AltModifier;
-    if (event->button() == Qt::LeftButton && alt) {
+    // Orbit / tumble: Alt+LMB (Houdini) or plain RMB.
+    if ((event->button() == Qt::LeftButton && alt) ||
+        (event->button() == Qt::RightButton && !alt)) {
         beginNavigation(1, event->pos());
         event->accept();
         return;

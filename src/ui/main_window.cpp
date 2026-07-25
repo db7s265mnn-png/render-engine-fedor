@@ -559,6 +559,7 @@ void MainWindow::onShowShortcuts() {
                              "  Wheel         zoom to cursor\n\n"
                              "Render view (Houdini style)\n"
                              "  Alt + LMB     tumble (pivot on geometry under cursor)\n"
+                             "  RMB           tumble / orbit\n"
                              "  MMB           pan\n"
                              "  Alt + RMB     dolly\n"
                              "  Wheel         dolly\n\n"
