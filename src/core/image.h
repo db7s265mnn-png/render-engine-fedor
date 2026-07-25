@@ -1,10 +1,9 @@
 // Floating point RGBA image buffer plus a 2D distribution used for
-// importance sampling environment maps. Images may also store a UDIM tile set.
+// importance sampling environment maps. May also be a baked UDIM atlas.
 #pragma once
 
 #include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include "core/math.h"
@@ -21,10 +20,7 @@ public:
 
     int width() const { return width_; }
     int height() const { return height_; }
-    bool empty() const {
-        if (isUdim()) return false;
-        return width_ <= 0 || height_ <= 0;
-    }
+    bool empty() const { return width_ <= 0 || height_ <= 0; }
 
     float* data() { return pixels_.data(); }
     const float* data() const { return pixels_.data(); }
@@ -45,21 +41,22 @@ public:
 
     void scaleRgb(float s);
 
-    // Houdini-style UDIM tile set (ids typically 1001+).
-    bool isUdim() const { return !udimTiles_.empty(); }
-    int udimTileCount() const { return int(udimTiles_.size()); }
-    int udimId(int index) const { return udimTiles_[size_t(index)].first; }
-    const Image& udimTile(int index) const { return *udimTiles_[size_t(index)].second; }
-    Image& udimTile(int index) { return *udimTiles_[size_t(index)].second; }
-    void clearUdimTiles() { udimTiles_.clear(); }
-    void addUdimTile(int udim, std::shared_ptr<Image> tile);
-    const Image* findUdimTile(int udim) const;
+    // Baked Mari/Houdini UDIM atlas: pixels cover UV [0, udimGridU] x [0, udimGridV].
+    // 0 means "not a UDIM atlas" (regular texture).
+    int udimGridU() const { return udimGridU_; }
+    int udimGridV() const { return udimGridV_; }
+    bool isUdimAtlas() const { return udimGridU_ > 0 && udimGridV_ > 0; }
+    void setUdimGrid(int gridU, int gridV) {
+        udimGridU_ = gridU;
+        udimGridV_ = gridV;
+    }
 
 private:
     int width_ = 0;
     int height_ = 0;
+    int udimGridU_ = 0;
+    int udimGridV_ = 0;
     std::vector<float> pixels_;
-    std::vector<std::pair<int, std::shared_ptr<Image>>> udimTiles_;
 };
 
 // Piecewise-constant 2D distribution (Pharr et al.) for env map sampling.

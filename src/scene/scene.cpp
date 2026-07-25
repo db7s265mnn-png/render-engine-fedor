@@ -151,7 +151,6 @@ int Scene::addEnvMap(std::shared_ptr<EnvironmentMap> env) {
 
 int Scene::addTexture(std::shared_ptr<Image> image) {
     if (!image || image->empty()) return -1;
-    if (!image->isUdim() && (image->width() <= 0 || image->height() <= 0)) return -1;
     textures.push_back(std::move(image));
     return static_cast<int>(textures.size()) - 1;
 }
@@ -234,47 +233,17 @@ void Scene::finalize() {
         envViews_.push_back(env ? env->view() : EnvMapView());
 
     textureViews_.clear();
-    udimPixelTables_.clear();
-    udimIdTables_.clear();
-    udimWidthTables_.clear();
-    udimHeightTables_.clear();
     textureViews_.reserve(textures.size());
     for (const std::shared_ptr<Image>& image : textures) {
         TextureView view;
-        if (image && image->isUdim()) {
-            std::vector<const float*> pixels;
-            std::vector<int> ids;
-            std::vector<int> widths;
-            std::vector<int> heights;
-            pixels.reserve(size_t(image->udimTileCount()));
-            ids.reserve(size_t(image->udimTileCount()));
-            widths.reserve(size_t(image->udimTileCount()));
-            heights.reserve(size_t(image->udimTileCount()));
-            for (int i = 0; i < image->udimTileCount(); ++i) {
-                const Image& tile = image->udimTile(i);
-                if (tile.empty()) continue;
-                pixels.push_back(tile.data());
-                ids.push_back(image->udimId(i));
-                widths.push_back(tile.width());
-                heights.push_back(tile.height());
-            }
-            if (!pixels.empty()) {
-                udimPixelTables_.push_back(std::move(pixels));
-                udimIdTables_.push_back(std::move(ids));
-                udimWidthTables_.push_back(std::move(widths));
-                udimHeightTables_.push_back(std::move(heights));
-                view.udimPixels = udimPixelTables_.back().data();
-                view.udimIds = udimIdTables_.back().data();
-                view.udimWidths = udimWidthTables_.back().data();
-                view.udimHeights = udimHeightTables_.back().data();
-                view.udimCount = int(udimPixelTables_.back().size());
-                view.width = view.udimWidths[0];
-                view.height = view.udimHeights[0];
-            }
-        } else if (image && !image->empty()) {
+        if (image && !image->empty()) {
             view.pixels = image->data();
             view.width = image->width();
             view.height = image->height();
+            if (image->isUdimAtlas()) {
+                view.udimGridU = image->udimGridU();
+                view.udimGridV = image->udimGridV();
+            }
         }
         textureViews_.push_back(view);
     }

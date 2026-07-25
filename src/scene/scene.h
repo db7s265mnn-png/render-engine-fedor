@@ -87,11 +87,6 @@ private:
     std::vector<MeshView> meshViews_;
     std::vector<EnvMapView> envViews_;
     std::vector<TextureView> textureViews_;
-    // Side storage for UDIM TextureView pointer tables (kept alive for SceneView).
-    std::vector<std::vector<const float*>> udimPixelTables_;
-    std::vector<std::vector<int>> udimIdTables_;
-    std::vector<std::vector<int>> udimWidthTables_;
-    std::vector<std::vector<int>> udimHeightTables_;
     int domeLightIndex_ = -1;
 };
 

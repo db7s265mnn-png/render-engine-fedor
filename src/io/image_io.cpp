@@ -3,7 +3,6 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
-#include <QRegularExpression>
 #include <QString>
 
 #include <algorithm>
@@ -279,34 +278,23 @@ bool pathHasUdimToken(const QString& path) {
 QString expandUdimToken(const QString& pattern, int udim) {
     QString result = pattern;
     const QString number = QString::number(udim);
-    result.replace(QLatin1String("<UDIM>"), number, Qt::CaseInsensitive);
-    result.replace(QLatin1String("%(UDIM)d"), number);
+    result.replace(QStringLiteral("<UDIM>"), number, Qt::CaseInsensitive);
+    result.replace(QStringLiteral("%(UDIM)d"), number);
     return result;
 }
 
-QString tokenizeUdimPathIfSequence(const QString& path) {
-    static const QRegularExpression re(QStringLiteral(R"(([._])(10\d{2})(\.[^.]+)$)"));
-    const QRegularExpressionMatch match = re.match(path);
-    if (!match.hasMatch()) return path;
-    const QString tokenized = path.left(match.capturedStart(2)) + QStringLiteral("<UDIM>") + match.captured(3);
-    int found = 0;
-    for (int udim = 1001; udim <= 1100; ++udim) {
-        if (QFileInfo::exists(expandUdimToken(tokenized, udim))) {
-            ++found;
-            if (found >= 2) return tokenized;
-        }
-    }
-    return path;
-}
-
 std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& searchDirectory, std::string& error) {
-    QString path = pathIn;
+    QString path = pathIn.trimmed();
     QFileInfo info(path);
     if (!info.isAbsolute() && !searchDirectory.isEmpty()) path = QDir(searchDirectory).absoluteFilePath(path);
 
     if (pathHasUdimToken(path)) {
-        auto udimImage = std::make_shared<Image>();
-        int loaded = 0;
+        struct Tile {
+            int udim = 0;
+            std::shared_ptr<Image> image;
+        };
+        std::vector<Tile> tiles;
+        tiles.reserve(16);
         for (int udim = 1001; udim <= 1100; ++udim) {
             const QString tilePath = expandUdimToken(path, udim);
             if (!QFileInfo::exists(tilePath)) continue;
@@ -316,15 +304,48 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
                 logWarning("UDIM tile failed (" + tilePath.toStdString() + "): " + loadError);
                 continue;
             }
-            udimImage->addUdimTile(udim, tile);
-            ++loaded;
+            tiles.push_back({udim, std::move(tile)});
         }
-        if (loaded == 0) {
+        if (tiles.empty()) {
             error = "no UDIM tiles found for: " + path.toStdString();
             return nullptr;
         }
-        logInfo("Loaded " + std::to_string(loaded) + " UDIM tile(s) for " + path.toStdString());
-        return udimImage;
+
+        int maxU = 0;
+        int maxV = 0;
+        int tileW = tiles.front().image->width();
+        int tileH = tiles.front().image->height();
+        for (const Tile& tile : tiles) {
+            const int u = (tile.udim - 1001) % 10;
+            const int v = (tile.udim - 1001) / 10;
+            maxU = std::max(maxU, u);
+            maxV = std::max(maxV, v);
+            tileW = std::max(tileW, tile.image->width());
+            tileH = std::max(tileH, tile.image->height());
+        }
+        const int gridU = maxU + 1;
+        const int gridV = maxV + 1;
+
+        // Bake tiles into one atlas so shading only needs a single TextureView.
+        auto atlas = std::make_shared<Image>(tileW * gridU, tileH * gridV, Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+        atlas->setUdimGrid(gridU, gridV);
+        for (const Tile& tile : tiles) {
+            const int u = (tile.udim - 1001) % 10;
+            const int v = (tile.udim - 1001) / 10;
+            const int dstX0 = u * tileW;
+            const int dstY0 = v * tileH;
+            const Image& src = *tile.image;
+            for (int y = 0; y < tileH; ++y) {
+                const int sy = std::min(y, src.height() - 1);
+                for (int x = 0; x < tileW; ++x) {
+                    const int sx = std::min(x, src.width() - 1);
+                    atlas->at(dstX0 + x, dstY0 + y) = src.at(sx, sy);
+                }
+            }
+        }
+        logInfo("Loaded " + std::to_string(tiles.size()) + " UDIM tile(s) → atlas " +
+                std::to_string(gridU) + "x" + std::to_string(gridV) + " for " + path.toStdString());
+        return atlas;
     }
 
     if (!QFileInfo::exists(path)) {

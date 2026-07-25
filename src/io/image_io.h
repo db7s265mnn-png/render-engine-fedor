@@ -16,12 +16,10 @@ namespace sol {
 // be sRGB encoded and are linearised.
 bool loadImage(const std::string& path, Image& out, std::string& error);
 
-// Houdini-style UDIM helpers (<UDIM> or %(UDIM)d).
+// Houdini/MaterialX UDIM helpers (<UDIM> or %(UDIM)d).
 bool pathHasUdimToken(const QString& path);
 QString expandUdimToken(const QString& pattern, int udim);
-// If path looks like foo.1001.exr and sibling tiles exist, returns foo.<UDIM>.exr.
-QString tokenizeUdimPathIfSequence(const QString& path);
-// Loads a single image, or a UDIM tile set when the path contains <UDIM>.
+// Loads a single image, or bakes a UDIM atlas when the path contains <UDIM>.
 std::shared_ptr<Image> loadImageOrUdim(const QString& path, const QString& searchDirectory, std::string& error);
 
 bool saveImagePng(const std::string& path, const Image& displayImage, std::string& error);

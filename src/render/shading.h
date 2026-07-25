@@ -33,8 +33,8 @@ SR_INL SR_HD float roughnessToAlpha(float roughness) {
     return srMax(kMinAlpha, r * r);
 }
 
-// Bilinear fetch for a single RGBA32F tile (local UV in [0,1]).
-SR_INL SR_HD Vec4 sampleTextureTileRGBA(const float* pixels, int width, int height, float u, float v) {
+// Bilinear fetch in normalized UV [0,1] with clamp (no wrap).
+SR_INL SR_HD Vec4 sampleTextureClampedRGBA(const float* pixels, int width, int height, float u, float v) {
     if (!pixels || width <= 0 || height <= 0) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
     u = clampf(u, 0.0f, 1.0f);
     v = clampf(v, 0.0f, 1.0f);
@@ -63,21 +63,17 @@ SR_INL SR_HD Vec4 sampleTextureTileRGBA(const float* pixels, int width, int heig
 }
 
 // Bilinear texture fetch for MaterialX image maps.
-// Regular maps wrap U / clamp V. UDIM sets select tile 1001 + floor(u) + 10*floor(v).
+// Regular maps wrap U / clamp V. UDIM atlases map unwrapped UV into the baked grid.
 SR_INL SR_HD Vec4 sampleTextureRGBA(const TextureView& tex, Vec2 uv) {
     if (!tex.valid()) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
 
-    if (tex.isUdim()) {
-        const int uTile = int(floorf(uv.x));
-        const int vTile = int(floorf(uv.y));
-        const int udim = 1001 + uTile + 10 * vTile;
-        const float localU = uv.x - float(uTile);
-        const float localV = uv.y - float(vTile);
-        for (int i = 0; i < tex.udimCount; ++i) {
-            if (tex.udimIds[i] != udim) continue;
-            return sampleTextureTileRGBA(tex.udimPixels[i], tex.udimWidths[i], tex.udimHeights[i], localU, localV);
-        }
-        return Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (tex.isUdimAtlas()) {
+        // Atlas covers UV [0, gridU] x [0, gridV]. Outside → transparent black.
+        if (uv.x < 0.0f || uv.y < 0.0f || uv.x >= float(tex.udimGridU) || uv.y >= float(tex.udimGridV))
+            return Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+        const float u = uv.x / float(tex.udimGridU);
+        const float v = uv.y / float(tex.udimGridV);
+        return sampleTextureClampedRGBA(tex.pixels, tex.width, tex.height, u, v);
     }
 
     const float u = uv.x - floorf(uv.x);

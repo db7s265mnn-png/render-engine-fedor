@@ -390,7 +390,8 @@ void addWire(QGraphicsScene* scene, QPointF from, QPointF to, const QString& tar
 
 MaterialNetworkGraphView::MaterialNetworkGraphView(QWidget* parent) : QGraphicsView(parent) {
     graphScene_ = new QGraphicsScene(this);
-    graphScene_->setSceneRect(-700, -450, 1400, 900);
+    // Large scene rect (same idea as Network Editor) so pan works freely on both axes.
+    graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
     setScene(graphScene_);
     setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
     setViewportUpdateMode(QGraphicsView::SmartViewportUpdate);
@@ -697,7 +698,7 @@ void MaterialNetworkGraphView::rebuild() {
     graphNodes_.clear();
 
     if (!materialNode_) {
-        graphScene_->setSceneRect(-700, -450, 1400, 900);
+        graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
         graphScene_->blockSignals(blocked);
         viewport()->update();
         emitSelectionChanged();
@@ -762,8 +763,8 @@ void MaterialNetworkGraphView::rebuild() {
     }
     preservedSelection_.clear();
 
-    const QRectF bounds = graphScene_->itemsBoundingRect().adjusted(-180.0, -130.0, 180.0, 130.0);
-    graphScene_->setSceneRect(bounds.isEmpty() ? QRectF(-700, -450, 1400, 900) : bounds);
+    // Keep a large scene rect so sticky pan is not clamped to content bounds.
+    graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
     graphScene_->blockSignals(blocked);
     pendingFrame_ = true;
     if (isVisible() && width() > 50) frameGraph();
@@ -1128,25 +1129,15 @@ void MaterialNetworkGraphView::chooseTexture(const QString& nodeName) {
     }
 
     const QString filter = "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)";
-    QString path =
+    const QString path =
         QFileDialog::getOpenFileName(this, "Choose texture for " + nodeName, node->inputs[fileInput].value, filter);
     if (path.isEmpty()) return;
-
-    // If the pick is one tile of a UDIM sequence, rewrite to Houdini <UDIM> token.
-    const QString tokenized = tokenizeUdimPathIfSequence(path);
-    if (tokenized != path) {
-        path = tokenized;
-        emit statusMessage(QString("%1: detected UDIM sequence → %2").arg(nodeName, QFileInfo(path).fileName()));
-    }
 
     node->inputs[fileInput].value = path;
     node->inputs[fileInput].nodename.clear();
     writeModel(true);
     rebuild();
-    if (pathHasUdimToken(path))
-        emit statusMessage(QString("%1 file set to %2 (UDIM)").arg(nodeName, QFileInfo(path).fileName()));
-    else
-        emit statusMessage(QString("%1 file set to %2").arg(nodeName, QFileInfo(path).fileName()));
+    emit statusMessage(QString("%1 file set to %2").arg(nodeName, QFileInfo(path).fileName()));
 }
 
 void MaterialNetworkGraphView::syncNodePositions() {
@@ -1540,11 +1531,10 @@ void MaterialNetworkView::rebuildInspector() {
             auto commit = [this, inputName](const QString& value) { commitInputValue(inputName, "filename", value); };
             connect(edit, &QLineEdit::editingFinished, this, [edit, commit] { commit(edit->text()); });
             connect(browse, &QPushButton::clicked, this, [this, edit, commit] {
-                QString path = QFileDialog::getOpenFileName(
+                const QString path = QFileDialog::getOpenFileName(
                     this, "Choose file", edit->text(),
                     "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)");
                 if (path.isEmpty()) return;
-                path = tokenizeUdimPathIfSequence(path);
                 edit->setText(path);
                 commit(path);
             });
