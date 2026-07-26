@@ -235,6 +235,11 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     setFloat("specular", material.specular);
     setFloat("specular_IOR", material.ior);
     setFloat("transmission", material.transmission);
+    material.roughness = saturatef(material.roughness);
+    material.metallic = saturatef(material.metallic);
+    material.specular = saturatef(material.specular);
+    material.ior = clampf(material.ior, 0.0f, 5.0f);
+    material.transmission = saturatef(material.transmission);
     {
         // MaterialX opacity is color3; use average as scalar cutout weight.
         if (!resolveConnectedNode(ss, "opacity")) {
@@ -253,7 +258,11 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     setFloat("subsurface", material.subsurface);
     setColor("subsurface_color", material.subsurfaceColor);
     setColor("subsurface_radius", material.subsurfaceRadius);
-    material.subsurfaceScale = 0.05f * srMax(1e-4f, maxComponent(material.subsurfaceRadius));
+    // Arnold/MaterialX subsurface_scale is a multiplier on subsurface_radius (MFP).
+    float subsurfaceScale = 1.0f;
+    setFloat("subsurface_scale", subsurfaceScale);
+    material.subsurface = saturatef(material.subsurface);
+    material.subsurfaceScale = clampf(subsurfaceScale, 1e-4f, 10.0f);
 }
 
 #endif  // SOLSTICE_HAVE_MATERIALX
@@ -345,6 +354,16 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
               {{"base_color", "color3", "0.8, 0.8, 0.8"},
                {"specular_roughness", "float", "0.35"},
                {"metalness", "float", "0"},
+               {"specular", "float", "0.5"},
+               {"specular_IOR", "float", "1.5"},
+               {"transmission", "float", "0"},
+               {"opacity", "color3", "1, 1, 1"},
+               {"emission", "float", "0"},
+               {"emission_color", "color3", "1, 1, 1"},
+               {"subsurface", "float", "0"},
+               {"subsurface_color", "color3", "1, 0.75, 0.55"},
+               {"subsurface_radius", "color3", "1, 0.35, 0.2"},
+               {"subsurface_scale", "float", "1"},
                {"normal", "vector3", {}}}),
         entry("surfacematerial", "material", "PBR / Shading", {{"surfaceshader", "surfaceshader", {}}}),
     };
@@ -431,6 +450,7 @@ QString createDefaultMaterialXDocument() {
     ss->setInputValue("subsurface", 0.0f);
     ss->setInputValue("subsurface_color", mx::Color3(1.0f, 0.75f, 0.55f));
     ss->setInputValue("subsurface_radius", mx::Color3(1.0f, 0.35f, 0.2f));
+    ss->setInputValue("subsurface_scale", 1.0f);
 
     // Place nodes left-to-right like Houdini Solaris MaterialX.
     ss->setAttribute("xpos", "0.0");

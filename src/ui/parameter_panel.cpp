@@ -9,6 +9,7 @@
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QKeyEvent>
@@ -93,17 +94,109 @@ Vec3 displayColorToLinear(const QColor& color) {
                 srgbToLinear(float(color.blueF())));
 }
 
+double defaultSpinStep(double minimum, double maximum) {
+    const double span = maximum - minimum;
+    if (span <= 2.0) return 0.01;
+    if (span <= 20.0) return 0.1;
+    return 1.0;
+}
+
 NoWheelDoubleSpinBox* makeDoubleSpin(double value, double minimum, double maximum) {
     auto* spin = new NoWheelDoubleSpinBox();
     spin->setRange(minimum, maximum);
     spin->setDecimals(4);
-    spin->setSingleStep(1.0);
+    spin->setSingleStep(defaultSpinStep(minimum, maximum));
     spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     spin->setValue(value);
     spin->setKeyboardTracking(false);
-    spin->setMinimumWidth(72);
-    spin->setMaximumWidth(96);
+    spin->setMinimumWidth(56);
+    spin->setMaximumWidth(84);
     return spin;
+}
+
+QString prettyMaterialXLabel(const QString& name) {
+    static const QHash<QString, QString> special = {
+        {QStringLiteral("specular_IOR"), QStringLiteral("Specular IOR")},
+        {QStringLiteral("coat_IOR"), QStringLiteral("Coat IOR")},
+        {QStringLiteral("thin_film_IOR"), QStringLiteral("Thin Film IOR")},
+        {QStringLiteral("subsurface_scale"), QStringLiteral("Subsurface Scale")},
+    };
+    if (special.contains(name)) return special.value(name);
+
+    QStringList parts = name.split(QLatin1Char('_'), Qt::SkipEmptyParts);
+    for (QString& part : parts) {
+        if (part.compare(QLatin1String("ior"), Qt::CaseInsensitive) == 0) {
+            part = QStringLiteral("IOR");
+        } else if (part.compare(QLatin1String("rgb"), Qt::CaseInsensitive) == 0) {
+            part = QStringLiteral("RGB");
+        } else if (part.compare(QLatin1String("uv"), Qt::CaseInsensitive) == 0) {
+            part = QStringLiteral("UV");
+        } else if (!part.isEmpty()) {
+            part = part.left(1).toUpper() + part.mid(1).toLower();
+        }
+    }
+    return parts.join(QLatin1Char(' '));
+}
+
+// Arnold / Autodesk Standard Surface style UI ranges for MaterialX floats.
+void materialXFloatRange(const QString& name, double& lo, double& hi) {
+    const QString n = name.toLower();
+    if (n.endsWith(QLatin1String("_ior")) || n == QLatin1String("ior")) {
+        lo = 0.0;
+        hi = 5.0;
+        return;
+    }
+    if (n == QLatin1String("subsurface_scale") || n == QLatin1String("scale")) {
+        lo = 0.0;
+        hi = 10.0;
+        return;
+    }
+    if (n == QLatin1String("emission") || n.contains(QLatin1String("intensity")) ||
+        n.contains(QLatin1String("exposure"))) {
+        lo = 0.0;
+        hi = 10.0;
+        return;
+    }
+    if (n.contains(QLatin1String("anisotropy")) && n.contains(QLatin1String("subsurface"))) {
+        lo = -1.0;
+        hi = 1.0;
+        return;
+    }
+    if (n.contains(QLatin1String("metalness")) || n.contains(QLatin1String("roughness")) ||
+        n == QLatin1String("specular") || n == QLatin1String("base") || n == QLatin1String("transmission") ||
+        n == QLatin1String("subsurface") || n == QLatin1String("sheen") || n == QLatin1String("coat") ||
+        n == QLatin1String("mix") || n.contains(QLatin1String("opacity")) ||
+        n.contains(QLatin1String("weight"))) {
+        lo = 0.0;
+        hi = 1.0;
+        return;
+    }
+    if (n.contains(QLatin1String("rotation")) || n.contains(QLatin1String("anisotropy"))) {
+        lo = 0.0;
+        hi = 1.0;
+        return;
+    }
+    // Generic MaterialX floats — keep a usable authoring range (not ±1e6).
+    lo = -10.0;
+    hi = 10.0;
+}
+
+bool parseFloatList(const QString& value, QVector<double>& out, int expectedMin) {
+    out.clear();
+    const QStringList parts = value.split(QRegularExpression("[,\\s]+"), Qt::SkipEmptyParts);
+    for (const QString& part : parts) {
+        bool ok = false;
+        const double v = part.toDouble(&ok);
+        if (!ok) return false;
+        out.push_back(v);
+    }
+    return out.size() >= expectedMin;
+}
+
+QString formatFloatList(const QVector<double>& values) {
+    QStringList parts;
+    for (double v : values) parts << QString::number(v, 'g', 6);
+    return parts.join(QStringLiteral(", "));
 }
 
 NoWheelSpinBox* makeIntSpin(int value, int minimum, int maximum) {
@@ -325,27 +418,89 @@ void ParameterPanel::rebuildMaterialX() {
     auto* form = new QFormLayout(paramsBox);
     form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
-    auto parseColor3Value = [](const QString& value, float& r, float& g, float& b) {
-        const QStringList parts = value.split(QRegularExpression("[,\\s]+"), Qt::SkipEmptyParts);
-        if (parts.size() < 3) return false;
-        bool ok1 = false, ok2 = false, ok3 = false;
-        r = parts[0].toFloat(&ok1);
-        g = parts[1].toFloat(&ok2);
-        b = parts[2].toFloat(&ok3);
-        return ok1 && ok2 && ok3;
-    };
-    auto formatColor3 = [](float r, float g, float b) {
-        return QString("%1, %2, %3").arg(r, 0, 'g', 4).arg(g, 0, 'g', 4).arg(b, 0, 'g', 4);
+    auto makeComponentRow = [this](int count, const QVector<double>& values, double lo, double hi, bool showSwatch,
+                                   const QString& pickerTitle, const std::function<void(const QString&)>& commit) {
+        auto* row = new QWidget();
+        auto* layout = new QHBoxLayout(row);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(4);
+
+        QVector<QDoubleSpinBox*> spins;
+        spins.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            const double v = i < values.size() ? values[i] : (i < 3 ? 0.0 : 1.0);
+            auto* spin = makeDoubleSpin(std::clamp(v, lo, hi), lo, hi);
+            spin->setDecimals(3);
+            spin->setMaximumWidth(64);
+            spins.push_back(spin);
+            layout->addWidget(spin, 0);
+        }
+
+        auto pushValue = [spins, commit] {
+            QVector<double> out;
+            out.reserve(spins.size());
+            for (QDoubleSpinBox* spin : spins) out.push_back(spin->value());
+            commit(formatFloatList(out));
+        };
+
+        QPushButton* swatch = nullptr;
+        if (showSwatch) {
+            swatch = new QPushButton();
+            swatch->setFixedSize(28, 22);
+            swatch->setToolTip("Pick colour");
+            // Swatch on the right of the component fields (Houdini-like, mirrored).
+            layout->addWidget(swatch, 0);
+        }
+        layout->addStretch(1);
+
+        auto refreshSwatch = [spins, swatch] {
+            if (!swatch || spins.size() < 3) return;
+            swatch->setStyleSheet(
+                QString("background:%1; border:1px solid #222;")
+                    .arg(QColor::fromRgbF(qBound(0.0, spins[0]->value(), 1.0), qBound(0.0, spins[1]->value(), 1.0),
+                                          qBound(0.0, spins[2]->value(), 1.0))
+                             .name()));
+        };
+        refreshSwatch();
+
+        if (swatch) {
+            connect(swatch, &QPushButton::clicked, this, [this, spins, pushValue, refreshSwatch, pickerTitle] {
+                if (spins.size() < 3) return;
+                const QColor chosen = QColorDialog::getColor(
+                    QColor::fromRgbF(qBound(0.0, spins[0]->value(), 1.0), qBound(0.0, spins[1]->value(), 1.0),
+                                     qBound(0.0, spins[2]->value(), 1.0)),
+                    this, pickerTitle);
+                if (!chosen.isValid()) return;
+                QSignalBlocker b0(spins[0]);
+                QSignalBlocker b1(spins[1]);
+                QSignalBlocker b2(spins[2]);
+                spins[0]->setValue(chosen.redF());
+                spins[1]->setValue(chosen.greenF());
+                spins[2]->setValue(chosen.blueF());
+                refreshSwatch();
+                pushValue();
+            });
+        }
+
+        for (QDoubleSpinBox* spin : spins) {
+            connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                    [pushValue, refreshSwatch](double) {
+                        refreshSwatch();
+                        pushValue();
+                    });
+        }
+        return row;
     };
 
     for (const MaterialXInputParam& input : materialX_.inputs) {
         if (input.name.isEmpty()) continue;
+        const QString label = prettyMaterialXLabel(input.name);
 
         if (!input.nodename.isEmpty()) {
             auto* linked = new QLabel("← " + input.nodename);
             linked->setStyleSheet("color: #8eb7ff;");
             linked->setToolTip("Connected input (disconnect the wire to edit a constant value)");
-            form->addRow(input.name, linked);
+            form->addRow(label, linked);
             continue;
         }
 
@@ -374,7 +529,7 @@ void ParameterPanel::rebuildMaterialX() {
             });
             rowLayout->addWidget(edit, 1);
             rowLayout->addWidget(browse);
-            form->addRow(input.name, row);
+            form->addRow(label, row);
             continue;
         }
 
@@ -383,73 +538,96 @@ void ParameterPanel::rebuildMaterialX() {
             box->setChecked(input.value == "true" || input.value == "1");
             connect(box, &QCheckBox::toggled, this,
                     [commit](bool checked) { commit(checked ? "true" : "false"); });
-            form->addRow(input.name, box);
+            form->addRow(label, box);
             continue;
         }
 
         if (type == "float" || type == "integer" || type == "int") {
             const bool isInt = type.startsWith("int");
-            const double lo = isInt ? -1.0e6 : -1.0e6;
-            const double hi = 1.0e6;
-            auto* spin = makeDoubleSpin(input.value.toDouble(), lo, hi);
+            double lo = -10.0;
+            double hi = 10.0;
+            if (isInt) {
+                lo = -1000.0;
+                hi = 1000.0;
+            } else {
+                materialXFloatRange(input.name, lo, hi);
+            }
+            double value = input.value.toDouble();
+            if (!std::isfinite(value)) value = lo;
+            // Clamp absurd leftovers from the old ±1e6 sliders into a usable range.
+            value = std::clamp(value, lo, hi);
+            auto* spin = makeDoubleSpin(value, lo, hi);
             spin->setDecimals(isInt ? 0 : 4);
             const QString inputType = input.type;
-            form->addRow(input.name, makeSpinSliderRow(spin, spin->value(), lo, hi,
-                                                       [commit, inputType](double value) {
-                                                           commit(inputType.startsWith("int")
-                                                                      ? QString::number(int(std::lround(value)))
-                                                                      : QString::number(value, 'g', 6));
-                                                       }));
+            form->addRow(label, makeSpinSliderRow(spin, value, lo, hi, [commit, inputType](double v) {
+                             commit(inputType.startsWith("int") ? QString::number(int(std::lround(v)))
+                                                                : QString::number(v, 'g', 6));
+                         }));
             continue;
         }
 
-        if (type == "color3" || type == "color4" || type == "vector3") {
-            float r = 1, g = 1, b = 1;
-            parseColor3Value(input.value, r, g, b);
-            auto* row = new QWidget();
-            auto* rowLayout = new QHBoxLayout(row);
-            rowLayout->setContentsMargins(0, 0, 0, 0);
-            auto* edit = new QLineEdit(input.value);
-            auto* swatch = new QPushButton();
-            swatch->setFixedSize(28, 22);
-            auto updateSwatch = [swatch](float rr, float gg, float bb) {
-                swatch->setStyleSheet(QString("background:%1; border:1px solid #222;")
-                                          .arg(QColor::fromRgbF(qBound(0.0, double(rr), 1.0),
-                                                                qBound(0.0, double(gg), 1.0),
-                                                                qBound(0.0, double(bb), 1.0))
-                                                   .name()));
-            };
-            updateSwatch(r, g, b);
-            connect(edit, &QLineEdit::editingFinished, this, [edit, commit, updateSwatch, parseColor3Value] {
-                float rr = 1, gg = 1, bb = 1;
-                parseColor3Value(edit->text(), rr, gg, bb);
-                updateSwatch(rr, gg, bb);
-                commit(edit->text().trimmed());
-            });
-            connect(swatch, &QPushButton::clicked, this,
-                    [this, edit, commit, updateSwatch, parseColor3Value, formatColor3, inputName] {
-                        float rr = 1, gg = 1, bb = 1;
-                        parseColor3Value(edit->text(), rr, gg, bb);
-                        const QColor chosen = QColorDialog::getColor(
-                            QColor::fromRgbF(qBound(0.0, double(rr), 1.0), qBound(0.0, double(gg), 1.0),
-                                             qBound(0.0, double(bb), 1.0)),
-                            this, "Pick " + inputName);
-                        if (!chosen.isValid()) return;
-                        const QString value =
-                            formatColor3(float(chosen.redF()), float(chosen.greenF()), float(chosen.blueF()));
-                        edit->setText(value);
-                        updateSwatch(float(chosen.redF()), float(chosen.greenF()), float(chosen.blueF()));
-                        commit(value);
-                    });
-            rowLayout->addWidget(edit, 1);
-            rowLayout->addWidget(swatch);
-            form->addRow(input.name, row);
+        if (type == "color3" || type == "color4" || type.startsWith("vector") || type.startsWith("matrix")) {
+            int count = 3;
+            if (type == "color4" || type == "vector4") count = 4;
+            else if (type == "vector2") count = 2;
+            else if (type == "matrix33") count = 9;
+            else if (type == "matrix44") count = 16;
+            else if (type.startsWith("vector") && type.size() > 6) {
+                bool ok = false;
+                const int n = type.mid(6).toInt(&ok);
+                if (ok && n > 0) count = n;
+            }
+
+            QVector<double> values;
+            if (!parseFloatList(input.value, values, 1)) {
+                values = QVector<double>(count, type.startsWith("color") ? 1.0 : 0.0);
+            }
+            while (values.size() < count) values.push_back(type.startsWith("color") ? 1.0 : 0.0);
+
+            const bool isColor = type.startsWith("color");
+            const double lo = isColor ? 0.0 : -10.0;
+            const double hi = isColor ? 1.0 : 10.0;
+            // subsurface_radius is authored 0..1 relative RGB radii (Arnold).
+            const double compLo = (input.name == QLatin1String("subsurface_radius")) ? 0.0 : lo;
+            const double compHi = (input.name == QLatin1String("subsurface_radius")) ? 1.0 : hi;
+
+            if (count <= 4) {
+                form->addRow(label, makeComponentRow(count, values, compLo, compHi, isColor,
+                                                     "Pick " + label, commit));
+            } else {
+                // Matrices: compact grid of component fields.
+                auto* row = new QWidget();
+                auto* grid = new QGridLayout(row);
+                grid->setContentsMargins(0, 0, 0, 0);
+                grid->setHorizontalSpacing(3);
+                grid->setVerticalSpacing(3);
+                const int dim = (count == 9) ? 3 : 4;
+                QVector<QDoubleSpinBox*> spins;
+                spins.reserve(count);
+                for (int i = 0; i < count; ++i) {
+                    auto* spin = makeDoubleSpin(std::clamp(values[i], -10.0, 10.0), -10.0, 10.0);
+                    spin->setDecimals(3);
+                    spin->setMaximumWidth(58);
+                    spins.push_back(spin);
+                    grid->addWidget(spin, i / dim, i % dim);
+                }
+                auto pushValue = [spins, commit] {
+                    QVector<double> out;
+                    for (QDoubleSpinBox* spin : spins) out.push_back(spin->value());
+                    commit(formatFloatList(out));
+                };
+                for (QDoubleSpinBox* spin : spins) {
+                    connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                            [pushValue](double) { pushValue(); });
+                }
+                form->addRow(label, row);
+            }
             continue;
         }
 
         auto* edit = new QLineEdit(input.value);
         connect(edit, &QLineEdit::editingFinished, this, [edit, commit] { commit(edit->text().trimmed()); });
-        form->addRow(input.name, edit);
+        form->addRow(label, edit);
     }
 
     contentLayout_->addWidget(paramsBox);

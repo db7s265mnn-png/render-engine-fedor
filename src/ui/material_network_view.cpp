@@ -106,6 +106,7 @@ QString fallbackDefaultDocument() {
         "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\"/>\n"
         "    <input name=\"specular_roughness\" type=\"float\" value=\"0.35\"/>\n"
         "    <input name=\"metalness\" type=\"float\" value=\"0\"/>\n"
+        "    <input name=\"subsurface_scale\" type=\"float\" value=\"1\"/>\n"
         "  </standard_surface>\n"
         "  <surfacematerial name=\"surface\" type=\"material\" xpos=\"4\" ypos=\"0\">\n"
         "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
@@ -539,7 +540,7 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
                 static const QStringList keep = {"base_color", "specular_roughness", "metalness", "specular",
                                                  "specular_IOR", "transmission", "opacity", "emission",
                                                  "emission_color", "normal", "subsurface", "subsurface_color",
-                                                 "subsurface_radius"};
+                                                 "subsurface_radius", "subsurface_scale"};
                 if (!keep.contains(def.name)) continue;
             }
             inputs.push_back({def.name, def.type, def.value, {}});
@@ -567,6 +568,16 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         inputs.push_back({"base_color", "color3", "0.8, 0.8, 0.8", {}});
         inputs.push_back({"specular_roughness", "float", "0.35", {}});
         inputs.push_back({"metalness", "float", "0", {}});
+        inputs.push_back({"specular", "float", "0.5", {}});
+        inputs.push_back({"specular_IOR", "float", "1.5", {}});
+        inputs.push_back({"transmission", "float", "0", {}});
+        inputs.push_back({"opacity", "color3", "1, 1, 1", {}});
+        inputs.push_back({"emission", "float", "0", {}});
+        inputs.push_back({"emission_color", "color3", "1, 1, 1", {}});
+        inputs.push_back({"subsurface", "float", "0", {}});
+        inputs.push_back({"subsurface_color", "color3", "1, 0.75, 0.55", {}});
+        inputs.push_back({"subsurface_radius", "color3", "1, 0.35, 0.2", {}});
+        inputs.push_back({"subsurface_scale", "float", "1", {}});
         inputs.push_back({"normal", "vector3", {}, {}});
     } else if (category == "surfacematerial") {
         inputs.push_back({"surfaceshader", "surfaceshader", {}, {}});
