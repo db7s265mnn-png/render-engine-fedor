@@ -1,5 +1,5 @@
-// Houdini style network editor: nodes flow from top to bottom, Tab opens the
-// node creation menu, and the display flag picks what the render view shows.
+// Houdini-style Scene Network: nodes flow top to bottom, Tab opens the
+// searchable create menu, and the display flag picks what the render view shows.
 #pragma once
 
 #include <QGraphicsScene>

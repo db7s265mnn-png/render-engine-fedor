@@ -64,6 +64,19 @@ public:
     using PickCallback = std::function<bool(float u, float v, Vec3& hitPoint)>;
     void setPickCallback(PickCallback callback) { pickCallback_ = std::move(callback); }
 
+    // Returns world bounds for the current selection (false → frame whole scene).
+    using SelectionBoundsCallback = std::function<bool(Bounds3& outBounds)>;
+    void setSelectionBoundsCallback(SelectionBoundsCallback callback) {
+        selectionBoundsCallback_ = std::move(callback);
+    }
+    using SceneBoundsCallback = std::function<bool(Bounds3& outBounds)>;
+    void setSceneBoundsCallback(SceneBoundsCallback callback) { sceneBoundsCallback_ = std::move(callback); }
+
+    // Houdini-style framing: F frames selection (or scene), H frames all.
+    void frameBounds(const Bounds3& bounds);
+    void frameSelection();
+    void frameAll();
+
 signals:
     void cameraMoved();
     // Fired while dragging (values already written quietly — do not cook/IPR).
@@ -80,6 +93,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
 
 private:
     enum class GizmoAxis { None = 0, X, Y, Z, Center };
@@ -114,6 +128,8 @@ private:
     QString statusText_;
     ViewCamera camera_;
     PickCallback pickCallback_;
+    SelectionBoundsCallback selectionBoundsCallback_;
+    SceneBoundsCallback sceneBoundsCallback_;
     QPoint lastMousePosition_;
     int mode_ = 0;  // 0 none, 1 orbit, 2 pan, 3 dolly, 4 gizmo
     bool navigationEnabled_ = true;

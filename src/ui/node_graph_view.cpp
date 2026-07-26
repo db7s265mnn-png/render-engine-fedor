@@ -642,9 +642,13 @@ void NodeGraphView::keyPressEvent(QKeyEvent* event) {
             if (!panning_) viewport()->setCursor(Qt::OpenHandCursor);
             event->accept();
             return;
-        case Qt::Key_Tab:
+        case Qt::Key_Tab: {
+            const QPoint viewPos = mapFromGlobal(QCursor::pos());
+            if (viewport()->rect().contains(viewPos)) lastScenePosition_ = mapToScene(viewPos);
             createMenu_->popupAt(QCursor::pos());
+            event->accept();
             return;
+        }
         case Qt::Key_Delete:
         case Qt::Key_Backspace:
             deleteSelectedNodes();
@@ -743,7 +747,8 @@ void NodeGraphView::drawForeground(QPainter* painter, const QRectF& rect) {
     painter->setFont(font);
     painter->setPen(theme::textDim());
     painter->drawText(QRect(8, height() - 22, width() - 16, 18), Qt::AlignLeft,
-                      "Tab: add   MMB/Alt+LMB/Space+LMB: pan   Wheel: zoom   D: display   B: bypass   Del: delete");
+                      "Tab: add   F: frame   MMB/Alt+LMB/Space+LMB: pan   Wheel: zoom   D: display   B: bypass   "
+                      "Del: delete");
 }
 
 }  // namespace sol

@@ -3,12 +3,15 @@
 #include <QContextMenuEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFocusEvent>
 #include <QGraphicsPathItem>
 #include <QGraphicsScene>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QLineF>
+#include <QListWidget>
 #include <QMap>
 #include <QMenu>
 #include <QMouseEvent>
@@ -48,6 +51,122 @@ const QVector<MaterialXNodeCatalogEntry>& catalogCache() {
     static const QVector<MaterialXNodeCatalogEntry> cache = listMaterialXNodeCatalog();
     return cache;
 }
+
+}  // namespace
+
+// Searchable MaterialX node creation popup (same interaction as Scene Network Tab menu).
+class MaterialXCreateMenu : public QWidget {
+    Q_OBJECT
+public:
+    explicit MaterialXCreateMenu(QWidget* parent = nullptr) : QWidget(parent, Qt::Popup) {
+        setObjectName("MaterialXCreateMenu");
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(6, 6, 6, 6);
+        layout->setSpacing(4);
+        search_ = new QLineEdit(this);
+        search_->setPlaceholderText("Add MaterialX node...");
+        layout->addWidget(search_);
+        list_ = new QListWidget(this);
+        list_->setUniformItemSizes(true);
+        layout->addWidget(list_);
+        setMinimumWidth(320);
+        setMinimumHeight(360);
+        connect(search_, &QLineEdit::textChanged, this, [this](const QString& text) { populate(text); });
+        connect(search_, &QLineEdit::returnPressed, this, &MaterialXCreateMenu::accept);
+        connect(list_, &QListWidget::itemActivated, this, &MaterialXCreateMenu::accept);
+        connect(list_, &QListWidget::itemClicked, this, &MaterialXCreateMenu::accept);
+    }
+
+    void popupAt(QPoint globalPosition) {
+        search_->clear();
+        populate(QString());
+        move(globalPosition);
+        show();
+        search_->setFocus();
+    }
+
+signals:
+    void nodeChosen(const QString& category, const QString& type);
+
+protected:
+    void keyPressEvent(QKeyEvent* event) override {
+        switch (event->key()) {
+            case Qt::Key_Escape:
+                hide();
+                return;
+            case Qt::Key_Down:
+            case Qt::Key_Up: {
+                const int direction = event->key() == Qt::Key_Down ? 1 : -1;
+                int row = list_->currentRow();
+                for (int i = 0; i < list_->count(); ++i) {
+                    row += direction;
+                    if (row < 0 || row >= list_->count()) break;
+                    if (list_->item(row)->flags() & Qt::ItemIsSelectable) {
+                        list_->setCurrentRow(row);
+                        break;
+                    }
+                }
+                return;
+            }
+            default:
+                break;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
+    void focusOutEvent(QFocusEvent* event) override {
+        QWidget::focusOutEvent(event);
+        hide();
+    }
+
+private:
+    void populate(const QString& filter) {
+        list_->clear();
+        QString currentGroup;
+        for (const MaterialXNodeCatalogEntry& entry : catalogCache()) {
+            if (!filter.isEmpty() && !entry.label.contains(filter, Qt::CaseInsensitive) &&
+                !entry.category.contains(filter, Qt::CaseInsensitive) &&
+                !entry.type.contains(filter, Qt::CaseInsensitive) &&
+                !entry.group.contains(filter, Qt::CaseInsensitive))
+                continue;
+            if (currentGroup != entry.group) {
+                currentGroup = entry.group;
+                auto* header = new QListWidgetItem(entry.group.toUpper());
+                header->setFlags(Qt::NoItemFlags);
+                header->setForeground(theme::accent());
+                list_->addItem(header);
+            }
+            auto* item = new QListWidgetItem("   " + entry.label);
+            item->setData(Qt::UserRole, entry.category);
+            item->setData(Qt::UserRole + 1, entry.type);
+            item->setToolTip(entry.category + " / " + entry.type);
+            list_->addItem(item);
+        }
+        for (int i = 0; i < list_->count(); ++i) {
+            if (list_->item(i)->flags() & Qt::ItemIsSelectable) {
+                list_->setCurrentRow(i);
+                break;
+            }
+        }
+    }
+
+    void accept() {
+        QListWidgetItem* item = list_->currentItem();
+        if (item && (item->flags() & Qt::ItemIsSelectable)) {
+            const QString category = item->data(Qt::UserRole).toString();
+            const QString type = item->data(Qt::UserRole + 1).toString();
+            hide();
+            if (!category.isEmpty()) emit nodeChosen(category, type);
+            return;
+        }
+        hide();
+    }
+
+    QLineEdit* search_ = nullptr;
+    QListWidget* list_ = nullptr;
+};
+
+namespace {
 
 const MaterialXNodeCatalogEntry* findCatalogEntry(const QString& category, const QString& type = QString()) {
     const QVector<MaterialXNodeCatalogEntry>& catalog = catalogCache();
@@ -409,7 +528,7 @@ void addWire(QGraphicsScene* scene, QPointF from, QPointF to, const QString& sou
 
 MaterialNetworkGraphView::MaterialNetworkGraphView(QWidget* parent) : QGraphicsView(parent) {
     graphScene_ = new QGraphicsScene(this);
-    // Large scene rect (same idea as Network Editor) so pan works freely on both axes.
+    // Large scene rect (same idea as Scene Network) so pan works freely on both axes.
     graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
     setScene(graphScene_);
     setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
@@ -420,10 +539,15 @@ MaterialNetworkGraphView::MaterialNetworkGraphView(QWidget* parent) : QGraphicsV
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setDragMode(QGraphicsView::RubberBandDrag);
     setFocusPolicy(Qt::StrongFocus);
+    setMouseTracking(true);
     setMinimumHeight(180);
     lastMousePoint_ = viewport()->rect().center();
     selectionConnection_ = connect(graphScene_, &QGraphicsScene::selectionChanged, this,
                                    &MaterialNetworkGraphView::emitSelectionChanged);
+
+    createMenu_ = new MaterialXCreateMenu(this);
+    connect(createMenu_, &MaterialXCreateMenu::nodeChosen, this,
+            &MaterialNetworkGraphView::onCreateMenuChosen);
     rebuild();
 }
 
@@ -863,22 +987,36 @@ void MaterialNetworkGraphView::wheelEvent(QWheelEvent* event) {
 }
 
 void MaterialNetworkGraphView::keyPressEvent(QKeyEvent* event) {
-    if (event->key() == Qt::Key_Space && !event->isAutoRepeat()) {
-        spacePressed_ = true;
-        if (!panning_) viewport()->setCursor(Qt::OpenHandCursor);
-        event->accept();
-        return;
-    }
-    if (event->key() == Qt::Key_Tab) {
-        const QPoint position = viewport()->rect().contains(lastMousePoint_) ? lastMousePoint_ : viewport()->rect().center();
-        showAddNodeMenu(position);
-        event->accept();
-        return;
-    }
-    if (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace) {
-        deleteSelectedNodes();
-        event->accept();
-        return;
+    switch (event->key()) {
+        case Qt::Key_Space:
+            if (!event->isAutoRepeat()) {
+                spacePressed_ = true;
+                if (!panning_) viewport()->setCursor(Qt::OpenHandCursor);
+            }
+            event->accept();
+            return;
+        case Qt::Key_Tab: {
+            const QPoint position =
+                viewport()->rect().contains(lastMousePoint_) ? lastMousePoint_ : viewport()->rect().center();
+            showAddNodeMenu(position);
+            event->accept();
+            return;
+        }
+        case Qt::Key_F:
+            frameGraph();
+            event->accept();
+            return;
+        case Qt::Key_Up:
+            emit upRequested();
+            event->accept();
+            return;
+        case Qt::Key_Delete:
+        case Qt::Key_Backspace:
+            deleteSelectedNodes();
+            event->accept();
+            return;
+        default:
+            break;
     }
     QGraphicsView::keyPressEvent(event);
 }
@@ -916,33 +1054,19 @@ void MaterialNetworkGraphView::contextMenuEvent(QContextMenuEvent* event) {
 
 void MaterialNetworkGraphView::showAddNodeMenu(const QPoint& viewPosition) {
     if (!materialNode_) {
-        emit statusMessage("Select a Material node in the Network Editor");
+        emit statusMessage("Select a Material node in the Scene Network");
         return;
     }
-
-    QMenu menu(this);
-    QMap<QString, QMenu*> groupMenus;
-    const QVector<MaterialXNodeCatalogEntry>& catalog = catalogCache();
-    if (catalog.isEmpty()) {
+    if (catalogCache().isEmpty()) {
         emit statusMessage("MaterialX node catalog is empty");
         return;
     }
+    pendingCreateScenePos_ = mapToScene(viewPosition);
+    if (createMenu_) createMenu_->popupAt(viewport()->mapToGlobal(viewPosition));
+}
 
-    for (const MaterialXNodeCatalogEntry& entry : catalog) {
-        QMenu* groupMenu = groupMenus.value(entry.group);
-        if (!groupMenu) {
-            groupMenu = menu.addMenu(entry.group);
-            groupMenus.insert(entry.group, groupMenu);
-        }
-        QAction* action = groupMenu->addAction(entry.label);
-        action->setData(QStringList{entry.category, entry.type});
-    }
-
-    QAction* chosen = menu.exec(viewport()->mapToGlobal(viewPosition));
-    if (!chosen) return;
-    const QStringList data = chosen->data().toStringList();
-    if (data.size() < 2) return;
-    addNode(data[0], data[1], mapToScene(viewPosition));
+void MaterialNetworkGraphView::onCreateMenuChosen(const QString& category, const QString& type) {
+    addNode(category, type, pendingCreateScenePos_);
 }
 
 void MaterialNetworkGraphView::addNode(const QString& category, const QString& type, QPointF scenePosition) {
@@ -1037,7 +1161,7 @@ void MaterialNetworkGraphView::mousePressEvent(QMouseEvent* event) {
             event->accept();
             return;
         }
-        // Pull existing wire off an input (rewire), matching the Network Editor.
+        // Pull existing wire off an input (rewire), matching the Scene Network.
         if (const InputHit hit = inputPortAt(graphScene_, mapToScene(event->pos()), kPortHitRadius * 1.8);
             hit.item) {
             const int modelInput = hit.item->inputModelIndex(hit.inputIndex);
@@ -1228,12 +1352,12 @@ void MaterialNetworkGraphView::syncNodePositions() {
         }
     }
     if (!changed) return;
-    // Persist xpos/ypos only — no cook, no scene rebuild (matches Network Editor).
+    // Persist xpos/ypos only — no cook, no scene rebuild (matches Scene Network).
     persistLayoutQuietly();
 }
 
 bool MaterialNetworkGraphView::shouldBeginPan(const QMouseEvent* event) const {
-    // Match the Network Editor (Houdini-style):
+    // Match the Scene Network (Houdini-style):
     //   MMB drag       — pan
     //   Alt+LMB drag   — pan
     //   Space+LMB drag — pan
@@ -1358,7 +1482,8 @@ void MaterialNetworkGraphView::drawForeground(QPainter* painter, const QRectF& r
     painter->setFont(font);
     painter->setPen(theme::textDim());
     painter->drawText(QRect(8, height() - 22, width() - 16, 18), Qt::AlignLeft,
-                      "Tab: add   MMB/Alt+LMB/Space+LMB: pan   Wheel: zoom   Del: delete   image: file");
+                      "Tab: add   F: frame   ↑: up   MMB/Alt+LMB/Space+LMB: pan   Wheel: zoom   Del: delete   "
+                      "image: file");
 }
 
 void MaterialNetworkGraphView::emitSelectionChanged() { emit selectionChanged(); }
@@ -1613,15 +1738,20 @@ void MaterialContainerGraphView::wheelEvent(QWheelEvent* event) {
 }
 
 void MaterialContainerGraphView::keyPressEvent(QKeyEvent* event) {
-    if (event->key() == Qt::Key_Space) {
-        spacePressed_ = true;
-        event->accept();
-        return;
-    }
-    if (event->key() == Qt::Key_F) {
-        frameGraph();
-        event->accept();
-        return;
+    switch (event->key()) {
+        case Qt::Key_Space:
+            if (!event->isAutoRepeat()) {
+                spacePressed_ = true;
+                if (!panning_) viewport()->setCursor(Qt::OpenHandCursor);
+            }
+            event->accept();
+            return;
+        case Qt::Key_F:
+            frameGraph();
+            event->accept();
+            return;
+        default:
+            break;
     }
     QGraphicsView::keyPressEvent(event);
 }
@@ -1727,7 +1857,7 @@ void MaterialContainerGraphView::drawBackground(QPainter* painter, const QRectF&
         painter->setFont(font);
         painter->setPen(theme::textDim());
         painter->drawText(QRect(0, 0, width(), height()), Qt::AlignCenter,
-                          "No material nodes in the scene\nAdd a Material node in the Network Editor");
+                          "No material nodes in the scene\nAdd a Material node in the Scene Network");
     }
 }
 
@@ -1776,6 +1906,7 @@ MaterialNetworkView::MaterialNetworkView(QWidget* parent) : QWidget(parent) {
     connect(graphView_, &MaterialNetworkGraphView::statusMessage, this, &MaterialNetworkView::statusMessage);
     connect(graphView_, &MaterialNetworkGraphView::selectionChanged, this,
             &MaterialNetworkView::onMaterialXSelectionChanged);
+    connect(graphView_, &MaterialNetworkGraphView::upRequested, this, &MaterialNetworkView::goUp);
 
     updateChrome();
 }
@@ -1902,3 +2033,5 @@ bool MaterialNetworkView::setSelectedMaterialXInput(const QString& inputName, co
 }
 
 }  // namespace sol
+
+#include "material_network_view.moc"

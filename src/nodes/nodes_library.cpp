@@ -8,6 +8,7 @@
 #include <map>
 
 #include "core/log.h"
+#include "core/units.h"
 #include "io/alembic_loader.h"
 #include "io/image_io.h"
 #include "io/materialx_graph.h"
@@ -57,7 +58,7 @@ public:
         addParameter(Parameter::makeFloat("time", "Time", 0.0, 0.0, 100.0, false)
                          .withTooltip("Sample time in seconds; the nearest stored sample is used"));
         addParameter(Parameter::makeFloat("importscale", "Import Scale", 1.0, 0.001, 100.0, false)
-                         .withTooltip("Unit conversion applied to the imported point positions"));
+                         .withTooltip(units::importScaleTooltip()));
         addParameter(Parameter::makeBool("importnormals", "Import Normals", true));
         addParameter(Parameter::makeBool("importuvs", "Import UVs", true));
         addTransformParameters(*this);
@@ -132,7 +133,8 @@ public:
                          .withTooltip("Scene graph location the imported prims are placed under"));
         addParameter(Parameter::makeString("pathfilter", "Path Filter", "")
                          .withTooltip("Only import prims whose path matches this glob"));
-        addParameter(Parameter::makeFloat("importscale", "Import Scale", 1.0, 0.001, 100.0, false));
+        addParameter(Parameter::makeFloat("importscale", "Import Scale", 1.0, 0.001, 100.0, false)
+                         .withTooltip(units::importScaleTooltip()));
         addParameter(Parameter::makeBool("importnormals", "Import Normals", true));
         addParameter(Parameter::makeBool("importuvs", "Import UVs", true));
         addTransformParameters(*this);
@@ -547,16 +549,25 @@ class CameraNode : public Node {
 public:
     explicit CameraNode(const QString& name) : Node("camera", name) {
         addParameter(Parameter::makeString("primname", "Prim Name", name));
-        addParameter(Parameter::makeFloat("focal", "Focal Length (mm)", 50.0, 8.0, 300.0).withGroup("Lens"));
-        addParameter(Parameter::makeFloat("aperture", "Sensor Width (mm)", 36.0, 4.0, 100.0).withGroup("Lens"));
+        addParameter(Parameter::makeFloat("focal", "Focal Length (mm)", 50.0, 8.0, 300.0)
+                         .withGroup("Lens")
+                         .withTooltip("Focal length in millimetres (Houdini camera convention)"));
+        addParameter(Parameter::makeFloat("aperture", "Sensor Width (mm)", 36.0, 4.0, 100.0)
+                         .withGroup("Lens")
+                         .withTooltip("Horizontal aperture in millimetres"));
         addParameter(Parameter::makeFloat("fstop", "F-Stop", 0.0, 0.0, 32.0)
                          .withGroup("Lens")
                          .withTooltip("0 disables depth of field"));
         addParameter(Parameter::makeFloat("focusdistance", "Focus Distance", 5.0, 0.01, 1000.0, false)
-                         .withGroup("Lens"));
+                         .withGroup("Lens")
+                         .withTooltip(units::focusDistanceTooltip()));
         addParameter(Parameter::makeBool("uselookat", "Use Look At", true).withGroup("Placement"));
-        addParameter(Parameter::makeVec3("eye", "Eye", Vec3(6.0f, 4.0f, 9.0f)).withGroup("Placement"));
-        addParameter(Parameter::makeVec3("target", "Look At", Vec3(0.0f, 1.0f, 0.0f)).withGroup("Placement"));
+        addParameter(Parameter::makeVec3("eye", "Eye", Vec3(6.0f, 4.0f, 9.0f))
+                         .withGroup("Placement")
+                         .withTooltip(units::lengthTooltip()));
+        addParameter(Parameter::makeVec3("target", "Look At", Vec3(0.0f, 1.0f, 0.0f))
+                         .withGroup("Placement")
+                         .withTooltip(units::lengthTooltip()));
         addParameter(Parameter::makeVec3("up", "Up", Vec3(0.0f, 1.0f, 0.0f)).withGroup("Placement"));
         addTransformParameters(*this, Vec3(0.0f, 2.0f, 8.0f));
     }

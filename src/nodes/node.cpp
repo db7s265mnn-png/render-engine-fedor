@@ -1,6 +1,7 @@
 #include "nodes/node.h"
 
 #include "core/log.h"
+#include "core/units.h"
 
 namespace sol {
 
@@ -130,8 +131,12 @@ void Node::setInputLabels(QStringList labels) {
 // ---------------------------------------------------------------------------
 
 void addTransformParameters(Node& node, Vec3 translate, Vec3 rotate, Vec3 scale) {
-    node.addParameter(Parameter::makeVec3("translate", "Translate", translate).withGroup("Transform"));
-    node.addParameter(Parameter::makeVec3("rotate", "Rotate", rotate).withGroup("Transform"));
+    node.addParameter(Parameter::makeVec3("translate", "Translate", translate)
+                          .withGroup("Transform")
+                          .withTooltip(units::lengthTooltip()));
+    node.addParameter(Parameter::makeVec3("rotate", "Rotate", rotate)
+                          .withGroup("Transform")
+                          .withTooltip("Euler rotation in degrees (Houdini-compatible XYZ)"));
     node.addParameter(Parameter::makeVec3("scale", "Scale", scale).withGroup("Transform"));
     node.addParameter(Parameter::makeFloat("uniformscale", "Uniform Scale", 1.0, 0.001, 100.0, false)
                           .withGroup("Transform"));

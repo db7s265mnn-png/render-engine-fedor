@@ -15,6 +15,8 @@
 class QGraphicsPathItem;
 class QGraphicsScene;
 class QLabel;
+class QLineEdit;
+class QListWidget;
 class QMouseEvent;
 class QToolButton;
 class QVBoxLayout;
@@ -110,6 +112,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void drawBackground(QPainter* painter, const QRectF& rect) override;
+    bool focusNextPrevChild(bool next) override { return false; }
 
 private:
     void frameGraph();
@@ -164,6 +167,7 @@ signals:
     void materialLayoutChanged();
     void statusMessage(const QString& message);
     void selectionChanged();
+    void upRequested();
 
 protected:
     void showEvent(QShowEvent* event) override;
@@ -178,6 +182,7 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void drawBackground(QPainter* painter, const QRectF& rect) override;
     void drawForeground(QPainter* painter, const QRectF& rect) override;
+    bool focusNextPrevChild(bool next) override { return false; }
 
 private:
     void rebuild();
@@ -189,6 +194,7 @@ private:
     void writeModel(bool emitEdited);
     void frameGraph();
     void showAddNodeMenu(const QPoint& viewPosition);
+    void onCreateMenuChosen(const QString& category, const QString& type);
     void addNode(const QString& category, const QString& type, QPointF scenePosition);
     void connectNodes(const QString& sourceName, const QString& targetName, int inputIndex);
     void disconnectInput(const QString& targetName, const QString& inputName);
@@ -224,6 +230,8 @@ private:
     // MaterialX geominfo udimset (tile ids). Empty → discover from disk at cook.
     QVector<int> udimSet_;
     QGraphicsPathItem* previewWire_ = nullptr;
+    class MaterialXCreateMenu* createMenu_ = nullptr;
+    QPointF pendingCreateScenePos_;
     bool pendingFrame_ = false;
     bool panning_ = false;
     bool spacePressed_ = false;

@@ -19,9 +19,11 @@
 #include "app/default_scene.h"
 #include "app/document.h"
 #include "core/log.h"
+#include "core/math.h"
 #include "io/image_io.h"
 #include "nodes/node_registry.h"
 #include "render/scene_picker.h"
+#include "scene/scene.h"
 #include "solstice_config.h"
 #include "ui/log_panel.h"
 #include "ui/material_network_view.h"
@@ -93,6 +95,42 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         camera.focusDistance = renderView_->camera().distance;
         return pickSceneSurface(scene_, camera, scene_->settings.resolutionX, scene_->settings.resolutionY, u, v,
                                 hit);
+    });
+
+    renderView_->setSceneBoundsCallback([this](Bounds3& out) -> bool {
+        if (!scene_ || !scene_->bounds().valid()) return false;
+        out = scene_->bounds();
+        return true;
+    });
+    renderView_->setSelectionBoundsCallback([this](Bounds3& out) -> bool {
+        if (!scene_) return false;
+        Node* target = renderView_->transformTarget();
+        if (!target) return false;
+        const std::string source = target->name().toStdString();
+        Bounds3 bounds;
+        bool found = false;
+        for (const PrimRecord& prim : scene_->prims) {
+            if (prim.sourceNode != source) continue;
+            if (prim.instanceIndex < 0 || prim.instanceIndex >= int(scene_->instances.size())) continue;
+            const InstanceData& inst = scene_->instances[size_t(prim.instanceIndex)];
+            if (inst.meshIndex < 0 || inst.meshIndex >= int(scene_->meshes.size())) continue;
+            const MeshPtr& mesh = scene_->meshes[size_t(inst.meshIndex)];
+            if (!mesh || !mesh->bounds.valid()) continue;
+            bounds.extend(transformBounds(inst.xform, mesh->bounds));
+            found = true;
+        }
+        if (!found) {
+            // Transformable node without cooked geo — frame its translate origin.
+            if (Parameter* t = target->findParameter("translate")) {
+                const Vec3 p = t->toVec3();
+                bounds.extend(p - Vec3(0.25f));
+                bounds.extend(p + Vec3(0.25f));
+                found = true;
+            }
+        }
+        if (!found) return false;
+        out = bounds;
+        return true;
     });
 
     // The render thread only flags that new samples exist; the UI timer picks
@@ -216,10 +254,10 @@ void MainWindow::createDocks() {
     setDockOptions(QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks |
                    QMainWindow::AllowTabbedDocks);
     // Keep the network pane at the bottom of the window, but put the tab bar
-    // (Network Editor / Material Network / Log) on TOP of that pane.
+    // (Scene Network / Material Network / Log) on TOP of that pane.
     setTabPosition(Qt::BottomDockWidgetArea, QTabWidget::North);
 
-    auto* networkDock = new QDockWidget("Network Editor", this);
+    auto* networkDock = new QDockWidget("Scene Network", this);
     networkDock->setObjectName("networkDock");
     networkView_ = new NodeGraphView(networkDock);
     networkView_->setGraph(&graph_);
@@ -271,7 +309,7 @@ void MainWindow::createDocks() {
     };
 
     connect(networkView_, &NodeGraphView::nodeSelected, this, [this, syncTransformTarget](Node* node) {
-        // Network Editor is the selection source — don't let Material Network steal it.
+        // Scene Network is the selection source — don't let Material Network steal it.
         parameterPanel_->setNode(node);
         syncTransformTarget(node);
     });
@@ -665,17 +703,27 @@ void MainWindow::onShowAbout() {
 
 void MainWindow::onShowShortcuts() {
     QMessageBox::information(this, "Keyboard shortcuts",
-                             "Network editor\n"
-                             "  Tab           add node\n"
+                             "Scene Network\n"
+                             "  Tab           add node (search)\n"
                              "  D             set display flag\n"
                              "  B             bypass\n"
                              "  F             frame all\n"
                              "  L             lay out selection\n"
                              "  Del           delete selection\n"
-                             "  MMB drag      pan (1:1)\n"
+                             "  MMB / Alt+LMB / Space+LMB   pan\n"
+                             "  Wheel         zoom to cursor\n\n"
+                             "Material Network\n"
+                             "  Tab           add MaterialX node (search)\n"
+                             "  F             frame all\n"
+                             "  Del           delete selection\n"
+                             "  ↑             return to materials level\n"
+                             "  Double-click  dive into material container\n"
+                             "  MMB / Alt+LMB / Space+LMB   pan\n"
                              "  Wheel         zoom to cursor\n\n"
                              "Render view (Houdini style)\n"
-                             "  T / R / S     translate / rotate / scale (viewport buttons)\n"
+                             "  F             frame selected object\n"
+                             "  H / Home      frame all\n"
+                             "  T / R / S     translate / rotate / scale\n"
                              "  Q             select (hide gizmo)\n"
                              "  LMB on gizmo  transform (IPR restarts on release)\n"
                              "  Alt + LMB     tumble (pivot on geometry under cursor)\n"
@@ -683,9 +731,9 @@ void MainWindow::onShowShortcuts() {
                              "  MMB           pan\n"
                              "  Alt + RMB     dolly\n"
                              "  Wheel         dolly\n\n"
-                             "Material Network\n"
-                             "  Double-click  dive into material container\n"
-                             "  ↑             return to materials level\n\n"
+                             "Units\n"
+                             "  1 scene unit = 1 metre (Houdini MKS)\n"
+                             "  angles in degrees, focal length in millimetres\n\n"
                              "General\n"
                              "  F5            render\n"
                              "  Esc           stop\n"

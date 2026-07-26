@@ -323,7 +323,7 @@ void ParameterPanel::rebuild() {
     }
 
     if (!node_) {
-        auto* hint = new QLabel("No node selected.\n\nPress Tab in the network editor to add one,\n"
+        auto* hint = new QLabel("No node selected.\n\nPress Tab in the Scene Network to add one,\n"
                                 "or select a node in the Material Network.");
         hint->setStyleSheet("color: #969aa0;");
         hint->setWordWrap(true);

@@ -95,7 +95,7 @@ is present at runtime, the renderer logs a warning and falls back to Embree.
 
 | Panel | Purpose |
 | --- | --- |
-| Network Editor | the node graph; the node with the blue display flag is what gets rendered |
+| Scene Network | the node graph; the node with the blue display flag is what gets rendered |
 | Render View | progressive result, Alt+LMB orbit, MMB pan, wheel dolly |
 | Parameters | parameters of the selected node |
 | Scene Graph | prims produced by the cooked network |

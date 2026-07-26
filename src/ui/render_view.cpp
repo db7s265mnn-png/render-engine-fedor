@@ -4,6 +4,7 @@
 #include <QButtonGroup>
 #include <QDateTime>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -981,6 +982,87 @@ void RenderView::wheelEvent(QWheelEvent* event) {
     camera_.dolly(float(event->angleDelta().y()) * 0.28f * precision);
     emit cameraMoved();
     event->accept();
+}
+
+void RenderView::frameBounds(const Bounds3& bounds) {
+    Bounds3 b = bounds;
+    if (!b.valid()) {
+        b.extend(Vec3(-0.5f));
+        b.extend(Vec3(0.5f));
+    }
+    const Vec3 center = b.center();
+    const float radius = std::max(0.05f, b.radius());
+
+    // Match the viewport film back (50mm / 36mm) used for picking / projection.
+    constexpr float kFocalLength = 50.0f;
+    constexpr float kSensorWidth = 36.0f;
+    const QRect img = imageRect();
+    const float aspect = img.height() > 0 ? float(img.width()) / float(img.height()) : (16.0f / 9.0f);
+    const float sensorHeight = kSensorWidth / std::max(0.01f, aspect);
+    const float fovX = 2.0f * std::atan(0.5f * kSensorWidth / kFocalLength);
+    const float fovY = 2.0f * std::atan(0.5f * sensorHeight / kFocalLength);
+    const float fov = std::max(0.05f, std::min(fovX, fovY));
+    const float distance = radius / std::sin(fov * 0.5f) * 1.15f;
+
+    camera_.pivot = center;
+    camera_.distance = std::max(0.05f, distance);
+    // Keep current orbit angles — only reframe distance/pivot like Houdini F.
+    emit cameraMoved();
+    update();
+}
+
+void RenderView::frameSelection() {
+    Bounds3 bounds;
+    if (selectionBoundsCallback_ && selectionBoundsCallback_(bounds) && bounds.valid()) {
+        frameBounds(bounds);
+        return;
+    }
+    frameAll();
+}
+
+void RenderView::frameAll() {
+    Bounds3 bounds;
+    if (sceneBoundsCallback_ && sceneBoundsCallback_(bounds) && bounds.valid()) {
+        frameBounds(bounds);
+        return;
+    }
+    Bounds3 fallback;
+    fallback.extend(Vec3(-1.0f));
+    fallback.extend(Vec3(1.0f));
+    frameBounds(fallback);
+}
+
+void RenderView::keyPressEvent(QKeyEvent* event) {
+    switch (event->key()) {
+        case Qt::Key_F:
+            frameSelection();
+            event->accept();
+            return;
+        case Qt::Key_H:
+        case Qt::Key_Home:
+            frameAll();
+            event->accept();
+            return;
+        case Qt::Key_Q:
+            setTransformTool(TransformTool::Select);
+            event->accept();
+            return;
+        case Qt::Key_T:
+            setTransformTool(TransformTool::Translate);
+            event->accept();
+            return;
+        case Qt::Key_R:
+            setTransformTool(TransformTool::Rotate);
+            event->accept();
+            return;
+        case Qt::Key_S:
+            setTransformTool(TransformTool::Scale);
+            event->accept();
+            return;
+        default:
+            break;
+    }
+    QWidget::keyPressEvent(event);
 }
 
 }  // namespace sol

@@ -156,6 +156,7 @@ set(SOLSTICE_LIB_SOURCES
 
 set(SOLSTICE_LIB_HEADERS
     src/core/math.h
+    src/core/units.h
     src/core/rng.h
     src/core/image.h
     src/core/log.h
