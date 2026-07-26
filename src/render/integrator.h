@@ -268,7 +268,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         // Specular is a separate surface lobe (roughness only affects that).
         // SSS replaces the diffuse body with weight = subsurface:
         //   MFP (scene units / metres) = subsurface_scale * subsurface_radius
-        //   Scale = 1 → Radius is already in metres (Houdini/Arnold MKS).
         const float sssWeight = saturatef(mat.subsurface);
         const bool canSss =
             sssWeight > 1e-4f && mat.transmission <= 1e-4f && mat.metallic < 0.999f;
@@ -278,15 +277,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             const Vec3 albedo = vmax(Vec3(0.0f), mat.subsurfaceColor);
             const Vec3 mfpRGB = vmax(Vec3(0.0f), mat.subsurfaceRadius) * srMax(0.0f, mat.subsurfaceScale);
 
-            // Specular layer at the ENTRY point — independent of the random walk.
-            {
-                Material specMat = mat;
-                specMat.subsurface = 0.0f;
-                specMat.transmission = 0.0f;
-                if (specMat.metallic < 0.999f) specMat.baseColor = Vec3(0.0f);
-                radiance += throughput * nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng);
-            }
-
             Material lambert = defaultMaterial();
             lambert.baseColor = albedo;
             lambert.specular = 0.0f;
@@ -295,110 +285,105 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             lambert.subsurface = 0.0f;
             lambert.roughness = 1.0f;
 
-            // Degenerate Scale/Radius → opaque Lambert with subsurface colour.
-            if (maxComponent(mfpRGB) < 1e-8f) {
-                radiance += throughput * nextEventEstimation(scene, tracer, si, lambert, frame, wo, rng);
-                const BsdfSample lb =
-                    bsdfSampleLocal(lambert, frame.toLocal(wo), rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
-                                    rng.nextFloat());
-                if (lb.pdf > 0.0f && !isBlack(lb.weight)) {
-                    throughput *= lb.weight;
-                    origin = offsetRayOrigin(si.p, si.ng, frame.toWorld(lb.wi));
-                    direction = normalize(frame.toWorld(lb.wi));
-                    bsdfPdf = lb.pdf;
-                    specularBounce = false;
-                    ++depth;
-                    continue;
-                }
-                break;
-            }
+            Vec3 exitP = si.p;
+            Vec3 exitN = si.ns;
+            Vec3 exitWo = wo;
+            Vec3 pathWeight(1.0f);
+            bool useEntryFallback = maxComponent(mfpRGB) < 1e-8f;
 
-            Vec3 pWalk = si.p - si.ns * (kRayEpsilon * (1.0f + length(si.p)));
-            Vec3 ssThroughput(1.0f);
-            bool escaped = false;
-            Vec3 escapeP = si.p;
-            Vec3 escapeN = si.ns;
+            if (!useEntryFallback) {
+                // Start just under the surface along -Ns (into the medium).
+                Vec3 pWalk = si.p - si.ns * (kRayEpsilon * (1.0f + length(si.p)));
+                Vec3 ssThroughput(1.0f);
+                bool escaped = false;
 
-            constexpr int kMaxWalkSteps = 24;
-            for (int step = 0; step < kMaxWalkSteps; ++step) {
-                const float channel = rng.nextFloat();
-                float mfp = mfpRGB.y;
-                if (channel < 0.333f) mfp = mfpRGB.x;
-                else if (channel > 0.666f) mfp = mfpRGB.z;
-                mfp = srMax(1e-6f, mfp);
+                // Keep walks short: long chains of albedo^N go black and are not useful.
+                constexpr int kMaxWalkSteps = 12;
+                for (int step = 0; step < kMaxWalkSteps; ++step) {
+                    const float channel = rng.nextFloat();
+                    float mfp = mfpRGB.y;
+                    if (channel < 0.333f) mfp = mfpRGB.x;
+                    else if (channel > 0.666f) mfp = mfpRGB.z;
+                    mfp = srMax(1e-5f, mfp);
 
-                const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) * mfp;
+                    const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) * mfp;
 
-                Vec3 walkDir;
-                if (step == 0) {
-                    const Frame inFrame(-si.ns);
-                    walkDir = inFrame.toWorld(sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat()));
-                } else {
-                    walkDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
-                }
-                if (lengthSquared(walkDir) < 1e-12f) continue;
-                walkDir = normalize(walkDir);
-
-                const Vec3 walkOrigin = pWalk + walkDir * kRayEpsilon;
-                RayHit walkHit;
-                if (!tracer.intersect(walkOrigin, walkDir, stepLen, walkHit)) {
-                    pWalk = walkOrigin + walkDir * stepLen;
-                    ssThroughput = ssThroughput * albedo;
-                    if (isBlack(ssThroughput)) break;
-                    if (step >= 4) {
-                        const float q = clampf(maxComponent(ssThroughput), 0.05f, 1.0f);
-                        if (rng.nextFloat() > q) {
-                            ssThroughput = Vec3(0.0f);
-                            break;
-                        }
-                        ssThroughput /= q;
+                    Vec3 walkDir;
+                    if (step == 0) {
+                        const Frame inFrame(-si.ns);
+                        walkDir = inFrame.toWorld(sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat()));
+                    } else {
+                        walkDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
                     }
-                    continue;
-                }
+                    if (lengthSquared(walkDir) < 1e-12f) continue;
+                    walkDir = normalize(walkDir);
 
-                SurfaceInteraction walkSi;
-                if (!buildSurfaceInteraction(scene, walkHit, walkOrigin, walkDir, walkSi)) break;
+                    const float rayEps = kRayEpsilon * (1.0f + length(pWalk));
+                    const Vec3 walkOrigin = pWalk + walkDir * rayEps;
+                    RayHit walkHit;
+                    if (!tracer.intersect(walkOrigin, walkDir, stepLen, walkHit)) {
+                        // No boundary within the free path — scatter inside the volume.
+                        pWalk = walkOrigin + walkDir * stepLen;
+                        ssThroughput = ssThroughput * albedo;
+                        if (maxComponent(ssThroughput) < 1e-4f) break;
+                        if (step >= 3) {
+                            const float q = clampf(maxComponent(ssThroughput), 0.1f, 1.0f);
+                            if (rng.nextFloat() > q) {
+                                ssThroughput = Vec3(0.0f);
+                                break;
+                            }
+                            ssThroughput /= q;
+                        }
+                        continue;
+                    }
 
-                if (dot(walkSi.ng, walkDir) > 0.0f) {
+                    SurfaceInteraction walkSi;
+                    if (!buildSurfaceInteraction(scene, walkHit, walkOrigin, walkDir, walkSi)) break;
+
+                    // ANY interface hit ends the walk. Mesh winding varies (DCC exports
+                    // often invert normals); a strict back-face-only test left paths
+                    // trapped inside → albedo^N → solid black silhouettes.
+                    // Orient the exit normal into air (same hemisphere as walkDir).
                     escaped = true;
-                    escapeP = walkSi.p;
-                    escapeN = normalize(-walkSi.ns);
+                    exitP = walkSi.p;
+                    exitN = walkSi.ns;
+                    if (dot(exitN, walkDir) < 0.0f) exitN = -exitN;
+                    if (lengthSquared(exitN) < 1e-12f) exitN = walkDir;
+                    else exitN = normalize(exitN);
+                    pathWeight = ssThroughput;
+                    Vec3 toEntry = si.p - exitP;
+                    const float woLen2 = lengthSquared(toEntry);
+                    exitWo = woLen2 > 1e-12f ? normalize(toEntry) : exitN;
                     break;
                 }
 
-                pWalk = walkSi.p - walkSi.ns * (kRayEpsilon * (1.0f + length(walkSi.p)));
-                ssThroughput = ssThroughput * albedo;
-                if (isBlack(ssThroughput)) break;
+                if (!escaped || isBlack(pathWeight)) {
+                    // Failed / absorbed walk: Lambert at entry (never a black hole).
+                    useEntryFallback = true;
+                }
             }
 
-            if (isBlack(ssThroughput)) break;
-
-            if (!escaped) {
-                escapeP = si.p;
-                escapeN = si.ns;
+            if (useEntryFallback) {
+                exitP = si.p;
+                exitN = si.ns;
+                exitWo = wo;
+                pathWeight = Vec3(1.0f);
             }
 
-            // Exit: pure Lambert with subsurface colour. Roughness must not affect this.
-            // (Disney/Pixar: path-traced SSS replaces the diffuse lobe only.)
+            if (dot(exitN, exitWo) < 0.0f) exitWo = exitN;
             SurfaceInteraction ssSi = si;
-            ssSi.p = escapeP;
-            ssSi.ns = escapeN;
-            ssSi.ng = escapeN;
-            const Frame ssFrame(escapeN);
-            Vec3 ssWo = si.p - escapeP;
-            const float woLen2 = lengthSquared(ssWo);
-            ssWo = woLen2 > 1e-12f ? normalize(ssWo) : escapeN;
-            if (dot(ssWo, escapeN) < 0.0f) ssWo = escapeN;
-
-            radiance += throughput * ssThroughput *
-                        nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, ssWo, rng);
-
+            ssSi.p = exitP;
+            ssSi.ns = exitN;
+            ssSi.ng = exitN;
+            const Frame ssFrame(exitN);
+            radiance += throughput * pathWeight *
+                        nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, exitWo, rng);
             const BsdfSample ssBs =
-                bsdfSampleLocal(lambert, ssFrame.toLocal(ssWo), rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
-                                rng.nextFloat());
+                bsdfSampleLocal(lambert, ssFrame.toLocal(exitWo), rng.nextFloat(), rng.nextFloat(),
+                                rng.nextFloat(), rng.nextFloat());
             if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
-                throughput *= ssThroughput * ssBs.weight;
-                origin = offsetRayOrigin(escapeP, escapeN, ssFrame.toWorld(ssBs.wi));
+                throughput *= pathWeight * ssBs.weight;
+                origin = offsetRayOrigin(exitP, exitN, ssFrame.toWorld(ssBs.wi));
                 direction = normalize(ssFrame.toWorld(ssBs.wi));
                 bsdfPdf = ssBs.pdf;
                 specularBounce = false;
