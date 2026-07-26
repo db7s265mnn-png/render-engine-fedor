@@ -35,8 +35,16 @@ void applyDarkTheme(QApplication& application) {
         QDockWidget::title { background: #2e3136; padding: 5px; }
         QGroupBox { border: 1px solid #3a3e44; border-radius: 3px; margin-top: 14px; padding-top: 6px; }
         QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #ffa82e; }
-        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTreeWidget {
+        QLineEdit, QComboBox, QPlainTextEdit, QTreeWidget {
             background: #22242a; border: 1px solid #3a3e44; border-radius: 3px; padding: 2px 4px;
+        }
+        /* Padding on QSpinBox breaks the embedded line-edit hit-test (can't place caret). */
+        QSpinBox, QDoubleSpinBox {
+            background: #22242a; border: 1px solid #3a3e44; border-radius: 3px; padding: 0px;
+        }
+        QSpinBox::up-button, QSpinBox::down-button,
+        QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+            width: 0px; border: none;
         }
         QPushButton {
             background: #3a3e44; border: 1px solid #4a4f57; border-radius: 3px; padding: 4px 10px;

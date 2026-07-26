@@ -264,40 +264,76 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         const Vec3 wo = -direction;
         const Frame frame(si.ns);
 
-        // Arnold-style random-walk SSS (default Standard Surface method).
-        // Effective mean free path per channel: MFP = subsurface_scale * subsurface_radius.
-        // Larger Scale → longer free paths → light travels farther under the surface.
-        if (mat.subsurface > 1e-4f && mat.transmission <= 1e-4f && mat.metallic < 0.999f &&
-            rng.nextFloat() < saturatef(mat.subsurface)) {
-            const Vec3 mfpRGB = mat.subsurfaceRadius * srMax(0.0f, mat.subsurfaceScale);
-            const Vec3 albedo = vmax(Vec3(0.0f), mat.subsurfaceColor);
+        // Arnold-style random-walk SSS (Standard Surface default).
+        // Specular is a separate surface lobe (roughness only affects that).
+        // SSS replaces the diffuse body with weight = subsurface:
+        //   MFP (scene units / metres) = subsurface_scale * subsurface_radius
+        //   Scale = 1 → Radius is already in metres (Houdini/Arnold MKS).
+        const float sssWeight = saturatef(mat.subsurface);
+        const bool canSss =
+            sssWeight > 1e-4f && mat.transmission <= 1e-4f && mat.metallic < 0.999f;
+        if (canSss && rng.nextFloat() < sssWeight) {
+            throughput /= sssWeight;
 
-            // Enter the volume just below the surface along -Ns.
+            const Vec3 albedo = vmax(Vec3(0.0f), mat.subsurfaceColor);
+            const Vec3 mfpRGB = vmax(Vec3(0.0f), mat.subsurfaceRadius) * srMax(0.0f, mat.subsurfaceScale);
+
+            // Specular layer at the ENTRY point — independent of the random walk.
+            {
+                Material specMat = mat;
+                specMat.subsurface = 0.0f;
+                specMat.transmission = 0.0f;
+                if (specMat.metallic < 0.999f) specMat.baseColor = Vec3(0.0f);
+                radiance += throughput * nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng);
+            }
+
+            Material lambert = defaultMaterial();
+            lambert.baseColor = albedo;
+            lambert.specular = 0.0f;
+            lambert.metallic = 0.0f;
+            lambert.transmission = 0.0f;
+            lambert.subsurface = 0.0f;
+            lambert.roughness = 1.0f;
+
+            // Degenerate Scale/Radius → opaque Lambert with subsurface colour.
+            if (maxComponent(mfpRGB) < 1e-8f) {
+                radiance += throughput * nextEventEstimation(scene, tracer, si, lambert, frame, wo, rng);
+                const BsdfSample lb =
+                    bsdfSampleLocal(lambert, frame.toLocal(wo), rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                    rng.nextFloat());
+                if (lb.pdf > 0.0f && !isBlack(lb.weight)) {
+                    throughput *= lb.weight;
+                    origin = offsetRayOrigin(si.p, si.ng, frame.toWorld(lb.wi));
+                    direction = normalize(frame.toWorld(lb.wi));
+                    bsdfPdf = lb.pdf;
+                    specularBounce = false;
+                    ++depth;
+                    continue;
+                }
+                break;
+            }
+
             Vec3 pWalk = si.p - si.ns * (kRayEpsilon * (1.0f + length(si.p)));
             Vec3 ssThroughput(1.0f);
             bool escaped = false;
             Vec3 escapeP = si.p;
             Vec3 escapeN = si.ns;
 
-            constexpr int kMaxWalkSteps = 32;
+            constexpr int kMaxWalkSteps = 24;
             for (int step = 0; step < kMaxWalkSteps; ++step) {
-                // Channel selection for spectral MFP (Arnold single-channel walk).
                 const float channel = rng.nextFloat();
                 float mfp = mfpRGB.y;
                 if (channel < 0.333f) mfp = mfpRGB.x;
                 else if (channel > 0.666f) mfp = mfpRGB.z;
                 mfp = srMax(1e-6f, mfp);
 
-                // Free path length ~ Exp(1/mfp); Scale directly stretches this distance.
                 const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) * mfp;
 
                 Vec3 walkDir;
                 if (step == 0) {
-                    // First step: cosine-weighted into the medium (Arnold randomwalk).
                     const Frame inFrame(-si.ns);
                     walkDir = inFrame.toWorld(sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat()));
                 } else {
-                    // Isotropic phase function inside the medium.
                     walkDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
                 }
                 if (lengthSquared(walkDir) < 1e-12f) continue;
@@ -306,18 +342,23 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 const Vec3 walkOrigin = pWalk + walkDir * kRayEpsilon;
                 RayHit walkHit;
                 if (!tracer.intersect(walkOrigin, walkDir, stepLen, walkHit)) {
-                    // No geometry within the free path — scatter event inside the volume.
-                    // (This is what makes Scale increase penetration: longer steps advance farther.)
                     pWalk = walkOrigin + walkDir * stepLen;
                     ssThroughput = ssThroughput * albedo;
                     if (isBlack(ssThroughput)) break;
+                    if (step >= 4) {
+                        const float q = clampf(maxComponent(ssThroughput), 0.05f, 1.0f);
+                        if (rng.nextFloat() > q) {
+                            ssThroughput = Vec3(0.0f);
+                            break;
+                        }
+                        ssThroughput /= q;
+                    }
                     continue;
                 }
 
                 SurfaceInteraction walkSi;
                 if (!buildSurfaceInteraction(scene, walkHit, walkOrigin, walkDir, walkSi)) break;
 
-                // Exiting into air (hit a back-facing surface along the walk).
                 if (dot(walkSi.ng, walkDir) > 0.0f) {
                     escaped = true;
                     escapeP = walkSi.p;
@@ -325,42 +366,38 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     break;
                 }
 
-                // Hit internal / opposite front-face geometry — stay in volume and continue.
                 pWalk = walkSi.p - walkSi.ns * (kRayEpsilon * (1.0f + length(walkSi.p)));
                 ssThroughput = ssThroughput * albedo;
                 if (isBlack(ssThroughput)) break;
             }
 
+            if (isBlack(ssThroughput)) break;
+
             if (!escaped) {
-                // Still trapped after max steps: fall back to a shallow exit at the entry.
-                escaped = true;
                 escapeP = si.p;
                 escapeN = si.ns;
-                ssThroughput = ssThroughput * albedo;
             }
 
-            Material ssMat = mat;
-            ssMat.subsurface = 0.0f;
-            ssMat.metallic = 0.0f;
-            ssMat.transmission = 0.0f;
-            ssMat.baseColor = vmax(Vec3(0.0f), mat.baseColor * ssThroughput * albedo);
-
+            // Exit: pure Lambert with subsurface colour. Roughness must not affect this.
+            // (Disney/Pixar: path-traced SSS replaces the diffuse lobe only.)
             SurfaceInteraction ssSi = si;
             ssSi.p = escapeP;
             ssSi.ns = escapeN;
             ssSi.ng = escapeN;
             const Frame ssFrame(escapeN);
-            // Outgoing direction toward the entry point (path connection through the medium).
             Vec3 ssWo = si.p - escapeP;
             const float woLen2 = lengthSquared(ssWo);
             ssWo = woLen2 > 1e-12f ? normalize(ssWo) : escapeN;
+            if (dot(ssWo, escapeN) < 0.0f) ssWo = escapeN;
 
-            radiance += throughput * nextEventEstimation(scene, tracer, ssSi, ssMat, ssFrame, ssWo, rng);
+            radiance += throughput * ssThroughput *
+                        nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, ssWo, rng);
+
             const BsdfSample ssBs =
-                bsdfSampleLocal(ssMat, ssFrame.toLocal(ssWo), rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                bsdfSampleLocal(lambert, ssFrame.toLocal(ssWo), rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
                                 rng.nextFloat());
             if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
-                throughput *= ssBs.weight;
+                throughput *= ssThroughput * ssBs.weight;
                 origin = offsetRayOrigin(escapeP, escapeN, ssFrame.toWorld(ssBs.wi));
                 direction = normalize(ssFrame.toWorld(ssBs.wi));
                 bsdfPdf = ssBs.pdf;
@@ -370,6 +407,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             }
             break;
         }
+
+        // Complementary BRDF path when SSS lottery was available but not chosen.
+        if (canSss) throughput /= srMax(1e-4f, 1.0f - sssWeight);
 
         radiance += throughput * nextEventEstimation(scene, tracer, si, mat, frame, wo, rng);
 

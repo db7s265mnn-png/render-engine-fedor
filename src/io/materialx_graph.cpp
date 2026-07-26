@@ -258,11 +258,12 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     setFloat("subsurface", material.subsurface);
     setColor("subsurface_color", material.subsurfaceColor);
     setColor("subsurface_radius", material.subsurfaceRadius);
-    // Arnold: world-space MFP = subsurface_scale * subsurface_radius (random-walk SSS).
+    // Arnold: MFP (metres) = subsurface_scale * subsurface_radius (random-walk SSS).
     float subsurfaceScale = 1.0f;
     setFloat("subsurface_scale", subsurfaceScale);
     material.subsurface = saturatef(material.subsurface);
-    material.subsurfaceScale = clampf(subsurfaceScale, 0.0f, 100.0f);
+    // Scale is metric (scene units); allow large values for cm-authored Radius maps.
+    material.subsurfaceScale = srMax(0.0f, subsurfaceScale);
 }
 
 #endif  // SOLSTICE_HAVE_MATERIALX

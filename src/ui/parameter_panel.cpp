@@ -104,14 +104,58 @@ double defaultSpinStep(double minimum, double maximum) {
 NoWheelDoubleSpinBox* makeDoubleSpin(double value, double minimum, double maximum) {
     auto* spin = new NoWheelDoubleSpinBox();
     spin->setRange(minimum, maximum);
-    spin->setDecimals(4);
+    spin->setDecimals(6);
     spin->setSingleStep(defaultSpinStep(minimum, maximum));
     spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     spin->setValue(value);
     spin->setKeyboardTracking(false);
-    spin->setMinimumWidth(56);
-    spin->setMaximumWidth(84);
+    spin->setMinimumWidth(64);
+    spin->setMaximumWidth(96);
     return spin;
+}
+
+// Line-edit + soft slider: type freely (caret anywhere); slider only authors within [lo,hi].
+QWidget* makeFreeFloatSliderRow(double value, double sliderMin, double sliderMax,
+                                const std::function<void(double)>& onCommit) {
+    auto* container = new QWidget();
+    auto* layout = new QHBoxLayout(container);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+
+    auto* edit = new FreeFloatLineEdit(value);
+    edit->setMinimumWidth(64);
+    edit->setMaximumWidth(96);
+    layout->addWidget(edit, 0);
+
+    auto* slider = new NoWheelSlider(Qt::Horizontal);
+    slider->setRange(0, 1000);
+    const double span = std::max(1e-9, sliderMax - sliderMin);
+    const double t = (value - sliderMin) / span;
+    slider->setValue(int(std::lround(std::clamp(t, 0.0, 1.0) * 1000.0)));
+    layout->addWidget(slider, 1);
+
+    auto syncSlider = [slider, sliderMin, span](double v) {
+        QSignalBlocker blocker(slider);
+        slider->setValue(int(std::lround(std::clamp((v - sliderMin) / span, 0.0, 1.0) * 1000.0)));
+    };
+
+    QObject::connect(edit, &QLineEdit::editingFinished, container, [edit, onCommit, syncSlider] {
+        bool ok = false;
+        const double v = edit->value(&ok);
+        if (!ok) {
+            edit->setValue(0.0, true);
+            return;
+        }
+        edit->setValue(v, true);  // normalize formatting after commit
+        syncSlider(v);
+        onCommit(v);
+    });
+    QObject::connect(slider, &QSlider::valueChanged, container, [edit, sliderMin, span, onCommit](int pos) {
+        const double v = sliderMin + span * (double(pos) / 1000.0);
+        edit->setValue(v, true);
+        onCommit(v);
+    });
+    return container;
 }
 
 QString prettyMaterialXLabel(const QString& name) {
@@ -147,7 +191,7 @@ void materialXFloatRange(const QString& name, double& lo, double& hi) {
         return;
     }
     if (n == QLatin1String("subsurface_scale")) {
-        // Arnold Scale: multiplies Radius (MFP). Soft range 0..10, usable beyond via typing.
+        // Arnold Scale in scene units (metres): MFP = Scale * Radius. Soft slider 0..10.
         lo = 0.0;
         hi = 10.0;
         return;
@@ -560,15 +604,19 @@ void ParameterPanel::rebuildMaterialX() {
             }
             double value = input.value.toDouble();
             if (!std::isfinite(value)) value = lo;
-            // Clamp absurd leftovers from the old ±1e6 sliders into a usable range.
-            value = std::clamp(value, lo, hi);
-            auto* spin = makeDoubleSpin(value, lo, hi);
-            spin->setDecimals(isInt ? 0 : 4);
+            // Soft slider range only — typed values may go beyond (esp. subsurface_scale).
             const QString inputType = input.type;
-            form->addRow(label, makeSpinSliderRow(spin, value, lo, hi, [commit, inputType](double v) {
-                             commit(inputType.startsWith("int") ? QString::number(int(std::lround(v)))
-                                                                : QString::number(v, 'g', 6));
-                         }));
+            const QString tip =
+                (input.name == QLatin1String("subsurface_scale"))
+                    ? QStringLiteral("Arnold Scale in scene units (metres). "
+                                     "Mean free path = Scale × Radius. 1 = 1 metre.")
+                    : QString();
+            QWidget* row = makeFreeFloatSliderRow(value, lo, hi, [commit, inputType, isInt](double v) {
+                if (isInt) commit(QString::number(int(std::lround(v))));
+                else commit(QString::number(v, 'g', 9));
+            });
+            if (!tip.isEmpty()) row->setToolTip(tip);
+            form->addRow(label, row);
             continue;
         }
 
@@ -653,9 +701,8 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
         case ParamType::Float: {
             const double lo = parameter.minValue;
             const double hi = parameter.maxValue;
-            auto* spin = makeDoubleSpin(parameter.toDouble(), lo, hi);
-            return makeSpinSliderRow(spin, parameter.toDouble(), lo, hi,
-                                     [notify](double value) { notify(value); });
+            return makeFreeFloatSliderRow(parameter.toDouble(), lo, hi,
+                                          [notify](double value) { notify(value); });
         }
         case ParamType::Int: {
             const int lo = int(parameter.minValue);
