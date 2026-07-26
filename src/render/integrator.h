@@ -428,20 +428,41 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             bool useEntryFallback = maxComponent(mfpRGB) < 1e-8f;
 
             if (!useEntryFallback) {
-                // Hero channel for this entire walk (equal prior; MIS via 1/pCh).
-                int ch = int(rng.nextFloat() * 3.0f);
-                if (ch > 2) ch = 2;
-                constexpr float kPCh = 1.0f / 3.0f;
-                const float mfp = srMax(1e-5f, vecChannel(mfpRGB, ch));
-                const float alphaCh = srMax(0.0f, vecChannel(singleAlbedo, ch));
+                // Spectral random-walk with hero-channel MIS (HWSS-style for RGB):
+                // free-flight distances are sampled with one hero σ_t, but all three
+                // channels are evaluated along the same geometry and combined with
+                // balance-heuristic MIS. This cuts colour noise a lot vs single-channel.
+                float sigma[3] = {1.0f / srMax(1e-5f, mfpRGB.x), 1.0f / srMax(1e-5f, mfpRGB.y),
+                                  1.0f / srMax(1e-5f, mfpRGB.z)};
+                float alpha[3] = {srMax(0.0f, singleAlbedo.x), srMax(0.0f, singleAlbedo.y),
+                                  srMax(0.0f, singleAlbedo.z)};
+
+                // Prefer hero channels that carry more energy × longer MFP.
+                float sel[3];
+                for (int c = 0; c < 3; ++c)
+                    sel[c] = srMax(1e-3f, alpha[c] / sigma[c]);
+                const float selSum = sel[0] + sel[1] + sel[2];
+                float uSel = rng.nextFloat() * selSum;
+                int hero = 0;
+                if (uSel >= sel[0]) {
+                    hero = 1;
+                    uSel -= sel[0];
+                }
+                if (hero == 1 && uSel >= sel[1]) hero = 2;
+                const float pSel[3] = {sel[0] / selSum, sel[1] / selSum, sel[2] / selSum};
+                const float sigmaH = sigma[hero];
+
+                // pathPdf[c] = p(select c) × ∏ free-flight densities under σ_c
+                // thr[c]     = ∏ (α_c σ_c T_c) on scatters × T_c on exit
+                float pathPdf[3] = {pSel[0], pSel[1], pSel[2]};
+                float thr[3] = {1.0f, 1.0f, 1.0f};
 
                 Vec3 pWalk = si.p - si.ns * (kRayEpsilon * (1.0f + length(si.p)));
-                Vec3 ssThroughput = channelMask(ch, 1.0f / kPCh);
                 bool escaped = false;
 
-                constexpr int kMaxWalkSteps = 16;
+                constexpr int kMaxWalkSteps = 24;
                 for (int step = 0; step < kMaxWalkSteps; ++step) {
-                    const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) * mfp;
+                    const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) / sigmaH;
 
                     Vec3 walkDir;
                     if (step == 0) {
@@ -458,25 +479,40 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     RayHit walkHit;
                     if (!tracer.intersect(walkOrigin, walkDir, stepLen, walkHit)) {
                         pWalk = walkOrigin + walkDir * stepLen;
-                        float w = vecChannel(ssThroughput, ch) * alphaCh;
-                        if (w < 1e-5f) {
-                            ssThroughput = Vec3(0.0f);
+                        for (int c = 0; c < 3; ++c) {
+                            const float tr = expf(-sigma[c] * stepLen);
+                            const float dens = sigma[c] * tr;
+                            thr[c] *= alpha[c] * dens;
+                            pathPdf[c] *= dens;
+                        }
+                        const float wHero = thr[hero] / srMax(1e-20f, pathPdf[hero]);
+                        if (wHero < 1e-5f) {
+                            thr[0] = thr[1] = thr[2] = 0.0f;
                             break;
                         }
-                        if (step >= 4) {
-                            const float q = clampf(w, 0.1f, 1.0f);
+                        // Softer / later RR — early termination was a big noise source.
+                        if (step >= 8) {
+                            const float q = clampf(wHero, 0.25f, 1.0f);
                             if (rng.nextFloat() > q) {
-                                ssThroughput = Vec3(0.0f);
+                                thr[0] = thr[1] = thr[2] = 0.0f;
                                 break;
                             }
-                            w /= q;
+                            thr[0] /= q;
+                            thr[1] /= q;
+                            thr[2] /= q;
                         }
-                        ssThroughput = channelMask(ch, w);
                         continue;
                     }
 
                     SurfaceInteraction walkSi;
                     if (!buildSurfaceInteraction(scene, walkHit, walkOrigin, walkDir, walkSi)) break;
+
+                    const float tHit = srMax(0.0f, walkHit.t);
+                    for (int c = 0; c < 3; ++c) {
+                        const float tr = expf(-sigma[c] * tHit);
+                        thr[c] *= tr;
+                        pathPdf[c] *= tr;
+                    }
 
                     escaped = true;
                     exitP = walkSi.p;
@@ -484,14 +520,20 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     if (dot(exitN, walkDir) < 0.0f) exitN = -exitN;
                     if (lengthSquared(exitN) < 1e-12f) exitN = walkDir;
                     else exitN = normalize(exitN);
-                    pathWeight = ssThroughput;
+
+                    const float pdfSum = pathPdf[0] + pathPdf[1] + pathPdf[2];
+                    if (pdfSum > 1e-20f) {
+                        pathWeight = Vec3(thr[0] / pdfSum, thr[1] / pdfSum, thr[2] / pdfSum);
+                    } else {
+                        pathWeight = Vec3(0.0f);
+                    }
                     const Vec3 toEntry = si.p - exitP;
                     const float woLen2 = lengthSquared(toEntry);
                     exitWo = woLen2 > 1e-12f ? normalize(toEntry) : exitN;
                     break;
                 }
 
-                if (!escaped || isBlack(pathWeight)) useEntryFallback = true;
+                if (!escaped || isBlack(pathWeight) || !isFinite(pathWeight)) useEntryFallback = true;
             }
 
             if (useEntryFallback) {
@@ -508,8 +550,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             ssSi.ns = exitN;
             ssSi.ng = exitN;
             const Frame ssFrame(exitN);
-            const Vec3 nee =
-                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, exitWo, rng, guiding);
+            // Two NEE samples at the SSS exit — lighting is a major SSS noise term.
+            Vec3 nee(0.0f);
+            constexpr int kSssNee = 2;
+            for (int i = 0; i < kSssNee; ++i)
+                nee += nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, exitWo, rng, guiding);
+            nee = nee * (1.0f / float(kSssNee));
             radiance += throughput * pathWeight * nee;
 #if !defined(__CUDACC__)
             if (guiding && guiding->active()) guiding->addScattered(pathWeight * nee);
