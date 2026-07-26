@@ -22,7 +22,8 @@ struct Material {
     float emissionStrength = 0.0f;
 
     float opacity = 1.0f;
-    float subsurface = 0.0f;     // 0 = opaque BRDF, 1 = full Arnold-style random-walk SSS
+    // Mix weight vs diffuse (Standard Surface): base_mix = (1-w)*diffuse + w*SSS.
+    float subsurface = 0.0f;
     int doubleSided = 1;
     int pad0 = 0;
 
@@ -33,7 +34,9 @@ struct Material {
     float subsurfaceScale = 1.0f;
 
     Vec3 subsurfaceRadius{1.0f, 0.35f, 0.2f};  // RGB mean free path (skin: R > G > B)
-    float pad1 = 0.0f;
+    // Standard Surface `base` weight (multiplies diffuse only). MaterialX default is 0.8;
+    // 1.0 keeps non-MaterialX materials unchanged until `base` is authored.
+    float baseWeight = 1.0f;
 
     // Indices into SceneView::textures (-1 = none).
     int baseColorTex = -1;

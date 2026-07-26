@@ -344,21 +344,18 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         }
 #endif
 
-        // Arnold-style random-walk SSS with spectral (RGB) radius.
-        //
-        // Layering (Standard Surface): specular sits ON TOP of the SSS body.
-        // With subsurface=1 the old code skipped specular entirely — and delta
-        // mirrors (roughness≈0) also get zero from NEE — so reflections vanished.
-        // Fix: Fresnel RR at entry chooses specular bounce vs SSS body; rough
-        // specular also gets direct NEE at the entry point.
+        // Arnold / Autodesk Standard Surface base mix (MaterialX):
+        //   base_mix = (1 - subsurface) * base * base_color * diffuse
+        //            + subsurface * SSS
+        // Stochastic selection with probability `subsurface` — WITHOUT 1/p
+        // compensation — so expectation matches the mix (energy conserving).
+        // Specular sits on top of the SSS body via Fresnel RR at entry.
         //
         // Spectral walk: hero RGB channel, MFP = scale * radius[ch], Chiang α.
         const float sssWeight = saturatef(mat.subsurface);
         const bool canSss =
             sssWeight > 1e-4f && mat.transmission <= 1e-4f && mat.metallic < 0.999f;
         if (canSss && rng.nextFloat() < sssWeight) {
-            throughput /= sssWeight;
-
             // Specular-only material at the ENTRY (dielectric F0 / metal base).
             Material specMat = mat;
             specMat.subsurface = 0.0f;
@@ -538,8 +535,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
-        // Complementary BRDF path when SSS lottery was available but not chosen.
-        if (canSss) throughput /= srMax(1e-4f, 1.0f - sssWeight);
+        // Complementary BRDF path: selected with probability (1 - subsurface).
+        // No 1/(1-w) boost — that previously made diffuse+SSS additive.
 
         const LobeWeights lw = computeLobes(mat);
 #if !defined(__CUDACC__)

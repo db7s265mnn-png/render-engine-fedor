@@ -230,6 +230,10 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     };
 
     setColor("base_color", material.baseColor);
+    // Autodesk Standard Surface: diffuse weight is `base` * `base_color`.
+    float baseWeight = 0.8f;
+    setFloat("base", baseWeight);
+    material.baseWeight = srMax(0.0f, baseWeight);
     setFloat("specular_roughness", material.roughness);
     setFloat("metalness", material.metallic);
     setFloat("specular", material.specular);
@@ -352,7 +356,8 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
         entry("normalmap", "vector3", "Texture", {{"in", "vector3", {}}, {"scale", "float", "1"}}),
         entry("texcoord", "vector2", "Geometric", {{"index", "integer", "0"}}),
         entry("standard_surface", "surfaceshader", "PBR / Shading",
-              {{"base_color", "color3", "0.8, 0.8, 0.8"},
+              {{"base", "float", "0.8"},
+               {"base_color", "color3", "0.8, 0.8, 0.8"},
                {"specular_roughness", "float", "0.35"},
                {"metalness", "float", "0"},
                {"specular", "float", "0.5"},
@@ -439,6 +444,7 @@ QString createDefaultMaterialXDocument() {
         return {};
     }
     mx::NodePtr ss = doc->addNode("standard_surface", "standard_surface1", "surfaceshader");
+    ss->setInputValue("base", 0.8f);
     ss->setInputValue("base_color", mx::Color3(0.8f, 0.8f, 0.8f));
     ss->setInputValue("specular_roughness", 0.35f);
     ss->setInputValue("metalness", 0.0f);

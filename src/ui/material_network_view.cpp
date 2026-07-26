@@ -222,6 +222,7 @@ QString fallbackDefaultDocument() {
         "<?xml version=\"1.0\"?>\n"
         "<materialx version=\"1.38\">\n"
         "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\" xpos=\"0\" ypos=\"0\">\n"
+        "    <input name=\"base\" type=\"float\" value=\"0.8\"/>\n"
         "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\"/>\n"
         "    <input name=\"specular_roughness\" type=\"float\" value=\"0.35\"/>\n"
         "    <input name=\"metalness\" type=\"float\" value=\"0\"/>\n"
@@ -661,7 +662,7 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         for (const MaterialXNodeInputDef& def : entry->inputs) {
             // Keep standard_surface UI focused on the common shading ports; full nodedef is huge.
             if (category == "standard_surface") {
-                static const QStringList keep = {"base_color", "specular_roughness", "metalness", "specular",
+                static const QStringList keep = {"base", "base_color", "specular_roughness", "metalness", "specular",
                                                  "specular_IOR", "transmission", "opacity", "emission",
                                                  "emission_color", "normal", "subsurface", "subsurface_color",
                                                  "subsurface_radius", "subsurface_scale"};
@@ -689,6 +690,7 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         inputs.push_back({"in", "vector3", {}, {}});
         inputs.push_back({"scale", "float", "1", {}});
     } else if (category == "standard_surface") {
+        inputs.push_back({"base", "float", "0.8", {}});
         inputs.push_back({"base_color", "color3", "0.8, 0.8, 0.8", {}});
         inputs.push_back({"specular_roughness", "float", "0.35", {}});
         inputs.push_back({"metalness", "float", "0", {}});

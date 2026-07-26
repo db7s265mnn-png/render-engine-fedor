@@ -248,16 +248,19 @@ SR_INL SR_HD LobeWeights computeLobes(const Material& mat) {
     lw.delta = lw.alpha <= kDeltaAlpha;
     lw.eta = srMax(1.01f, mat.ior);
     const Vec3 base = vmax(Vec3(0.0f), mat.baseColor);
+    // Standard Surface: diffuse = base * base_color (SSS is mixed separately in the integrator).
+    const float baseWeight = srMax(0.0f, mat.baseWeight);
     // Specular = 0 must fully kill dielectric reflections (artist expectation).
     const float dielectricF0 = 0.08f * specularControl;
     lw.f0 = lerp(Vec3(dielectricF0), base, metallic);
-    lw.diffuseAlbedo = base * ((1.0f - metallic) * (1.0f - transmission));
+    lw.diffuseAlbedo = base * (baseWeight * (1.0f - metallic) * (1.0f - transmission));
     lw.transmissionTint = base;
 
     // The transmission lobe already contains its own Fresnel reflection, so the
     // opaque specular lobe is faded out as transmission increases.
     const float opaqueSpec = 1.0f - transmission * (1.0f - metallic);
-    const float diffuseWeight = (1.0f - metallic) * (1.0f - transmission) * average(base);
+    const float diffuseWeight =
+        (1.0f - metallic) * (1.0f - transmission) * average(base) * baseWeight;
     float specWeight = 0.0f;
     if (metallic > 1e-4f) {
         specWeight = opaqueSpec;
