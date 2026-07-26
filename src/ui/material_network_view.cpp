@@ -33,6 +33,7 @@
 #include "nodes/node_graph.h"
 #include "nodes/parameter.h"
 #include "ui/material_wire_item.h"
+#include "ui/node_icons.h"
 #include "ui/theme.h"
 
 namespace sol {
@@ -187,6 +188,14 @@ public:
         painter->setPen(Qt::NoPen);
         painter->setBrush(colorForCategory(category_));
         painter->drawRect(QRectF(body.left(), body.top(), body.width(), 20.0));
+
+        // Official MaterialX mark in the header strip.
+        const QPixmap mtlx = nodeIconPixmap(NodeIconKind::Material);
+        if (!mtlx.isNull()) {
+            const QRectF badge(body.right() - 20.0, body.top() + 2.0, 16.0, 16.0);
+            painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+            painter->drawPixmap(badge, mtlx, QRectF(mtlx.rect()));
+        }
         painter->restore();
 
         QFont nameFont = painter->font();
@@ -194,7 +203,7 @@ public:
         nameFont.setBold(true);
         painter->setFont(nameFont);
         painter->setPen(theme::text());
-        const QRectF nameRect(body.left() + 8.0, body.top() + 2.0, body.width() - 16.0, 16.0);
+        const QRectF nameRect(body.left() + 8.0, body.top() + 2.0, body.width() - 30.0, 16.0);
         painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
                           QFontMetrics(nameFont).elidedText(nodeName_, Qt::ElideRight, int(nameRect.width())));
 
@@ -1398,7 +1407,9 @@ public:
     int type() const override { return Type; }
     Node* materialNode() const { return node_; }
 
-    QRectF boundingRect() const override { return bodyRect().adjusted(-10.0, -10.0, 10.0, 10.0); }
+    QRectF boundingRect() const override {
+        return bodyRect().adjusted(-10.0, -10.0, 10.0, 42.0);
+    }
 
     QPainterPath shape() const override {
         QPainterPath path;
@@ -1413,41 +1424,44 @@ public:
         painter->setBrush(QColor(0, 0, 0, 78));
         painter->drawRoundedRect(body.translated(2.0, 3.0), 7.0, 7.0);
 
+        const QColor bodyColor = nodeBodyColor(NodeIconKind::Material, theme::panel());
         QLinearGradient gradient(body.topLeft(), body.bottomLeft());
-        gradient.setColorAt(0.0, theme::panelLight().lighter(110));
-        gradient.setColorAt(1.0, theme::panel().darker(112));
+        gradient.setColorAt(0.0, bodyColor.lighter(112));
+        gradient.setColorAt(1.0, bodyColor.darker(118));
         painter->setBrush(gradient);
         painter->setPen(QPen(isSelected() ? theme::selection() : QColor(20, 21, 24), isSelected() ? 2.0 : 1.0));
         painter->drawRoundedRect(body, 7.0, 7.0);
 
-        painter->setPen(Qt::NoPen);
-        painter->setBrush(colorForCategory("material"));
-        painter->drawRoundedRect(QRectF(body.left(), body.top(), body.width(), 22.0), 7.0, 7.0);
-        painter->drawRect(QRectF(body.left(), body.top() + 12.0, body.width(), 10.0));
+        painter->save();
+        QPainterPath clip;
+        clip.addRoundedRect(body, 7.0, 7.0);
+        painter->setClipPath(clip);
+        paintNodeIcon(*painter, NodeIconKind::Material,
+                      QRectF(body.left() + 8.0, body.top() + 4.0, body.width() - 16.0, body.height() - 8.0));
+        painter->restore();
 
+        // Name / hint live under the tile, matching the LOP network editor.
         QFont nameFont = painter->font();
         nameFont.setPointSizeF(8.4);
         nameFont.setBold(true);
         painter->setFont(nameFont);
-        painter->setPen(theme::text());
+        painter->setPen(QColor(245, 246, 248));
         const QString name = node_ ? node_->name() : QString("material");
-        painter->drawText(QRectF(body.left() + 10.0, body.top() + 3.0, body.width() - 20.0, 16.0),
-                          Qt::AlignLeft | Qt::AlignVCenter,
-                          QFontMetrics(nameFont).elidedText(name, Qt::ElideRight, int(body.width() - 20.0)));
+        const QRectF nameRect(body.left(), body.bottom() + 4.0, body.width(), 16.0);
+        painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(nameFont).elidedText(name, Qt::ElideRight, int(nameRect.width())));
 
         QFont small = painter->font();
         small.setBold(false);
-        small.setPointSizeF(7.2);
+        small.setPointSizeF(7.0);
         painter->setFont(small);
         painter->setPen(theme::textDim());
-        painter->drawText(QRectF(body.left() + 10.0, body.top() + 28.0, body.width() - 20.0, 16.0),
-                          Qt::AlignLeft | Qt::AlignVCenter, "material  ·  container");
-        painter->drawText(QRectF(body.left() + 10.0, body.top() + 46.0, body.width() - 20.0, 16.0),
-                          Qt::AlignLeft | Qt::AlignVCenter, "double-click to dive");
+        painter->drawText(QRectF(body.left(), body.bottom() + 20.0, body.width(), 14.0),
+                          Qt::AlignLeft | Qt::AlignVCenter, "MaterialX  ·  double-click");
     }
 
 private:
-    QRectF bodyRect() const { return QRectF(-78.0, -36.0, 156.0, 72.0); }
+    QRectF bodyRect() const { return QRectF(-48.0, -36.0, 96.0, 72.0); }
     Node* node_ = nullptr;
 };
 

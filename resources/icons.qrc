@@ -4,5 +4,8 @@
         <file alias="OBJ_geo.png">icons/OBJ_geo.png</file>
         <file alias="OBJ_hlight.png">icons/OBJ_hlight.png</file>
         <file alias="OBJ_camera.png">icons/OBJ_camera.png</file>
+        <file alias="LOP_merge.png">icons/LOP_merge.png</file>
+        <file alias="MaterialX.png">icons/MaterialX.png</file>
+        <file alias="ARRI.png">icons/ARRI.png</file>
     </qresource>
 </RCC>
