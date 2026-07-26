@@ -1,6 +1,7 @@
 #include "ui/main_window.h"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDockWidget>
@@ -115,6 +116,43 @@ void MainWindow::createActions() {
     iprAction_->setCheckable(true);
     iprAction_->setChecked(true);
     iprAction_->setToolTip("Re-render automatically after every edit");
+
+    auto* transformGroup = new QActionGroup(this);
+    transformGroup->setExclusive(true);
+
+    selectToolAction_ = new QAction("Select", this);
+    selectToolAction_->setCheckable(true);
+    selectToolAction_->setChecked(true);
+    selectToolAction_->setShortcut(QKeySequence("Q"));
+    selectToolAction_->setToolTip("Select (Q)");
+    transformGroup->addAction(selectToolAction_);
+
+    translateToolAction_ = new QAction("T", this);
+    translateToolAction_->setCheckable(true);
+    translateToolAction_->setShortcut(QKeySequence("T"));
+    translateToolAction_->setToolTip("Translate (T)");
+    transformGroup->addAction(translateToolAction_);
+
+    rotateToolAction_ = new QAction("R", this);
+    rotateToolAction_->setCheckable(true);
+    rotateToolAction_->setShortcut(QKeySequence("R"));
+    rotateToolAction_->setToolTip("Rotate (R)");
+    transformGroup->addAction(rotateToolAction_);
+
+    scaleToolAction_ = new QAction("S", this);
+    scaleToolAction_->setCheckable(true);
+    scaleToolAction_->setShortcut(QKeySequence("S"));
+    scaleToolAction_->setToolTip("Scale (S)");
+    transformGroup->addAction(scaleToolAction_);
+
+    connect(selectToolAction_, &QAction::triggered, this,
+            [this] { renderView_->setTransformTool(TransformTool::Select); });
+    connect(translateToolAction_, &QAction::triggered, this,
+            [this] { renderView_->setTransformTool(TransformTool::Translate); });
+    connect(rotateToolAction_, &QAction::triggered, this,
+            [this] { renderView_->setTransformTool(TransformTool::Rotate); });
+    connect(scaleToolAction_, &QAction::triggered, this,
+            [this] { renderView_->setTransformTool(TransformTool::Scale); });
 }
 
 void MainWindow::createMenus() {
@@ -158,6 +196,10 @@ void MainWindow::createMenus() {
 void MainWindow::createToolBar() {
     QToolBar* toolBar = addToolBar("Render");
     toolBar->setMovable(false);
+    toolBar->addAction(translateToolAction_);
+    toolBar->addAction(rotateToolAction_);
+    toolBar->addAction(scaleToolAction_);
+    toolBar->addSeparator();
     toolBar->addAction(renderAction_);
     toolBar->addAction(stopAction_);
     toolBar->addSeparator();
@@ -210,14 +252,34 @@ void MainWindow::createDocks() {
 
     resizeDocks({networkDock}, {330}, Qt::Vertical);
 
-    connect(networkView_, &NodeGraphView::nodeSelected, this, [this](Node* node) {
+    materialNetworkView_->setGraph(&graph_);
+
+    auto syncTransformTarget = [this](Node* node) {
+        renderView_->setTransformTarget(node && node->findParameter("translate") ? node : nullptr);
+    };
+
+    connect(networkView_, &NodeGraphView::nodeSelected, this, [this, syncTransformTarget](Node* node) {
         parameterPanel_->setNode(node);
-        materialNetworkView_->setMaterialNode(node && node->typeName() == "material" ? node : nullptr);
+        syncTransformTarget(node);
     });
     connect(networkView_, &NodeGraphView::statusMessage, this,
             [this](const QString& message) { statusBar()->showMessage(message, 3000); });
+    connect(materialNetworkView_, &MaterialNetworkView::selectionChanged, this, [this, syncTransformTarget] {
+        MaterialXSelection mtlx;
+        if (materialNetworkView_->selectedMaterialX(mtlx)) {
+            parameterPanel_->setMaterialXSelection(mtlx);
+            syncTransformTarget(nullptr);
+            return;
+        }
+        Node* node = materialNetworkView_->selectedLopNode();
+        parameterPanel_->setNode(node);
+        syncTransformTarget(node);
+    });
     connect(materialNetworkView_, &MaterialNetworkView::materialEdited, this, [this](Node* node) {
-        if (parameterPanel_->node() == node) parameterPanel_->refresh();
+        // MaterialX constant edits keep the Parameters widgets live; topology /
+        // rename paths emit selectionChanged and rebuild the panel there.
+        if (!parameterPanel_->showingMaterialX() && parameterPanel_->node() == node)
+            parameterPanel_->refresh();
         scheduleCook();
     });
     connect(materialNetworkView_, &MaterialNetworkView::statusMessage, this,
@@ -225,6 +287,23 @@ void MainWindow::createDocks() {
     connect(parameterPanel_, &ParameterPanel::parameterEdited, this,
             [this](Node*, const QString&) { scheduleCook(); });
     connect(parameterPanel_, &ParameterPanel::nodeRenamed, this, [this](Node*) { scheduleCook(); });
+    connect(parameterPanel_, &ParameterPanel::materialXRenamed, this,
+            [this](Node*, const QString&, const QString& newName) {
+                if (materialNetworkView_->renameSelectedMaterialX(newName)) {
+                    MaterialXSelection mtlx;
+                    if (materialNetworkView_->selectedMaterialX(mtlx))
+                        parameterPanel_->setMaterialXSelection(mtlx);
+                }
+            });
+    connect(parameterPanel_, &ParameterPanel::materialXInputEdited, this,
+            [this](Node*, const QString&, const QString& inputName, const QString& value) {
+                materialNetworkView_->setSelectedMaterialXInput(inputName, value);
+            });
+    connect(renderView_, &RenderView::transformEdited, this, [this](Node* node) {
+        if (parameterPanel_->node() == node && !parameterPanel_->showingMaterialX())
+            parameterPanel_->refresh();
+        scheduleCook();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -235,8 +314,9 @@ void MainWindow::newScene() {
     session_.stop();
     buildDefaultGraph(graph_);
     networkView_->setGraph(&graph_);
-    parameterPanel_->setNode(nullptr);
-    materialNetworkView_->setMaterialNode(nullptr);
+    parameterPanel_->clearSelection();
+    materialNetworkView_->goUp();
+    renderView_->setTransformTarget(nullptr);
     cameraOverride_ = false;
     renderView_->clearImage();
     updateWindowTitle();
@@ -248,8 +328,9 @@ void MainWindow::newSceneFromAlembic(const QString& alembicPath, const QString& 
     session_.stop();
     buildAlembicGraph(graph_, alembicPath, hdriPath);
     networkView_->setGraph(&graph_);
-    parameterPanel_->setNode(nullptr);
-    materialNetworkView_->setMaterialNode(nullptr);
+    parameterPanel_->clearSelection();
+    materialNetworkView_->goUp();
+    renderView_->setTransformTarget(nullptr);
     cameraOverride_ = false;
     renderView_->clearImage();
     updateWindowTitle();
@@ -265,8 +346,9 @@ bool MainWindow::openScene(const QString& path) {
         return false;
     }
     networkView_->setGraph(&graph_);
-    parameterPanel_->setNode(nullptr);
-    materialNetworkView_->setMaterialNode(nullptr);
+    parameterPanel_->clearSelection();
+    materialNetworkView_->goUp();
+    renderView_->setTransformTarget(nullptr);
     cameraOverride_ = false;
     updateWindowTitle();
     cookNow();
@@ -443,7 +525,7 @@ void MainWindow::selectDisplayNode() {
     if (!node) return;
     networkView_->selectNode(node);
     parameterPanel_->setNode(node);
-    materialNetworkView_->setMaterialNode(node->typeName() == "material" ? node : nullptr);
+    renderView_->setTransformTarget(node->findParameter("translate") ? node : nullptr);
 }
 
 Node* MainWindow::findCameraNode() const {
@@ -558,11 +640,16 @@ void MainWindow::onShowShortcuts() {
                              "  MMB drag      pan (1:1)\n"
                              "  Wheel         zoom to cursor\n\n"
                              "Render view (Houdini style)\n"
+                             "  T / R / S     translate / rotate / scale gizmo\n"
+                             "  Q             select (hide gizmo)\n"
                              "  Alt + LMB     tumble (pivot on geometry under cursor)\n"
                              "  RMB           tumble / orbit\n"
                              "  MMB           pan\n"
                              "  Alt + RMB     dolly\n"
                              "  Wheel         dolly\n\n"
+                             "Material Network\n"
+                             "  Double-click  dive into material container\n"
+                             "  ↑             return to materials level\n\n"
                              "General\n"
                              "  F5            render\n"
                              "  Esc           stop\n"

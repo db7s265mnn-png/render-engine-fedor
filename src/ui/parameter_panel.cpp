@@ -15,6 +15,7 @@
 #include <QLineEdit>
 #include <QMimeData>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
@@ -119,9 +120,30 @@ ParameterPanel::ParameterPanel(QWidget* parent) : QWidget(parent) {
     rebuild();
 }
 
+void ParameterPanel::clearSelection() {
+    node_ = nullptr;
+    materialXMode_ = false;
+    materialX_ = {};
+    rebuild();
+}
+
 void ParameterPanel::setNode(Node* node) {
-    if (node_ == node) return;
+    if (!materialXMode_ && node_ == node) return;
     node_ = node;
+    materialXMode_ = false;
+    materialX_ = {};
+    rebuild();
+}
+
+void ParameterPanel::setMaterialXSelection(const MaterialXSelection& selection) {
+    node_ = selection.hostMaterial;
+    materialXMode_ = selection.hostMaterial && !selection.name.isEmpty();
+    materialX_ = selection;
+    if (!materialXMode_) {
+        materialX_ = {};
+        rebuild();
+        return;
+    }
     rebuild();
 }
 
@@ -136,8 +158,15 @@ void ParameterPanel::rebuild() {
     }
     nameEdit_ = nullptr;
 
+    if (materialXMode_) {
+        rebuildMaterialX();
+        updating_ = false;
+        return;
+    }
+
     if (!node_) {
-        auto* hint = new QLabel("No node selected.\n\nPress Tab in the network editor to add one.");
+        auto* hint = new QLabel("No node selected.\n\nPress Tab in the network editor to add one,\n"
+                                "or select a node in the Material Network.");
         hint->setStyleSheet("color: #969aa0;");
         hint->setWordWrap(true);
         contentLayout_->addWidget(hint);
@@ -146,12 +175,17 @@ void ParameterPanel::rebuild() {
         return;
     }
 
+    rebuildLop();
+    updating_ = false;
+}
+
+void ParameterPanel::rebuildLop() {
     // Header: node name plus type description.
     auto* header = new QGroupBox(node_->typeName());
     auto* headerLayout = new QFormLayout(header);
     nameEdit_ = new QLineEdit(node_->name());
     connect(nameEdit_, &QLineEdit::editingFinished, this, [this] {
-        if (!node_ || updating_) return;
+        if (!node_ || updating_ || materialXMode_) return;
         const QString text = nameEdit_->text().trimmed();
         if (!text.isEmpty() && text != node_->name()) {
             node_->setName(text);
@@ -201,7 +235,163 @@ void ParameterPanel::rebuild() {
     }
 
     contentLayout_->addStretch(1);
-    updating_ = false;
+}
+
+void ParameterPanel::rebuildMaterialX() {
+    auto* header = new QGroupBox("MaterialX Node");
+    auto* headerLayout = new QFormLayout(header);
+    auto* typeLabel = new QLabel(materialX_.category +
+                                 (materialX_.type.isEmpty() ? QString() : ("  ·  " + materialX_.type)));
+    typeLabel->setStyleSheet("color: #969aa0;");
+    typeLabel->setWordWrap(true);
+    headerLayout->addRow("Type", typeLabel);
+
+    nameEdit_ = new QLineEdit(materialX_.name);
+    nameEdit_->setPlaceholderText("node name");
+    connect(nameEdit_, &QLineEdit::editingFinished, this, [this] {
+        if (updating_ || !materialXMode_ || !materialX_.hostMaterial) return;
+        const QString text = nameEdit_->text().trimmed();
+        if (text.isEmpty() || text == materialX_.name) return;
+        emit materialXRenamed(materialX_.hostMaterial, materialX_.name, text);
+    });
+    headerLayout->addRow("Name", nameEdit_);
+    if (materialX_.hostMaterial) {
+        auto* host = new QLabel(materialX_.hostMaterial->name());
+        host->setStyleSheet("color: #969aa0;");
+        headerLayout->addRow("Material", host);
+    }
+    contentLayout_->addWidget(header);
+
+    auto* paramsBox = new QGroupBox("Parameters");
+    auto* form = new QFormLayout(paramsBox);
+    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+    auto parseColor3Value = [](const QString& value, float& r, float& g, float& b) {
+        const QStringList parts = value.split(QRegularExpression("[,\\s]+"), Qt::SkipEmptyParts);
+        if (parts.size() < 3) return false;
+        bool ok1 = false, ok2 = false, ok3 = false;
+        r = parts[0].toFloat(&ok1);
+        g = parts[1].toFloat(&ok2);
+        b = parts[2].toFloat(&ok3);
+        return ok1 && ok2 && ok3;
+    };
+    auto formatColor3 = [](float r, float g, float b) {
+        return QString("%1, %2, %3").arg(r, 0, 'g', 4).arg(g, 0, 'g', 4).arg(b, 0, 'g', 4);
+    };
+
+    for (const MaterialXInputParam& input : materialX_.inputs) {
+        if (input.name.isEmpty()) continue;
+
+        if (!input.nodename.isEmpty()) {
+            auto* linked = new QLabel("← " + input.nodename);
+            linked->setStyleSheet("color: #8eb7ff;");
+            linked->setToolTip("Connected input (disconnect the wire to edit a constant value)");
+            form->addRow(input.name, linked);
+            continue;
+        }
+
+        const QString type = input.type.toLower();
+        const QString inputName = input.name;
+        auto commit = [this, inputName](const QString& value) {
+            if (updating_ || !materialXMode_ || !materialX_.hostMaterial) return;
+            emit materialXInputEdited(materialX_.hostMaterial, materialX_.name, inputName, value);
+        };
+
+        if (type == "filename") {
+            auto* row = new QWidget();
+            auto* rowLayout = new QHBoxLayout(row);
+            rowLayout->setContentsMargins(0, 0, 0, 0);
+            auto* edit = new QLineEdit(input.value);
+            auto* browse = new QPushButton("…");
+            browse->setFixedWidth(28);
+            connect(edit, &QLineEdit::editingFinished, this, [edit, commit] { commit(edit->text()); });
+            connect(browse, &QPushButton::clicked, this, [this, edit, commit] {
+                const QString path = QFileDialog::getOpenFileName(
+                    this, "Choose file", edit->text(),
+                    "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)");
+                if (path.isEmpty()) return;
+                edit->setText(path);
+                commit(path);
+            });
+            rowLayout->addWidget(edit, 1);
+            rowLayout->addWidget(browse);
+            form->addRow(input.name, row);
+            continue;
+        }
+
+        if (type == "boolean" || type == "bool") {
+            auto* box = new QCheckBox();
+            box->setChecked(input.value == "true" || input.value == "1");
+            connect(box, &QCheckBox::toggled, this,
+                    [commit](bool checked) { commit(checked ? "true" : "false"); });
+            form->addRow(input.name, box);
+            continue;
+        }
+
+        if (type == "float" || type == "integer" || type == "int") {
+            auto* spin = makeDoubleSpin(input.value.toDouble(), -1.0e6, 1.0e6);
+            spin->setDecimals(type.startsWith("int") ? 0 : 4);
+            const QString inputType = input.type;
+            connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                    [commit, inputType](double value) {
+                        commit(inputType.startsWith("int") ? QString::number(int(value))
+                                                           : QString::number(value, 'g', 6));
+                    });
+            form->addRow(input.name, spin);
+            continue;
+        }
+
+        if (type == "color3" || type == "color4" || type == "vector3") {
+            float r = 1, g = 1, b = 1;
+            parseColor3Value(input.value, r, g, b);
+            auto* row = new QWidget();
+            auto* rowLayout = new QHBoxLayout(row);
+            rowLayout->setContentsMargins(0, 0, 0, 0);
+            auto* edit = new QLineEdit(input.value);
+            auto* swatch = new QPushButton();
+            swatch->setFixedSize(28, 22);
+            auto updateSwatch = [swatch](float rr, float gg, float bb) {
+                swatch->setStyleSheet(QString("background:%1; border:1px solid #222;")
+                                          .arg(QColor::fromRgbF(qBound(0.0, double(rr), 1.0),
+                                                                qBound(0.0, double(gg), 1.0),
+                                                                qBound(0.0, double(bb), 1.0))
+                                                   .name()));
+            };
+            updateSwatch(r, g, b);
+            connect(edit, &QLineEdit::editingFinished, this, [edit, commit, updateSwatch, parseColor3Value] {
+                float rr = 1, gg = 1, bb = 1;
+                parseColor3Value(edit->text(), rr, gg, bb);
+                updateSwatch(rr, gg, bb);
+                commit(edit->text().trimmed());
+            });
+            connect(swatch, &QPushButton::clicked, this,
+                    [this, edit, commit, updateSwatch, parseColor3Value, formatColor3, inputName] {
+                        float rr = 1, gg = 1, bb = 1;
+                        parseColor3Value(edit->text(), rr, gg, bb);
+                        const QColor chosen = QColorDialog::getColor(
+                            QColor::fromRgbF(qBound(0.0, double(rr), 1.0), qBound(0.0, double(gg), 1.0),
+                                             qBound(0.0, double(bb), 1.0)),
+                            this, "Pick " + inputName);
+                        if (!chosen.isValid()) return;
+                        const QString value =
+                            formatColor3(float(chosen.redF()), float(chosen.greenF()), float(chosen.blueF()));
+                        edit->setText(value);
+                        updateSwatch(float(chosen.redF()), float(chosen.greenF()), float(chosen.blueF()));
+                        commit(value);
+                    });
+            rowLayout->addWidget(edit, 1);
+            rowLayout->addWidget(swatch);
+            form->addRow(input.name, row);
+            continue;
+        }
+
+        auto* edit = new QLineEdit(input.value);
+        connect(edit, &QLineEdit::editingFinished, this, [edit, commit] { commit(edit->text().trimmed()); });
+        form->addRow(input.name, edit);
+    }
+
+    contentLayout_->addWidget(paramsBox);
+    contentLayout_->addStretch(1);
 }
 
 QWidget* ParameterPanel::createEditor(Parameter& parameter) {

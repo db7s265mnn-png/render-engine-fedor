@@ -1,8 +1,11 @@
 #include "ui/render_view.h"
 
+#include <QApplication>
 #include <QDateTime>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
+#include <QVector3D>
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
@@ -23,6 +26,43 @@ Vec3 rotateAroundAxis(const Vec3& point, const Vec3& center, const Vec3& axis, f
 
 Vec3 rotateAroundY(const Vec3& point, const Vec3& center, float degrees) {
     return rotateAroundAxis(point, center, Vec3(0.0f, 1.0f, 0.0f), degrees);
+}
+
+float closestRayAxisParam(const Vec3& rayOrigin, const Vec3& rayDir, const Vec3& axisOrigin,
+                          const Vec3& axisDir) {
+    // Closest points between ray and infinite axis; return param along axis.
+    const Vec3 w0 = rayOrigin - axisOrigin;
+    const float a = dot(rayDir, rayDir);
+    const float b = dot(rayDir, axisDir);
+    const float c = dot(axisDir, axisDir);
+    const float d = dot(rayDir, w0);
+    const float e = dot(axisDir, w0);
+    const float denom = a * c - b * b;
+    if (std::fabs(denom) < 1e-10f) return e / std::max(1e-8f, c);
+    return (a * e - b * d) / denom;
+}
+
+float pointSegmentDistance2D(const QPointF& p, const QPointF& a, const QPointF& b, float* tOut = nullptr) {
+    const QPointF ab = b - a;
+    const float len2 = float(QPointF::dotProduct(ab, ab));
+    float t = 0.0f;
+    if (len2 > 1e-8f) {
+        t = float(QPointF::dotProduct(p - a, ab) / double(len2));
+        t = clampf(t, 0.0f, 1.0f);
+    }
+    if (tOut) *tOut = t;
+    const QPointF closest = a + ab * double(t);
+    const QPointF d = p - closest;
+    return float(QPointF::dotProduct(d, d));
+}
+
+QColor axisColor(int axis, bool active) {
+    QColor c;
+    if (axis == 0) c = QColor(220, 70, 70);
+    else if (axis == 1) c = QColor(70, 200, 90);
+    else c = QColor(70, 130, 230);
+    if (active) c = c.lighter(130);
+    return c;
 }
 
 }  // namespace
@@ -54,8 +94,6 @@ void ViewCamera::orbit(float deltaYaw, float deltaPitch) {
 }
 
 void ViewCamera::orbitAround(const Vec3& center, float deltaYaw, float deltaPitch) {
-    // Rotate both the eye and the look-at point around `center` so the framed
-    // image does not jump when the tumble pivot is chosen under the cursor.
     Vec3 e = eye();
     Vec3 p = pivot;
 
@@ -123,6 +161,21 @@ void RenderView::setCamera(const ViewCamera& camera) {
     update();
 }
 
+void RenderView::setTransformTool(TransformTool tool) {
+    transformTool_ = tool;
+    if (mode_ == 4) endGizmoDrag();
+    hoverAxis_ = GizmoAxis::None;
+    update();
+}
+
+void RenderView::setTransformTarget(Node* node) {
+    if (transformTarget_ == node) return;
+    if (mode_ == 4) endGizmoDrag();
+    transformTarget_ = node;
+    hoverAxis_ = GizmoAxis::None;
+    update();
+}
+
 QRect RenderView::imageRect() const {
     const double aspect = double(resolutionX_) / double(std::max(1, resolutionY_));
     int w = width() - 16;
@@ -156,10 +209,29 @@ bool RenderView::projectWorldToWidget(const Vec3& world, QPointF& out) const {
     const float sy = (cam.y / -cam.z) * focalLength;
     const float ndcX = sx / sensorWidth + 0.5f;
     const float ndcY = 0.5f - sy / sensorHeight;
-    if (ndcX < 0.0f || ndcX > 1.0f || ndcY < 0.0f || ndcY > 1.0f) return false;
+    if (ndcX < -0.05f || ndcX > 1.05f || ndcY < -0.05f || ndcY > 1.05f) return false;
 
     const QRect target = imageRect();
     out = QPointF(target.left() + ndcX * target.width(), target.top() + ndcY * target.height());
+    return true;
+}
+
+bool RenderView::widgetToCameraRay(const QPoint& pos, Vec3& origin, Vec3& direction) const {
+    const QRect target = imageRect();
+    if (target.width() <= 0 || target.height() <= 0) return false;
+    const float u = (float(pos.x() - target.left()) + 0.5f) / float(target.width());
+    const float v = (float(pos.y() - target.top()) + 0.5f) / float(target.height());
+
+    const float sensorWidth = 36.0f;
+    const float focalLength = 50.0f;
+    const float aspect = float(resolutionX_) / float(std::max(1, resolutionY_));
+    const float sensorHeight = sensorWidth / aspect;
+    const float sx = (u - 0.5f) * sensorWidth;
+    const float sy = (0.5f - v) * sensorHeight;
+    const Vec3 dirCam = normalize(Vec3(sx, sy, -focalLength));
+    const Mat4 cameraToWorld = camera_.toMatrix();
+    origin = transformPoint(cameraToWorld, Vec3(0.0f));
+    direction = normalize(transformVector(cameraToWorld, dirCam));
     return true;
 }
 
@@ -167,8 +239,6 @@ void RenderView::beginNavigation(int mode, const QPoint& pos) {
     mode_ = mode;
     lastMousePosition_ = pos;
     if (mode_ == 1) {
-        // Pick the tumble center under the cursor, but do NOT reframe the camera.
-        // The view stays exactly where it is; later drags rotate around this point.
         tumbleCenter_ = camera_.pivot;
         Vec3 hit;
         if (pickUnderMouse(pos, hit)) {
@@ -183,6 +253,245 @@ void RenderView::beginNavigation(int mode, const QPoint& pos) {
         setCursor(Qt::ClosedHandCursor);
     }
     grabMouse();
+}
+
+bool RenderView::hasTransformTarget() const {
+    return transformTarget_ && transformTarget_->findParameter("translate") &&
+           transformTool_ != TransformTool::Select;
+}
+
+Mat4 RenderView::targetWorldMatrix() const {
+    if (!transformTarget_) return Mat4::identity();
+    return transformFromParameters(*transformTarget_);
+}
+
+Vec3 RenderView::targetOrigin() const {
+    const Mat4 m = targetWorldMatrix();
+    return Vec3(m.at(0, 3), m.at(1, 3), m.at(2, 3));
+}
+
+void RenderView::targetAxes(Vec3& x, Vec3& y, Vec3& z) const {
+    const Mat4 m = targetWorldMatrix();
+    x = normalize(Vec3(m.at(0, 0), m.at(1, 0), m.at(2, 0)));
+    y = normalize(Vec3(m.at(0, 1), m.at(1, 1), m.at(2, 1)));
+    z = normalize(Vec3(m.at(0, 2), m.at(1, 2), m.at(2, 2)));
+}
+
+float RenderView::gizmoWorldSize() const {
+    return std::max(0.15f, camera_.distance * 0.12f);
+}
+
+RenderView::GizmoAxis RenderView::hitTestGizmo(const QPoint& pos) const {
+    if (!hasTransformTarget()) return GizmoAxis::None;
+    QPointF originScreen;
+    if (!projectWorldToWidget(targetOrigin(), originScreen)) return GizmoAxis::None;
+
+    const float size = gizmoWorldSize();
+    Vec3 ax, ay, az;
+    targetAxes(ax, ay, az);
+    const Vec3 o = targetOrigin();
+    struct Cand {
+        GizmoAxis axis;
+        float dist2;
+    };
+    Cand best{GizmoAxis::None, 14.0f * 14.0f};
+
+    auto considerAxis = [&](GizmoAxis axis, const Vec3& dir) {
+        QPointF tip;
+        if (!projectWorldToWidget(o + dir * size, tip)) return;
+        float t = 0.0f;
+        const float d2 = pointSegmentDistance2D(QPointF(pos), originScreen, tip, &t);
+        if (d2 < best.dist2) best = {axis, d2};
+    };
+
+    const QPointF delta = QPointF(pos) - originScreen;
+    if (QPointF::dotProduct(delta, delta) < 10.0 * 10.0) return GizmoAxis::Center;
+
+    considerAxis(GizmoAxis::X, ax);
+    considerAxis(GizmoAxis::Y, ay);
+    considerAxis(GizmoAxis::Z, az);
+
+    if (transformTool_ == TransformTool::Rotate) {
+        // Also hit-test a ring around the origin in screen space.
+        const float r = float(std::sqrt(QPointF::dotProduct(
+            [&]() {
+                QPointF tip;
+                projectWorldToWidget(o + ax * size, tip);
+                return tip - originScreen;
+            }(),
+            [&]() {
+                QPointF tip;
+                projectWorldToWidget(o + ax * size, tip);
+                return tip - originScreen;
+            }())));
+        Q_UNUSED(r);
+        // Prefer axis tip hits already considered; ring uses same axes.
+    }
+
+    return best.axis;
+}
+
+bool RenderView::beginGizmoDrag(const QPoint& pos) {
+    activeAxis_ = hitTestGizmo(pos);
+    if (activeAxis_ == GizmoAxis::None || !hasTransformTarget()) return false;
+
+    dragStartTranslate_ = transformTarget_->vec3Value("translate", Vec3(0.0f));
+    dragStartRotate_ = transformTarget_->vec3Value("rotate", Vec3(0.0f));
+    dragStartScale_ = transformTarget_->vec3Value("scale", Vec3(1.0f));
+    dragOrigin_ = targetOrigin();
+    dragStartMouse_ = pos;
+
+    Vec3 ax, ay, az;
+    targetAxes(ax, ay, az);
+    if (activeAxis_ == GizmoAxis::X) dragAxisDir_ = ax;
+    else if (activeAxis_ == GizmoAxis::Y) dragAxisDir_ = ay;
+    else if (activeAxis_ == GizmoAxis::Z) dragAxisDir_ = az;
+    else dragAxisDir_ = normalize(cross(Vec3(0, 1, 0), normalize(camera_.eye() - dragOrigin_)));
+
+    Vec3 rayO, rayD;
+    if (widgetToCameraRay(pos, rayO, rayD))
+        dragStartParam_ = closestRayAxisParam(rayO, rayD, dragOrigin_, dragAxisDir_);
+    else
+        dragStartParam_ = 0.0f;
+
+    mode_ = 4;
+    lastMousePosition_ = pos;
+    setCursor(Qt::ClosedHandCursor);
+    grabMouse();
+    return true;
+}
+
+void RenderView::updateGizmoDrag(const QPoint& pos) {
+    if (!transformTarget_ || activeAxis_ == GizmoAxis::None) return;
+    const float precision = (QApplication::keyboardModifiers() & Qt::ShiftModifier) ? 0.25f : 1.0f;
+
+    if (transformTool_ == TransformTool::Translate) {
+        Vec3 rayO, rayD;
+        if (!widgetToCameraRay(pos, rayO, rayD)) return;
+        const float param = closestRayAxisParam(rayO, rayD, dragOrigin_, dragAxisDir_);
+        const float delta = (param - dragStartParam_) * precision;
+        Vec3 t = dragStartTranslate_;
+        if (activeAxis_ == GizmoAxis::Center) {
+            // Screen-space pan in the camera plane.
+            const QPoint d = pos - dragStartMouse_;
+            const Vec3 forward = normalize(camera_.pivot - camera_.eye());
+            Vec3 right = cross(forward, Vec3(0, 1, 0));
+            if (lengthSquared(right) < 1e-8f) right = Vec3(1, 0, 0);
+            right = normalize(right);
+            const Vec3 up = normalize(cross(right, forward));
+            const float scale = camera_.distance * 0.0018f * precision;
+            t = dragStartTranslate_ + right * (-float(d.x()) * scale) + up * (float(d.y()) * scale);
+        } else if (activeAxis_ == GizmoAxis::X) t.x = dragStartTranslate_.x + delta;
+        else if (activeAxis_ == GizmoAxis::Y) t.y = dragStartTranslate_.y + delta;
+        else if (activeAxis_ == GizmoAxis::Z) t.z = dragStartTranslate_.z + delta;
+        // When axes are rotated, move along world axis direction in translate space
+        // by projecting delta onto the local translate (Houdini object-level TRS).
+        if (activeAxis_ != GizmoAxis::Center) {
+            t = dragStartTranslate_ + dragAxisDir_ * delta;
+        }
+        transformTarget_->setParameterValue("translate", QVariant::fromValue(QVector3D(t.x, t.y, t.z)));
+        emit transformEdited(transformTarget_);
+        update();
+        return;
+    }
+
+    if (transformTool_ == TransformTool::Scale) {
+        Vec3 rayO, rayD;
+        if (!widgetToCameraRay(pos, rayO, rayD)) return;
+        const float param = closestRayAxisParam(rayO, rayD, dragOrigin_, dragAxisDir_);
+        const float delta = (param - dragStartParam_) * precision;
+        const float factor = std::max(0.01f, 1.0f + delta / std::max(0.15f, gizmoWorldSize()));
+        Vec3 s = dragStartScale_;
+        if (activeAxis_ == GizmoAxis::Center) {
+            s = dragStartScale_ * factor;
+        } else if (activeAxis_ == GizmoAxis::X) s.x = dragStartScale_.x * factor;
+        else if (activeAxis_ == GizmoAxis::Y) s.y = dragStartScale_.y * factor;
+        else if (activeAxis_ == GizmoAxis::Z) s.z = dragStartScale_.z * factor;
+        transformTarget_->setParameterValue("scale", QVariant::fromValue(QVector3D(s.x, s.y, s.z)));
+        emit transformEdited(transformTarget_);
+        update();
+        return;
+    }
+
+    if (transformTool_ == TransformTool::Rotate) {
+        const QPoint d = pos - dragStartMouse_;
+        const float degrees = float(d.x() + d.y()) * 0.35f * precision;
+        Vec3 r = dragStartRotate_;
+        if (activeAxis_ == GizmoAxis::X) r.x = dragStartRotate_.x + degrees;
+        else if (activeAxis_ == GizmoAxis::Y) r.y = dragStartRotate_.y + degrees;
+        else if (activeAxis_ == GizmoAxis::Z) r.z = dragStartRotate_.z + degrees;
+        else {
+            r.y = dragStartRotate_.y + float(d.x()) * 0.35f * precision;
+            r.x = dragStartRotate_.x + float(d.y()) * 0.35f * precision;
+        }
+        transformTarget_->setParameterValue("rotate", QVariant::fromValue(QVector3D(r.x, r.y, r.z)));
+        emit transformEdited(transformTarget_);
+        update();
+    }
+}
+
+void RenderView::endGizmoDrag() {
+    activeAxis_ = GizmoAxis::None;
+    if (mode_ == 4) {
+        mode_ = 0;
+        releaseMouse();
+        unsetCursor();
+    }
+}
+
+void RenderView::drawGizmo(QPainter& painter) {
+    if (!hasTransformTarget()) return;
+    QPointF originScreen;
+    const Vec3 o = targetOrigin();
+    if (!projectWorldToWidget(o, originScreen)) return;
+
+    const float size = gizmoWorldSize();
+    Vec3 ax, ay, az;
+    targetAxes(ax, ay, az);
+    const Vec3 dirs[3] = {ax, ay, az};
+    const GizmoAxis axes[3] = {GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z};
+
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    // Center handle
+    const bool centerActive = (hoverAxis_ == GizmoAxis::Center || activeAxis_ == GizmoAxis::Center);
+    painter.setPen(QPen(centerActive ? QColor(255, 220, 90) : QColor(240, 240, 240), 1.2));
+    painter.setBrush(centerActive ? QColor(255, 220, 90, 200) : QColor(230, 230, 230, 180));
+    painter.drawEllipse(originScreen, 5.5, 5.5);
+
+    for (int i = 0; i < 3; ++i) {
+        QPointF tip;
+        if (!projectWorldToWidget(o + dirs[i] * size, tip)) continue;
+        const bool active = (hoverAxis_ == axes[i] || activeAxis_ == axes[i]);
+        const QColor color = axisColor(i, active);
+        painter.setPen(QPen(color, active ? 3.0 : 2.2, Qt::SolidLine, Qt::RoundCap));
+        painter.drawLine(originScreen, tip);
+
+        if (transformTool_ == TransformTool::Translate) {
+            // Arrow tip
+            QPainterPath arrow;
+            const QPointF dir = tip - originScreen;
+            const double len = std::sqrt(QPointF::dotProduct(dir, dir));
+            if (len < 1.0) continue;
+            const QPointF n = dir / len;
+            const QPointF perp(-n.y(), n.x());
+            arrow.moveTo(tip);
+            arrow.lineTo(tip - n * 12.0 + perp * 5.0);
+            arrow.lineTo(tip - n * 12.0 - perp * 5.0);
+            arrow.closeSubpath();
+            painter.setBrush(color);
+            painter.setPen(Qt::NoPen);
+            painter.drawPath(arrow);
+        } else if (transformTool_ == TransformTool::Scale) {
+            painter.setBrush(color);
+            painter.setPen(Qt::NoPen);
+            painter.drawRect(QRectF(tip.x() - 4.5, tip.y() - 4.5, 9.0, 9.0));
+        } else if (transformTool_ == TransformTool::Rotate) {
+            painter.setBrush(Qt::NoBrush);
+            painter.setPen(QPen(color, active ? 2.4 : 1.6));
+            painter.drawEllipse(tip, 6.0, 6.0);
+        }
+    }
 }
 
 void RenderView::paintEvent(QPaintEvent*) {
@@ -213,6 +522,8 @@ void RenderView::paintEvent(QPaintEvent*) {
     } else {
         showPivotMarker_ = false;
     }
+
+    drawGizmo(painter);
 
     if (!statusText_.isEmpty()) {
         QFont font = painter.font();
@@ -250,12 +561,32 @@ void RenderView::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
+    if (event->button() == Qt::LeftButton && !alt && hasTransformTarget()) {
+        if (beginGizmoDrag(event->pos())) {
+            event->accept();
+            return;
+        }
+    }
+
     mode_ = 0;
     QWidget::mousePressEvent(event);
 }
 
 void RenderView::mouseMoveEvent(QMouseEvent* event) {
+    if (mode_ == 4) {
+        updateGizmoDrag(event->pos());
+        event->accept();
+        return;
+    }
     if (mode_ == 0) {
+        if (hasTransformTarget()) {
+            const GizmoAxis hit = hitTestGizmo(event->pos());
+            if (hit != hoverAxis_) {
+                hoverAxis_ = hit;
+                update();
+            }
+            setCursor(hit != GizmoAxis::None ? Qt::SizeAllCursor : Qt::ArrowCursor);
+        }
         QWidget::mouseMoveEvent(event);
         return;
     }
@@ -282,6 +613,11 @@ void RenderView::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void RenderView::mouseReleaseEvent(QMouseEvent* event) {
+    if (mode_ == 4) {
+        endGizmoDrag();
+        event->accept();
+        return;
+    }
     if (mode_ != 0) {
         mode_ = 0;
         releaseMouse();

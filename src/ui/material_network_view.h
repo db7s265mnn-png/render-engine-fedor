@@ -1,5 +1,6 @@
-// Solaris-style MaterialX graph view backed by a material node's "mtlx" XML.
-// Layout: graph canvas on the left, inspector for the selected MaterialX node on the right.
+// Solaris-style Material Network: material containers at the root, dive into
+// MaterialX graphs on double-click, with a back control to return upstairs.
+// Selected node parameters are shown in the shared Parameters dock (not here).
 #pragma once
 
 #include <QGraphicsView>
@@ -11,52 +12,122 @@
 
 #include "nodes/node.h"
 
-class QFormLayout;
 class QGraphicsPathItem;
 class QGraphicsScene;
 class QLabel;
-class QLineEdit;
 class QMouseEvent;
-class QSplitter;
+class QToolButton;
 class QVBoxLayout;
 
 namespace sol {
 
 class MaterialNetworkGraphView;
+class MaterialContainerGraphView;
+class NodeGraph;
 
-// Public Material Network dock widget: graph + right-side parameter inspector.
+struct MaterialXInputParam {
+    QString name;
+    QString type;
+    QString value;
+    QString nodename;
+};
+
+struct MaterialXSelection {
+    Node* hostMaterial = nullptr;
+    QString category;
+    QString type;
+    QString name;
+    QVector<MaterialXInputParam> inputs;
+};
+
+// Public Material Network dock widget: container level + MaterialX canvas.
 class MaterialNetworkView : public QWidget {
     Q_OBJECT
 
 public:
     explicit MaterialNetworkView(QWidget* parent = nullptr);
 
-    void setMaterialNode(Node* node);
+    void setGraph(NodeGraph* graph);
+    void goUp();
+    bool isInsideMaterial() const { return currentMaterial_ != nullptr; }
+    Node* currentMaterial() const { return currentMaterial_; }
+
+    // Selected LOP material container (root level), or host material when inside
+    // with no MaterialX node selected.
+    Node* selectedLopNode() const;
+    bool selectedMaterialX(MaterialXSelection& out) const;
+    bool renameSelectedMaterialX(const QString& newName);
+    bool setSelectedMaterialXInput(const QString& inputName, const QString& value);
 
 signals:
     void materialEdited(sol::Node* node);
     void statusMessage(const QString& message);
+    // Fired when selection should drive the shared Parameters panel.
+    void selectionChanged();
 
 private:
-    void onGraphSelectionChanged();
-    void rebuildInspector();
-    void commitRename();
-    void commitInputValue(const QString& inputName, const QString& type, const QString& value);
+    void refreshContainers();
+    void diveInto(Node* material);
+    void updateChrome();
+    void onContainerSelectionChanged();
+    void onMaterialXSelectionChanged();
+    void onGraphTopologyChanged();
 
+    NodeGraph* graph_ = nullptr;
+    Node* currentMaterial_ = nullptr;
+    MaterialContainerGraphView* containerView_ = nullptr;
     MaterialNetworkGraphView* graphView_ = nullptr;
-    QSplitter* splitter_ = nullptr;
-    QWidget* inspector_ = nullptr;
-    QVBoxLayout* inspectorLayout_ = nullptr;
-    QLabel* inspectorHint_ = nullptr;
-    QLabel* categoryLabel_ = nullptr;
-    QLineEdit* nameEdit_ = nullptr;
-    QWidget* paramsHost_ = nullptr;
-    QFormLayout* paramsForm_ = nullptr;
-    QString selectedNodeName_;
-    bool updatingInspector_ = false;
+    QToolButton* backButton_ = nullptr;
+    QLabel* pathLabel_ = nullptr;
+    QMetaObject::Connection graphChangedConnection_;
+    QMetaObject::Connection nodeAddedConnection_;
+    QMetaObject::Connection nodeRemovedConnection_;
 };
 
-// Internal left-to-right MaterialX canvas.
+// Root-level view: one container node per material LOP in the scene graph.
+class MaterialContainerGraphView : public QGraphicsView {
+    Q_OBJECT
+
+public:
+    explicit MaterialContainerGraphView(QWidget* parent = nullptr);
+
+    void setMaterials(const QVector<Node*>& materials);
+    Node* selectedMaterial() const;
+
+signals:
+    void selectionChanged();
+    void diveRequested(sol::Node* material);
+    void statusMessage(const QString& message);
+
+protected:
+    void showEvent(QShowEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void keyReleaseEvent(QKeyEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void drawBackground(QPainter* painter, const QRectF& rect) override;
+
+private:
+    void frameGraph();
+    bool shouldBeginPan(const QMouseEvent* event) const;
+    void beginPan(const QPoint& viewPosition);
+    void updatePan(const QPoint& viewPosition);
+    void endPan();
+
+    QGraphicsScene* graphScene_ = nullptr;
+    bool pendingFrame_ = false;
+    bool panning_ = false;
+    bool spacePressed_ = false;
+    QPoint lastPanPoint_;
+    QGraphicsView::DragMode savedDragMode_ = QGraphicsView::RubberBandDrag;
+    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::AnchorUnderMouse;
+};
+
+// Internal left-to-right MaterialX canvas (inside one material container).
 class MaterialNetworkGraphView : public QGraphicsView {
     Q_OBJECT
 

@@ -1,32 +1,25 @@
 #include "ui/material_network_view.h"
 
-#include <QCheckBox>
-#include <QColorDialog>
 #include <QContextMenuEvent>
-#include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFormLayout>
-#include <QFrame>
 #include <QGraphicsPathItem>
 #include <QGraphicsScene>
-#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
-#include <QLineEdit>
 #include <QLineF>
 #include <QMap>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
-#include <QPushButton>
 #include <QRegularExpression>
-#include <QScrollArea>
+#include <QResizeEvent>
 #include <QScrollBar>
-#include <QSplitter>
+#include <QShowEvent>
 #include <QStyleOptionGraphicsItem>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
@@ -36,9 +29,9 @@
 #include "io/image_io.h"
 #include "io/materialx_graph.h"
 #include "nodes/node.h"
+#include "nodes/node_graph.h"
 #include "nodes/parameter.h"
 #include "ui/material_wire_item.h"
-#include "ui/numeric_editors.h"
 #include "ui/theme.h"
 
 namespace sol {
@@ -1292,7 +1285,7 @@ void MaterialNetworkGraphView::drawForeground(QPainter* painter, const QRectF& r
         painter->setFont(font);
         painter->setPen(theme::textDim());
         painter->drawText(QRect(0, 0, width(), height()), Qt::AlignCenter,
-                          "Select a Material node in the Network Editor");
+                          "Double-click a material container to edit its MaterialX graph");
         return;
     }
 
@@ -1385,269 +1378,448 @@ bool MaterialNetworkGraphView::setInputValue(const QString& nodeName, const QStr
 }
 
 // ---------------------------------------------------------------------------
-// Public dock widget: graph canvas + right-side MaterialX inspector
+// Root-level material containers
 // ---------------------------------------------------------------------------
 
 namespace {
 
-bool parseColor3Value(const QString& value, float& r, float& g, float& b) {
-    const QStringList parts = value.split(QRegularExpression("[,\\s]+"), Qt::SkipEmptyParts);
-    if (parts.size() < 3) return false;
-    bool ok1 = false, ok2 = false, ok3 = false;
-    r = parts[0].toFloat(&ok1);
-    g = parts[1].toFloat(&ok2);
-    b = parts[2].toFloat(&ok3);
-    return ok1 && ok2 && ok3;
-}
+class MaterialContainerItem : public QGraphicsItem {
+public:
+    enum { Type = UserType + 72 };
 
-QString formatColor3(float r, float g, float b) {
-    return QString("%1, %2, %3").arg(r, 0, 'g', 4).arg(g, 0, 'g', 4).arg(b, 0, 'g', 4);
+    explicit MaterialContainerItem(Node* node) : node_(node) {
+        setFlag(ItemIsSelectable, true);
+        setFlag(ItemIsMovable, true);
+        setCursor(Qt::OpenHandCursor);
+        setZValue(2.0);
+    }
+
+    int type() const override { return Type; }
+    Node* materialNode() const { return node_; }
+
+    QRectF boundingRect() const override { return bodyRect().adjusted(-10.0, -10.0, 10.0, 10.0); }
+
+    QPainterPath shape() const override {
+        QPainterPath path;
+        path.addRoundedRect(bodyRect(), 7.0, 7.0);
+        return path;
+    }
+
+    void paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget*) override {
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        const QRectF body = bodyRect();
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(0, 0, 0, 78));
+        painter->drawRoundedRect(body.translated(2.0, 3.0), 7.0, 7.0);
+
+        QLinearGradient gradient(body.topLeft(), body.bottomLeft());
+        gradient.setColorAt(0.0, theme::panelLight().lighter(110));
+        gradient.setColorAt(1.0, theme::panel().darker(112));
+        painter->setBrush(gradient);
+        painter->setPen(QPen(isSelected() ? theme::selection() : QColor(20, 21, 24), isSelected() ? 2.0 : 1.0));
+        painter->drawRoundedRect(body, 7.0, 7.0);
+
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(colorForCategory("material"));
+        painter->drawRoundedRect(QRectF(body.left(), body.top(), body.width(), 22.0), 7.0, 7.0);
+        painter->drawRect(QRectF(body.left(), body.top() + 12.0, body.width(), 10.0));
+
+        QFont nameFont = painter->font();
+        nameFont.setPointSizeF(8.4);
+        nameFont.setBold(true);
+        painter->setFont(nameFont);
+        painter->setPen(theme::text());
+        const QString name = node_ ? node_->name() : QString("material");
+        painter->drawText(QRectF(body.left() + 10.0, body.top() + 3.0, body.width() - 20.0, 16.0),
+                          Qt::AlignLeft | Qt::AlignVCenter,
+                          QFontMetrics(nameFont).elidedText(name, Qt::ElideRight, int(body.width() - 20.0)));
+
+        QFont small = painter->font();
+        small.setBold(false);
+        small.setPointSizeF(7.2);
+        painter->setFont(small);
+        painter->setPen(theme::textDim());
+        painter->drawText(QRectF(body.left() + 10.0, body.top() + 28.0, body.width() - 20.0, 16.0),
+                          Qt::AlignLeft | Qt::AlignVCenter, "material  ·  container");
+        painter->drawText(QRectF(body.left() + 10.0, body.top() + 46.0, body.width() - 20.0, 16.0),
+                          Qt::AlignLeft | Qt::AlignVCenter, "double-click to dive");
+    }
+
+private:
+    QRectF bodyRect() const { return QRectF(-78.0, -36.0, 156.0, 72.0); }
+    Node* node_ = nullptr;
+};
+
+MaterialContainerItem* containerItemAt(QGraphicsView* view, const QPoint& viewPosition) {
+    for (QGraphicsItem* item : view->items(viewPosition)) {
+        if (auto* container = qgraphicsitem_cast<MaterialContainerItem*>(item)) return container;
+    }
+    return nullptr;
 }
 
 }  // namespace
 
+MaterialContainerGraphView::MaterialContainerGraphView(QWidget* parent) : QGraphicsView(parent) {
+    graphScene_ = new QGraphicsScene(this);
+    setScene(graphScene_);
+    setRenderHint(QPainter::Antialiasing, true);
+    setViewportUpdateMode(QGraphicsView::BoundingRectViewportUpdate);
+    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    setResizeAnchor(QGraphicsView::AnchorViewCenter);
+    setDragMode(QGraphicsView::RubberBandDrag);
+    setBackgroundBrush(theme::gridDark());
+    connect(graphScene_, &QGraphicsScene::selectionChanged, this, &MaterialContainerGraphView::selectionChanged);
+}
+
+void MaterialContainerGraphView::setMaterials(const QVector<Node*>& materials) {
+    Node* keep = selectedMaterial();
+    graphScene_->clear();
+    const int count = int(materials.size());
+    const int columns = std::max(1, int(std::ceil(std::sqrt(double(std::max(1, count))))));
+    for (int i = 0; i < count; ++i) {
+        Node* material = materials[i];
+        if (!material) continue;
+        auto* item = new MaterialContainerItem(material);
+        const int col = i % columns;
+        const int row = i / columns;
+        item->setPos(col * 190.0, row * 110.0);
+        graphScene_->addItem(item);
+        if (material == keep) item->setSelected(true);
+    }
+    pendingFrame_ = true;
+    if (isVisible()) frameGraph();
+    emit selectionChanged();
+}
+
+Node* MaterialContainerGraphView::selectedMaterial() const {
+    Node* selected = nullptr;
+    for (QGraphicsItem* item : graphScene_->selectedItems()) {
+        if (auto* container = qgraphicsitem_cast<MaterialContainerItem*>(item)) {
+            if (selected && selected != container->materialNode()) return nullptr;
+            selected = container->materialNode();
+        }
+    }
+    return selected;
+}
+
+void MaterialContainerGraphView::showEvent(QShowEvent* event) {
+    QGraphicsView::showEvent(event);
+    if (pendingFrame_) frameGraph();
+}
+
+void MaterialContainerGraphView::resizeEvent(QResizeEvent* event) {
+    QGraphicsView::resizeEvent(event);
+    if (pendingFrame_) frameGraph();
+}
+
+void MaterialContainerGraphView::frameGraph() {
+    pendingFrame_ = false;
+    if (graphScene_->items().isEmpty()) {
+        resetTransform();
+        centerOn(0.0, 0.0);
+        return;
+    }
+    const QRectF bounds = graphScene_->itemsBoundingRect().adjusted(-40.0, -40.0, 40.0, 40.0);
+    fitInView(bounds, Qt::KeepAspectRatio);
+    if (transform().m11() > 1.35) {
+        resetTransform();
+        centerOn(bounds.center());
+    }
+}
+
+void MaterialContainerGraphView::wheelEvent(QWheelEvent* event) {
+    const double factor = std::pow(1.0018, event->angleDelta().y());
+    const double next = transform().m11() * factor;
+    if (next < 0.2 || next > 4.0) {
+        event->accept();
+        return;
+    }
+    scale(factor, factor);
+    event->accept();
+}
+
+void MaterialContainerGraphView::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Space) {
+        spacePressed_ = true;
+        event->accept();
+        return;
+    }
+    if (event->key() == Qt::Key_F) {
+        frameGraph();
+        event->accept();
+        return;
+    }
+    QGraphicsView::keyPressEvent(event);
+}
+
+void MaterialContainerGraphView::keyReleaseEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Space) {
+        spacePressed_ = false;
+        if (panning_) endPan();
+        event->accept();
+        return;
+    }
+    QGraphicsView::keyReleaseEvent(event);
+}
+
+bool MaterialContainerGraphView::shouldBeginPan(const QMouseEvent* event) const {
+    if (event->button() == Qt::MiddleButton) return true;
+    if (event->button() == Qt::LeftButton &&
+        ((event->modifiers() & Qt::AltModifier) || spacePressed_))
+        return true;
+    return false;
+}
+
+void MaterialContainerGraphView::beginPan(const QPoint& viewPosition) {
+    panning_ = true;
+    lastPanPoint_ = viewPosition;
+    savedDragMode_ = dragMode();
+    savedAnchor_ = transformationAnchor();
+    setDragMode(QGraphicsView::NoDrag);
+    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    setCursor(Qt::ClosedHandCursor);
+}
+
+void MaterialContainerGraphView::updatePan(const QPoint& viewPosition) {
+    const QPoint delta = viewPosition - lastPanPoint_;
+    lastPanPoint_ = viewPosition;
+    horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
+    verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
+}
+
+void MaterialContainerGraphView::endPan() {
+    if (!panning_) return;
+    panning_ = false;
+    setDragMode(savedDragMode_);
+    setTransformationAnchor(savedAnchor_);
+    unsetCursor();
+}
+
+void MaterialContainerGraphView::mousePressEvent(QMouseEvent* event) {
+    if (shouldBeginPan(event)) {
+        beginPan(event->pos());
+        event->accept();
+        return;
+    }
+    QGraphicsView::mousePressEvent(event);
+}
+
+void MaterialContainerGraphView::mouseMoveEvent(QMouseEvent* event) {
+    if (panning_) {
+        updatePan(event->pos());
+        event->accept();
+        return;
+    }
+    QGraphicsView::mouseMoveEvent(event);
+}
+
+void MaterialContainerGraphView::mouseReleaseEvent(QMouseEvent* event) {
+    if (panning_) {
+        endPan();
+        event->accept();
+        return;
+    }
+    QGraphicsView::mouseReleaseEvent(event);
+}
+
+void MaterialContainerGraphView::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton) {
+        if (MaterialContainerItem* item = containerItemAt(this, event->pos())) {
+            graphScene_->clearSelection();
+            item->setSelected(true);
+            emit diveRequested(item->materialNode());
+            event->accept();
+            return;
+        }
+    }
+    QGraphicsView::mouseDoubleClickEvent(event);
+}
+
+void MaterialContainerGraphView::drawBackground(QPainter* painter, const QRectF& rect) {
+    painter->fillRect(rect, theme::gridDark());
+    const qreal step = 40.0;
+    painter->setPen(QPen(theme::gridLine(), 0.0));
+    const qreal left = std::floor(rect.left() / step) * step;
+    const qreal top = std::floor(rect.top() / step) * step;
+    for (qreal x = left; x < rect.right(); x += step)
+        painter->drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()));
+    for (qreal y = top; y < rect.bottom(); y += step)
+        painter->drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y));
+
+    if (graphScene_->items().isEmpty()) {
+        painter->resetTransform();
+        QFont font = painter->font();
+        font.setPointSizeF(11.0);
+        painter->setFont(font);
+        painter->setPen(theme::textDim());
+        painter->drawText(QRect(0, 0, width(), height()), Qt::AlignCenter,
+                          "No material nodes in the scene\nAdd a Material node in the Network Editor");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public dock widget: containers + MaterialX dive canvas
+// ---------------------------------------------------------------------------
+
 MaterialNetworkView::MaterialNetworkView(QWidget* parent) : QWidget(parent) {
-    auto* root = new QHBoxLayout(this);
+    auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
-    splitter_ = new QSplitter(Qt::Horizontal, this);
-    splitter_->setChildrenCollapsible(false);
-    root->addWidget(splitter_);
+    auto* chrome = new QWidget(this);
+    chrome->setObjectName("materialNetworkChrome");
+    auto* chromeLayout = new QHBoxLayout(chrome);
+    chromeLayout->setContentsMargins(6, 4, 8, 4);
+    chromeLayout->setSpacing(6);
 
-    graphView_ = new MaterialNetworkGraphView(splitter_);
-    splitter_->addWidget(graphView_);
+    backButton_ = new QToolButton(chrome);
+    backButton_->setText(QString::fromUtf8("↑"));
+    backButton_->setToolTip("Up to material containers");
+    backButton_->setFixedSize(28, 24);
+    backButton_->setEnabled(false);
+    connect(backButton_, &QToolButton::clicked, this, &MaterialNetworkView::goUp);
+    chromeLayout->addWidget(backButton_);
 
-    inspector_ = new QWidget(splitter_);
-    inspector_->setMinimumWidth(220);
-    inspector_->setMaximumWidth(420);
-    auto* inspectorOuter = new QVBoxLayout(inspector_);
-    inspectorOuter->setContentsMargins(0, 0, 0, 0);
+    pathLabel_ = new QLabel("Materials", chrome);
+    pathLabel_->setStyleSheet("color: #c8ccd2; font-weight: 600;");
+    chromeLayout->addWidget(pathLabel_, 1);
+    root->addWidget(chrome);
 
-    auto* scroll = new QScrollArea(inspector_);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    inspectorOuter->addWidget(scroll);
+    containerView_ = new MaterialContainerGraphView(this);
+    graphView_ = new MaterialNetworkGraphView(this);
+    graphView_->hide();
+    root->addWidget(containerView_, 1);
+    root->addWidget(graphView_, 1);
 
-    auto* scrollContent = new QWidget();
-    inspectorLayout_ = new QVBoxLayout(scrollContent);
-    inspectorLayout_->setContentsMargins(8, 8, 8, 8);
-    inspectorLayout_->setSpacing(8);
-    scroll->setWidget(scrollContent);
-
-    auto* header = new QGroupBox("MaterialX Node");
-    auto* headerForm = new QFormLayout(header);
-    categoryLabel_ = new QLabel("—");
-    categoryLabel_->setStyleSheet("color: #969aa0;");
-    categoryLabel_->setWordWrap(true);
-    nameEdit_ = new QLineEdit();
-    nameEdit_->setPlaceholderText("node name");
-    connect(nameEdit_, &QLineEdit::editingFinished, this, &MaterialNetworkView::commitRename);
-    headerForm->addRow("Type", categoryLabel_);
-    headerForm->addRow("Name", nameEdit_);
-    inspectorLayout_->addWidget(header);
-
-    auto* paramsBox = new QGroupBox("Parameters");
-    auto* paramsBoxLayout = new QVBoxLayout(paramsBox);
-    paramsHost_ = new QWidget();
-    paramsForm_ = new QFormLayout(paramsHost_);
-    paramsForm_->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    paramsForm_->setContentsMargins(0, 0, 0, 0);
-    paramsBoxLayout->addWidget(paramsHost_);
-    inspectorLayout_->addWidget(paramsBox);
-
-    inspectorHint_ = new QLabel("Select a MaterialX node in the graph.");
-    inspectorHint_->setStyleSheet("color: #969aa0;");
-    inspectorHint_->setWordWrap(true);
-    inspectorLayout_->addWidget(inspectorHint_);
-    inspectorLayout_->addStretch(1);
-
-    splitter_->addWidget(inspector_);
-    splitter_->setStretchFactor(0, 1);
-    splitter_->setStretchFactor(1, 0);
-    splitter_->setSizes({700, 260});
-
+    connect(containerView_, &MaterialContainerGraphView::selectionChanged, this,
+            &MaterialNetworkView::onContainerSelectionChanged);
+    connect(containerView_, &MaterialContainerGraphView::diveRequested, this, &MaterialNetworkView::diveInto);
+    connect(containerView_, &MaterialContainerGraphView::statusMessage, this, &MaterialNetworkView::statusMessage);
     connect(graphView_, &MaterialNetworkGraphView::materialEdited, this, &MaterialNetworkView::materialEdited);
     connect(graphView_, &MaterialNetworkGraphView::statusMessage, this, &MaterialNetworkView::statusMessage);
     connect(graphView_, &MaterialNetworkGraphView::selectionChanged, this,
-            &MaterialNetworkView::onGraphSelectionChanged);
+            &MaterialNetworkView::onMaterialXSelectionChanged);
 
-    rebuildInspector();
+    updateChrome();
 }
 
-void MaterialNetworkView::setMaterialNode(Node* node) {
-    graphView_->setMaterialNode(node);
-    selectedNodeName_.clear();
-    rebuildInspector();
-}
-
-void MaterialNetworkView::onGraphSelectionChanged() {
-    selectedNodeName_ = graphView_->selectedNodeName();
-    rebuildInspector();
-}
-
-void MaterialNetworkView::commitRename() {
-    if (updatingInspector_ || selectedNodeName_.isEmpty()) return;
-    const QString text = nameEdit_->text().trimmed();
-    if (text.isEmpty() || text == selectedNodeName_) return;
-    if (graphView_->renameNode(selectedNodeName_, text)) selectedNodeName_ = text;
-    rebuildInspector();
-}
-
-void MaterialNetworkView::commitInputValue(const QString& inputName, const QString& type, const QString& value) {
-    Q_UNUSED(type);
-    if (updatingInspector_ || selectedNodeName_.isEmpty()) return;
-    graphView_->setInputValue(selectedNodeName_, inputName, value);
-}
-
-void MaterialNetworkView::rebuildInspector() {
-    updatingInspector_ = true;
-
-    while (QLayoutItem* child = paramsForm_->takeAt(0)) {
-        if (child->widget()) child->widget()->deleteLater();
-        delete child;
+void MaterialNetworkView::setGraph(NodeGraph* graph) {
+    if (graphChangedConnection_) disconnect(graphChangedConnection_);
+    if (nodeAddedConnection_) disconnect(nodeAddedConnection_);
+    if (nodeRemovedConnection_) disconnect(nodeRemovedConnection_);
+    graph_ = graph;
+    if (graph_) {
+        graphChangedConnection_ =
+            connect(graph_, &NodeGraph::graphChanged, this, &MaterialNetworkView::onGraphTopologyChanged);
+        nodeAddedConnection_ =
+            connect(graph_, &NodeGraph::nodeAdded, this, [this](Node*) { onGraphTopologyChanged(); });
+        nodeRemovedConnection_ = connect(graph_, &NodeGraph::nodeAboutToBeRemoved, this, [this](Node* node) {
+            if (node == currentMaterial_) goUp();
+            onGraphTopologyChanged();
+        });
     }
+    currentMaterial_ = nullptr;
+    graphView_->setMaterialNode(nullptr);
+    graphView_->hide();
+    containerView_->show();
+    refreshContainers();
+    updateChrome();
+    emit selectionChanged();
+}
 
-    const MaterialNetworkGraphView::MtlxNode* node = graphView_->selectedNode();
-    if (!node) {
-        selectedNodeName_.clear();
-        categoryLabel_->setText("—");
-        nameEdit_->clear();
-        nameEdit_->setEnabled(false);
-        inspectorHint_->setText("Select a MaterialX node in the graph.");
-        inspectorHint_->show();
-        updatingInspector_ = false;
+void MaterialNetworkView::refreshContainers() {
+    QVector<Node*> materials;
+    if (graph_) {
+        for (const NodePtr& node : graph_->nodes()) {
+            if (node && node->typeName() == "material") materials.push_back(node.get());
+        }
+    }
+    std::sort(materials.begin(), materials.end(),
+              [](Node* a, Node* b) { return a->name().localeAwareCompare(b->name()) < 0; });
+    containerView_->setMaterials(materials);
+}
+
+void MaterialNetworkView::diveInto(Node* material) {
+    if (!material || material->typeName() != "material") return;
+    currentMaterial_ = material;
+    containerView_->hide();
+    graphView_->show();
+    graphView_->setMaterialNode(material);
+    updateChrome();
+    emit selectionChanged();
+}
+
+void MaterialNetworkView::goUp() {
+    if (!currentMaterial_) return;
+    currentMaterial_ = nullptr;
+    graphView_->setMaterialNode(nullptr);
+    graphView_->hide();
+    containerView_->show();
+    refreshContainers();
+    updateChrome();
+    emit selectionChanged();
+}
+
+void MaterialNetworkView::updateChrome() {
+    const bool inside = currentMaterial_ != nullptr;
+    backButton_->setEnabled(inside);
+    if (inside)
+        pathLabel_->setText(QString("Materials  /  %1").arg(currentMaterial_->name()));
+    else
+        pathLabel_->setText("Materials");
+}
+
+void MaterialNetworkView::onContainerSelectionChanged() { emit selectionChanged(); }
+
+void MaterialNetworkView::onMaterialXSelectionChanged() { emit selectionChanged(); }
+
+void MaterialNetworkView::onGraphTopologyChanged() {
+    if (currentMaterial_ && graph_ && !graph_->findNode(currentMaterial_->name())) {
+        goUp();
         return;
     }
+    if (!currentMaterial_) refreshContainers();
+    else updateChrome();
+}
 
-    selectedNodeName_ = node->name;
-    categoryLabel_->setText(node->category + (node->type.isEmpty() ? QString() : ("  ·  " + node->type)));
-    nameEdit_->setEnabled(true);
-    nameEdit_->setText(node->name);
-    inspectorHint_->hide();
+Node* MaterialNetworkView::selectedLopNode() const {
+    if (currentMaterial_) return currentMaterial_;
+    return containerView_ ? containerView_->selectedMaterial() : nullptr;
+}
 
+bool MaterialNetworkView::selectedMaterialX(MaterialXSelection& out) const {
+    out = {};
+    if (!currentMaterial_ || !graphView_) return false;
+    const MaterialNetworkGraphView::MtlxNode* node = graphView_->selectedNode();
+    if (!node) return false;
+    out.hostMaterial = currentMaterial_;
+    out.category = node->category;
+    out.type = node->type;
+    out.name = node->name;
+    out.inputs.reserve(node->inputs.size());
     for (const MaterialNetworkGraphView::MtlxInput& input : node->inputs) {
-        if (input.name.isEmpty()) continue;
-
-        if (!input.nodename.isEmpty()) {
-            auto* linked = new QLabel("← " + input.nodename);
-            linked->setStyleSheet("color: #8eb7ff;");
-            linked->setToolTip("Connected input (disconnect the wire to edit a constant value)");
-            paramsForm_->addRow(input.name, linked);
-            continue;
-        }
-
-        const QString type = input.type.toLower();
-        if (type == "filename") {
-            auto* row = new QWidget();
-            auto* rowLayout = new QHBoxLayout(row);
-            rowLayout->setContentsMargins(0, 0, 0, 0);
-            auto* edit = new QLineEdit(input.value);
-            auto* browse = new QPushButton("…");
-            browse->setFixedWidth(28);
-            const QString inputName = input.name;
-            auto commit = [this, inputName](const QString& value) { commitInputValue(inputName, "filename", value); };
-            connect(edit, &QLineEdit::editingFinished, this, [edit, commit] { commit(edit->text()); });
-            connect(browse, &QPushButton::clicked, this, [this, edit, commit] {
-                const QString path = QFileDialog::getOpenFileName(
-                    this, "Choose file", edit->text(),
-                    "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)");
-                if (path.isEmpty()) return;
-                edit->setText(path);
-                commit(path);
-            });
-            rowLayout->addWidget(edit, 1);
-            rowLayout->addWidget(browse);
-            paramsForm_->addRow(input.name, row);
-            continue;
-        }
-
-        if (type == "boolean" || type == "bool") {
-            auto* box = new QCheckBox();
-            const bool on = input.value == "true" || input.value == "1";
-            box->setChecked(on);
-            const QString inputName = input.name;
-            connect(box, &QCheckBox::toggled, this, [this, inputName](bool checked) {
-                commitInputValue(inputName, "boolean", checked ? "true" : "false");
-            });
-            paramsForm_->addRow(input.name, box);
-            continue;
-        }
-
-        if (type == "float" || type == "integer" || type == "int") {
-            auto* spin = new NoWheelDoubleSpinBox();
-            spin->setDecimals(type.startsWith("int") ? 0 : 4);
-            spin->setRange(-1.0e6, 1.0e6);
-            spin->setKeyboardTracking(false);
-            spin->setValue(input.value.toDouble());
-            const QString inputName = input.name;
-            const QString inputType = input.type;
-            connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
-                    [this, inputName, inputType](double value) {
-                        commitInputValue(inputName, inputType,
-                                         inputType.startsWith("int") ? QString::number(int(value))
-                                                                     : QString::number(value, 'g', 6));
-                    });
-            paramsForm_->addRow(input.name, spin);
-            continue;
-        }
-
-        if (type == "color3" || type == "color4" || type == "vector3") {
-            float r = 1, g = 1, b = 1;
-            parseColor3Value(input.value, r, g, b);
-            auto* row = new QWidget();
-            auto* rowLayout = new QHBoxLayout(row);
-            rowLayout->setContentsMargins(0, 0, 0, 0);
-            auto* edit = new QLineEdit(input.value);
-            auto* swatch = new QPushButton();
-            swatch->setFixedSize(28, 22);
-            auto updateSwatch = [swatch](float rr, float gg, float bb) {
-                swatch->setStyleSheet(QString("background:%1; border:1px solid #222;")
-                                          .arg(QColor::fromRgbF(qBound(0.0, double(rr), 1.0),
-                                                                qBound(0.0, double(gg), 1.0),
-                                                                qBound(0.0, double(bb), 1.0))
-                                                   .name()));
-            };
-            updateSwatch(r, g, b);
-            const QString inputName = input.name;
-            const QString inputType = input.type;
-            connect(edit, &QLineEdit::editingFinished, this, [this, edit, inputName, inputType, updateSwatch] {
-                float rr = 1, gg = 1, bb = 1;
-                parseColor3Value(edit->text(), rr, gg, bb);
-                updateSwatch(rr, gg, bb);
-                commitInputValue(inputName, inputType, edit->text().trimmed());
-            });
-            connect(swatch, &QPushButton::clicked, this,
-                    [this, edit, inputName, inputType, updateSwatch] {
-                        float rr = 1, gg = 1, bb = 1;
-                        parseColor3Value(edit->text(), rr, gg, bb);
-                        const QColor chosen = QColorDialog::getColor(
-                            QColor::fromRgbF(qBound(0.0, double(rr), 1.0), qBound(0.0, double(gg), 1.0),
-                                             qBound(0.0, double(bb), 1.0)),
-                            this, "Pick " + inputName);
-                        if (!chosen.isValid()) return;
-                        const QString value =
-                            formatColor3(float(chosen.redF()), float(chosen.greenF()), float(chosen.blueF()));
-                        edit->setText(value);
-                        updateSwatch(float(chosen.redF()), float(chosen.greenF()), float(chosen.blueF()));
-                        commitInputValue(inputName, inputType, value);
-                    });
-            rowLayout->addWidget(edit, 1);
-            rowLayout->addWidget(swatch);
-            paramsForm_->addRow(input.name, row);
-            continue;
-        }
-
-        auto* edit = new QLineEdit(input.value);
-        const QString inputName = input.name;
-        const QString inputType = input.type;
-        connect(edit, &QLineEdit::editingFinished, this, [this, edit, inputName, inputType] {
-            commitInputValue(inputName, inputType, edit->text().trimmed());
-        });
-        paramsForm_->addRow(input.name, edit);
+        MaterialXInputParam param;
+        param.name = input.name;
+        param.type = input.type;
+        param.value = input.value;
+        param.nodename = input.nodename;
+        out.inputs.push_back(param);
     }
+    return true;
+}
 
-    updatingInspector_ = false;
+bool MaterialNetworkView::renameSelectedMaterialX(const QString& newName) {
+    if (!graphView_) return false;
+    const QString oldName = graphView_->selectedNodeName();
+    if (oldName.isEmpty()) return false;
+    return graphView_->renameNode(oldName, newName);
+}
+
+bool MaterialNetworkView::setSelectedMaterialXInput(const QString& inputName, const QString& value) {
+    if (!graphView_) return false;
+    const QString nodeName = graphView_->selectedNodeName();
+    if (nodeName.isEmpty()) return false;
+    return graphView_->setInputValue(nodeName, inputName, value);
 }
 
 }  // namespace sol

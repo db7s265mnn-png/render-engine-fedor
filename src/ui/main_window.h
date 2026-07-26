@@ -89,6 +89,10 @@ private:
     QAction* renderAction_ = nullptr;
     QAction* stopAction_ = nullptr;
     QAction* iprAction_ = nullptr;
+    QAction* selectToolAction_ = nullptr;
+    QAction* translateToolAction_ = nullptr;
+    QAction* rotateToolAction_ = nullptr;
+    QAction* scaleToolAction_ = nullptr;
 
     std::atomic<bool> framePending_{false};
     bool cameraOverride_ = false;
