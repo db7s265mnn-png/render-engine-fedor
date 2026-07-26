@@ -1,8 +1,9 @@
 // Graphics item that draws a single node, Houdini style: inputs on top,
-// output at the bottom, display and bypass flags on the right hand side.
+// output at the bottom, filled bypass (left) and display (right) flag edges.
 #pragma once
 
 #include <QGraphicsItem>
+#include <QPainterPath>
 #include <QRectF>
 
 #include "nodes/node.h"
@@ -16,10 +17,13 @@ public:
     enum { Type = UserType + 1 };
     enum class Hit { None, Body, Output, Input, DisplayFlag, BypassFlag };
 
-    static constexpr qreal kWidth = 74.0;
-    static constexpr qreal kHeight = 50.0;
+    static constexpr qreal kWidth = 78.0;
+    static constexpr qreal kHeight = 52.0;
     static constexpr qreal kPortRadius = 5.5;
     static constexpr qreal kPortHitRadius = 18.0;
+    static constexpr qreal kCornerRadius = 6.0;
+    static constexpr qreal kFlagWidth = 12.0;
+    static constexpr qreal kFlagSlant = 9.0;
 
     NodeItem(Node* node, NodeGraphScene* scene);
 
@@ -46,8 +50,9 @@ private:
     QColor headerColor() const;
     QRectF bodyRect() const;
     QRectF labelRect() const;
-    QRectF displayFlagRect() const;
-    QRectF bypassFlagRect() const;
+    QPainterPath bodyPath() const;
+    QPainterPath displayFlagPath() const;
+    QPainterPath bypassFlagPath() const;
 
     Node* node_ = nullptr;
     NodeGraphScene* graphScene_ = nullptr;

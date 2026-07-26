@@ -11,6 +11,17 @@
 #include "ui/theme.h"
 
 namespace sol {
+namespace {
+
+QColor bypassFlagColor(bool active) {
+    return active ? QColor(236, 196, 48) : QColor(72, 68, 42);
+}
+
+QColor displayFlagColor(bool active) {
+    return active ? theme::displayFlag() : QColor(42, 58, 72);
+}
+
+}  // namespace
 
 NodeItem::NodeItem(Node* node, NodeGraphScene* scene) : node_(node), graphScene_(scene) {
     setFlag(ItemIsMovable, true);
@@ -28,7 +39,7 @@ QColor NodeItem::headerColor() const {
 }
 
 QRectF NodeItem::boundingRect() const {
-    QRectF bounds = bodyRect().adjusted(-7.0, -7.0, 8.0, 9.0);
+    QRectF bounds = bodyRect().adjusted(-8.0, -8.0, 9.0, 10.0);
     bounds = bounds.united(labelRect().adjusted(0.0, -3.0, 4.0, 3.0));
     for (int i = 0; i < node_->inputCount(); ++i) {
         const QPointF port = inputPortPosition(i) - pos();
@@ -44,8 +55,7 @@ QRectF NodeItem::boundingRect() const {
 }
 
 QPainterPath NodeItem::shape() const {
-    QPainterPath path;
-    path.addRoundedRect(bodyRect(), 5.0, 5.0);
+    QPainterPath path = bodyPath();
     path.addRect(labelRect());
     for (int i = 0; i < node_->inputCount(); ++i) {
         const QPointF port = inputPortPosition(i) - pos();
@@ -66,23 +76,41 @@ QRectF NodeItem::labelRect() const {
     return QRectF(kWidth * 0.5 + 10.0, -20.0, 140.0, 40.0);
 }
 
-QRectF NodeItem::displayFlagRect() const {
-    constexpr qreal flagSize = 10.0;
-    const QRectF body = bodyRect();
-    return QRectF(body.right() - flagSize - 5.0, body.top() + 5.0, flagSize, flagSize);
+QPainterPath NodeItem::bodyPath() const {
+    QPainterPath path;
+    path.addRoundedRect(bodyRect(), kCornerRadius, kCornerRadius);
+    return path;
 }
 
-QRectF NodeItem::bypassFlagRect() const {
-    constexpr qreal flagSize = 10.0;
+QPainterPath NodeItem::bypassFlagPath() const {
+    // Left filled edge: wider at the top, slanting inward — Houdini bypass flag.
     const QRectF body = bodyRect();
-    return QRectF(body.right() - flagSize - 5.0, body.bottom() - flagSize - 5.0, flagSize, flagSize);
+    QPainterPath path;
+    path.moveTo(body.topLeft());
+    path.lineTo(QPointF(body.left() + kFlagWidth + kFlagSlant, body.top()));
+    path.lineTo(QPointF(body.left() + kFlagWidth, body.bottom()));
+    path.lineTo(body.bottomLeft());
+    path.closeSubpath();
+    return path.intersected(bodyPath());
+}
+
+QPainterPath NodeItem::displayFlagPath() const {
+    // Right filled edge: wider at the bottom, slanting inward — Houdini display flag.
+    const QRectF body = bodyRect();
+    QPainterPath path;
+    path.moveTo(body.topRight());
+    path.lineTo(body.bottomRight());
+    path.lineTo(QPointF(body.right() - kFlagWidth - kFlagSlant, body.bottom()));
+    path.lineTo(QPointF(body.right() - kFlagWidth, body.top()));
+    path.closeSubpath();
+    return path.intersected(bodyPath());
 }
 
 QPointF NodeItem::outputPortPosition() const { return pos() + QPointF(0.0, kHeight * 0.5 + 2.0); }
 
 QPointF NodeItem::inputPortPosition(int index) const {
     const int count = std::max(1, node_->inputCount());
-    const qreal span = kWidth * 0.68;
+    const qreal span = kWidth * 0.58;
     const qreal step = count > 1 ? span / qreal(count - 1) : 0.0;
     const qreal x = count > 1 ? -span * 0.5 + step * index : 0.0;
     return pos() + QPointF(x, -kHeight * 0.5 - 2.0);
@@ -113,8 +141,8 @@ bool NodeItem::outputPortNear(QPointF localPosition, qreal maxDistance) const {
 }
 
 NodeItem::Hit NodeItem::hitTest(QPointF localPosition) const {
-    if (displayFlagRect().contains(localPosition)) return Hit::DisplayFlag;
-    if (bypassFlagRect().contains(localPosition)) return Hit::BypassFlag;
+    if (displayFlagPath().contains(localPosition)) return Hit::DisplayFlag;
+    if (bypassFlagPath().contains(localPosition)) return Hit::BypassFlag;
     if (outputPortNear(localPosition)) return Hit::Output;
     if (nearestInputPort(localPosition) >= 0) return Hit::Input;
     if (bodyRect().contains(localPosition) || labelRect().contains(localPosition)) return Hit::Body;
@@ -138,11 +166,24 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     painter->setRenderHint(QPainter::Antialiasing, true);
     const QRectF body = bodyRect();
     const bool isDisplay = graphScene_ && graphScene_->graph() && graphScene_->graph()->displayNode() == node_;
+    const bool isBypassed = node_->isBypassed();
+    const QPainterPath clip = bodyPath();
+
+    // Soft display halo behind the tile (Houdini-style cook/display cue).
+    if (isDisplay) {
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(theme::displayFlag().red(), theme::displayFlag().green(),
+                                 theme::displayFlag().blue(), 38));
+        painter->drawEllipse(body.center(), body.width() * 0.72, body.height() * 0.78);
+        painter->setBrush(QColor(theme::displayFlag().red(), theme::displayFlag().green(),
+                                 theme::displayFlag().blue(), 22));
+        painter->drawEllipse(body.center(), body.width() * 0.92, body.height() * 0.98);
+    }
 
     // Drop shadow.
     painter->setPen(Qt::NoPen);
     painter->setBrush(QColor(0, 0, 0, 70));
-    painter->drawRoundedRect(body.translated(2.0, 3.0), 5.0, 5.0);
+    painter->drawRoundedRect(body.translated(2.0, 3.0), kCornerRadius, kCornerRadius);
 
     QLinearGradient gradient(body.topLeft(), body.bottomLeft());
     gradient.setColorAt(0.0, theme::panelLight().lighter(108));
@@ -152,27 +193,37 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     QPen border(node_->errorText().isEmpty() ? QColor(20, 21, 24) : theme::error(), 1.4);
     if (isSelected()) border = QPen(theme::selection(), 2.0);
     painter->setPen(border);
-    painter->drawRoundedRect(body, 5.0, 5.0);
+    painter->drawPath(clip);
 
-    QPainterPath bodyClip;
-    bodyClip.addRoundedRect(body, 5.0, 5.0);
     painter->save();
-    painter->setClipPath(bodyClip);
+    painter->setClipPath(clip);
     painter->setPen(Qt::NoPen);
+
+    // Type color strip across the top, inset so it doesn't cover the flags.
     painter->setBrush(color_);
-    painter->drawRect(QRectF(body.left(), body.top(), body.width(), 11.0));
+    painter->drawRect(QRectF(body.left() + kFlagWidth + 1.0, body.top(),
+                             body.width() - 2.0 * kFlagWidth - 2.0, 11.0));
+
+    // Filled Houdini-style flag edges.
+    painter->setBrush(bypassFlagColor(isBypassed));
+    painter->drawPath(bypassFlagPath());
+    painter->setBrush(displayFlagColor(isDisplay));
+    painter->drawPath(displayFlagPath());
+
+    // Subtle separators between flags and body.
+    painter->setPen(QPen(QColor(0, 0, 0, 90), 1.0));
+    painter->drawLine(QPointF(body.left() + kFlagWidth + kFlagSlant * 0.35, body.top() + 1.0),
+                      QPointF(body.left() + kFlagWidth - kFlagSlant * 0.15, body.bottom() - 1.0));
+    painter->drawLine(QPointF(body.right() - kFlagWidth + kFlagSlant * 0.15, body.top() + 1.0),
+                      QPointF(body.right() - kFlagWidth - kFlagSlant * 0.35, body.bottom() - 1.0));
+
+    // Dim the center when bypassed.
+    if (isBypassed) {
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(QColor(0, 0, 0, 55));
+        painter->drawRect(body.adjusted(kFlagWidth + 1.0, 0.0, -(kFlagWidth + 1.0), 0.0));
+    }
     painter->restore();
-
-    if (isDisplay) {
-        painter->setPen(QPen(theme::displayFlag().lighter(125), 3.0, Qt::SolidLine, Qt::SquareCap, Qt::RoundJoin));
-        painter->setBrush(Qt::NoBrush);
-        painter->drawRoundedRect(body.adjusted(-1.8, -1.8, 1.8, 1.8), 6.0, 6.0);
-    }
-
-    if (node_->isBypassed()) {
-        painter->setPen(QPen(QColor(255, 230, 150, 180), 1.6));
-        painter->drawLine(body.topLeft() + QPointF(4, 4), body.bottomRight() - QPointF(4, 4));
-    }
 
     // Name and type live outside the tile, matching Houdini's network editor.
     const QRectF label = labelRect();
@@ -193,16 +244,6 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     const QRectF typeRect(label.left(), label.top() + 20.0, label.width(), 16.0);
     painter->drawText(typeRect, Qt::AlignLeft | Qt::AlignVCenter,
                       QFontMetrics(typeFont).elidedText(node_->typeName(), Qt::ElideRight, int(typeRect.width())));
-
-    // Flags.
-    const QRectF displayRect = displayFlagRect();
-    painter->setPen(QPen(QColor(20, 21, 24), 1.0));
-    painter->setBrush(isDisplay ? theme::displayFlag() : QColor(60, 63, 68));
-    painter->drawRect(displayRect);
-
-    const QRectF bypassRect = bypassFlagRect();
-    painter->setBrush(node_->isBypassed() ? theme::accent() : QColor(60, 63, 68));
-    painter->drawRect(bypassRect);
 
     // Ports.
     for (int i = 0; i < node_->inputCount(); ++i) {
