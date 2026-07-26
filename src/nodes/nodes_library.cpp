@@ -661,9 +661,9 @@ void registerBuiltinNodes() {
     NodeRegistry& registry = NodeRegistry::instance();
 
     registry.registerType(makeType<AlembicNode>("alembic", "Alembic Import", "Geometry",
-                                                "Loads polygon meshes from an .abc archive", "#3f6f4f"));
+                                                "Loads polygon meshes from an .abc archive", "#a8aaae"));
     registry.registerType(makeType<UsdNode>("usd", "USD Import", "Geometry",
-                                            "Loads meshes, cameras and lights from a USDA scene", "#3f5f6f"));
+                                            "Loads meshes, cameras and lights from a USDA scene", "#a8aaae"));
 
     {
         NodeTypeInfo info;
@@ -671,7 +671,7 @@ void registerBuiltinNodes() {
         info.label = "Sphere";
         info.category = "Geometry";
         info.description = "Polygonal sphere primitive";
-        info.colorHex = "#3f6f4f";
+        info.colorHex = "#a8aaae";
         info.factory = [](const QString& name) -> NodePtr {
             return std::make_unique<PrimitiveNode>("sphere", name, PrimitiveNode::Shape::Sphere);
         };
@@ -717,7 +717,7 @@ void registerBuiltinNodes() {
     {
         NodeTypeInfo info;
         info.category = "Lighting";
-        info.colorHex = "#8a8340";
+        info.colorHex = "#d67a2a";
 
         info.typeName = "domelight";
         info.label = "Dome Light";
@@ -761,7 +761,7 @@ void registerBuiltinNodes() {
     }
 
     registry.registerType(
-        makeType<CameraNode>("camera", "Camera", "Camera", "Render camera with lens controls", "#3f6a8a"));
+        makeType<CameraNode>("camera", "Camera", "Camera", "Render camera with lens controls", "#3a76b2"));
     registry.registerType(makeType<RenderSettingsNode>("rendersettings", "Render Settings", "Render",
                                                        "Resolution, sampling and backend selection", "#8a4550"));
 }

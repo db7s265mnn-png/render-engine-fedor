@@ -17,8 +17,8 @@ public:
     enum { Type = UserType + 1 };
     enum class Hit { None, Body, Output, Input, DisplayFlag, BypassFlag };
 
-    static constexpr qreal kWidth = 78.0;
-    static constexpr qreal kHeight = 52.0;
+    static constexpr qreal kWidth = 86.0;
+    static constexpr qreal kHeight = 56.0;
     static constexpr qreal kPortRadius = 5.5;
     static constexpr qreal kPortHitRadius = 18.0;
     static constexpr qreal kCornerRadius = 6.0;
@@ -49,6 +49,7 @@ private:
     QColor headerColor() const;
     QRectF bodyRect() const;
     QRectF labelRect() const;
+    QRectF iconArea() const;
     QPainterPath bodyPath() const;
     QPainterPath displayFlagPath() const;
     QPainterPath bypassFlagPath() const;

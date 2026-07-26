@@ -224,6 +224,7 @@ set(SOLSTICE_APP_SOURCES
     src/ui/material_wire_item.cpp
     src/ui/node_graph_view.cpp
     src/ui/node_item.cpp
+    src/ui/node_icons.cpp
     src/ui/connection_item.cpp
     src/ui/parameter_panel.cpp
     src/ui/render_view.cpp
@@ -238,6 +239,7 @@ set(SOLSTICE_APP_HEADERS
     src/ui/material_wire_item.h
     src/ui/node_graph_view.h
     src/ui/node_item.h
+    src/ui/node_icons.h
     src/ui/connection_item.h
     src/ui/parameter_panel.h
     src/ui/render_view.h

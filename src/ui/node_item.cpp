@@ -8,6 +8,7 @@
 
 #include "nodes/node_registry.h"
 #include "ui/node_graph_view.h"
+#include "ui/node_icons.h"
 #include "ui/theme.h"
 
 namespace sol {
@@ -74,6 +75,12 @@ QRectF NodeItem::bodyRect() const {
 
 QRectF NodeItem::labelRect() const {
     return QRectF(kWidth * 0.5 + 10.0, -20.0, 140.0, 40.0);
+}
+
+QRectF NodeItem::iconArea() const {
+    const QRectF body = bodyRect();
+    return QRectF(body.left() + kFlagWidth + 2.0, body.top() + 3.0,
+                  body.width() - 2.0 * kFlagWidth - 4.0, body.height() - 6.0);
 }
 
 QPainterPath NodeItem::bodyPath() const {
@@ -177,10 +184,23 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     painter->setBrush(QColor(0, 0, 0, 70));
     painter->drawRoundedRect(body.translated(2.0, 3.0), kCornerRadius, kCornerRadius);
 
-    QLinearGradient gradient(body.topLeft(), body.bottomLeft());
-    gradient.setColorAt(0.0, theme::panelLight().lighter(108));
-    gradient.setColorAt(1.0, theme::panel().darker(112));
-    painter->setBrush(gradient);
+    const NodeTypeInfo* typeInfo = NodeRegistry::instance().find(node_->typeName());
+    const NodeIconKind iconKind =
+        nodeIconKind(node_->typeName(), typeInfo ? typeInfo->category : QString());
+    const QColor bodyColor = nodeBodyColor(iconKind, color_);
+
+    if (iconKind != NodeIconKind::None) {
+        // Houdini SOP/OBJ style: solid category-colored body with a center icon.
+        QLinearGradient gradient(body.topLeft(), body.bottomLeft());
+        gradient.setColorAt(0.0, bodyColor.lighter(112));
+        gradient.setColorAt(1.0, bodyColor.darker(118));
+        painter->setBrush(gradient);
+    } else {
+        QLinearGradient gradient(body.topLeft(), body.bottomLeft());
+        gradient.setColorAt(0.0, theme::panelLight().lighter(108));
+        gradient.setColorAt(1.0, theme::panel().darker(112));
+        painter->setBrush(gradient);
+    }
 
     QPen border(node_->errorText().isEmpty() ? QColor(20, 21, 24) : theme::error(), 1.4);
     if (isSelected()) border = QPen(theme::selection(), 2.0);
@@ -191,12 +211,14 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     painter->setClipPath(clip);
     painter->setPen(Qt::NoPen);
 
-    // Type color strip across the top, inset so it doesn't cover the flags.
-    painter->setBrush(color_);
-    painter->drawRect(QRectF(body.left() + kFlagWidth + 1.0, body.top(),
-                             body.width() - 2.0 * kFlagWidth - 2.0, 11.0));
+    if (iconKind == NodeIconKind::None) {
+        // Utility / material nodes keep a thin type-color header strip.
+        painter->setBrush(color_);
+        painter->drawRect(QRectF(body.left() + kFlagWidth + 1.0, body.top(),
+                                 body.width() - 2.0 * kFlagWidth - 2.0, 11.0));
+    }
 
-    // Filled Houdini-style flag edges.
+    // Filled Houdini-style flag edges (straight).
     painter->setBrush(bypassFlagColor(isBypassed));
     painter->drawPath(bypassFlagPath());
     painter->setBrush(displayFlagColor(isDisplay));
@@ -208,6 +230,8 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
                       QPointF(body.left() + kFlagWidth, body.bottom() - 1.0));
     painter->drawLine(QPointF(body.right() - kFlagWidth, body.top() + 1.0),
                       QPointF(body.right() - kFlagWidth, body.bottom() - 1.0));
+
+    if (iconKind != NodeIconKind::None) paintNodeIcon(*painter, iconKind, iconArea());
 
     // Dim the center when bypassed.
     if (isBypassed) {
