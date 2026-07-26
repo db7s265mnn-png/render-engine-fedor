@@ -1,5 +1,6 @@
 #include "ui/parameter_panel.h"
 
+#include <QAbstractSpinBox>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -17,10 +18,13 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QVBoxLayout>
 #include <QVector3D>
+#include <algorithm>
+#include <cmath>
 #include <functional>
 
 #include "nodes/node_registry.h"
@@ -93,11 +97,66 @@ NoWheelDoubleSpinBox* makeDoubleSpin(double value, double minimum, double maximu
     auto* spin = new NoWheelDoubleSpinBox();
     spin->setRange(minimum, maximum);
     spin->setDecimals(4);
-    spin->setSingleStep(std::max(0.001, (maximum - minimum) / 200.0));
+    spin->setSingleStep(1.0);
+    spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     spin->setValue(value);
     spin->setKeyboardTracking(false);
-    spin->setMinimumWidth(70);
+    spin->setMinimumWidth(72);
+    spin->setMaximumWidth(96);
     return spin;
+}
+
+NoWheelSpinBox* makeIntSpin(int value, int minimum, int maximum) {
+    auto* spin = new NoWheelSpinBox();
+    spin->setRange(minimum, maximum);
+    spin->setSingleStep(1);
+    spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    spin->setValue(value);
+    spin->setKeyboardTracking(false);
+    spin->setMinimumWidth(72);
+    spin->setMaximumWidth(96);
+    return spin;
+}
+
+QWidget* makeSpinSliderRow(QWidget* spin, double value, double minimum, double maximum,
+                           const std::function<void(double)>& onSpinChanged) {
+    auto* container = new QWidget();
+    auto* layout = new QHBoxLayout(container);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(6);
+    layout->addWidget(spin, 0);
+
+    auto* slider = new NoWheelSlider(Qt::Horizontal);
+    slider->setRange(0, 1000);
+    const double span = std::max(1e-9, maximum - minimum);
+    const double t = (value - minimum) / span;
+    slider->setValue(int(std::lround(std::clamp(t, 0.0, 1.0) * 1000.0)));
+    layout->addWidget(slider, 1);
+
+    if (auto* doubleSpin = qobject_cast<QDoubleSpinBox*>(spin)) {
+        QObject::connect(doubleSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), container,
+                         [slider, minimum, span, onSpinChanged](double v) {
+                             QSignalBlocker blocker(slider);
+                             slider->setValue(int(std::lround(std::clamp((v - minimum) / span, 0.0, 1.0) * 1000.0)));
+                             onSpinChanged(v);
+                         });
+        QObject::connect(slider, &QSlider::valueChanged, container, [doubleSpin, minimum, span](int pos) {
+            const double v = minimum + span * (double(pos) / 1000.0);
+            doubleSpin->setValue(v);
+        });
+    } else if (auto* intSpin = qobject_cast<QSpinBox*>(spin)) {
+        QObject::connect(intSpin, QOverload<int>::of(&QSpinBox::valueChanged), container,
+                         [slider, minimum, span, onSpinChanged](int v) {
+                             QSignalBlocker blocker(slider);
+                             slider->setValue(int(std::lround(std::clamp((double(v) - minimum) / span, 0.0, 1.0) * 1000.0)));
+                             onSpinChanged(double(v));
+                         });
+        QObject::connect(slider, &QSlider::valueChanged, container, [intSpin, minimum, span](int pos) {
+            const double v = minimum + span * (double(pos) / 1000.0);
+            intSpin->setValue(int(std::lround(v)));
+        });
+    }
+    return container;
 }
 
 }  // namespace
@@ -329,15 +388,18 @@ void ParameterPanel::rebuildMaterialX() {
         }
 
         if (type == "float" || type == "integer" || type == "int") {
-            auto* spin = makeDoubleSpin(input.value.toDouble(), -1.0e6, 1.0e6);
-            spin->setDecimals(type.startsWith("int") ? 0 : 4);
+            const bool isInt = type.startsWith("int");
+            const double lo = isInt ? -1.0e6 : -1.0e6;
+            const double hi = 1.0e6;
+            auto* spin = makeDoubleSpin(input.value.toDouble(), lo, hi);
+            spin->setDecimals(isInt ? 0 : 4);
             const QString inputType = input.type;
-            connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
-                    [commit, inputType](double value) {
-                        commit(inputType.startsWith("int") ? QString::number(int(value))
-                                                           : QString::number(value, 'g', 6));
-                    });
-            form->addRow(input.name, spin);
+            form->addRow(input.name, makeSpinSliderRow(spin, spin->value(), lo, hi,
+                                                       [commit, inputType](double value) {
+                                                           commit(inputType.startsWith("int")
+                                                                      ? QString::number(int(std::lround(value)))
+                                                                      : QString::number(value, 'g', 6));
+                                                       }));
             continue;
         }
 
@@ -405,48 +467,18 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
 
     switch (parameter.type) {
         case ParamType::Float: {
-            auto* container = new QWidget();
-            auto* layout = new QHBoxLayout(container);
-            layout->setContentsMargins(0, 0, 0, 0);
-            auto* spin = makeDoubleSpin(parameter.toDouble(), parameter.hasRange ? parameter.minValue : -1e7,
-                                        parameter.hasRange ? parameter.maxValue : 1e7);
-            QSlider* slider = nullptr;
-            if (parameter.hasRange) {
-                slider = new NoWheelSlider(Qt::Horizontal);
-                slider->setRange(0, 1000);
-                const double t = (parameter.toDouble() - parameter.minValue) /
-                                 std::max(1e-9, parameter.maxValue - parameter.minValue);
-                slider->setValue(int(t * 1000.0));
-                layout->addWidget(slider, 1);
-            }
-            layout->addWidget(spin, 0);
-
-            connect(spin, &QDoubleSpinBox::valueChanged, this, [notify, slider, parameter](double value) {
-                if (slider) {
-                    QSignalBlocker blocker(slider);
-                    const double t = (value - parameter.minValue) /
-                                     std::max(1e-9, parameter.maxValue - parameter.minValue);
-                    slider->setValue(int(t * 1000.0));
-                }
-                notify(value);
-            });
-            if (slider) {
-                connect(slider, &QSlider::valueChanged, this, [spin, parameter](int value) {
-                    const double v = parameter.minValue +
-                                     (parameter.maxValue - parameter.minValue) * (double(value) / 1000.0);
-                    spin->setValue(v);
-                });
-            }
-            return container;
+            const double lo = parameter.minValue;
+            const double hi = parameter.maxValue;
+            auto* spin = makeDoubleSpin(parameter.toDouble(), lo, hi);
+            return makeSpinSliderRow(spin, parameter.toDouble(), lo, hi,
+                                     [notify](double value) { notify(value); });
         }
         case ParamType::Int: {
-            auto* spin = new NoWheelSpinBox();
-            spin->setRange(parameter.hasRange ? int(parameter.minValue) : -1000000,
-                           parameter.hasRange ? int(parameter.maxValue) : 1000000);
-            spin->setValue(parameter.toInt());
-            spin->setKeyboardTracking(false);
-            connect(spin, &QSpinBox::valueChanged, this, [notify](int value) { notify(value); });
-            return spin;
+            const int lo = int(parameter.minValue);
+            const int hi = int(parameter.maxValue);
+            auto* spin = makeIntSpin(parameter.toInt(), lo, hi);
+            return makeSpinSliderRow(spin, double(parameter.toInt()), double(lo), double(hi),
+                                     [notify](double value) { notify(int(std::lround(value))); });
         }
         case ParamType::Bool: {
             auto* check = new QCheckBox();
@@ -463,6 +495,7 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             for (int i = 0; i < 3; ++i) {
                 spins[i] = makeDoubleSpin(double(value[i]), -1e6, 1e6);
                 spins[i]->setDecimals(3);
+                spins[i]->setMaximumWidth(80);
                 layout->addWidget(spins[i]);
             }
             for (int i = 0; i < 3; ++i) {

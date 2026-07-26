@@ -155,9 +155,13 @@ public:
     bool renameNode(const QString& oldName, const QString& newName);
     bool setInputValue(const QString& nodeName, const QString& inputName, const QString& value);
     void selectNodeByName(const QString& name);
+    // Live-update MaterialX wires while a node is dragged.
+    void updateWiresLive();
 
 signals:
     void materialEdited(sol::Node* node);
+    // Layout-only persist (xpos/ypos) — mark project dirty, do not cook.
+    void materialLayoutChanged();
     void statusMessage(const QString& message);
     void selectionChanged();
 
@@ -195,6 +199,7 @@ private:
     QString applyUdimFilename(const QString& path);
     void refreshUdimSetFromFilenames();
     void syncNodePositions();
+    void persistLayoutQuietly();
     bool shouldBeginPan(const QMouseEvent* event) const;
     void beginPan(const QPoint& viewPosition);
     void updatePan(const QPoint& viewPosition);

@@ -138,9 +138,10 @@ public:
         bool connected = false;
     };
 
-    MaterialNetworkNodeItem(QString nodeName, QString category, QString typeName, QVector<InputPort> inputs,
-                            QString subtitle)
-        : nodeName_(std::move(nodeName)),
+    MaterialNetworkNodeItem(MaterialNetworkGraphView* view, QString nodeName, QString category, QString typeName,
+                            QVector<InputPort> inputs, QString subtitle)
+        : view_(view),
+          nodeName_(std::move(nodeName)),
           category_(std::move(category)),
           typeName_(std::move(typeName)),
           inputs_(std::move(inputs)),
@@ -148,6 +149,7 @@ public:
         setFlag(ItemIsSelectable, true);
         setFlag(ItemIsMovable, true);
         setFlag(ItemSendsGeometryChanges, true);
+        setCacheMode(NoCache);
         setCursor(Qt::OpenHandCursor);
         setZValue(2.0);
     }
@@ -155,6 +157,13 @@ public:
     int type() const override { return Type; }
     const QString& nodeName() const { return nodeName_; }
     const QString& category() const { return category_; }
+    QString inputPortName(int portIndex) const { return inputs_.value(portIndex).name; }
+    int inputPortIndexByName(const QString& name) const {
+        for (int i = 0; i < inputs_.size(); ++i) {
+            if (inputs_[i].name == name) return i;
+        }
+        return -1;
+    }
 
     QRectF boundingRect() const override { return bodyRect().adjusted(-16.0, -14.0, 16.0, 14.0); }
 
@@ -192,7 +201,7 @@ public:
         // Official MaterialX mark in the header strip.
         const QPixmap mtlx = nodeIconPixmap(NodeIconKind::Material);
         if (!mtlx.isNull()) {
-            const QRectF badge(body.right() - 20.0, body.top() + 2.0, 16.0, 16.0);
+            const QRectF badge(body.right() - 16.0, body.top() + 4.0, 12.0, 12.0);
             painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
             painter->drawPixmap(badge, mtlx, QRectF(mtlx.rect()));
         }
@@ -203,7 +212,7 @@ public:
         nameFont.setBold(true);
         painter->setFont(nameFont);
         painter->setPen(theme::text());
-        const QRectF nameRect(body.left() + 8.0, body.top() + 2.0, body.width() - 30.0, 16.0);
+        const QRectF nameRect(body.left() + 8.0, body.top() + 2.0, body.width() - 28.0, 16.0);
         painter->drawText(nameRect, Qt::AlignLeft | Qt::AlignVCenter,
                           QFontMetrics(nameFont).elidedText(nodeName_, Qt::ElideRight, int(nameRect.width())));
 
@@ -251,6 +260,11 @@ public:
 
     bool hitOutputPort(QPointF scenePosition, qreal radius = kPortHitRadius) const {
         return QLineF(scenePosition, outputPortScene()).length() <= radius;
+    }
+
+    QVariant itemChange(GraphicsItemChange change, const QVariant& value) override {
+        if (change == ItemPositionHasChanged && view_) view_->updateWiresLive();
+        return QGraphicsItem::itemChange(change, value);
     }
 
     qreal nearestInputDistance(QPointF scenePosition, int* portOut = nullptr) const {
@@ -301,6 +315,7 @@ private:
         drawPort(outputPortLocal(), true, categoryColor);
     }
 
+    MaterialNetworkGraphView* view_ = nullptr;
     QString nodeName_;
     QString category_;
     QString typeName_;
@@ -382,8 +397,9 @@ MaterialWireItem* wireItemAt(QGraphicsView* view, const QPoint& viewPosition) {
     return best;
 }
 
-void addWire(QGraphicsScene* scene, QPointF from, QPointF to, const QString& targetName, const QString& inputName) {
-    auto* wire = new MaterialWireItem(targetName, inputName);
+void addWire(QGraphicsScene* scene, QPointF from, QPointF to, const QString& sourceName, const QString& targetName,
+             const QString& inputName) {
+    auto* wire = new MaterialWireItem(sourceName, targetName, inputName);
     wire->setWirePath(makeWirePath(from, to));
     scene->addItem(wire);
 }
@@ -396,7 +412,8 @@ MaterialNetworkGraphView::MaterialNetworkGraphView(QWidget* parent) : QGraphicsV
     graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
     setScene(graphScene_);
     setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
-    setViewportUpdateMode(QGraphicsView::SmartViewportUpdate);
+    // Full updates avoid antialiased trails while dragging MaterialX nodes.
+    setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -459,7 +476,8 @@ void MaterialNetworkGraphView::writeXmlToMaterial(const QString& xml, bool emitE
     if (!materialNode_) return;
     ensureMtlxParameter();
     suppressMaterialSignal_ = true;
-    materialNode_->setParameterValue("mtlx", xml);
+    // notify=false when not emitting — avoids graphChanged → cook for layout/repair writes.
+    materialNode_->setParameterValue("mtlx", xml, emitEdited);
     suppressMaterialSignal_ = false;
     if (emitEdited) emit materialEdited(materialNode_);
 }
@@ -725,7 +743,7 @@ void MaterialNetworkGraphView::rebuild() {
             subtitle = node.category + " / " + node.type;
         }
 
-        auto* item = new MaterialNetworkNodeItem(node.name, node.category, node.type, ports, subtitle);
+        auto* item = new MaterialNetworkNodeItem(this, node.name, node.category, node.type, ports, subtitle);
         item->setPos(node.layout * kLayoutScale);
         graphScene_->addItem(item);
     }
@@ -741,7 +759,7 @@ void MaterialNetworkGraphView::rebuild() {
                 MaterialNetworkNodeItem* sourceItem = nodeItemByName(graphScene_, input.nodename);
                 if (sourceItem)
                     addWire(graphScene_, sourceItem->outputPortScene(), targetItem->inputPortScene(visiblePort),
-                            target.name, input.name);
+                            sourceItem->nodeName(), target.name, input.name);
             }
             ++visiblePort;
         }
@@ -1159,6 +1177,32 @@ void MaterialNetworkGraphView::chooseTexture(const QString& nodeName) {
     emit statusMessage(QString("%1 file set to %2").arg(nodeName, QFileInfo(node->inputs[fileInput].value).fileName()));
 }
 
+void MaterialNetworkGraphView::updateWiresLive() {
+    if (!graphScene_) return;
+    for (QGraphicsItem* item : graphScene_->items()) {
+        auto* wire = qgraphicsitem_cast<MaterialWireItem*>(item);
+        if (!wire) continue;
+        MaterialNetworkNodeItem* source = nodeItemByName(graphScene_, wire->sourceNodeName());
+        MaterialNetworkNodeItem* target = nodeItemByName(graphScene_, wire->targetNodeName());
+        if (!source || !target) continue;
+        const int port = target->inputPortIndexByName(wire->inputName());
+        if (port < 0) continue;
+        wire->setWirePath(makeWirePath(source->outputPortScene(), target->inputPortScene(port)));
+    }
+}
+
+void MaterialNetworkGraphView::persistLayoutQuietly() {
+    if (!materialNode_) return;
+    ensureMtlxParameter();
+    const QString xml = serializeGraph();
+    // Write layout into the stored document without dirtying cook / emitting signals.
+    if (Parameter* parameter = materialNode_->findParameter("mtlx")) {
+        if (parameter->value.toString() == xml) return;
+        parameter->value = xml;
+    }
+    emit materialLayoutChanged();
+}
+
 void MaterialNetworkGraphView::syncNodePositions() {
     bool changed = false;
     for (QGraphicsItem* item : graphScene_->items()) {
@@ -1173,8 +1217,8 @@ void MaterialNetworkGraphView::syncNodePositions() {
         }
     }
     if (!changed) return;
-    writeModel(true);
-    rebuild();
+    // Persist xpos/ypos only — no cook, no scene rebuild (matches Network Editor).
+    persistLayoutQuietly();
 }
 
 bool MaterialNetworkGraphView::shouldBeginPan(const QMouseEvent* event) const {
@@ -1478,7 +1522,7 @@ MaterialContainerGraphView::MaterialContainerGraphView(QWidget* parent) : QGraph
     graphScene_ = new QGraphicsScene(this);
     setScene(graphScene_);
     setRenderHint(QPainter::Antialiasing, true);
-    setViewportUpdateMode(QGraphicsView::BoundingRectViewportUpdate);
+    setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
     setResizeAnchor(QGraphicsView::AnchorViewCenter);
     setDragMode(QGraphicsView::RubberBandDrag);
@@ -1715,6 +1759,9 @@ MaterialNetworkView::MaterialNetworkView(QWidget* parent) : QWidget(parent) {
     connect(containerView_, &MaterialContainerGraphView::diveRequested, this, &MaterialNetworkView::diveInto);
     connect(containerView_, &MaterialContainerGraphView::statusMessage, this, &MaterialNetworkView::statusMessage);
     connect(graphView_, &MaterialNetworkGraphView::materialEdited, this, &MaterialNetworkView::materialEdited);
+    connect(graphView_, &MaterialNetworkGraphView::materialLayoutChanged, this, [this] {
+        if (graph_) graph_->setModified(true);
+    });
     connect(graphView_, &MaterialNetworkGraphView::statusMessage, this, &MaterialNetworkView::statusMessage);
     connect(graphView_, &MaterialNetworkGraphView::selectionChanged, this,
             &MaterialNetworkView::onMaterialXSelectionChanged);

@@ -78,10 +78,10 @@ void paintNodeIcon(QPainter& painter, NodeIconKind kind, const QRectF& area) {
     painter.save();
     painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
 
-    // Fit the icon inside the body with a little padding, preserving aspect.
+    // Fit the icon inside the body; keep ~25% smaller than the available area.
     const qreal pad = qMin(area.width(), area.height()) * 0.08;
     const QRectF target = area.adjusted(pad, pad, -pad, -pad);
-    const QSizeF scaled = QSizeF(pm.size()).scaled(target.size(), Qt::KeepAspectRatio);
+    const QSizeF scaled = QSizeF(pm.size()).scaled(target.size() * 0.75, Qt::KeepAspectRatio);
     const QRectF dest(target.center().x() - scaled.width() * 0.5,
                       target.center().y() - scaled.height() * 0.5, scaled.width(), scaled.height());
     painter.drawPixmap(dest, pm, QRectF(pm.rect()));

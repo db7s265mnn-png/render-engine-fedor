@@ -20,8 +20,10 @@ QPainterPath strokedShape(const QPainterPath& path) {
 
 }  // namespace
 
-MaterialWireItem::MaterialWireItem(QString targetNodeName, QString inputName, QGraphicsItem* parent)
+MaterialWireItem::MaterialWireItem(QString sourceNodeName, QString targetNodeName, QString inputName,
+                                   QGraphicsItem* parent)
     : QGraphicsPathItem(parent),
+      sourceNodeName_(std::move(sourceNodeName)),
       targetNodeName_(std::move(targetNodeName)),
       inputName_(std::move(inputName)) {
     setAcceptHoverEvents(true);
