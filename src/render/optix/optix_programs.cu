@@ -32,7 +32,7 @@ struct OptixTracer {
         unsigned int uBits = 0;
         unsigned int vBits = 0;
         optixTrace(params.traversable, toFloat3(origin), toFloat3(direction), 0.0f, tMax, 0.0f,
-                   OptixVisibilityMask(255), OPTIX_RAY_FLAG_NONE, kRayTypeRadiance, kRayTypeCount,
+                   OptixVisibilityMask(kVisAll), OPTIX_RAY_FLAG_NONE, kRayTypeRadiance, kRayTypeCount,
                    kRayTypeRadiance, didHit, tBits, instance, primitive, uBits, vBits);
         if (!didHit) return false;
         hit.t = __uint_as_float(tBits);
@@ -47,7 +47,7 @@ struct OptixTracer {
         const LaunchParams& params = launchParams();
         unsigned int blocked = 1;  // the shadow miss program clears this
         optixTrace(params.traversable, toFloat3(origin), toFloat3(direction), 0.0f, tMax, 0.0f,
-                   OptixVisibilityMask(255),
+                   OptixVisibilityMask(kVisShadow),
                    OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT |
                        OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
                    kRayTypeShadow, kRayTypeCount, kRayTypeShadow, blocked);

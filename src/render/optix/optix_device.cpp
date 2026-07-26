@@ -244,7 +244,7 @@ public:
                 std::memcpy(instance.transform, source.xform.m, sizeof(float) * 12);
                 instance.instanceId = unsigned(i);
                 instance.sbtOffset = 0;
-                instance.visibilityMask = 255;
+                instance.visibilityMask = static_cast<unsigned char>(source.visibilityMask & 0xFF);
                 instance.flags = OPTIX_INSTANCE_FLAG_NONE;
                 instance.traversableHandle = gas;
                 instances.push_back(instance);

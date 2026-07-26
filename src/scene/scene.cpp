@@ -188,6 +188,8 @@ void Scene::buildLightProxies() {
         inst.materialIndex = -1;
         inst.lightIndex = static_cast<int>(i);
         inst.visibleCamera = light.visibleCamera;
+        // Area lights are visible to camera/MIS, but only cast shadows when self-shadow is on.
+        inst.visibilityMask = light.selfShadowEnable ? kVisAll : kVisPrimary;
         instances.push_back(inst);
     }
 }

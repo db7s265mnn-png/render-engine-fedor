@@ -33,7 +33,7 @@ struct EmbreeTracer {
         rayhit.ray.dir_z = dir.z;
         rayhit.ray.tnear = 0.0f;
         rayhit.ray.tfar = tMax;
-        rayhit.ray.mask = 0xFFFFFFFF;
+        rayhit.ray.mask = unsigned(kVisAll);
         rayhit.ray.flags = 0;
         rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
         rayhit.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
@@ -58,7 +58,8 @@ struct EmbreeTracer {
         ray.dir_z = dir.z;
         ray.tnear = 0.0f;
         ray.tfar = tMax;
-        ray.mask = 0xFFFFFFFF;
+        // Shadow rays skip light proxies that have self-shadows disabled.
+        ray.mask = unsigned(kVisShadow);
         rtcOccluded1(scene, &ray, nullptr);
         return ray.tfar < 0.0f;
     }
@@ -143,6 +144,7 @@ public:
             // Our matrices are row major with column vectors, so the first
             // twelve floats are exactly Embree's 3x4 row major affine layout.
             rtcSetGeometryTransform(instGeom, 0, RTC_FORMAT_FLOAT3X4_ROW_MAJOR, inst.xform.m);
+            rtcSetGeometryMask(instGeom, unsigned(inst.visibilityMask));
             rtcCommitGeometry(instGeom);
             // Geometry ids match instance indices so hits map back directly.
             rtcAttachGeometryByID(topScene_, instGeom, static_cast<unsigned int>(i));

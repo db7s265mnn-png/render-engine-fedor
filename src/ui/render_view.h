@@ -31,6 +31,7 @@ struct ViewCamera {
 };
 
 enum class TransformTool { Select = 0, Translate, Rotate, Scale };
+enum class TransformSpace { Local = 0, World };
 
 class RenderView : public QWidget {
     Q_OBJECT
@@ -54,6 +55,8 @@ public:
 
     TransformTool transformTool() const { return transformTool_; }
     void setTransformTool(TransformTool tool);
+    TransformSpace transformSpace() const { return transformSpace_; }
+    void setTransformSpace(TransformSpace space);
     void setTransformTarget(Node* node);
     Node* transformTarget() const { return transformTarget_; }
     bool isGizmoDragging() const { return mode_ == 4; }
@@ -68,6 +71,7 @@ signals:
     // Fired on mouse release after a gizmo drag — safe to cook/IPR.
     void transformFinished(sol::Node* node);
     void transformToolChanged(sol::TransformTool tool);
+    void transformSpaceChanged(sol::TransformSpace space);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -93,11 +97,18 @@ private:
     Vec3 targetOrigin() const;
     void targetAxes(Vec3& x, Vec3& y, Vec3& z) const;
     float gizmoWorldSize() const;
+    bool rayPlaneHit(const Vec3& rayO, const Vec3& rayD, const Vec3& planeO, const Vec3& planeN,
+                     Vec3& out) const;
+    float angleOnAxisPlane(const Vec3& axis, const Vec3& center, const Vec3& point) const;
+    bool ringAngleAtMouse(const QPoint& pos, const Vec3& axis, float& angleOut) const;
+    float ringScreenDistance(const QPoint& pos, const Vec3& axis, float radius) const;
     GizmoAxis hitTestGizmo(const QPoint& pos) const;
     bool beginGizmoDrag(const QPoint& pos);
     void updateGizmoDrag(const QPoint& pos);
     void endGizmoDrag();
     void drawGizmo(QPainter& painter);
+    void drawRotationRings(QPainter& painter, const Vec3& origin, const Vec3& ax, const Vec3& ay,
+                           const Vec3& az, float radius);
 
     QImage image_;
     QString statusText_;
@@ -110,15 +121,18 @@ private:
     int resolutionY_ = 540;
 
     TransformTool transformTool_ = TransformTool::Translate;
+    TransformSpace transformSpace_ = TransformSpace::Local;
     Node* transformTarget_ = nullptr;
     GizmoAxis activeAxis_ = GizmoAxis::None;
     GizmoAxis hoverAxis_ = GizmoAxis::None;
     Vec3 dragStartTranslate_{0.0f};
     Vec3 dragStartRotate_{0.0f};
     Vec3 dragStartScale_{1.0f};
+    Mat4 dragStartMatrix_ = Mat4::identity();
     Vec3 dragAxisDir_{1.0f, 0.0f, 0.0f};
     Vec3 dragOrigin_{0.0f};
     float dragStartParam_ = 0.0f;
+    float dragStartAngle_ = 0.0f;
     QPoint dragStartMouse_;
     QString dragParameterName_;
     bool gizmoDidEdit_ = false;
@@ -127,6 +141,8 @@ private:
     QToolButton* translateButton_ = nullptr;
     QToolButton* rotateButton_ = nullptr;
     QToolButton* scaleButton_ = nullptr;
+    QToolButton* localSpaceButton_ = nullptr;
+    QToolButton* worldSpaceButton_ = nullptr;
 
     // World-space tumble center for the current Alt+LMB / RMB drag (may differ from look-at).
     Vec3 tumbleCenter_{0.0f, 1.0f, 0.0f};

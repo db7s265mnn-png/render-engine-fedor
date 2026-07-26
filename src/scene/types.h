@@ -72,6 +72,11 @@ struct MeshView {
     uint32_t vertexCount = 0;
 };
 
+// Visibility bits for primary vs shadow rays (Embree mask / OptiX visibilityMask).
+constexpr int kVisShadow = 0x1;
+constexpr int kVisPrimary = 0x2;
+constexpr int kVisAll = kVisShadow | kVisPrimary;
+
 struct InstanceData {
     Mat4 xform;      // object -> world
     Mat4 xformInv;   // world -> object
@@ -79,6 +84,9 @@ struct InstanceData {
     int materialIndex = -1;
     int lightIndex = -1;   // >= 0 when this instance is an area light proxy
     int visibleCamera = 1;
+    // Embree/OptiX visibility: shadow rays use kVisShadow only so area-light
+    // proxies can opt out of casting self-shadows via kVisPrimary alone.
+    int visibilityMask = kVisAll;
 };
 
 // ---------------------------------------------------------------------------
@@ -132,9 +140,10 @@ struct LightData {
     int envIndex = -1;       // index into the scene environment map table
 
     int shadowEnable = 1;
+    // When 0, the light's proxy geometry is skipped by shadow rays (no self-shadow).
+    int selfShadowEnable = 0;
     int samples = 1;
     int pad1 = 0;
-    int pad2 = 0;
 
     SR_HD Vec3 emittedRadiance() const { return color * (intensity * exp2f(exposure)); }
 };

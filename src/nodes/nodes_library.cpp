@@ -425,6 +425,9 @@ public:
                 addParameter(Parameter::makeBool("normalize", "Normalize", true).withGroup("Shape"));
                 addParameter(Parameter::makeBool("twosided", "Two Sided", false).withGroup("Shape"));
                 addParameter(Parameter::makeBool("visiblecamera", "Visible To Camera", true).withGroup("Shape"));
+                addParameter(Parameter::makeBool("selfshadows", "Self Shadows", false)
+                                 .withGroup("Shape")
+                                 .withTooltip("When off, this light's own geometry does not cast shadows"));
                 break;
             case kLightDisk:
             case kLightSphere:
@@ -432,6 +435,9 @@ public:
                 addParameter(Parameter::makeBool("normalize", "Normalize", true).withGroup("Shape"));
                 addParameter(Parameter::makeBool("twosided", "Two Sided", false).withGroup("Shape"));
                 addParameter(Parameter::makeBool("visiblecamera", "Visible To Camera", true).withGroup("Shape"));
+                addParameter(Parameter::makeBool("selfshadows", "Self Shadows", false)
+                                 .withGroup("Shape")
+                                 .withTooltip("When off, this light's own geometry does not cast shadows"));
                 break;
             case kLightDistant:
                 addParameter(Parameter::makeFloat("angle", "Angular Diameter", 0.53, 0.0, 20.0).withGroup("Shape"));
@@ -476,6 +482,7 @@ public:
         light.intensity = float(floatValue("intensity", defaultIntensity()));
         light.exposure = float(floatValue("exposure", 0.0));
         light.shadowEnable = boolValue("shadows", true) ? 1 : 0;
+        light.selfShadowEnable = boolValue("selfshadows", false) ? 1 : 0;
         light.normalize = boolValue("normalize", type_ != kLightDistant) ? 1 : 0;
         light.twoSided = boolValue("twosided", false) ? 1 : 0;
         light.visibleCamera = boolValue("visiblecamera", true) ? 1 : 0;
