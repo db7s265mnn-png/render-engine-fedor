@@ -18,6 +18,8 @@ light transport code.
 * **Path tracing** — progressive unidirectional path tracer with next event estimation,
   multiple importance sampling, a principled BSDF (diffuse, GGX metal/dielectric specular,
   rough dielectric transmission, emission), Russian roulette and firefly clamping.
+* **Path guiding** — Intel OpenPGL on the CPU backend (enabled by default in Render Settings)
+  learns incident radiance while rendering and guides BSDF samples with MIS.
 * **Two backends** — `CPU (Embree)` uses Embree 4 with a tiled thread pool; `GPU (OptiX)` uses
   OptiX with per-mesh GAS and a top level IAS. The integrator, BSDF and light sampling code
   is a single set of headers compiled for both.
@@ -40,6 +42,8 @@ light transport code.
 | --- | --- | --- |
 | Qt 6 (Core, Gui, Widgets) | yes | 6.2 or newer |
 | Embree 4 | yes | CPU path tracing backend |
+| oneTBB | for OpenPGL | fetched automatically when missing |
+| OpenPGL 0.7 | optional | CPU path guiding, `-DSOLSTICE_ENABLE_OPENPGL=OFF` to skip |
 | Alembic 1.8 | optional | `.abc` import, `-DSOLSTICE_ENABLE_ALEMBIC=OFF` to skip |
 | OpenEXR 3 | optional | `.exr` reading and writing |
 | CUDA + OptiX SDK 7.7–9.x | optional | `-DSOLSTICE_ENABLE_OPTIX=ON` |
@@ -48,7 +52,7 @@ light transport code.
 
 ```bash
 sudo apt install build-essential cmake ninja-build qt6-base-dev libembree-dev \
-                 libopenexr-dev libimath-dev
+                 libopenexr-dev libimath-dev libtbb-dev
 
 # Alembic is not packaged on every distribution:
 git clone --depth 1 --branch 1.8.6 https://github.com/alembic/alembic.git

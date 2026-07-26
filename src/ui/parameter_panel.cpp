@@ -646,8 +646,13 @@ void ParameterPanel::rebuildMaterialX() {
             const double compHi = (input.name == QLatin1String("subsurface_radius")) ? 1.0 : hi;
 
             if (count <= 4) {
-                form->addRow(label, makeComponentRow(count, values, compLo, compHi, isColor,
-                                                     "Pick " + label, commit));
+                QWidget* row = makeComponentRow(count, values, compLo, compHi, isColor, "Pick " + label, commit);
+                if (input.name == QLatin1String("subsurface_radius")) {
+                    row->setToolTip(
+                        "Arnold RGB mean free path weights. MFP = Scale × Radius per channel.\n"
+                        "Higher red than green/blue (e.g. 1, 0.35, 0.2) gives warm edge fringing.");
+                }
+                form->addRow(label, row);
             } else {
                 // Matrices: compact grid of component fields.
                 auto* row = new QWidget();

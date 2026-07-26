@@ -11,6 +11,11 @@
 #include "core/thread_pool.h"
 #include "render/integrator.h"
 #include "render/render_device.h"
+#include "solstice_config.h"
+
+#if SOLSTICE_HAVE_OPENPGL
+#include "render/cpu/path_guiding.h"
+#endif
 
 namespace sol {
 namespace {
@@ -73,6 +78,9 @@ public:
         device_ = rtcNewDevice(config.c_str());
         if (device_) rtcSetDeviceErrorFunction(device_, embreeErrorCallback, nullptr);
         pool_ = std::make_unique<ThreadPool>(threadCount);
+#if SOLSTICE_HAVE_OPENPGL
+        pathGuiding_ = std::make_unique<PathGuiding>();
+#endif
     }
 
     ~EmbreeDevice() override {
@@ -152,6 +160,13 @@ public:
         }
         rtcCommitScene(topScene_);
 
+#if SOLSTICE_HAVE_OPENPGL
+        if (pathGuiding_) {
+            const int threads = pool_ ? pool_->threadCount() : threadCount_;
+            pathGuiding_->reset(view_.worldBounds, threads);
+        }
+#endif
+
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         logInfo("Embree: built BVH for " + std::to_string(scene_->instances.size()) + " instances, " +
                 std::to_string(scene_->totalTriangles()) + " triangles in " + std::to_string(int(ms)) + " ms");
@@ -174,7 +189,15 @@ public:
         const SceneView& scene = view_;
         const uint32_t frameSeed = uint32_t(settings.seed) * 9781u + uint32_t(sampleIndex) * 6271u;
 
-        pool_->parallelFor(tileCount, [&](int tileIndex, int /*threadId*/) {
+#if SOLSTICE_HAVE_OPENPGL
+        const bool useGuiding =
+            settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() &&
+            settings.integrator == kIntegratorPathTracer;
+#else
+        const bool useGuiding = false;
+#endif
+
+        pool_->parallelFor(tileCount, [&](int tileIndex, int threadId) {
             if (cancel.load(std::memory_order_relaxed)) return;
             const int tx = tileIndex % tilesX;
             const int ty = tileIndex / tilesX;
@@ -193,11 +216,29 @@ public:
                     Vec3 origin, direction;
                     generateCameraRay(scene, float(x) + jx, float(y) + jy, rng.nextFloat(), rng.nextFloat(),
                                       origin, direction);
+#if SOLSTICE_HAVE_OPENPGL
+                    Vec3 radiance;
+                    if (useGuiding) {
+                        PathGuiding::ThreadState& guiding = pathGuiding_->thread(threadId);
+                        guiding.beginPath();
+                        radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding);
+                        guiding.endPath();
+                    } else {
+                        radiance = traceRadiance(scene, tracer, origin, direction, rng);
+                    }
+#else
+                    (void)threadId;
+                    (void)useGuiding;
                     const Vec3 radiance = traceRadiance(scene, tracer, origin, direction, rng);
+#endif
                     fb.addSample(x, y, radiance);
                 }
             }
         });
+
+#if SOLSTICE_HAVE_OPENPGL
+        if (useGuiding) pathGuiding_->commitSample();
+#endif
     }
 
     void refreshSceneData() override {
@@ -226,6 +267,9 @@ private:
     SceneView view_;
     std::unique_ptr<ThreadPool> pool_;
     int threadCount_ = 0;
+#if SOLSTICE_HAVE_OPENPGL
+    std::unique_ptr<PathGuiding> pathGuiding_;
+#endif
 };
 
 }  // namespace

@@ -620,6 +620,10 @@ public:
                          .withTooltip("0 uses every available core"));
         addParameter(Parameter::makeInt("tilesize", "Tile Size", 32, 8, 256).withGroup("Engine"));
         addParameter(Parameter::makeFloat("aodistance", "AO Distance", 1.0, 0.01, 100.0, false).withGroup("Engine"));
+        addParameter(Parameter::makeBool("pathguiding", "Path Guiding (OpenPGL)", true)
+                         .withGroup("Engine")
+                         .withTooltip("Learn incident radiance while rendering and guide BSDF "
+                                      "samples (CPU / Embree only). On by default."));
         addParameter(Parameter::makeMenu("tonemap", "Tone Map", {"None", "Reinhard", "ACES"}, 2).withGroup("Film"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -8.0, 8.0).withGroup("Film"));
         addParameter(Parameter::makeFloat("gamma", "Gamma", 2.2, 1.0, 4.0).withGroup("Film"));
@@ -640,6 +644,7 @@ public:
         settings.threads = intValue("threads", 0);
         settings.tileSize = intValue("tilesize", 32);
         settings.aoDistance = float(floatValue("aodistance", 1.0));
+        settings.pathGuiding = boolValue("pathguiding", true) ? 1 : 0;
         settings.toneMapper = intValue("tonemap", 2);
         settings.exposure = float(floatValue("exposure", 0.0));
         settings.gamma = float(floatValue("gamma", 2.2));

@@ -10,6 +10,7 @@ option(SOLSTICE_ENABLE_OPTIX "Build the OptiX GPU path tracing backend" OFF)
 option(SOLSTICE_ENABLE_ALEMBIC "Build with Alembic geometry import" ON)
 option(SOLSTICE_ENABLE_OPENEXR "Build with OpenEXR image support" ON)
 option(SOLSTICE_ENABLE_MATERIALX "Build with Academy Software Foundation MaterialX" ON)
+option(SOLSTICE_ENABLE_OPENPGL "Build with Intel OpenPGL path guiding (CPU)" ON)
 option(SOLSTICE_BUILD_TESTS "Build unit tests" ON)
 option(SOLSTICE_BUILD_APP "Build the Qt desktop application" ON)
 option(SOLSTICE_BUILD_TOOLS "Build helper tools (test scene generators)" ON)
@@ -124,6 +125,55 @@ if(SOLSTICE_ENABLE_MATERIALX)
     endif()
 endif()
 
+# OpenPGL (https://github.com/RenderKit/openpgl) — CPU path guiding
+set(SOLSTICE_HAVE_OPENPGL_01 0)
+if(SOLSTICE_ENABLE_OPENPGL)
+    include(FetchContent)
+    find_package(TBB QUIET)
+    if(NOT TBB_FOUND AND NOT TARGET TBB::tbb)
+        message(STATUS "TBB not found — fetching oneTBB for OpenPGL")
+        set(TBB_TEST OFF CACHE BOOL "" FORCE)
+        set(TBB_STRICT OFF CACHE BOOL "" FORCE)
+        set(_solstice_saved_build_shared ${BUILD_SHARED_LIBS})
+        set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+        if(EXISTS "/tmp/onetbb.tgz")
+            set(_solstice_tbb_url "file:///tmp/onetbb.tgz")
+        else()
+            set(_solstice_tbb_url
+                "https://github.com/oneapi-src/oneTBB/archive/refs/tags/v2021.12.0.tar.gz")
+        endif()
+        FetchContent_Declare(onetbb
+            URL ${_solstice_tbb_url}
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(onetbb)
+        set(BUILD_SHARED_LIBS ${_solstice_saved_build_shared} CACHE BOOL "" FORCE)
+    endif()
+    find_package(TBB QUIET)
+    if(TBB_FOUND OR TARGET TBB::tbb)
+        set(OPENPGL_BUILD_STATIC ON CACHE BOOL "" FORCE)
+        set(OPENPGL_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+        set(OPENPGL_BUILD_CHECK_TOOL OFF CACHE BOOL "" FORCE)
+        set(OPENPGL_ISA_AVX512 OFF CACHE BOOL "" FORCE)
+        if(EXISTS "/tmp/openpgl.tgz")
+            set(_solstice_openpgl_url "file:///tmp/openpgl.tgz")
+        else()
+            set(_solstice_openpgl_url
+                "https://github.com/RenderKit/openpgl/archive/refs/tags/v0.7.1.tar.gz")
+        endif()
+        FetchContent_Declare(openpgl
+            URL ${_solstice_openpgl_url}
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(openpgl)
+        if(TARGET openpgl)
+            set(SOLSTICE_HAVE_OPENPGL_01 1)
+        else()
+            message(WARNING "OpenPGL target missing — path guiding disabled")
+        endif()
+    else()
+        message(WARNING "TBB not available — OpenPGL path guiding disabled")
+    endif()
+endif()
+
 configure_file(${CMAKE_SOURCE_DIR}/cmake/solstice_config.h.in
                ${CMAKE_BINARY_DIR}/generated/solstice_config.h @ONLY)
 
@@ -142,6 +192,7 @@ set(SOLSTICE_LIB_SOURCES
     src/render/render_session.cpp
     src/render/scene_picker.cpp
     src/render/cpu/embree_device.cpp
+    src/render/cpu/path_guiding.cpp
     src/render/optix/optix_device_stub.cpp
     src/nodes/parameter.cpp
     src/nodes/node.cpp
@@ -210,6 +261,13 @@ if(SOLSTICE_HAVE_OPTIX_01)
     target_link_libraries(solstice_lib PUBLIC CUDA::cudart CUDA::cuda_driver)
     target_include_directories(solstice_lib PUBLIC ${OptiX_INCLUDE_DIR})
     add_dependencies(solstice_lib solstice_optix_programs)
+endif()
+
+if(SOLSTICE_HAVE_OPENPGL_01)
+    target_link_libraries(solstice_lib PUBLIC openpgl)
+    if(TARGET TBB::tbb)
+        target_link_libraries(solstice_lib PUBLIC TBB::tbb)
+    endif()
 endif()
 
 find_package(Threads REQUIRED)
@@ -308,6 +366,7 @@ message(STATUS "  Alembic support : ${SOLSTICE_HAVE_ALEMBIC_01}")
 message(STATUS "  OpenEXR support : ${SOLSTICE_HAVE_OPENEXR_01}")
 message(STATUS "  MaterialX       : ${SOLSTICE_HAVE_MATERIALX_01}")
 message(STATUS "  OptiX backend   : ${SOLSTICE_HAVE_OPTIX_01}")
+message(STATUS "  OpenPGL guiding : ${SOLSTICE_HAVE_OPENPGL_01}")
 message(STATUS "")
 
 # OBJ -> Alembic converter for shipping demo assets.

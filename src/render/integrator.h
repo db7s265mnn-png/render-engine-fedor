@@ -10,6 +10,11 @@
 #include "render/lights.h"
 #include "render/shading.h"
 #include "scene/types.h"
+#include "solstice_config.h"
+
+#if !defined(__CUDACC__) && SOLSTICE_HAVE_OPENPGL
+#include "render/cpu/path_guiding.h"
+#endif
 
 namespace sol {
 
@@ -140,9 +145,28 @@ SR_INL SR_HD void generateCameraRay(const SceneView& scene, float pixelX, float 
 // ---------------------------------------------------------------------------
 // Path tracing
 // ---------------------------------------------------------------------------
-template <typename Tracer>
+
+// Default no-op guiding hooks (OptiX / builds without OpenPGL).
+struct NullGuiding {
+    SR_INL SR_HD bool active() const { return false; }
+    SR_INL SR_HD float guideProbability() const { return 0.0f; }
+    SR_INL SR_HD bool prepared() const { return false; }
+    SR_INL SR_HD bool prepare(Vec3, Vec3, Rng&) { return false; }
+    SR_INL SR_HD float pdf(Vec3) const { return 0.0f; }
+    SR_INL SR_HD bool sample(float, float, Vec3&, float&) const { return false; }
+    SR_INL SR_HD void beginSegment(Vec3, Vec3) {}
+    SR_INL SR_HD void recordEmission(Vec3, float) {}
+    SR_INL SR_HD void addScattered(Vec3) {}
+    SR_INL SR_HD void recordBounce(Vec3, Vec3, float, Vec3, bool, float, float, float) {}
+    SR_INL SR_HD void setRussianRoulette(float) {}
+    SR_INL SR_HD void recordBackground(Vec3, Vec3, Vec3, float) {}
+    SR_INL SR_HD void recordLightHit(Vec3, Vec3, Vec3, float) {}
+};
+
+template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
-                                      const Material& mat, const Frame& frame, Vec3 wo, Rng& rng) {
+                                      const Material& mat, const Frame& frame, Vec3 wo, Rng& rng,
+                                      Guiding* guiding) {
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
@@ -167,15 +191,32 @@ SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& trac
     const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
     if (be.pdf <= 0.0f || isBlack(be.f)) return result;
 
+    float scatterPdf = be.pdf;
+#if !defined(__CUDACC__)
+    if (guiding && guiding->active() && guiding->prepared()) {
+        const float pg = guiding->guideProbability();
+        const float gPdf = guiding->pdf(ls.wi);
+        scatterPdf = pg * gPdf + (1.0f - pg) * be.pdf;
+    }
+#else
+    (void)guiding;
+#endif
+
     const float lightPdf = ls.pdf * selectPdf;
-    const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
+    const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
     result = ls.radiance * be.f * (fabsf(wiLocal.z) * misWeight / lightPdf);
     return result;
 }
 
 template <typename Tracer>
+SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
+                                      const Material& mat, const Frame& frame, Vec3 wo, Rng& rng) {
+    return nextEventEstimation<Tracer, NullGuiding>(scene, tracer, si, mat, frame, wo, rng, nullptr);
+}
+
+template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                                Rng& rng) {
+                                Rng& rng, Guiding* guiding) {
     Vec3 radiance(0.0f);
     Vec3 throughput(1.0f);
     float bsdfPdf = 0.0f;
@@ -204,6 +245,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         radiance += throughput * envL * weight;
+#if !defined(__CUDACC__)
+                        if (guiding && guiding->active())
+                            guiding->recordBackground(origin, direction, envL, weight);
+#else
+                        (void)guiding;
+#endif
                     }
                 }
             }
@@ -236,6 +283,10 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                 }
                 radiance += throughput * emitted * weight;
+#if !defined(__CUDACC__)
+                if (guiding && guiding->active())
+                    guiding->recordLightHit(si.p, -direction, emitted, weight);
+#endif
             }
             // Light geometry is opaque and is not shaded further.
             break;
@@ -282,6 +333,16 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
         const Vec3 wo = -direction;
         const Frame frame(si.ns);
+#if !defined(__CUDACC__)
+        if (guiding && guiding->active()) {
+            guiding->beginSegment(si.p, wo);
+            if (mat.emissionStrength > 0.0f && !isBlack(mat.emissionColor)) {
+                const bool frontFacing = dot(si.ns, wo) > 0.0f;
+                if (frontFacing || mat.doubleSided)
+                    guiding->recordEmission(mat.emissionColor * mat.emissionStrength, 1.0f);
+            }
+        }
+#endif
 
         // Arnold-style random-walk SSS with spectral (RGB) radius.
         //
@@ -314,8 +375,14 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 pSpec = clampf(srMax(fresnelEst, specLw.specular * fresnelEst), 0.0f, 0.98f);
 
             // Direct specular lighting at entry (works for rough GGX; delta → 0).
-            if (pSpec > 0.0f)
-                radiance += throughput * nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng);
+            if (pSpec > 0.0f) {
+                const Vec3 nee =
+                    nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding);
+                radiance += throughput * nee;
+#if !defined(__CUDACC__)
+                if (guiding && guiding->active()) guiding->addScattered(nee);
+#endif
+            }
 
             // Fresnel lottery: reflect at entry OR enter the SSS body.
             if (pSpec > 0.0f && rng.nextFloat() < pSpec) {
@@ -326,9 +393,15 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     bsdfSampleLocal(specMat, woLocalEntry, uSpec, rng.nextFloat(), rng.nextFloat(),
                                     rng.nextFloat());
                 if (specBs.pdf > 0.0f && !isBlack(specBs.weight)) {
+                    const Vec3 wiWorld = normalize(frame.toWorld(specBs.wi));
+#if !defined(__CUDACC__)
+                    if (guiding && guiding->active())
+                        guiding->recordBounce(si.ns, wiWorld, specBs.pdf, specBs.weight, true,
+                                              mat.roughness, computeLobes(specMat).eta, 1.0f);
+#endif
                     throughput *= specBs.weight;
-                    origin = offsetRayOrigin(si.p, si.ng, frame.toWorld(specBs.wi));
-                    direction = normalize(frame.toWorld(specBs.wi));
+                    origin = offsetRayOrigin(si.p, si.ng, wiWorld);
+                    direction = wiWorld;
                     bsdfPdf = specBs.pdf;
                     specularBounce = specBs.specular;
                     ++depth;
@@ -438,15 +511,25 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             ssSi.ns = exitN;
             ssSi.ng = exitN;
             const Frame ssFrame(exitN);
-            radiance += throughput * pathWeight *
-                        nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, exitWo, rng);
+            const Vec3 nee =
+                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, exitWo, rng, guiding);
+            radiance += throughput * pathWeight * nee;
+#if !defined(__CUDACC__)
+            if (guiding && guiding->active()) guiding->addScattered(pathWeight * nee);
+#endif
             const BsdfSample ssBs =
                 bsdfSampleLocal(lambert, ssFrame.toLocal(exitWo), rng.nextFloat(), rng.nextFloat(),
                                 rng.nextFloat(), rng.nextFloat());
             if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
+                const Vec3 wiWorld = normalize(ssFrame.toWorld(ssBs.wi));
+#if !defined(__CUDACC__)
+                if (guiding && guiding->active())
+                    guiding->recordBounce(exitN, wiWorld, ssBs.pdf, pathWeight * ssBs.weight, false,
+                                          1.0f, 1.0f, 1.0f);
+#endif
                 throughput *= pathWeight * ssBs.weight;
-                origin = offsetRayOrigin(exitP, exitN, ssFrame.toWorld(ssBs.wi));
-                direction = normalize(ssFrame.toWorld(ssBs.wi));
+                origin = offsetRayOrigin(exitP, exitN, wiWorld);
+                direction = wiWorld;
                 bsdfPdf = ssBs.pdf;
                 specularBounce = false;
                 ++depth;
@@ -458,11 +541,62 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         // Complementary BRDF path when SSS lottery was available but not chosen.
         if (canSss) throughput /= srMax(1e-4f, 1.0f - sssWeight);
 
-        radiance += throughput * nextEventEstimation(scene, tracer, si, mat, frame, wo, rng);
+        const LobeWeights lw = computeLobes(mat);
+#if !defined(__CUDACC__)
+        const bool guideReady =
+            guiding && guiding->active() && !lw.delta && guiding->prepare(si.p, si.ns, rng);
+#else
+        const bool guideReady = false;
+#endif
+
+        const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, guiding);
+        radiance += throughput * nee;
+#if !defined(__CUDACC__)
+        if (guiding && guiding->active()) guiding->addScattered(nee);
+#endif
 
         const Vec3 woLocal = frame.toLocal(wo);
-        const BsdfSample bs = bsdfSampleLocal(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
-                                              rng.nextFloat());
+        BsdfSample bs;
+        bool gotSample = false;
+#if !defined(__CUDACC__)
+        if (guideReady) {
+            const float pg = guiding->guideProbability();
+            if (rng.nextFloat() < pg) {
+                Vec3 wiWorld;
+                float gPdf = 0.0f;
+                if (guiding->sample(rng.nextFloat(), rng.nextFloat(), wiWorld, gPdf) && gPdf > 0.0f) {
+                    const Vec3 wiLocal = frame.toLocal(wiWorld);
+                    const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
+                    if (be.pdf > 0.0f && !isBlack(be.f)) {
+                        const float mixPdf = pg * gPdf + (1.0f - pg) * be.pdf;
+                        if (mixPdf > 0.0f) {
+                            bs.wi = wiLocal;
+                            bs.pdf = mixPdf;
+                            bs.weight = be.f * (fabsf(wiLocal.z) / mixPdf);
+                            bs.specular = false;
+                            bs.transmitted = wiLocal.z < 0.0f;
+                            gotSample = true;
+                        }
+                    }
+                }
+            }
+        }
+#endif
+        if (!gotSample) {
+            bs = bsdfSampleLocal(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                 rng.nextFloat());
+#if !defined(__CUDACC__)
+            if (bs.pdf > 0.0f && guideReady) {
+                const float pg = guiding->guideProbability();
+                const float gPdf = guiding->pdf(normalize(frame.toWorld(bs.wi)));
+                const float mixPdf = pg * gPdf + (1.0f - pg) * bs.pdf;
+                if (mixPdf > 0.0f) {
+                    bs.weight *= bs.pdf / mixPdf;
+                    bs.pdf = mixPdf;
+                }
+            }
+#endif
+        }
         if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
 
         Vec3 weight = bs.weight;
@@ -470,10 +604,17 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             const float m = maxComponent(weight);
             if (m > settings.clampIndirect) weight *= settings.clampIndirect / m;
         }
+
+        const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
+#if !defined(__CUDACC__)
+        if (guiding && guiding->active())
+            guiding->recordBounce(si.ns, wiWorld, bs.pdf, weight, bs.specular, mat.roughness, lw.eta,
+                                  1.0f);
+#endif
+
         throughput *= weight;
         if (!isFinite(throughput) || isBlack(throughput)) break;
 
-        const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
         origin = offsetRayOrigin(si.p, si.ng, wiWorld);
         direction = wiWorld;
         bsdfPdf = bs.pdf;
@@ -484,12 +625,21 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         if (depth >= srMax(1, settings.rrStartDepth)) {
             const float q = clampf(maxComponent(throughput), 0.05f, 1.0f);
             if (rng.nextFloat() > q) break;
+#if !defined(__CUDACC__)
+            if (guiding && guiding->active()) guiding->setRussianRoulette(q);
+#endif
             throughput /= q;
         }
     }
 
     if (!isFinite(radiance)) return Vec3(0.0f);
     return radiance;
+}
+
+template <typename Tracer>
+SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
+                                Rng& rng) {
+    return traceRadiance<Tracer, NullGuiding>(scene, tracer, origin, direction, rng, nullptr);
 }
 
 }  // namespace sol
