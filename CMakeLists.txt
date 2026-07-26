@@ -147,13 +147,13 @@ if(SOLSTICE_ENABLE_OPENPGL)
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
         FetchContent_MakeAvailable(onetbb)
         set(BUILD_SHARED_LIBS ${_solstice_saved_build_shared} CACHE BOOL "" FORCE)
-        # OpenPGL's FindTBB cannot parse generator expressions on in-tree TBB targets.
+        # OpenPGL's FindTBB cannot parse generator expressions on in-tree TBB
+        # alias targets — give it a concrete include root instead.
         FetchContent_GetProperties(onetbb SOURCE_DIR _solstice_onetbb_src)
-        if(TARGET TBB::tbb AND _solstice_onetbb_src)
-            set_property(TARGET TBB::tbb PROPERTY
-                INTERFACE_INCLUDE_DIRECTORIES "${_solstice_onetbb_src}/include")
+        if(_solstice_onetbb_src)
             set(TBB_INCLUDE_DIR "${_solstice_onetbb_src}/include" CACHE PATH "" FORCE)
             set(OPENPGL_TBB_ROOT "${_solstice_onetbb_src}" CACHE PATH "" FORCE)
+            set(TBB_ROOT "${_solstice_onetbb_src}" CACHE PATH "" FORCE)
         endif()
     endif()
     if(TBB_FOUND OR TARGET TBB::tbb)
