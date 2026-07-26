@@ -10,6 +10,7 @@
 #include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QSignalBlocker>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <functional>
@@ -20,6 +21,8 @@ namespace sol {
 namespace {
 
 constexpr const char* kPrimPathMime = "application/x-fedor-prim-path";
+constexpr int kRolePath = Qt::UserRole;
+constexpr int kRoleSourceNode = Qt::UserRole + 1;
 
 class PrimTreeWidget : public QTreeWidget {
 public:
@@ -55,7 +58,7 @@ protected:
             QTreeWidget::mouseMoveEvent(event);
             return;
         }
-        const QString path = item->data(0, Qt::UserRole).toString();
+        const QString path = item->data(0, kRolePath).toString();
         if (path.isEmpty()) {
             QTreeWidget::mouseMoveEvent(event);
             return;
@@ -75,7 +78,7 @@ public:
     void copySelectedPrimPath() {
         const QList<QTreeWidgetItem*> selected = selectedItems();
         if (selected.isEmpty()) return;
-        const QString path = selected.first()->data(0, Qt::UserRole).toString();
+        const QString path = selected.first()->data(0, kRolePath).toString();
         if (path.isEmpty()) return;
         QApplication::clipboard()->setText(path);
     }
@@ -83,6 +86,22 @@ public:
 private:
     QPoint dragStartPos_;
 };
+
+QTreeWidgetItem* findItemByPath(QTreeWidget* tree, const QString& path) {
+    if (!tree || path.isEmpty()) return nullptr;
+    std::function<QTreeWidgetItem*(QTreeWidgetItem*)> walk = [&](QTreeWidgetItem* item) -> QTreeWidgetItem* {
+        if (!item) return nullptr;
+        if (item->data(0, kRolePath).toString() == path) return item;
+        for (int i = 0; i < item->childCount(); ++i) {
+            if (QTreeWidgetItem* hit = walk(item->child(i))) return hit;
+        }
+        return nullptr;
+    };
+    for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+        if (QTreeWidgetItem* hit = walk(tree->topLevelItem(i))) return hit;
+    }
+    return nullptr;
+}
 
 }  // namespace
 
@@ -109,11 +128,7 @@ SceneGraphPanel::SceneGraphPanel(QWidget* parent) : QWidget(parent) {
     summary_->setStyleSheet("color: #969aa0;");
     layout->addWidget(summary_, 0);
 
-    connect(tree_, &QTreeWidget::itemSelectionChanged, this, [this] {
-        const QList<QTreeWidgetItem*> selected = tree_->selectedItems();
-        if (selected.isEmpty()) return;
-        emit primSelected(selected.first()->data(0, Qt::UserRole).toString());
-    });
+    connect(tree_, &QTreeWidget::itemSelectionChanged, this, [this] { emitCurrentSelection(); });
 
     tree_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree_, &QWidget::customContextMenuRequested, this, [this, tree](const QPoint& pos) {
@@ -126,9 +141,32 @@ SceneGraphPanel::SceneGraphPanel(QWidget* parent) : QWidget(parent) {
     });
 }
 
-void SceneGraphPanel::setStage(const StagePtr& stage) {
+QString SceneGraphPanel::selectedPath() const {
+    const QList<QTreeWidgetItem*> selected = tree_->selectedItems();
+    if (selected.isEmpty()) return {};
+    return selected.first()->data(0, kRolePath).toString();
+}
+
+QString SceneGraphPanel::selectedSourceNode() const {
+    const QList<QTreeWidgetItem*> selected = tree_->selectedItems();
+    if (selected.isEmpty()) return {};
+    return selected.first()->data(0, kRoleSourceNode).toString();
+}
+
+void SceneGraphPanel::emitCurrentSelection() {
+    const QList<QTreeWidgetItem*> selected = tree_->selectedItems();
+    if (selected.isEmpty()) return;
+    emit itemSelected(selected.first()->data(0, kRolePath).toString(),
+                      selected.first()->data(0, kRoleSourceNode).toString());
+}
+
+void SceneGraphPanel::setStage(const StagePtr& stage, const QStringList& materialContainers) {
+    const QString keepPath = pendingSelectPath_.isEmpty() ? selectedPath() : pendingSelectPath_;
+    pendingSelectPath_.clear();
+
+    const QSignalBlocker blocker(tree_);
     tree_->clear();
-    if (!stage) {
+    if (!stage && materialContainers.isEmpty()) {
         summary_->setText("empty stage");
         return;
     }
@@ -144,7 +182,7 @@ void SceneGraphPanel::setStage(const StagePtr& stage) {
         item->setText(0, path.mid(slash + 1));
         item->setText(1, "Scope");
         item->setForeground(1, theme::textDim());
-        item->setData(0, Qt::UserRole, path);
+        item->setData(0, kRolePath, path);
         item->setFlags(item->flags() | Qt::ItemIsDragEnabled);
         item->setToolTip(0, path + "\nCtrl+C or drag into Material → Assign To");
         folders.insert(path, item);
@@ -153,40 +191,70 @@ void SceneGraphPanel::setStage(const StagePtr& stage) {
 
     long long triangles = 0;
     long long points = 0;
-    for (const StagePrim& prim : stage->prims) {
-        const int slash = prim.path.lastIndexOf('/');
-        QTreeWidgetItem* parent = slash > 0 ? ensureFolder(prim.path.left(slash)) : nullptr;
-        auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree_);
-        item->setText(0, prim.path.mid(slash + 1));
-        item->setText(1, prim.typeName());
-        item->setData(0, Qt::UserRole, prim.path);
-        item->setFlags(item->flags() | Qt::ItemIsDragEnabled);
-        item->setToolTip(0, prim.path + "\nauthored by " + prim.sourceNode +
-                                "\nCtrl+C or drag into Material → Assign To");
-        if (prim.type == PrimType::Mesh && prim.mesh) {
-            item->setText(2, QString("%1 pts / %2 tris")
-                                 .arg(prim.mesh->positions.size())
-                                 .arg(prim.mesh->triangleCount()));
-            triangles += static_cast<long long>(prim.mesh->triangleCount());
-            points += static_cast<long long>(prim.mesh->positions.size());
-        } else if (prim.type == PrimType::Light) {
-            item->setText(2, QString("intensity %1").arg(double(prim.light.intensity), 0, 'g', 3));
-        } else if (prim.type == PrimType::Camera) {
-            item->setText(2, QString("%1 mm").arg(double(prim.camera.focalLength), 0, 'g', 3));
+    int primCount = 0;
+    if (stage) {
+        primCount = int(stage->prims.size());
+        for (const StagePrim& prim : stage->prims) {
+            const int slash = prim.path.lastIndexOf('/');
+            QTreeWidgetItem* parent = slash > 0 ? ensureFolder(prim.path.left(slash)) : nullptr;
+            auto* item = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(tree_);
+            item->setText(0, prim.path.mid(slash + 1));
+            item->setText(1, prim.typeName());
+            item->setData(0, kRolePath, prim.path);
+            item->setData(0, kRoleSourceNode, prim.sourceNode);
+            item->setFlags(item->flags() | Qt::ItemIsDragEnabled);
+            item->setToolTip(0, prim.path + "\nauthored by " + prim.sourceNode +
+                                    "\nCtrl+C or drag into Material → Assign To");
+            if (prim.type == PrimType::Mesh && prim.mesh) {
+                item->setText(2, QString("%1 pts / %2 tris")
+                                     .arg(prim.mesh->positions.size())
+                                     .arg(prim.mesh->triangleCount()));
+                triangles += static_cast<long long>(prim.mesh->triangleCount());
+                points += static_cast<long long>(prim.mesh->positions.size());
+            } else if (prim.type == PrimType::Light) {
+                item->setText(2, QString("intensity %1").arg(double(prim.light.intensity), 0, 'g', 3));
+            } else if (prim.type == PrimType::Camera) {
+                item->setText(2, QString("%1 mm").arg(double(prim.camera.focalLength), 0, 'g', 3));
+            }
+            if (!prim.active) {
+                item->setForeground(0, theme::textDim());
+                item->setText(2, item->text(2) + " (pruned)");
+            }
         }
-        if (!prim.active) {
-            item->setForeground(0, theme::textDim());
-            item->setText(2, item->text(2) + " (pruned)");
+    }
+
+    // Material containers from the LOPs network (not MaterialX internals).
+    if (!materialContainers.isEmpty()) {
+        QTreeWidgetItem* materialsRoot = ensureFolder("/materials");
+        materialsRoot->setText(1, "Materials");
+        materialsRoot->setText(2, QString("%1 containers").arg(materialContainers.size()));
+        for (const QString& name : materialContainers) {
+            if (name.isEmpty()) continue;
+            auto* item = new QTreeWidgetItem(materialsRoot);
+            item->setText(0, name);
+            item->setText(1, "Material");
+            item->setText(2, "container");
+            item->setData(0, kRolePath, "/materials/" + name);
+            item->setData(0, kRoleSourceNode, name);
+            item->setToolTip(0, "Material container node: " + name);
         }
     }
 
     tree_->expandAll();
     tree_->resizeColumnToContents(0);
-    summary_->setText(QString("%1 prims  |  %2 meshes  |  %3 lights  |  %4 triangles")
-                          .arg(stage->prims.size())
-                          .arg(stage->countOfType(PrimType::Mesh))
-                          .arg(stage->countOfType(PrimType::Light))
+    summary_->setText(QString("%1 prims  |  %2 meshes  |  %3 lights  |  %4 materials  |  %5 triangles")
+                          .arg(primCount)
+                          .arg(stage ? stage->countOfType(PrimType::Mesh) : 0)
+                          .arg(stage ? stage->countOfType(PrimType::Light) : 0)
+                          .arg(materialContainers.size())
                           .arg(triangles));
+
+    if (!keepPath.isEmpty()) {
+        if (QTreeWidgetItem* item = findItemByPath(tree_, keepPath)) {
+            tree_->setCurrentItem(item);
+            item->setSelected(true);
+        }
+    }
 }
 
 }  // namespace sol

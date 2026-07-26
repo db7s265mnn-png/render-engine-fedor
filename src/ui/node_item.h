@@ -22,8 +22,7 @@ public:
     static constexpr qreal kPortRadius = 5.5;
     static constexpr qreal kPortHitRadius = 18.0;
     static constexpr qreal kCornerRadius = 6.0;
-    static constexpr qreal kFlagWidth = 12.0;
-    static constexpr qreal kFlagSlant = 9.0;
+    static constexpr qreal kFlagWidth = 11.0;
 
     NodeItem(Node* node, NodeGraphScene* scene);
 

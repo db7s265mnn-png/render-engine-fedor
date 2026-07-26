@@ -79,9 +79,9 @@ private:
     MaterialNetworkGraphView* graphView_ = nullptr;
     QToolButton* backButton_ = nullptr;
     QLabel* pathLabel_ = nullptr;
-    QMetaObject::Connection graphChangedConnection_;
     QMetaObject::Connection nodeAddedConnection_;
     QMetaObject::Connection nodeRemovedConnection_;
+    QMetaObject::Connection connectionsChangedConnection_;
 };
 
 // Root-level view: one container node per material LOP in the scene graph.

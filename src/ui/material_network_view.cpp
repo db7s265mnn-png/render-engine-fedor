@@ -18,6 +18,7 @@
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QShowEvent>
+#include <QSignalBlocker>
 #include <QStyleOptionGraphicsItem>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -1473,22 +1474,26 @@ MaterialContainerGraphView::MaterialContainerGraphView(QWidget* parent) : QGraph
 
 void MaterialContainerGraphView::setMaterials(const QVector<Node*>& materials) {
     Node* keep = selectedMaterial();
-    graphScene_->clear();
-    const int count = int(materials.size());
-    const int columns = std::max(1, int(std::ceil(std::sqrt(double(std::max(1, count))))));
-    for (int i = 0; i < count; ++i) {
-        Node* material = materials[i];
-        if (!material) continue;
-        auto* item = new MaterialContainerItem(material);
-        const int col = i % columns;
-        const int row = i / columns;
-        item->setPos(col * 190.0, row * 110.0);
-        graphScene_->addItem(item);
-        if (material == keep) item->setSelected(true);
+    {
+        const QSignalBlocker blocker(graphScene_);
+        graphScene_->clear();
+        const int count = int(materials.size());
+        const int columns = std::max(1, int(std::ceil(std::sqrt(double(std::max(1, count))))));
+        for (int i = 0; i < count; ++i) {
+            Node* material = materials[i];
+            if (!material) continue;
+            auto* item = new MaterialContainerItem(material);
+            const int col = i % columns;
+            const int row = i / columns;
+            item->setPos(col * 190.0, row * 110.0);
+            graphScene_->addItem(item);
+            if (material == keep) item->setSelected(true);
+        }
     }
     pendingFrame_ = true;
     if (isVisible()) frameGraph();
-    emit selectionChanged();
+    // Only notify when the selected container identity actually changed.
+    if (selectedMaterial() != keep) emit selectionChanged();
 }
 
 Node* MaterialContainerGraphView::selectedMaterial() const {
@@ -1704,19 +1709,21 @@ MaterialNetworkView::MaterialNetworkView(QWidget* parent) : QWidget(parent) {
 }
 
 void MaterialNetworkView::setGraph(NodeGraph* graph) {
-    if (graphChangedConnection_) disconnect(graphChangedConnection_);
     if (nodeAddedConnection_) disconnect(nodeAddedConnection_);
     if (nodeRemovedConnection_) disconnect(nodeRemovedConnection_);
+    if (connectionsChangedConnection_) disconnect(connectionsChangedConnection_);
     graph_ = graph;
     if (graph_) {
-        graphChangedConnection_ =
-            connect(graph_, &NodeGraph::graphChanged, this, &MaterialNetworkView::onGraphTopologyChanged);
+        // Listen only to topology — not every parameter edit (graphChanged),
+        // otherwise container refresh steals the Parameters selection.
         nodeAddedConnection_ =
             connect(graph_, &NodeGraph::nodeAdded, this, [this](Node*) { onGraphTopologyChanged(); });
         nodeRemovedConnection_ = connect(graph_, &NodeGraph::nodeAboutToBeRemoved, this, [this](Node* node) {
             if (node == currentMaterial_) goUp();
             onGraphTopologyChanged();
         });
+        connectionsChangedConnection_ =
+            connect(graph_, &NodeGraph::connectionsChanged, this, &MaterialNetworkView::onGraphTopologyChanged);
     }
     currentMaterial_ = nullptr;
     graphView_->setMaterialNode(nullptr);

@@ -83,26 +83,18 @@ QPainterPath NodeItem::bodyPath() const {
 }
 
 QPainterPath NodeItem::bypassFlagPath() const {
-    // Left filled edge: wider at the top, slanting inward — Houdini bypass flag.
+    // Left filled vertical edge — bypass flag.
     const QRectF body = bodyRect();
     QPainterPath path;
-    path.moveTo(body.topLeft());
-    path.lineTo(QPointF(body.left() + kFlagWidth + kFlagSlant, body.top()));
-    path.lineTo(QPointF(body.left() + kFlagWidth, body.bottom()));
-    path.lineTo(body.bottomLeft());
-    path.closeSubpath();
+    path.addRect(QRectF(body.left(), body.top(), kFlagWidth, body.height()));
     return path.intersected(bodyPath());
 }
 
 QPainterPath NodeItem::displayFlagPath() const {
-    // Right filled edge: wider at the bottom, slanting inward — Houdini display flag.
+    // Right filled vertical edge — display / cook flag.
     const QRectF body = bodyRect();
     QPainterPath path;
-    path.moveTo(body.topRight());
-    path.lineTo(body.bottomRight());
-    path.lineTo(QPointF(body.right() - kFlagWidth - kFlagSlant, body.bottom()));
-    path.lineTo(QPointF(body.right() - kFlagWidth, body.top()));
-    path.closeSubpath();
+    path.addRect(QRectF(body.right() - kFlagWidth, body.top(), kFlagWidth, body.height()));
     return path.intersected(bodyPath());
 }
 
@@ -212,10 +204,10 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
 
     // Subtle separators between flags and body.
     painter->setPen(QPen(QColor(0, 0, 0, 90), 1.0));
-    painter->drawLine(QPointF(body.left() + kFlagWidth + kFlagSlant * 0.35, body.top() + 1.0),
-                      QPointF(body.left() + kFlagWidth - kFlagSlant * 0.15, body.bottom() - 1.0));
-    painter->drawLine(QPointF(body.right() - kFlagWidth + kFlagSlant * 0.15, body.top() + 1.0),
-                      QPointF(body.right() - kFlagWidth - kFlagSlant * 0.35, body.bottom() - 1.0));
+    painter->drawLine(QPointF(body.left() + kFlagWidth, body.top() + 1.0),
+                      QPointF(body.left() + kFlagWidth, body.bottom() - 1.0));
+    painter->drawLine(QPointF(body.right() - kFlagWidth, body.top() + 1.0),
+                      QPointF(body.right() - kFlagWidth, body.bottom() - 1.0));
 
     // Dim the center when bypassed.
     if (isBypassed) {

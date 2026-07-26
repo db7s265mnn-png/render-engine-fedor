@@ -129,6 +129,7 @@ void MainWindow::createActions() {
 
     translateToolAction_ = new QAction("T", this);
     translateToolAction_->setCheckable(true);
+    translateToolAction_->setChecked(true);
     translateToolAction_->setShortcut(QKeySequence("T"));
     translateToolAction_->setToolTip("Translate (T)");
     transformGroup->addAction(translateToolAction_);
@@ -145,6 +146,8 @@ void MainWindow::createActions() {
     scaleToolAction_->setToolTip("Scale (S)");
     transformGroup->addAction(scaleToolAction_);
 
+    selectToolAction_->setChecked(false);
+
     connect(selectToolAction_, &QAction::triggered, this,
             [this] { renderView_->setTransformTool(TransformTool::Select); });
     connect(translateToolAction_, &QAction::triggered, this,
@@ -153,6 +156,12 @@ void MainWindow::createActions() {
             [this] { renderView_->setTransformTool(TransformTool::Rotate); });
     connect(scaleToolAction_, &QAction::triggered, this,
             [this] { renderView_->setTransformTool(TransformTool::Scale); });
+    connect(renderView_, &RenderView::transformToolChanged, this, [this](TransformTool tool) {
+        selectToolAction_->setChecked(tool == TransformTool::Select);
+        translateToolAction_->setChecked(tool == TransformTool::Translate);
+        rotateToolAction_->setChecked(tool == TransformTool::Rotate);
+        scaleToolAction_->setChecked(tool == TransformTool::Scale);
+    });
 }
 
 void MainWindow::createMenus() {
@@ -196,10 +205,7 @@ void MainWindow::createMenus() {
 void MainWindow::createToolBar() {
     QToolBar* toolBar = addToolBar("Render");
     toolBar->setMovable(false);
-    toolBar->addAction(translateToolAction_);
-    toolBar->addAction(rotateToolAction_);
-    toolBar->addAction(scaleToolAction_);
-    toolBar->addSeparator();
+    // T/R/S live centered on the viewport itself; this bar is render controls.
     toolBar->addAction(renderAction_);
     toolBar->addAction(stopAction_);
     toolBar->addSeparator();
@@ -258,34 +264,54 @@ void MainWindow::createDocks() {
         renderView_->setTransformTarget(node && node->findParameter("translate") ? node : nullptr);
     };
 
+    auto selectNodeForEditing = [this, syncTransformTarget](Node* node) {
+        parameterPanel_->setNode(node);
+        syncTransformTarget(node);
+        if (node) networkView_->selectNode(node);
+    };
+
     connect(networkView_, &NodeGraphView::nodeSelected, this, [this, syncTransformTarget](Node* node) {
+        // Network Editor is the selection source — don't let Material Network steal it.
         parameterPanel_->setNode(node);
         syncTransformTarget(node);
     });
     connect(networkView_, &NodeGraphView::statusMessage, this,
             [this](const QString& message) { statusBar()->showMessage(message, 3000); });
     connect(materialNetworkView_, &MaterialNetworkView::selectionChanged, this, [this, syncTransformTarget] {
+        // Only push Material Network selection when that view actually has one.
         MaterialXSelection mtlx;
         if (materialNetworkView_->selectedMaterialX(mtlx)) {
             parameterPanel_->setMaterialXSelection(mtlx);
             syncTransformTarget(nullptr);
             return;
         }
-        Node* node = materialNetworkView_->selectedLopNode();
-        parameterPanel_->setNode(node);
-        syncTransformTarget(node);
+        if (!materialNetworkView_->isInsideMaterial()) {
+            Node* node = materialNetworkView_->selectedLopNode();
+            if (!node) return;  // empty container selection must not clear Parameters
+            parameterPanel_->setNode(node);
+            syncTransformTarget(node);
+        } else {
+            // Inside a material with no MaterialX node selected — show the container.
+            parameterPanel_->setNode(materialNetworkView_->currentMaterial());
+            syncTransformTarget(nullptr);
+        }
     });
-    connect(materialNetworkView_, &MaterialNetworkView::materialEdited, this, [this](Node* node) {
-        // MaterialX constant edits keep the Parameters widgets live; topology /
-        // rename paths emit selectionChanged and rebuild the panel there.
-        if (!parameterPanel_->showingMaterialX() && parameterPanel_->node() == node)
-            parameterPanel_->refresh();
+    connect(materialNetworkView_, &MaterialNetworkView::materialEdited, this, [this](Node*) {
         scheduleCook();
     });
     connect(materialNetworkView_, &MaterialNetworkView::statusMessage, this,
             [this](const QString& message) { statusBar()->showMessage(message, 3000); });
+    connect(sceneGraphPanel_, &SceneGraphPanel::itemSelected, this,
+            [this, selectNodeForEditing](const QString& path, const QString& sourceNode) {
+                Q_UNUSED(path);
+                if (sourceNode.isEmpty()) return;
+                if (Node* node = graph_.findNode(sourceNode)) selectNodeForEditing(node);
+            });
     connect(parameterPanel_, &ParameterPanel::parameterEdited, this,
-            [this](Node*, const QString&) { scheduleCook(); });
+            [this](Node*, const QString&) {
+                if (renderView_->isGizmoDragging()) return;
+                scheduleCook();
+            });
     connect(parameterPanel_, &ParameterPanel::nodeRenamed, this, [this](Node*) { scheduleCook(); });
     connect(parameterPanel_, &ParameterPanel::materialXRenamed, this,
             [this](Node*, const QString&, const QString& newName) {
@@ -299,10 +325,14 @@ void MainWindow::createDocks() {
             [this](Node*, const QString&, const QString& inputName, const QString& value) {
                 materialNetworkView_->setSelectedMaterialXInput(inputName, value);
             });
-    connect(renderView_, &RenderView::transformEdited, this, [this](Node* node) {
+    // Live gizmo moves update node params quietly — cook / IPR only on release.
+    connect(renderView_, &RenderView::transformEdited, this, [this](Node*) {
+        // Keep the gizmo responsive; do not rebuild Parameters or restart IPR.
+    });
+    connect(renderView_, &RenderView::transformFinished, this, [this](Node* node) {
         if (parameterPanel_->node() == node && !parameterPanel_->showingMaterialX())
             parameterPanel_->refresh();
-        scheduleCook();
+        scheduleCook(0);
     });
 }
 
@@ -457,8 +487,13 @@ void MainWindow::cookNow() {
     if (!graph_.filePath().isEmpty()) context.sceneDirectory = QFileInfo(graph_.filePath()).absolutePath();
 
     stage_ = graph_.cookDisplay(context);
-    sceneGraphPanel_->setStage(stage_);
-    if (parameterPanel_->node()) parameterPanel_->refresh();
+    QStringList materialContainers;
+    for (const NodePtr& node : graph_.nodes()) {
+        if (node && node->typeName() == "material") materialContainers << node->name();
+    }
+    materialContainers.sort(Qt::CaseInsensitive);
+    sceneGraphPanel_->setStage(stage_, materialContainers);
+    // Do not rebuild Parameters on every cook — that steals focus / selection while editing.
 
     if (!stage_) return;
     scene_ = stage_->toScene();
@@ -640,8 +675,9 @@ void MainWindow::onShowShortcuts() {
                              "  MMB drag      pan (1:1)\n"
                              "  Wheel         zoom to cursor\n\n"
                              "Render view (Houdini style)\n"
-                             "  T / R / S     translate / rotate / scale gizmo\n"
+                             "  T / R / S     translate / rotate / scale (viewport buttons)\n"
                              "  Q             select (hide gizmo)\n"
+                             "  LMB on gizmo  transform (IPR restarts on release)\n"
                              "  Alt + LMB     tumble (pivot on geometry under cursor)\n"
                              "  RMB           tumble / orbit\n"
                              "  MMB           pan\n"

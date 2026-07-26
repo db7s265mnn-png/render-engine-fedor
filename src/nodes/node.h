@@ -50,7 +50,10 @@ public:
     Parameter* findParameter(const QString& name);
     const Parameter* findParameter(const QString& name) const;
     void addParameter(Parameter parameter);
-    void setParameterValue(const QString& name, const QVariant& value);
+    // notify=false updates the value / dirty flag without emitting parameterChanged
+    // (used while dragging viewport gizmos so cook/IPR wait for mouse release).
+    void setParameterValue(const QString& name, const QVariant& value, bool notify = true);
+    void notifyParameterChanged(const QString& name);
 
     double floatValue(const QString& name, double fallback = 0.0) const;
     int intValue(const QString& name, int fallback = 0) const;

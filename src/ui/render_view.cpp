@@ -1,10 +1,14 @@
 #include "ui/render_view.h"
 
 #include <QApplication>
+#include <QButtonGroup>
 #include <QDateTime>
+#include <QHBoxLayout>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QResizeEvent>
+#include <QToolButton>
 #include <QVector3D>
 #include <QWheelEvent>
 #include <algorithm>
@@ -139,6 +143,64 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     QPalette pal = palette();
     pal.setColor(QPalette::Window, theme::gridDark());
     setPalette(pal);
+
+    // Centered T / R / S tool strip above the framebuffer (viewport chrome).
+    toolStrip_ = new QWidget(this);
+    toolStrip_->setObjectName("viewportTransformStrip");
+    toolStrip_->setStyleSheet(
+        "QWidget#viewportTransformStrip {"
+        "  background: rgba(20, 22, 26, 180);"
+        "  border: 1px solid rgba(255,255,255,28);"
+        "  border-radius: 6px;"
+        "}"
+        "QToolButton {"
+        "  color: #e8eaed;"
+        "  background: transparent;"
+        "  border: none;"
+        "  border-radius: 4px;"
+        "  min-width: 28px;"
+        "  min-height: 24px;"
+        "  font-weight: 700;"
+        "  font-size: 12px;"
+        "}"
+        "QToolButton:checked {"
+        "  background: rgba(80, 170, 255, 70);"
+        "  color: #ffffff;"
+        "}"
+        "QToolButton:hover {"
+        "  background: rgba(255,255,255,22);"
+        "}");
+    auto* stripLayout = new QHBoxLayout(toolStrip_);
+    stripLayout->setContentsMargins(4, 3, 4, 3);
+    stripLayout->setSpacing(2);
+
+    auto* group = new QButtonGroup(toolStrip_);
+    group->setExclusive(true);
+    auto makeButton = [&](const QString& text, const QString& tip) {
+        auto* button = new QToolButton(toolStrip_);
+        button->setText(text);
+        button->setCheckable(true);
+        button->setToolTip(tip);
+        button->setAutoRaise(true);
+        group->addButton(button);
+        stripLayout->addWidget(button);
+        return button;
+    };
+    translateButton_ = makeButton("T", "Translate (T)");
+    rotateButton_ = makeButton("R", "Rotate (R)");
+    scaleButton_ = makeButton("S", "Scale (S)");
+    translateButton_->setChecked(true);
+
+    connect(translateButton_, &QToolButton::clicked, this, [this] {
+        setTransformTool(TransformTool::Translate);
+    });
+    connect(rotateButton_, &QToolButton::clicked, this, [this] {
+        setTransformTool(TransformTool::Rotate);
+    });
+    connect(scaleButton_, &QToolButton::clicked, this, [this] {
+        setTransformTool(TransformTool::Scale);
+    });
+    layoutToolStrip();
 }
 
 void RenderView::setImage(const QImage& image) {
@@ -162,10 +224,36 @@ void RenderView::setCamera(const ViewCamera& camera) {
 }
 
 void RenderView::setTransformTool(TransformTool tool) {
+    if (transformTool_ == tool) {
+        syncToolButtons();
+        return;
+    }
     transformTool_ = tool;
     if (mode_ == 4) endGizmoDrag();
     hoverAxis_ = GizmoAxis::None;
+    syncToolButtons();
+    emit transformToolChanged(transformTool_);
     update();
+}
+
+void RenderView::syncToolButtons() {
+    if (!translateButton_) return;
+    translateButton_->setChecked(transformTool_ == TransformTool::Translate);
+    rotateButton_->setChecked(transformTool_ == TransformTool::Rotate);
+    scaleButton_->setChecked(transformTool_ == TransformTool::Scale);
+}
+
+void RenderView::layoutToolStrip() {
+    if (!toolStrip_) return;
+    toolStrip_->adjustSize();
+    const int x = std::max(8, (width() - toolStrip_->width()) / 2);
+    toolStrip_->move(x, 8);
+    toolStrip_->raise();
+}
+
+void RenderView::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    layoutToolStrip();
 }
 
 void RenderView::setTransformTarget(Node* node) {
@@ -355,6 +443,8 @@ bool RenderView::beginGizmoDrag(const QPoint& pos) {
         dragStartParam_ = 0.0f;
 
     mode_ = 4;
+    gizmoDidEdit_ = false;
+    dragParameterName_.clear();
     lastMousePosition_ = pos;
     setCursor(Qt::ClosedHandCursor);
     grabMouse();
@@ -381,15 +471,14 @@ void RenderView::updateGizmoDrag(const QPoint& pos) {
             const Vec3 up = normalize(cross(right, forward));
             const float scale = camera_.distance * 0.0018f * precision;
             t = dragStartTranslate_ + right * (-float(d.x()) * scale) + up * (float(d.y()) * scale);
-        } else if (activeAxis_ == GizmoAxis::X) t.x = dragStartTranslate_.x + delta;
-        else if (activeAxis_ == GizmoAxis::Y) t.y = dragStartTranslate_.y + delta;
-        else if (activeAxis_ == GizmoAxis::Z) t.z = dragStartTranslate_.z + delta;
-        // When axes are rotated, move along world axis direction in translate space
-        // by projecting delta onto the local translate (Houdini object-level TRS).
-        if (activeAxis_ != GizmoAxis::Center) {
+        } else {
+            // Move along the chosen world/local axis direction.
             t = dragStartTranslate_ + dragAxisDir_ * delta;
         }
-        transformTarget_->setParameterValue("translate", QVariant::fromValue(QVector3D(t.x, t.y, t.z)));
+        dragParameterName_ = "translate";
+        transformTarget_->setParameterValue("translate", QVariant::fromValue(QVector3D(t.x, t.y, t.z)),
+                                            false);
+        gizmoDidEdit_ = true;
         emit transformEdited(transformTarget_);
         update();
         return;
@@ -407,7 +496,9 @@ void RenderView::updateGizmoDrag(const QPoint& pos) {
         } else if (activeAxis_ == GizmoAxis::X) s.x = dragStartScale_.x * factor;
         else if (activeAxis_ == GizmoAxis::Y) s.y = dragStartScale_.y * factor;
         else if (activeAxis_ == GizmoAxis::Z) s.z = dragStartScale_.z * factor;
-        transformTarget_->setParameterValue("scale", QVariant::fromValue(QVector3D(s.x, s.y, s.z)));
+        dragParameterName_ = "scale";
+        transformTarget_->setParameterValue("scale", QVariant::fromValue(QVector3D(s.x, s.y, s.z)), false);
+        gizmoDidEdit_ = true;
         emit transformEdited(transformTarget_);
         update();
         return;
@@ -424,18 +515,29 @@ void RenderView::updateGizmoDrag(const QPoint& pos) {
             r.y = dragStartRotate_.y + float(d.x()) * 0.35f * precision;
             r.x = dragStartRotate_.x + float(d.y()) * 0.35f * precision;
         }
-        transformTarget_->setParameterValue("rotate", QVariant::fromValue(QVector3D(r.x, r.y, r.z)));
+        dragParameterName_ = "rotate";
+        transformTarget_->setParameterValue("rotate", QVariant::fromValue(QVector3D(r.x, r.y, r.z)), false);
+        gizmoDidEdit_ = true;
         emit transformEdited(transformTarget_);
         update();
     }
 }
 
 void RenderView::endGizmoDrag() {
+    Node* node = transformTarget_;
+    const QString param = dragParameterName_;
+    const bool edited = gizmoDidEdit_;
     activeAxis_ = GizmoAxis::None;
+    gizmoDidEdit_ = false;
+    dragParameterName_.clear();
     if (mode_ == 4) {
         mode_ = 0;
         releaseMouse();
         unsetCursor();
+    }
+    if (edited && node) {
+        if (!param.isEmpty()) node->notifyParameterChanged(param);
+        emit transformFinished(node);
     }
 }
 

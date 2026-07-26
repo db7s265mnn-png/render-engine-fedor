@@ -59,11 +59,16 @@ void Node::addParameter(Parameter parameter) {
     parameters_.push_back(std::move(parameter));
 }
 
-void Node::setParameterValue(const QString& name, const QVariant& value) {
+void Node::setParameterValue(const QString& name, const QVariant& value, bool notify) {
     Parameter* parameter = findParameter(name);
     if (!parameter) return;
     if (parameter->value == value) return;
     parameter->value = value;
+    dirty_ = true;
+    if (notify) emit parameterChanged(this, name);
+}
+
+void Node::notifyParameterChanged(const QString& name) {
     dirty_ = true;
     emit parameterChanged(this, name);
 }

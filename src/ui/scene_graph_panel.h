@@ -1,6 +1,8 @@
 // Scene graph tree of the cooked stage, mirroring the Solaris prim hierarchy.
+// Also lists material container nodes from the LOPs network (not MaterialX guts).
 #pragma once
 
+#include <QStringList>
 #include <QWidget>
 
 #include "nodes/stage.h"
@@ -16,14 +18,21 @@ class SceneGraphPanel : public QWidget {
 public:
     explicit SceneGraphPanel(QWidget* parent = nullptr);
 
-    void setStage(const StagePtr& stage);
+    void setStage(const StagePtr& stage, const QStringList& materialContainers = {});
+    QString selectedPath() const;
+    QString selectedSourceNode() const;
 
 signals:
-    void primSelected(const QString& path);
+    // Fired when the user picks a prim or material container.
+    // sourceNode is the authoring LOP node name when available.
+    void itemSelected(const QString& path, const QString& sourceNode);
 
 private:
+    void emitCurrentSelection();
+
     QTreeWidget* tree_ = nullptr;
     QLabel* summary_ = nullptr;
+    QString pendingSelectPath_;
 };
 
 }  // namespace sol

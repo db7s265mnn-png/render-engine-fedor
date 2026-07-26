@@ -9,6 +9,8 @@
 #include "core/math.h"
 #include "nodes/node.h"
 
+class QToolButton;
+
 namespace sol {
 
 struct ViewCamera {
@@ -54,16 +56,22 @@ public:
     void setTransformTool(TransformTool tool);
     void setTransformTarget(Node* node);
     Node* transformTarget() const { return transformTarget_; }
+    bool isGizmoDragging() const { return mode_ == 4; }
 
     using PickCallback = std::function<bool(float u, float v, Vec3& hitPoint)>;
     void setPickCallback(PickCallback callback) { pickCallback_ = std::move(callback); }
 
 signals:
     void cameraMoved();
+    // Fired while dragging (values already written quietly — do not cook/IPR).
     void transformEdited(sol::Node* node);
+    // Fired on mouse release after a gizmo drag — safe to cook/IPR.
+    void transformFinished(sol::Node* node);
+    void transformToolChanged(sol::TransformTool tool);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
@@ -77,6 +85,8 @@ private:
     bool projectWorldToWidget(const Vec3& world, QPointF& out) const;
     bool widgetToCameraRay(const QPoint& pos, Vec3& origin, Vec3& direction) const;
     void beginNavigation(int mode, const QPoint& pos);
+    void layoutToolStrip();
+    void syncToolButtons();
 
     bool hasTransformTarget() const;
     Mat4 targetWorldMatrix() const;
@@ -99,7 +109,7 @@ private:
     int resolutionX_ = 960;
     int resolutionY_ = 540;
 
-    TransformTool transformTool_ = TransformTool::Select;
+    TransformTool transformTool_ = TransformTool::Translate;
     Node* transformTarget_ = nullptr;
     GizmoAxis activeAxis_ = GizmoAxis::None;
     GizmoAxis hoverAxis_ = GizmoAxis::None;
@@ -110,6 +120,13 @@ private:
     Vec3 dragOrigin_{0.0f};
     float dragStartParam_ = 0.0f;
     QPoint dragStartMouse_;
+    QString dragParameterName_;
+    bool gizmoDidEdit_ = false;
+
+    QWidget* toolStrip_ = nullptr;
+    QToolButton* translateButton_ = nullptr;
+    QToolButton* rotateButton_ = nullptr;
+    QToolButton* scaleButton_ = nullptr;
 
     // World-space tumble center for the current Alt+LMB / RMB drag (may differ from look-at).
     Vec3 tumbleCenter_{0.0f, 1.0f, 0.0f};
