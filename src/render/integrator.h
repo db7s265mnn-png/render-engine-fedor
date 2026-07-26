@@ -163,16 +163,24 @@ struct NullGuiding {
     SR_INL SR_HD void recordLightHit(Vec3, Vec3, Vec3, float) {}
 };
 
+// Clamp a path contribution to fight fireflies (bright rare samples).
+SR_INL SR_HD Vec3 clampContribution(Vec3 contrib, float clampValue) {
+    if (clampValue <= 0.0f || !isFinite(contrib)) return isFinite(contrib) ? contrib : Vec3(0.0f);
+    const float m = maxComponent(contrib);
+    if (m > clampValue) contrib *= clampValue / m;
+    return contrib;
+}
+
 template <typename Tracer, typename Guiding>
-SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
-                                      const Material& mat, const Frame& frame, Vec3 wo, Rng& rng,
-                                      Guiding* guiding) {
+SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& tracer,
+                                          const SurfaceInteraction& si, const Material& mat,
+                                          const Frame& frame, Vec3 wo, Rng& rng, Guiding* guiding) {
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
-    const float selectPdf = lightSelectionPdf(scene);
-    int lightIndex = int(rng.nextFloat() * float(scene.lightCount));
-    if (lightIndex >= scene.lightCount) lightIndex = scene.lightCount - 1;
+    float selectPdf = 0.0f;
+    const int lightIndex = sampleLightIndex(scene, rng.nextFloat(), selectPdf);
+    if (lightIndex < 0 || selectPdf <= 0.0f) return result;
 
     LightSample ls;
     if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) return result;
@@ -208,6 +216,17 @@ SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& trac
     return result;
 }
 
+template <typename Tracer, typename Guiding>
+SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
+                                      const Material& mat, const Frame& frame, Vec3 wo, Rng& rng,
+                                      Guiding* guiding) {
+    const int n = srMax(1, scene.settings.lightSamples);
+    Vec3 sum(0.0f);
+    for (int i = 0; i < n; ++i)
+        sum += nextEventEstimationOnce(scene, tracer, si, mat, frame, wo, rng, guiding);
+    return sum * (1.0f / float(n));
+}
+
 template <typename Tracer>
 SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
                                       const Material& mat, const Frame& frame, Vec3 wo, Rng& rng) {
@@ -241,10 +260,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         if (!specularBounce) {
                             const float lp = lightPdfDirection(scene, scene.domeLightIndex, origin, direction,
                                                                origin, direction) *
-                                             lightSelectionPdf(scene);
+                                             lightSelectionPdfIndex(scene, scene.domeLightIndex);
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
-                        radiance += throughput * envL * weight;
+                        Vec3 contrib = throughput * envL * weight;
+                        if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
+                        radiance += contrib;
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active())
                             guiding->recordBackground(origin, direction, envL, weight);
@@ -279,10 +300,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 float weight = 1.0f;
                 if (!specularBounce) {
                     const float lp = lightPdfDirection(scene, si.lightIndex, origin, direction, si.p, lightN) *
-                                     lightSelectionPdf(scene);
+                                     lightSelectionPdfIndex(scene, si.lightIndex);
                     weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                 }
-                radiance += throughput * emitted * weight;
+                Vec3 contrib = throughput * emitted * weight;
+                if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
+                radiance += contrib;
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active())
                     guiding->recordLightHit(si.p, -direction, emitted, weight);
@@ -375,7 +398,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             if (pSpec > 0.0f) {
                 const Vec3 nee =
                     nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding);
-                radiance += throughput * nee;
+                Vec3 contrib = throughput * nee;
+                if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
+                radiance += contrib;
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active()) guiding->addScattered(nee);
 #endif
@@ -550,13 +575,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             ssSi.ns = exitN;
             ssSi.ng = exitN;
             const Frame ssFrame(exitN);
-            // Two NEE samples at the SSS exit — lighting is a major SSS noise term.
-            Vec3 nee(0.0f);
-            constexpr int kSssNee = 2;
-            for (int i = 0; i < kSssNee; ++i)
-                nee += nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, exitWo, rng, guiding);
-            nee = nee * (1.0f / float(kSssNee));
-            radiance += throughput * pathWeight * nee;
+            // NEE at SSS exit (lightSamples is handled inside nextEventEstimation).
+            const Vec3 nee =
+                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, exitWo, rng, guiding);
+            Vec3 contrib = throughput * pathWeight * nee;
+            if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
+            radiance += contrib;
 #if !defined(__CUDACC__)
             if (guiding && guiding->active()) guiding->addScattered(pathWeight * nee);
 #endif
@@ -593,7 +617,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #endif
 
         const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, guiding);
-        radiance += throughput * nee;
+        {
+            Vec3 contrib = throughput * nee;
+            // Direct lighting on the first hit is left unclamped; secondary is clamped.
+            if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
+            radiance += contrib;
+        }
 #if !defined(__CUDACC__)
         if (guiding && guiding->active()) guiding->addScattered(nee);
 #endif
@@ -643,7 +672,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
 
         Vec3 weight = bs.weight;
-        if (settings.clampIndirect > 0.0f && depth > 0) {
+        // Clamp bounce weights even on the first hit — glossy→sun fireflies start here.
+        if (settings.clampIndirect > 0.0f) {
             const float m = maxComponent(weight);
             if (m > settings.clampIndirect) weight *= settings.clampIndirect / m;
         }

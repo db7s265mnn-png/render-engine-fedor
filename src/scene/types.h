@@ -184,11 +184,11 @@ struct RenderSettingsData {
     int maxDepth = 8;
 
     int rrStartDepth = 3;
-    int lightSamples = 1;
+    int lightSamples = 2;          // NEE samples per bounce (MIS with BSDF)
     int seed = 0;
     int integrator = kIntegratorPathTracer;
 
-    float clampIndirect = 20.0f;   // <= 0 disables firefly clamping
+    float clampIndirect = 10.0f;   // <= 0 disables firefly clamping of indirect contribs
     float exposure = 0.0f;
     float gamma = 2.2f;
     int toneMapper = kToneAces;

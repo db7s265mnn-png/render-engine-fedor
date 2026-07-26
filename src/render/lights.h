@@ -380,10 +380,79 @@ SR_INL SR_HD float lightPdfDirection(const SceneView& scene, int lightIndex, Vec
     }
 }
 
-// Probability of picking a given light in next event estimation. Uniform for
-// now; lights are cheap to sample and the counts are small.
+// Approximate emitted flux used to pick lights (brighter / larger → more samples).
+SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
+    if (lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
+    const LightData& l = scene.lights[lightIndex];
+    const float intens = srMax(1e-8f, average(vmax(Vec3(0.0f), l.emittedRadiance())));
+    switch (l.type) {
+        case kLightDome:
+            if (l.envIndex >= 0 && l.envIndex < scene.envMapCount && scene.envMaps[l.envIndex].sampled())
+                return intens * srMax(1e-4f, scene.envMaps[l.envIndex].integral);
+            return intens * 4.0f;
+        case kLightRect:
+            return intens * srMax(1e-6f, rectLightArea(l));
+        case kLightDisk:
+            return intens * srMax(1e-6f, diskLightArea(l));
+        case kLightSphere: {
+            const float r = sphereLightRadius(l);
+            return intens * srMax(1e-6f, 4.0f * kPi * r * r);
+        }
+        case kLightDistant: {
+            const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
+            if (halfAngle < 1e-4f) return intens;
+            return intens * srMax(1e-6f, kTwoPi * (1.0f - cosf(halfAngle)));
+        }
+        case kLightPoint:
+            return intens;
+        default:
+            return intens;
+    }
+}
+
 SR_INL SR_HD float lightSelectionPdf(const SceneView& scene) {
     return scene.lightCount > 0 ? 1.0f / float(scene.lightCount) : 0.0f;
+}
+
+// Flux-weighted probability of selecting a specific light.
+SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, int lightIndex) {
+    if (scene.lightCount <= 0 || lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
+    float total = 0.0f;
+    float chosen = 0.0f;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        const float w = lightFluxWeight(scene, i);
+        total += w;
+        if (i == lightIndex) chosen = w;
+    }
+    if (total <= 1e-20f) return lightSelectionPdf(scene);
+    return chosen / total;
+}
+
+// Sample a light index with probability ∝ flux. `pdf` is the selection pdf.
+SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
+    if (scene.lightCount <= 0) {
+        pdf = 0.0f;
+        return -1;
+    }
+    float total = 0.0f;
+    for (int i = 0; i < scene.lightCount; ++i) total += lightFluxWeight(scene, i);
+    if (total <= 1e-20f) {
+        int idx = int(u * float(scene.lightCount));
+        if (idx >= scene.lightCount) idx = scene.lightCount - 1;
+        pdf = lightSelectionPdf(scene);
+        return idx;
+    }
+    float r = clampf(u, 0.0f, 0.999999f) * total;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        const float w = lightFluxWeight(scene, i);
+        if (r < w) {
+            pdf = w / total;
+            return i;
+        }
+        r -= w;
+    }
+    pdf = lightFluxWeight(scene, scene.lightCount - 1) / total;
+    return scene.lightCount - 1;
 }
 
 }  // namespace sol

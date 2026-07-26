@@ -613,7 +613,14 @@ public:
                          .withGroup("Engine"));
         addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
-        addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 20.0, 0.0, 1000.0, false).withGroup("Engine"));
+        addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
+                         .withGroup("Engine")
+                         .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
+                                      "Higher = less light/reflection noise, slower."));
+        addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000.0, false)
+                         .withGroup("Engine")
+                         .withTooltip("Caps bright indirect path contributions (fireflies). "
+                                      "0 disables. Lower = cleaner, slightly darker caustics."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Engine"));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
@@ -639,7 +646,8 @@ public:
         settings.integrator = intValue("integrator", 0);
         settings.maxDepth = intValue("maxdepth", 8);
         settings.rrStartDepth = intValue("rrdepth", 3);
-        settings.clampIndirect = float(floatValue("clamp", 20.0));
+        settings.lightSamples = std::max(1, intValue("lightsamples", 2));
+        settings.clampIndirect = float(floatValue("clamp", 10.0));
         settings.seed = intValue("seed", 0);
         settings.threads = intValue("threads", 0);
         settings.tileSize = intValue("tilesize", 32);
