@@ -249,7 +249,11 @@ set(SOLSTICE_APP_HEADERS
 )
 
 if(SOLSTICE_BUILD_APP)
-    qt_add_executable(Solstice WIN32 MACOSX_BUNDLE ${SOLSTICE_APP_SOURCES} ${SOLSTICE_APP_HEADERS})
+    set(CMAKE_AUTORCC ON)
+    qt_add_executable(Solstice WIN32 MACOSX_BUNDLE
+        ${SOLSTICE_APP_SOURCES}
+        ${SOLSTICE_APP_HEADERS}
+        resources/icons.qrc)
     target_link_libraries(Solstice PRIVATE solstice_lib Qt6::Widgets)
     set_target_properties(Solstice PROPERTIES
         OUTPUT_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
