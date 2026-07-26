@@ -146,7 +146,13 @@ void materialXFloatRange(const QString& name, double& lo, double& hi) {
         hi = 5.0;
         return;
     }
-    if (n == QLatin1String("subsurface_scale") || n == QLatin1String("scale")) {
+    if (n == QLatin1String("subsurface_scale")) {
+        // Arnold Scale: multiplies Radius (MFP). Soft range 0..10, usable beyond via typing.
+        lo = 0.0;
+        hi = 10.0;
+        return;
+    }
+    if (n == QLatin1String("scale")) {
         lo = 0.0;
         hi = 10.0;
         return;

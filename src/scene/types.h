@@ -22,14 +22,15 @@ struct Material {
     float emissionStrength = 0.0f;
 
     float opacity = 1.0f;
-    float subsurface = 0.0f;     // 0 = opaque BRDF, 1 = full random-walk SSS
+    float subsurface = 0.0f;     // 0 = opaque BRDF, 1 = full Arnold-style random-walk SSS
     int doubleSided = 1;
     int pad0 = 0;
 
     Vec3 subsurfaceColor{1.0f, 0.75f, 0.55f};
-    float subsurfaceScale = 0.15f;  // world-space mean free path scale
+    // Arnold: world MFP = subsurfaceScale * subsurfaceRadius (per channel).
+    float subsurfaceScale = 1.0f;
 
-    Vec3 subsurfaceRadius{1.0f, 0.35f, 0.2f};  // relative RGB scattering radii
+    Vec3 subsurfaceRadius{1.0f, 0.35f, 0.2f};  // RGB mean-free-path weights (often relative)
     float pad1 = 0.0f;
 
     // Indices into SceneView::textures (-1 = none).

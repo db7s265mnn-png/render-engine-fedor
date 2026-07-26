@@ -264,70 +264,109 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         const Vec3 wo = -direction;
         const Frame frame(si.ns);
 
-        // Random-walk subsurface scattering (MaterialX-style subsurface lobe).
+        // Arnold-style random-walk SSS (default Standard Surface method).
+        // Effective mean free path per channel: MFP = subsurface_scale * subsurface_radius.
+        // Larger Scale → longer free paths → light travels farther under the surface.
         if (mat.subsurface > 1e-4f && mat.transmission <= 1e-4f && mat.metallic < 0.999f &&
             rng.nextFloat() < saturatef(mat.subsurface)) {
-            const float mfp = srMax(1e-4f, mat.subsurfaceScale);
-            Vec3 pWalk = si.p;
-            Vec3 nWalk = si.ns;
-            Vec3 ssThroughput = mat.subsurfaceColor;
+            const Vec3 mfpRGB = mat.subsurfaceRadius * srMax(0.0f, mat.subsurfaceScale);
+            const Vec3 albedo = vmax(Vec3(0.0f), mat.subsurfaceColor);
+
+            // Enter the volume just below the surface along -Ns.
+            Vec3 pWalk = si.p - si.ns * (kRayEpsilon * (1.0f + length(si.p)));
+            Vec3 ssThroughput(1.0f);
             bool escaped = false;
-            Vec3 escapeN = nWalk;
-            Vec3 escapeP = pWalk;
-            for (int step = 0; step < 6; ++step) {
-                const Vec3 walkDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
+            Vec3 escapeP = si.p;
+            Vec3 escapeN = si.ns;
+
+            constexpr int kMaxWalkSteps = 32;
+            for (int step = 0; step < kMaxWalkSteps; ++step) {
+                // Channel selection for spectral MFP (Arnold single-channel walk).
                 const float channel = rng.nextFloat();
-                float radiusScale = mat.subsurfaceRadius.y;
-                if (channel < 0.333f) radiusScale = mat.subsurfaceRadius.x;
-                else if (channel > 0.666f) radiusScale = mat.subsurfaceRadius.z;
-                const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) * mfp * srMax(1e-3f, radiusScale);
-                RayHit walkHit;
-                const Vec3 walkOrigin = offsetRayOrigin(pWalk, nWalk, walkDir);
-                if (!tracer.intersect(walkOrigin, walkDir, stepLen, walkHit)) {
-                    // Left the volume locally — shade diffuse at the entry with SS tint.
-                    escaped = true;
-                    escapeP = si.p;
-                    escapeN = si.ns;
-                    break;
+                float mfp = mfpRGB.y;
+                if (channel < 0.333f) mfp = mfpRGB.x;
+                else if (channel > 0.666f) mfp = mfpRGB.z;
+                mfp = srMax(1e-6f, mfp);
+
+                // Free path length ~ Exp(1/mfp); Scale directly stretches this distance.
+                const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) * mfp;
+
+                Vec3 walkDir;
+                if (step == 0) {
+                    // First step: cosine-weighted into the medium (Arnold randomwalk).
+                    const Frame inFrame(-si.ns);
+                    walkDir = inFrame.toWorld(sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat()));
+                } else {
+                    // Isotropic phase function inside the medium.
+                    walkDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
                 }
+                if (lengthSquared(walkDir) < 1e-12f) continue;
+                walkDir = normalize(walkDir);
+
+                const Vec3 walkOrigin = pWalk + walkDir * kRayEpsilon;
+                RayHit walkHit;
+                if (!tracer.intersect(walkOrigin, walkDir, stepLen, walkHit)) {
+                    // No geometry within the free path — scatter event inside the volume.
+                    // (This is what makes Scale increase penetration: longer steps advance farther.)
+                    pWalk = walkOrigin + walkDir * stepLen;
+                    ssThroughput = ssThroughput * albedo;
+                    if (isBlack(ssThroughput)) break;
+                    continue;
+                }
+
                 SurfaceInteraction walkSi;
                 if (!buildSurfaceInteraction(scene, walkHit, walkOrigin, walkDir, walkSi)) break;
-                // Crossing into air: exit and shade at the exit point.
+
+                // Exiting into air (hit a back-facing surface along the walk).
                 if (dot(walkSi.ng, walkDir) > 0.0f) {
                     escaped = true;
                     escapeP = walkSi.p;
-                    escapeN = -walkSi.ns;
-                    ssThroughput = ssThroughput * mat.subsurfaceColor;
+                    escapeN = normalize(-walkSi.ns);
                     break;
                 }
-                pWalk = walkSi.p;
-                nWalk = walkSi.ns;
-                ssThroughput = ssThroughput * mat.subsurfaceColor;
+
+                // Hit internal / opposite front-face geometry — stay in volume and continue.
+                pWalk = walkSi.p - walkSi.ns * (kRayEpsilon * (1.0f + length(walkSi.p)));
+                ssThroughput = ssThroughput * albedo;
+                if (isBlack(ssThroughput)) break;
             }
-            if (escaped) {
-                Material ssMat = mat;
-                ssMat.subsurface = 0.0f;
-                ssMat.baseColor = vmax(Vec3(0.0f), mat.baseColor * ssThroughput);
-                ssMat.metallic = 0.0f;
-                ssMat.transmission = 0.0f;
-                SurfaceInteraction ssSi = si;
-                ssSi.p = escapeP;
-                ssSi.ns = escapeN;
-                ssSi.ng = escapeN;
-                const Frame ssFrame(escapeN);
-                radiance += throughput * nextEventEstimation(scene, tracer, ssSi, ssMat, ssFrame, wo, rng);
-                const BsdfSample ssBs =
-                    bsdfSampleLocal(ssMat, ssFrame.toLocal(wo), rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
-                                    rng.nextFloat());
-                if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
-                    throughput *= ssBs.weight;
-                    origin = offsetRayOrigin(escapeP, escapeN, ssFrame.toWorld(ssBs.wi));
-                    direction = normalize(ssFrame.toWorld(ssBs.wi));
-                    bsdfPdf = ssBs.pdf;
-                    specularBounce = false;
-                    ++depth;
-                    continue;
-                }
+
+            if (!escaped) {
+                // Still trapped after max steps: fall back to a shallow exit at the entry.
+                escaped = true;
+                escapeP = si.p;
+                escapeN = si.ns;
+                ssThroughput = ssThroughput * albedo;
+            }
+
+            Material ssMat = mat;
+            ssMat.subsurface = 0.0f;
+            ssMat.metallic = 0.0f;
+            ssMat.transmission = 0.0f;
+            ssMat.baseColor = vmax(Vec3(0.0f), mat.baseColor * ssThroughput * albedo);
+
+            SurfaceInteraction ssSi = si;
+            ssSi.p = escapeP;
+            ssSi.ns = escapeN;
+            ssSi.ng = escapeN;
+            const Frame ssFrame(escapeN);
+            // Outgoing direction toward the entry point (path connection through the medium).
+            Vec3 ssWo = si.p - escapeP;
+            const float woLen2 = lengthSquared(ssWo);
+            ssWo = woLen2 > 1e-12f ? normalize(ssWo) : escapeN;
+
+            radiance += throughput * nextEventEstimation(scene, tracer, ssSi, ssMat, ssFrame, ssWo, rng);
+            const BsdfSample ssBs =
+                bsdfSampleLocal(ssMat, ssFrame.toLocal(ssWo), rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                rng.nextFloat());
+            if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
+                throughput *= ssBs.weight;
+                origin = offsetRayOrigin(escapeP, escapeN, ssFrame.toWorld(ssBs.wi));
+                direction = normalize(ssFrame.toWorld(ssBs.wi));
+                bsdfPdf = ssBs.pdf;
+                specularBounce = false;
+                ++depth;
+                continue;
             }
             break;
         }
