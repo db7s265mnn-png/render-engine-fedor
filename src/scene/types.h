@@ -29,9 +29,10 @@ struct Material {
     Vec3 subsurfaceColor{1.0f, 0.75f, 0.55f};
     // Arnold: MFP (scene units / metres) = subsurfaceScale * subsurfaceRadius.
     // Scale = 1 means Radius is already in metres (Houdini MKS).
+    // Radius is RGB: each channel has its own MFP (spectral random-walk / hero channel).
     float subsurfaceScale = 1.0f;
 
-    Vec3 subsurfaceRadius{1.0f, 0.35f, 0.2f};  // RGB MFP weights (often relative 0..1)
+    Vec3 subsurfaceRadius{1.0f, 0.35f, 0.2f};  // RGB mean free path (skin: R > G > B)
     float pad1 = 0.0f;
 
     // Indices into SceneView::textures (-1 = none).

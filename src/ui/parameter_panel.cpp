@@ -641,7 +641,7 @@ void ParameterPanel::rebuildMaterialX() {
             const bool isColor = type.startsWith("color");
             const double lo = isColor ? 0.0 : -10.0;
             const double hi = isColor ? 1.0 : 10.0;
-            // subsurface_radius is authored 0..1 relative RGB radii (Arnold).
+            // subsurface_radius: Arnold RGB MFP weights (often 0..1 relative; R>G>B for skin).
             const double compLo = (input.name == QLatin1String("subsurface_radius")) ? 0.0 : lo;
             const double compHi = (input.name == QLatin1String("subsurface_radius")) ? 1.0 : hi;
 
