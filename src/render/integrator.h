@@ -285,24 +285,58 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
         // Arnold-style random-walk SSS with spectral (RGB) radius.
         //
-        // Artist params (Standard Surface):
-        //   MFP_rgb = subsurface_scale * subsurface_radius   (metres / scene units)
-        //   subsurface_color = apparent / multiple-scattering albedo
+        // Layering (Standard Surface): specular sits ON TOP of the SSS body.
+        // With subsurface=1 the old code skipped specular entirely — and delta
+        // mirrors (roughness≈0) also get zero from NEE — so reflections vanished.
+        // Fix: Fresnel RR at entry chooses specular bounce vs SSS body; rough
+        // specular also gets direct NEE at the entry point.
         //
-        // Spectral decomposition (Arnold / Pixar / Chiang):
-        //   Pick ONE RGB channel for the whole walk (hero wavelength).
-        //   Free-path length uses that channel's MFP only, and the path
-        //   contributes only to that channel.  Larger red radius → longer
-        //   red walks → red bleeds farther (classic skin fringing).
-        //   subsurface_color is remapped to single-scattering albedo (Chiang).
-        //
-        // Exit shading is white Lambert × spectral throughput (Pixar): colour
-        // already lives in the walk; specular/roughness do not affect SSS.
+        // Spectral walk: hero RGB channel, MFP = scale * radius[ch], Chiang α.
         const float sssWeight = saturatef(mat.subsurface);
         const bool canSss =
             sssWeight > 1e-4f && mat.transmission <= 1e-4f && mat.metallic < 0.999f;
         if (canSss && rng.nextFloat() < sssWeight) {
             throughput /= sssWeight;
+
+            // Specular-only material at the ENTRY (dielectric F0 / metal base).
+            Material specMat = mat;
+            specMat.subsurface = 0.0f;
+            specMat.transmission = 0.0f;
+            if (specMat.metallic < 0.999f) specMat.baseColor = Vec3(0.0f);
+
+            const Vec3 woLocalEntry = frame.toLocal(wo);
+            const LobeWeights specLw = computeLobes(specMat);
+            const float cosWo = srMax(0.0f, woLocalEntry.z);
+            const float fresnelEst = average(fresnelSchlick(specLw.f0, cosWo));
+            // Probability of taking the specular bounce this path (layer over SSS).
+            float pSpec = 0.0f;
+            if (specLw.specular > 1e-5f && saturatef(mat.specular) > 1e-5f)
+                pSpec = clampf(srMax(fresnelEst, specLw.specular * fresnelEst), 0.0f, 0.98f);
+
+            // Direct specular lighting at entry (works for rough GGX; delta → 0).
+            if (pSpec > 0.0f)
+                radiance += throughput * nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng);
+
+            // Fresnel lottery: reflect at entry OR enter the SSS body.
+            if (pSpec > 0.0f && rng.nextFloat() < pSpec) {
+                throughput /= pSpec;
+                // Force the specular lobe (uLobe in specular range).
+                const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
+                const BsdfSample specBs =
+                    bsdfSampleLocal(specMat, woLocalEntry, uSpec, rng.nextFloat(), rng.nextFloat(),
+                                    rng.nextFloat());
+                if (specBs.pdf > 0.0f && !isBlack(specBs.weight)) {
+                    throughput *= specBs.weight;
+                    origin = offsetRayOrigin(si.p, si.ng, frame.toWorld(specBs.wi));
+                    direction = normalize(frame.toWorld(specBs.wi));
+                    bsdfPdf = specBs.pdf;
+                    specularBounce = specBs.specular;
+                    ++depth;
+                    continue;
+                }
+                break;
+            }
+            if (pSpec > 0.0f && pSpec < 0.999f) throughput /= (1.0f - pSpec);
 
             const Vec3 mfpRGB = vmax(Vec3(0.0f), mat.subsurfaceRadius) * srMax(0.0f, mat.subsurfaceScale);
             const Vec3 multiAlbedo = vmax(Vec3(0.0f), mat.subsurfaceColor);
@@ -332,13 +366,11 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 const float alphaCh = srMax(0.0f, vecChannel(singleAlbedo, ch));
 
                 Vec3 pWalk = si.p - si.ns * (kRayEpsilon * (1.0f + length(si.p)));
-                // Only this channel carries energy; compensate discrete channel PDF.
                 Vec3 ssThroughput = channelMask(ch, 1.0f / kPCh);
                 bool escaped = false;
 
                 constexpr int kMaxWalkSteps = 16;
                 for (int step = 0; step < kMaxWalkSteps; ++step) {
-                    // Free path from THIS channel's extinction σt = 1/MFP.
                     const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) * mfp;
 
                     Vec3 walkDir;
@@ -355,7 +387,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     const Vec3 walkOrigin = pWalk + walkDir * rayEps;
                     RayHit walkHit;
                     if (!tracer.intersect(walkOrigin, walkDir, stepLen, walkHit)) {
-                        // Scatter inside: apply single-scattering albedo on the hero channel only.
                         pWalk = walkOrigin + walkDir * stepLen;
                         float w = vecChannel(ssThroughput, ch) * alphaCh;
                         if (w < 1e-5f) {
@@ -377,7 +408,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     SurfaceInteraction walkSi;
                     if (!buildSurfaceInteraction(scene, walkHit, walkOrigin, walkDir, walkSi)) break;
 
-                    // Any interface hit ends the walk (winding-robust). Normal faces air.
                     escaped = true;
                     exitP = walkSi.p;
                     exitN = walkSi.ns;
@@ -391,10 +421,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     break;
                 }
 
-                if (!escaped || isBlack(pathWeight)) {
-                    // Lost walk: RGB Lambert at entry (biased, avoids black holes).
-                    useEntryFallback = true;
-                }
+                if (!escaped || isBlack(pathWeight)) useEntryFallback = true;
             }
 
             if (useEntryFallback) {
@@ -411,7 +438,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             ssSi.ns = exitN;
             ssSi.ng = exitN;
             const Frame ssFrame(exitN);
-            // pathWeight is spectral (one channel for a successful walk).
             radiance += throughput * pathWeight *
                         nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, exitWo, rng);
             const BsdfSample ssBs =
