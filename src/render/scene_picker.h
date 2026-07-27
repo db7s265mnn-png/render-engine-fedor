@@ -8,7 +8,8 @@ namespace sol {
 
 // Casts a camera ray through normalized image coordinates (u,v in 0..1) using
 // the supplied camera and returns the first surface hit in world space.
+// When instanceIndexOut is non-null, writes the Scene::instances index of the hit.
 bool pickSceneSurface(const ScenePtr& scene, const CameraData& camera, int resolutionX, int resolutionY,
-                      float u, float v, Vec3& hitPoint);
+                      float u, float v, Vec3& hitPoint, int* instanceIndexOut = nullptr);
 
 }  // namespace sol

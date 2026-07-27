@@ -204,7 +204,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     pal.setColor(QPalette::Window, theme::gridDark());
     setPalette(pal);
 
-    // Centered T / R / S tool strip above the framebuffer (viewport chrome).
+    // Centered Select / T / R / S tool strip above the framebuffer (viewport chrome).
     toolStrip_ = new QWidget(this);
     toolStrip_->setObjectName("viewportTransformStrip");
     toolStrip_->setStyleSheet(
@@ -246,6 +246,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         stripLayout->addWidget(button);
         return button;
     };
+    selectButton_ = makeButton("Sel", "Select (Q) — click objects in the viewport");
     translateButton_ = makeButton("T", "Translate (T)");
     rotateButton_ = makeButton("R", "Rotate (R)");
     scaleButton_ = makeButton("S", "Scale (S)");
@@ -278,6 +279,9 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     worldSpaceButton_ = makeSpaceButton("World", "World transform space");
     localSpaceButton_->setChecked(true);
 
+    connect(selectButton_, &QToolButton::clicked, this, [this] {
+        setTransformTool(TransformTool::Select);
+    });
     connect(translateButton_, &QToolButton::clicked, this, [this] {
         setTransformTool(TransformTool::Translate);
     });
@@ -331,6 +335,7 @@ void RenderView::setTransformTool(TransformTool tool) {
 
 void RenderView::syncToolButtons() {
     if (!translateButton_) return;
+    if (selectButton_) selectButton_->setChecked(transformTool_ == TransformTool::Select);
     translateButton_->setChecked(transformTool_ == TransformTool::Translate);
     rotateButton_->setChecked(transformTool_ == TransformTool::Rotate);
     scaleButton_->setChecked(transformTool_ == TransformTool::Scale);
@@ -392,6 +397,16 @@ bool RenderView::pickUnderMouse(const QPoint& pos, Vec3& hitPoint) const {
     const float u = (float(pos.x() - target.left()) + 0.5f) / float(target.width());
     const float v = (float(pos.y() - target.top()) + 0.5f) / float(target.height());
     return pickCallback_(u, v, hitPoint);
+}
+
+bool RenderView::pickObjectUnderMouse(const QPoint& pos, QString& sourceNode) const {
+    sourceNode.clear();
+    if (!objectPickCallback_) return false;
+    const QRect target = imageRect();
+    if (!target.contains(pos) || target.width() <= 0 || target.height() <= 0) return false;
+    const float u = (float(pos.x() - target.left()) + 0.5f) / float(target.width());
+    const float v = (float(pos.y() - target.top()) + 0.5f) / float(target.height());
+    return objectPickCallback_(u, v, sourceNode);
 }
 
 bool RenderView::projectWorldToWidget(const Vec3& world, QPointF& out) const {
@@ -858,11 +873,10 @@ void RenderView::paintEvent(QPaintEvent*) {
         QPointF screen;
         if (projectWorldToWidget(pivotMarkerWorld_, screen)) {
             painter.setRenderHint(QPainter::Antialiasing, true);
-            painter.setPen(QPen(QColor(255, 210, 70), 1.6));
-            painter.setBrush(QColor(255, 210, 70, 180));
-            painter.drawEllipse(screen, 5.0, 5.0);
-            painter.drawLine(screen + QPointF(-10, 0), screen + QPointF(10, 0));
-            painter.drawLine(screen + QPointF(0, -10), screen + QPointF(0, 10));
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QColor(255, 210, 70));
+            // Neat 6×6 yellow orbit-pivot dot (no crosshair).
+            painter.drawEllipse(QRectF(screen.x() - 3.0, screen.y() - 3.0, 6.0, 6.0));
         }
     } else {
         showPivotMarker_ = false;
@@ -906,8 +920,22 @@ void RenderView::mousePressEvent(QMouseEvent* event) {
         return;
     }
 
-    if (event->button() == Qt::LeftButton && !alt && hasTransformTarget()) {
-        if (beginGizmoDrag(event->pos())) {
+    if (event->button() == Qt::LeftButton && !alt) {
+        if (hasTransformTarget()) {
+            if (beginGizmoDrag(event->pos())) {
+                event->accept();
+                return;
+            }
+        }
+        // Click geometry to select the authoring node (Select tool, or miss on gizmo).
+        QString sourceNode;
+        if (pickObjectUnderMouse(event->pos(), sourceNode)) {
+            emit objectSelected(sourceNode);
+            event->accept();
+            return;
+        }
+        if (transformTool_ == TransformTool::Select) {
+            emit objectSelected(QString());
             event->accept();
             return;
         }

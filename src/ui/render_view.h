@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QImage>
+#include <QString>
 #include <QWidget>
 #include <functional>
 
@@ -64,6 +65,10 @@ public:
     using PickCallback = std::function<bool(float u, float v, Vec3& hitPoint)>;
     void setPickCallback(PickCallback callback) { pickCallback_ = std::move(callback); }
 
+    // Object pick for viewport selection: returns authoring node name for the hit.
+    using ObjectPickCallback = std::function<bool(float u, float v, QString& sourceNode)>;
+    void setObjectPickCallback(ObjectPickCallback callback) { objectPickCallback_ = std::move(callback); }
+
     // Returns world bounds for the current selection (false → frame whole scene).
     using SelectionBoundsCallback = std::function<bool(Bounds3& outBounds)>;
     void setSelectionBoundsCallback(SelectionBoundsCallback callback) {
@@ -85,6 +90,8 @@ signals:
     void transformFinished(sol::Node* node);
     void transformToolChanged(sol::TransformTool tool);
     void transformSpaceChanged(sol::TransformSpace space);
+    // Viewport object pick: empty string clears selection.
+    void objectSelected(const QString& sourceNode);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -100,6 +107,7 @@ private:
 
     QRect imageRect() const;
     bool pickUnderMouse(const QPoint& pos, Vec3& hitPoint) const;
+    bool pickObjectUnderMouse(const QPoint& pos, QString& sourceNode) const;
     bool projectWorldToWidget(const Vec3& world, QPointF& out) const;
     bool widgetToCameraRay(const QPoint& pos, Vec3& origin, Vec3& direction) const;
     void beginNavigation(int mode, const QPoint& pos);
@@ -128,6 +136,7 @@ private:
     QString statusText_;
     ViewCamera camera_;
     PickCallback pickCallback_;
+    ObjectPickCallback objectPickCallback_;
     SelectionBoundsCallback selectionBoundsCallback_;
     SceneBoundsCallback sceneBoundsCallback_;
     QPoint lastMousePosition_;
@@ -154,6 +163,7 @@ private:
     bool gizmoDidEdit_ = false;
 
     QWidget* toolStrip_ = nullptr;
+    QToolButton* selectButton_ = nullptr;
     QToolButton* translateButton_ = nullptr;
     QToolButton* rotateButton_ = nullptr;
     QToolButton* scaleButton_ = nullptr;

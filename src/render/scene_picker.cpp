@@ -99,7 +99,8 @@ bool ensurePickScene(const ScenePtr& scene) {
 }  // namespace
 
 bool pickSceneSurface(const ScenePtr& scene, const CameraData& camera, int resolutionX, int resolutionY,
-                      float u, float v, Vec3& hitPoint) {
+                      float u, float v, Vec3& hitPoint, int* instanceIndexOut) {
+    if (instanceIndexOut) *instanceIndexOut = -1;
     if (!scene || scene->instances.empty()) return false;
 
     PickCache& cache = pickCache();
@@ -127,10 +128,16 @@ bool pickSceneSurface(const ScenePtr& scene, const CameraData& camera, int resol
     rayhit.ray.tfar = 1e7f;
     rayhit.ray.mask = 0xFFFFFFFF;
     rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
+    rayhit.hit.instID[0] = RTC_INVALID_GEOMETRY_ID;
     rtcIntersect1(cache.topScene, &rayhit, nullptr);
 
     if (rayhit.hit.geomID == RTC_INVALID_GEOMETRY_ID) return false;
     hitPoint = origin + direction * rayhit.ray.tfar;
+    if (instanceIndexOut) {
+        const unsigned int instID = rayhit.hit.instID[0];
+        *instanceIndexOut =
+            instID == RTC_INVALID_GEOMETRY_ID ? int(rayhit.hit.geomID) : int(instID);
+    }
     return true;
 }
 

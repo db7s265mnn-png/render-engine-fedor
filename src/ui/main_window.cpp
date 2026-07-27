@@ -97,6 +97,26 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                                 hit);
     });
 
+    renderView_->setObjectPickCallback([this](float u, float v, QString& sourceNode) -> bool {
+        sourceNode.clear();
+        if (!scene_ || scene_->instances.empty()) return false;
+        CameraData camera = scene_->camera;
+        camera.cameraToWorld = renderView_->camera().toMatrix();
+        camera.focusDistance = renderView_->camera().distance;
+        Vec3 hit;
+        int instanceIndex = -1;
+        if (!pickSceneSurface(scene_, camera, scene_->settings.resolutionX, scene_->settings.resolutionY, u, v,
+                              hit, &instanceIndex))
+            return false;
+        if (instanceIndex < 0 || instanceIndex >= int(scene_->instances.size())) return false;
+        for (const PrimRecord& prim : scene_->prims) {
+            if (prim.instanceIndex != instanceIndex || prim.sourceNode.empty()) continue;
+            sourceNode = QString::fromStdString(prim.sourceNode);
+            return true;
+        }
+        return false;
+    });
+
     renderView_->setSceneBoundsCallback([this](Bounds3& out) -> bool {
         if (!scene_ || !scene_->bounds().valid()) return false;
         out = scene_->bounds();
@@ -306,7 +326,21 @@ void MainWindow::createDocks() {
         parameterPanel_->setNode(node);
         syncTransformTarget(node);
         if (node) networkView_->selectNode(node);
+        else networkView_->selectNode(nullptr);
     };
+
+    connect(renderView_, &RenderView::objectSelected, this,
+            [this, selectNodeForEditing](const QString& sourceNode) {
+                if (sourceNode.isEmpty()) {
+                    selectNodeForEditing(nullptr);
+                    statusBar()->showMessage("Selection cleared", 1500);
+                    return;
+                }
+                if (Node* node = graph_.findNode(sourceNode)) {
+                    selectNodeForEditing(node);
+                    statusBar()->showMessage("Selected " + sourceNode, 2000);
+                }
+            });
 
     connect(networkView_, &NodeGraphView::nodeSelected, this, [this, syncTransformTarget](Node* node) {
         // Scene Network is the selection source — don't let Material Network steal it.
@@ -723,9 +757,10 @@ void MainWindow::onShowShortcuts() {
                              "Render view (Houdini style)\n"
                              "  F             frame selected object\n"
                              "  H / Home      frame all\n"
+                             "  Sel / Q       select — LMB click geometry\n"
                              "  T / R / S     translate / rotate / scale\n"
-                             "  Q             select (hide gizmo)\n"
                              "  LMB on gizmo  transform (IPR restarts on release)\n"
+                             "  LMB on geo    select object (also when missing gizmo)\n"
                              "  Alt + LMB     tumble (pivot on geometry under cursor)\n"
                              "  RMB           tumble / orbit\n"
                              "  MMB           pan\n"
