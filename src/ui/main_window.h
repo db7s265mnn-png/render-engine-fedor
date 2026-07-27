@@ -4,6 +4,7 @@
 
 #include <QMainWindow>
 #include <QString>
+#include <QStringList>
 #include <memory>
 
 #include "nodes/node_graph.h"
@@ -67,6 +68,12 @@ private:
     void updateStatusBar();
     bool maybeSaveChanges();
     Node* findCameraNode() const;
+    Node* findCameraNodeByName(const QString& name) const;
+    QStringList listCameraNodeNames() const;
+    void refreshViewportCameraMenu();
+    void lookThroughCamera(const QString& cameraName);
+    void applyCameraNodeToView(Node* camera);
+    void writeViewToCameraNode(Node* camera);
     void selectDisplayNode();
 
     NodeGraph graph_;
@@ -97,6 +104,8 @@ private:
     std::atomic<bool> framePending_{false};
     bool cameraOverride_ = false;
     bool renderRequested_ = false;
+    // Empty = free persp; otherwise Scene Network camera node name (look-through).
+    QString lookThroughCameraName_;
 };
 
 }  // namespace sol

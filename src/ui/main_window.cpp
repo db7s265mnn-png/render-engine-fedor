@@ -22,6 +22,7 @@
 #include "core/math.h"
 #include "io/image_io.h"
 #include "nodes/node_registry.h"
+#include "nodes/node.h"
 #include "render/scene_picker.h"
 #include "scene/scene.h"
 #include "solstice_config.h"
@@ -83,10 +84,28 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&graph_, &NodeGraph::graphChanged, this, [this] {
         updateWindowTitle();
         scheduleCook();
+        refreshViewportCameraMenu();
     });
     connect(&graph_, &NodeGraph::displayNodeChanged, this, [this](Node*) { scheduleCook(0); });
 
     connect(renderView_, &RenderView::cameraMoved, this, &MainWindow::onCameraMoved);
+    connect(renderView_, &RenderView::lookThroughCameraChosen, this, [this](const QString& name) {
+        lookThroughCamera(name);
+    });
+    connect(&graph_, &NodeGraph::nodeAdded, this, [this](Node* node) {
+        if (node && node->typeName() == QLatin1String("camera")) {
+            refreshViewportCameraMenu();
+            if (lookThroughCameraName_.isEmpty()) lookThroughCamera(node->name());
+        }
+    });
+    connect(&graph_, &NodeGraph::nodeAboutToBeRemoved, this, [this](Node* node) {
+        if (!node || node->typeName() != QLatin1String("camera")) return;
+        if (lookThroughCameraName_ == node->name()) {
+            lookThroughCameraName_.clear();
+            cameraOverride_ = true;
+        }
+        QMetaObject::invokeMethod(this, [this] { refreshViewportCameraMenu(); }, Qt::QueuedConnection);
+    });
 
     renderView_->setPickCallback([this](float u, float v, Vec3& hit) -> bool {
         if (!scene_ || scene_->instances.empty()) return false;
@@ -344,7 +363,8 @@ void MainWindow::createDocks() {
             });
 
     connect(renderView_, &RenderView::focusDistancePicked, this, [this](float distanceMetres) {
-        Node* camera = findCameraNode();
+        Node* camera = findCameraNodeByName(lookThroughCameraName_);
+        if (!camera) camera = findCameraNode();
         if (!camera) {
             statusBar()->showMessage("No camera node — add Camera in the Scene Network", 4000);
             parameterPanel_->setFocusPickActive(false);
@@ -451,10 +471,13 @@ void MainWindow::newScene() {
     materialNetworkView_->goUp();
     renderView_->setTransformTarget(nullptr);
     cameraOverride_ = false;
+    lookThroughCameraName_.clear();
     renderView_->clearImage();
     updateWindowTitle();
     cookNow();
     selectDisplayNode();
+    if (Node* cam = findCameraNode()) lookThroughCamera(cam->name());
+    else refreshViewportCameraMenu();
 }
 
 void MainWindow::newSceneFromAlembic(const QString& alembicPath, const QString& hdriPath) {
@@ -465,10 +488,13 @@ void MainWindow::newSceneFromAlembic(const QString& alembicPath, const QString& 
     materialNetworkView_->goUp();
     renderView_->setTransformTarget(nullptr);
     cameraOverride_ = false;
+    lookThroughCameraName_.clear();
     renderView_->clearImage();
     updateWindowTitle();
     cookNow();
     selectDisplayNode();
+    if (Node* cam = findCameraNode()) lookThroughCamera(cam->name());
+    else refreshViewportCameraMenu();
 }
 
 bool MainWindow::openScene(const QString& path) {
@@ -483,9 +509,12 @@ bool MainWindow::openScene(const QString& path) {
     materialNetworkView_->goUp();
     renderView_->setTransformTarget(nullptr);
     cameraOverride_ = false;
+    lookThroughCameraName_.clear();
     updateWindowTitle();
     cookNow();
     selectDisplayNode();
+    if (Node* cam = findCameraNode()) lookThroughCamera(cam->name());
+    else refreshViewportCameraMenu();
     return true;
 }
 
@@ -601,11 +630,19 @@ void MainWindow::cookNow() {
     if (!stage_) return;
     scene_ = stage_->toScene();
 
-    if (cameraOverride_) {
-        // Keep authored DOF focusDistance — ViewCamera.distance is orbit radius, not focus.
+    // Keep look-through camera if it still exists.
+    if (!lookThroughCameraName_.isEmpty() && !findCameraNodeByName(lookThroughCameraName_)) {
+        lookThroughCameraName_.clear();
+    }
+
+    if (Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
+        // Looking through: camera node is source of truth after cook (nav writes back quietly).
+        applyCameraNodeToView(cam);
+        scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
+    } else if (cameraOverride_) {
+        // Free persp — keep authored DOF focusDistance; only override the transform.
         scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
     } else {
-        // Frame the interactive view from look-at / current orbit; DOF focus stays on CameraData.
         float frameDistance = renderView_->camera().distance;
         if (Node* camNode = findCameraNode()) {
             if (camNode->boolValue("uselookat", true)) {
@@ -626,6 +663,7 @@ void MainWindow::cookNow() {
 
     session_.setScene(scene_);
     updateStatusBar();
+    refreshViewportCameraMenu();
 
     if (iprAction_->isChecked() || renderRequested_) restartRender();
 }
@@ -656,18 +694,27 @@ void MainWindow::onRenderTick() {
 
 void MainWindow::onCameraMoved() {
     cameraOverride_ = true;
+    if (Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
+        // Looking through: navigation authors the camera node (Houdini lock-to-camera).
+        writeViewToCameraNode(cam);
+        if (parameterPanel_->node() == cam && !parameterPanel_->showingMaterialX()) {
+            // Avoid rebuilding the whole panel every mouse move — refresh on next cook.
+        }
+    }
     if (!scene_) return;
     scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
     // Do not overwrite CameraData.focusDistance with the orbit radius — that broke DOF.
-    // The geometry has not changed, so this keeps the acceleration structures.
     session_.updateSceneData();
     if (iprAction_->isChecked()) session_.start();
 }
 
 void MainWindow::onLookThroughCameraNode() {
-    cameraOverride_ = false;
-    cookNow();
-    statusBar()->showMessage("Looking through the camera node", 3000);
+    if (Node* cam = findCameraNode()) {
+        lookThroughCamera(cam->name());
+        return;
+    }
+    lookThroughCamera(QString());
+    statusBar()->showMessage("No camera node in the network", 3000);
 }
 
 void MainWindow::selectDisplayNode() {
@@ -685,21 +732,110 @@ Node* MainWindow::findCameraNode() const {
     return nullptr;
 }
 
+Node* MainWindow::findCameraNodeByName(const QString& name) const {
+    if (name.isEmpty()) return nullptr;
+    return graph_.findNode(name);
+}
+
+QStringList MainWindow::listCameraNodeNames() const {
+    QStringList names;
+    for (const NodePtr& node : graph_.nodes()) {
+        if (node && node->typeName() == QLatin1String("camera")) names << node->name();
+    }
+    names.sort(Qt::CaseInsensitive);
+    return names;
+}
+
+void MainWindow::refreshViewportCameraMenu() {
+    if (!renderView_) return;
+    // Drop stale look-through if the node vanished.
+    if (!lookThroughCameraName_.isEmpty() && !findCameraNodeByName(lookThroughCameraName_)) {
+        lookThroughCameraName_.clear();
+    }
+    renderView_->setCameraMenu(listCameraNodeNames(), lookThroughCameraName_);
+}
+
+void MainWindow::lookThroughCamera(const QString& cameraName) {
+    if (cameraName.isEmpty()) {
+        lookThroughCameraName_.clear();
+        cameraOverride_ = true;
+        refreshViewportCameraMenu();
+        statusBar()->showMessage("Free perspective (persp)", 2500);
+        if (scene_) {
+            scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
+            session_.updateSceneData();
+            if (iprAction_->isChecked()) session_.start();
+        }
+        return;
+    }
+    Node* camera = findCameraNodeByName(cameraName);
+    if (!camera || camera->typeName() != QLatin1String("camera")) {
+        statusBar()->showMessage("Camera not found: " + cameraName, 3000);
+        refreshViewportCameraMenu();
+        return;
+    }
+    lookThroughCameraName_ = camera->name();
+    cameraOverride_ = false;
+    applyCameraNodeToView(camera);
+    refreshViewportCameraMenu();
+    if (scene_) {
+        scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
+        // Keep DOF focus from the node.
+        scene_->camera.focusDistance = float(camera->floatValue("focusdistance", scene_->camera.focusDistance));
+        scene_->camera.fStop = float(camera->floatValue("fstop", scene_->camera.fStop));
+        scene_->camera.focalLength = float(camera->floatValue("focal", scene_->camera.focalLength));
+        scene_->camera.sensorWidth = float(camera->floatValue("aperture", scene_->camera.sensorWidth));
+        session_.updateSceneData();
+        if (iprAction_->isChecked()) session_.start();
+    }
+    statusBar()->showMessage("Looking through " + camera->name(), 3000);
+}
+
+void MainWindow::applyCameraNodeToView(Node* camera) {
+    if (!camera || !renderView_) return;
+    Mat4 cameraToWorld;
+    float frameDistance = 5.0f;
+    if (camera->boolValue("uselookat", true)) {
+        const Vec3 eye = camera->vec3Value("eye", Vec3(6.0f, 4.0f, 9.0f));
+        const Vec3 target = camera->vec3Value("target", Vec3(0.0f, 1.0f, 0.0f));
+        const Vec3 up = camera->vec3Value("up", Vec3(0.0f, 1.0f, 0.0f));
+        cameraToWorld = lookAtMatrix(eye, target, up);
+        frameDistance = std::max(0.05f, length(eye - target));
+    } else {
+        cameraToWorld = transformFromParameters(*camera);
+        frameDistance = std::max(0.05f, float(camera->floatValue("focusdistance", 5.0)));
+    }
+    renderView_->camera().setFromMatrix(cameraToWorld, frameDistance);
+    renderView_->update();
+}
+
+void MainWindow::writeViewToCameraNode(Node* camera) {
+    if (!camera || !renderView_) return;
+    const ViewCamera& view = renderView_->camera();
+    const Vec3 eye = view.eye();
+    const Vec3 target = view.pivot;
+    // Quiet writes — avoid cook-on-every-mouse-move; scene is updated live for IPR.
+    camera->setParameterValue("uselookat", true, false);
+    camera->setParameterValue("eye", QVariant::fromValue(QVector3D(eye.x, eye.y, eye.z)), false);
+    camera->setParameterValue("target", QVariant::fromValue(QVector3D(target.x, target.y, target.z)),
+                              false);
+    camera->setParameterValue("translate", QVariant::fromValue(QVector3D(eye.x, eye.y, eye.z)), false);
+    graph_.setModified(true);
+    updateWindowTitle();
+}
+
 void MainWindow::onCopyViewToCameraNode() {
-    Node* camera = findCameraNode();
+    Node* camera = findCameraNodeByName(lookThroughCameraName_);
+    if (!camera) camera = findCameraNode();
     if (!camera) {
         QMessageBox::information(this, "Copy view",
                                  "This network has no camera node. Add one with Tab > Camera.");
         return;
     }
-    const ViewCamera& view = renderView_->camera();
-    const Vec3 eye = view.eye();
-    camera->setParameterValue("uselookat", true);
-    camera->setParameterValue("eye", QVariant::fromValue(QVector3D(eye.x, eye.y, eye.z)));
-    camera->setParameterValue("target",
-                              QVariant::fromValue(QVector3D(view.pivot.x, view.pivot.y, view.pivot.z)));
-    camera->setParameterValue("focusdistance", double(view.distance));
-    cameraOverride_ = false;
+    writeViewToCameraNode(camera);
+    // Also push focus distance from current orbit framing as a convenience.
+    camera->setParameterValue("focusdistance", double(renderView_->camera().distance));
+    lookThroughCamera(camera->name());
     parameterPanel_->refresh();
     scheduleCook(0);
     statusBar()->showMessage("View copied to " + camera->name(), 4000);
@@ -804,6 +940,7 @@ void MainWindow::onShowShortcuts() {
                              "  T / R / S     translate / rotate / scale\n"
                              "  LMB on gizmo  transform (IPR restarts on release)\n"
                              "  Focus Pick    camera Lens → click geo to set DOF focus\n"
+                             "  Cam menu      look through a camera (nav edits that camera)\n"
                              "  Alt + LMB     tumble (pivot on geometry under cursor)\n"
                              "  RMB           tumble / orbit\n"
                              "  MMB           pan\n"

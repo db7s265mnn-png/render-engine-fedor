@@ -18,7 +18,7 @@ public:
     enum class Hit { None, Body, Output, Input, DisplayFlag, BypassFlag };
 
     static constexpr qreal kWidth = 86.0;
-    static constexpr qreal kHeight = 56.0;
+    static constexpr qreal kHeight = 47.6;  // 15% shorter than the previous 56px tile
     static constexpr qreal kPortRadius = 5.5;
     static constexpr qreal kPortHitRadius = 18.0;
     static constexpr qreal kCornerRadius = 6.0;

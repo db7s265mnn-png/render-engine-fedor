@@ -5,6 +5,8 @@
 #include <QDateTime>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QAction>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -234,6 +236,26 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     stripLayout->setContentsMargins(4, 3, 4, 3);
     stripLayout->setSpacing(2);
 
+    cameraMenuButton_ = new QToolButton(toolStrip_);
+    cameraMenuButton_->setText("persp");
+    cameraMenuButton_->setToolTip("Look through camera (Houdini-style)");
+    cameraMenuButton_->setPopupMode(QToolButton::InstantPopup);
+    cameraMenuButton_->setAutoRaise(true);
+    cameraMenuButton_->setStyleSheet(
+        "QToolButton { min-width: 72px; max-width: 140px; font-size: 10px; font-weight: 600; "
+        "text-align: left; padding-left: 6px; padding-right: 6px; }"
+        "QToolButton::menu-indicator { width: 10px; }");
+    stripLayout->addWidget(cameraMenuButton_);
+    rebuildCameraMenu();
+
+    auto* camSep = new QWidget(toolStrip_);
+    camSep->setFixedWidth(1);
+    camSep->setStyleSheet("background: rgba(255,255,255,40);");
+    camSep->setMinimumHeight(18);
+    stripLayout->addSpacing(4);
+    stripLayout->addWidget(camSep);
+    stripLayout->addSpacing(4);
+
     auto* group = new QButtonGroup(toolStrip_);
     group->setExclusive(true);
     auto makeButton = [&](const QString& text, const QString& tip) {
@@ -378,6 +400,39 @@ void RenderView::layoutToolStrip() {
     const int x = std::max(8, (width() - toolStrip_->width()) / 2);
     toolStrip_->move(x, 8);
     toolStrip_->raise();
+}
+
+void RenderView::setCameraMenu(const QStringList& cameraNames, const QString& activeName) {
+    cameraMenuNames_ = cameraNames;
+    activeCameraName_ = activeName;
+    if (cameraMenuButton_) {
+        const QString label = activeCameraName_.isEmpty() ? QStringLiteral("persp") : activeCameraName_;
+        cameraMenuButton_->setText(label);
+        cameraMenuButton_->setToolTip(activeCameraName_.isEmpty()
+                                          ? QStringLiteral("Free perspective — choose a camera to look through")
+                                          : QStringLiteral("Looking through %1").arg(activeCameraName_));
+    }
+    rebuildCameraMenu();
+}
+
+void RenderView::rebuildCameraMenu() {
+    if (!cameraMenuButton_) return;
+    auto* menu = new QMenu(cameraMenuButton_);
+    auto* freeAction = menu->addAction(QStringLiteral("persp (free)"));
+    freeAction->setCheckable(true);
+    freeAction->setChecked(activeCameraName_.isEmpty());
+    connect(freeAction, &QAction::triggered, this, [this] { emit lookThroughCameraChosen(QString()); });
+
+    if (!cameraMenuNames_.isEmpty()) {
+        menu->addSeparator();
+        for (const QString& name : cameraMenuNames_) {
+            auto* action = menu->addAction(name);
+            action->setCheckable(true);
+            action->setChecked(name == activeCameraName_);
+            connect(action, &QAction::triggered, this, [this, name] { emit lookThroughCameraChosen(name); });
+        }
+    }
+    cameraMenuButton_->setMenu(menu);
 }
 
 void RenderView::resizeEvent(QResizeEvent* event) {

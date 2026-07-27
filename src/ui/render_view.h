@@ -86,6 +86,9 @@ public:
     void frameSelection();
     void frameAll();
 
+    // Look-through camera menu (Houdini-style). empty activeName → free view.
+    void setCameraMenu(const QStringList& cameraNames, const QString& activeName);
+
 signals:
     void cameraMoved();
     // Fired while dragging (values already written quietly — do not cook/IPR).
@@ -99,6 +102,8 @@ signals:
     // Focus-distance pick for DOF (metres along the view ray to the hit).
     void focusDistancePicked(float distanceMetres);
     void focusPickChanged(bool active);
+    // Empty string = free perspective (no look-through camera).
+    void lookThroughCameraChosen(const QString& cameraName);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -120,6 +125,7 @@ private:
     void beginNavigation(int mode, const QPoint& pos);
     void layoutToolStrip();
     void syncToolButtons();
+    void rebuildCameraMenu();
 
     bool hasTransformTarget() const;
     Mat4 targetWorldMatrix() const;
@@ -170,12 +176,15 @@ private:
     bool gizmoDidEdit_ = false;
 
     QWidget* toolStrip_ = nullptr;
+    QToolButton* cameraMenuButton_ = nullptr;
     QToolButton* selectButton_ = nullptr;
     QToolButton* translateButton_ = nullptr;
     QToolButton* rotateButton_ = nullptr;
     QToolButton* scaleButton_ = nullptr;
     QToolButton* localSpaceButton_ = nullptr;
     QToolButton* worldSpaceButton_ = nullptr;
+    QStringList cameraMenuNames_;
+    QString activeCameraName_;
 
     // World-space tumble center for the current Alt+LMB / RMB drag (may differ from look-at).
     Vec3 tumbleCenter_{0.0f, 1.0f, 0.0f};
