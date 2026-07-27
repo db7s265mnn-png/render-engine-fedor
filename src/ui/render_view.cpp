@@ -944,17 +944,18 @@ void RenderView::mousePressEvent(QMouseEvent* event) {
     }
 
     if (event->button() == Qt::LeftButton && !alt) {
-        // Focus Pick (camera DOF): click geometry → distance from camera eye to hit.
+        // Focus Pick (camera DOF): click geometry → focus plane depth in camera space.
         if (focusPickActive_) {
             Vec3 hit;
             if (pickUnderMouse(event->pos(), hit)) {
-                const float distance = length(hit - camera_.eye());
-                if (distance > 1e-4f) {
-                    emit focusDistancePicked(distance);
-                    setFocusPickActive(false);
-                    event->accept();
-                    return;
-                }
+                // Optical-axis depth (metres), matching generateCameraRay's focus plane at z=-focusDistance.
+                const Mat4 worldToCam = inverse(camera_.toMatrix());
+                const Vec3 hitCam = transformPoint(worldToCam, hit);
+                const float distance = std::max(1e-4f, -hitCam.z);
+                emit focusDistancePicked(distance);
+                setFocusPickActive(false);
+                event->accept();
+                return;
             }
             event->accept();
             return;

@@ -92,7 +92,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (!scene_ || scene_->instances.empty()) return false;
         CameraData camera = scene_->camera;
         camera.cameraToWorld = renderView_->camera().toMatrix();
-        camera.focusDistance = renderView_->camera().distance;
+        // Pinhole pick — do not mix orbit distance into DOF focus.
+        camera.fStop = 0.0f;
         return pickSceneSurface(scene_, camera, scene_->settings.resolutionX, scene_->settings.resolutionY, u, v,
                                 hit);
     });
@@ -102,7 +103,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (!scene_ || scene_->instances.empty()) return false;
         CameraData camera = scene_->camera;
         camera.cameraToWorld = renderView_->camera().toMatrix();
-        camera.focusDistance = renderView_->camera().distance;
+        camera.fStop = 0.0f;
         Vec3 hit;
         int instanceIndex = -1;
         if (!pickSceneSurface(scene_, camera, scene_->settings.resolutionX, scene_->settings.resolutionY, u, v,
@@ -601,13 +602,25 @@ void MainWindow::cookNow() {
     scene_ = stage_->toScene();
 
     if (cameraOverride_) {
+        // Keep authored DOF focusDistance — ViewCamera.distance is orbit radius, not focus.
         scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
-        scene_->camera.focusDistance = renderView_->camera().distance;
     } else {
-        renderView_->camera().setFromMatrix(scene_->camera.cameraToWorld,
-                                            scene_->camera.focusDistance > 0.0f
-                                                ? scene_->camera.focusDistance
-                                                : std::max(1.0f, scene_->bounds().radius() * 2.0f));
+        // Frame the interactive view from look-at / current orbit; DOF focus stays on CameraData.
+        float frameDistance = renderView_->camera().distance;
+        if (Node* camNode = findCameraNode()) {
+            if (camNode->boolValue("uselookat", true)) {
+                const Vec3 eye = camNode->vec3Value("eye", Vec3(6.0f, 4.0f, 9.0f));
+                const Vec3 target = camNode->vec3Value("target", Vec3(0.0f, 1.0f, 0.0f));
+                frameDistance = std::max(0.05f, length(eye - target));
+            } else if (scene_->camera.focusDistance > 0.0f) {
+                frameDistance = scene_->camera.focusDistance;
+            }
+        } else if (scene_->camera.focusDistance > 0.0f) {
+            frameDistance = scene_->camera.focusDistance;
+        } else if (scene_->bounds().valid()) {
+            frameDistance = std::max(1.0f, scene_->bounds().radius() * 2.0f);
+        }
+        renderView_->camera().setFromMatrix(scene_->camera.cameraToWorld, frameDistance);
     }
     renderView_->setResolution(scene_->settings.resolutionX, scene_->settings.resolutionY);
 
@@ -645,7 +658,7 @@ void MainWindow::onCameraMoved() {
     cameraOverride_ = true;
     if (!scene_) return;
     scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
-    scene_->camera.focusDistance = renderView_->camera().distance;
+    // Do not overwrite CameraData.focusDistance with the orbit radius — that broke DOF.
     // The geometry has not changed, so this keeps the acceleration structures.
     session_.updateSceneData();
     if (iprAction_->isChecked()) session_.start();
