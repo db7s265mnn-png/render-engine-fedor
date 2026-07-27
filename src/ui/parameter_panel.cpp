@@ -776,6 +776,36 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                 layout->addWidget(combo, 0);
                 return row;
             }
+            // Camera lens: common focal-length presets (mm).
+            if (name == QLatin1String("focal") && node_ && node_->typeName() == QLatin1String("camera")) {
+                auto* row = new QWidget();
+                auto* layout = new QHBoxLayout(row);
+                layout->setContentsMargins(0, 0, 0, 0);
+                layout->setSpacing(6);
+                layout->addWidget(slider, 1);
+
+                static const double kFocalPresets[] = {10.0, 12.0, 14.0, 16.0, 24.0,  28.0,  35.0,  40.0,
+                                                      50.0, 55.0, 65.0, 75.0, 85.0,  90.0, 100.0, 135.0};
+                auto* combo = new QComboBox();
+                combo->setToolTip("Focal length presets (mm)");
+                combo->setMaximumWidth(86);
+                combo->addItem(QStringLiteral("mm…"));
+                const double current = parameter.toDouble();
+                int matched = 0;
+                for (double mm : kFocalPresets) {
+                    combo->addItem(QStringLiteral("%1 mm").arg(int(std::lround(mm))), mm);
+                    if (matched == 0 && std::fabs(current - mm) < 1e-4) matched = combo->count() - 1;
+                }
+                combo->setCurrentIndex(matched);
+                connect(combo, QOverload<int>::of(&QComboBox::activated), this,
+                        [this, notify, combo](int index) {
+                            if (updating_ || index <= 0) return;
+                            notify(combo->itemData(index).toDouble());
+                            QMetaObject::invokeMethod(this, [this] { refresh(); }, Qt::QueuedConnection);
+                        });
+                layout->addWidget(combo, 0);
+                return row;
+            }
             return slider;
         }
         case ParamType::Int: {

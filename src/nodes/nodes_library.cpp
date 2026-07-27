@@ -551,7 +551,8 @@ public:
         addParameter(Parameter::makeString("primname", "Prim Name", name));
         addParameter(Parameter::makeFloat("focal", "Focal Length (mm)", 50.0, 8.0, 300.0)
                          .withGroup("Lens")
-                         .withTooltip("Focal length in millimetres (Houdini camera convention)"));
+                         .withTooltip("Focal length in millimetres (Houdini camera convention). "
+                                      "Use the preset menu for common lens lengths"));
         addParameter(Parameter::makeFloat("aperture", "Sensor Width (mm)", 36.0, 4.0, 100.0)
                          .withGroup("Lens")
                          .withTooltip("Horizontal aperture in millimetres"));
