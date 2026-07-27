@@ -23,6 +23,29 @@ inline QColor wire() { return QColor(150, 155, 165); }
 inline QColor wireActive() { return QColor(255, 190, 90); }
 inline QColor displayFlag() { return QColor(80, 170, 255); }
 inline QColor error() { return QColor(220, 90, 80); }
+
+// Houdini / Arnold-style MaterialX port colours by data type.
+inline QColor colorForMaterialXType(const QString& type) {
+    const QString t = type.trimmed().toLower();
+    if (t == "float") return QColor(92, 196, 92);
+    if (t == "integer" || t == "int") return QColor(58, 158, 110);
+    if (t == "boolean" || t == "bool") return QColor(220, 140, 55);
+    if (t == "color3" || t == "color") return QColor(230, 200, 70);
+    if (t == "color4") return QColor(210, 175, 55);
+    if (t == "vector2") return QColor(90, 155, 230);
+    if (t == "vector3" || t == "vector") return QColor(70, 135, 220);
+    if (t == "vector4") return QColor(55, 115, 205);
+    if (t.startsWith("matrix")) return QColor(55, 175, 165);
+    if (t == "filename") return QColor(200, 90, 170);
+    if (t == "string" || t == "token") return QColor(170, 120, 185);
+    if (t == "surfaceshader" || t == "bsdf" || t == "edf" || t == "vdf") return QColor(230, 140, 55);
+    if (t == "displacementshader") return QColor(180, 110, 70);
+    if (t == "volumeshader") return QColor(120, 160, 200);
+    if (t == "lightshader") return QColor(230, 200, 100);
+    if (t == "material") return QColor(160, 100, 210);
+    if (t.endsWith("shader")) return QColor(230, 140, 55);
+    return QColor(140, 145, 155);
+}
 }  // namespace theme
 
 }  // namespace sol

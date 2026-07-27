@@ -449,6 +449,14 @@ void MainWindow::createDocks() {
             [this](Node*, const QString&, const QString& inputName, const QString& value) {
                 materialNetworkView_->setSelectedMaterialXInput(inputName, value);
             });
+    connect(parameterPanel_, &ParameterPanel::materialXTypeEdited, this,
+            [this](Node*, const QString&, const QString& type) {
+                if (materialNetworkView_->setSelectedMaterialXType(type)) {
+                    MaterialXSelection mtlx;
+                    if (materialNetworkView_->selectedMaterialX(mtlx))
+                        parameterPanel_->setMaterialXSelection(mtlx);
+                }
+            });
     // Live gizmo moves update node params quietly — cook / IPR only on release.
     connect(renderView_, &RenderView::transformEdited, this, [this](Node*) {
         // Keep the gizmo responsive; do not rebuild Parameters or restart IPR.

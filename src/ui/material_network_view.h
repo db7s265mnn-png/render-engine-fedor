@@ -38,6 +38,7 @@ struct MaterialXSelection {
     Node* hostMaterial = nullptr;
     QString category;
     QString type;
+    QStringList typeVariants;
     QString name;
     QVector<MaterialXInputParam> inputs;
 };
@@ -60,6 +61,7 @@ public:
     bool selectedMaterialX(MaterialXSelection& out) const;
     bool renameSelectedMaterialX(const QString& newName);
     bool setSelectedMaterialXInput(const QString& inputName, const QString& value);
+    bool setSelectedMaterialXType(const QString& type);
 
 signals:
     void materialEdited(sol::Node* node);
@@ -157,6 +159,7 @@ public:
     const MtlxNode* selectedNode() const;
     bool renameNode(const QString& oldName, const QString& newName);
     bool setInputValue(const QString& nodeName, const QString& inputName, const QString& value);
+    bool setNodeType(const QString& nodeName, const QString& type);
     void selectNodeByName(const QString& name);
     // Live-update MaterialX wires while a node is dragged.
     void updateWiresLive();

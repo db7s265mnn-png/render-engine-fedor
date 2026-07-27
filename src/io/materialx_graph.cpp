@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QHash>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -333,47 +334,141 @@ QString catalogGroupFor(const QString& category, const QString& type, const QStr
     return "Utility";
 }
 
+int materialXTypePreferenceRank(const QString& type) {
+    if (type == "color3" || type == "surfaceshader" || type == "material") return 0;
+    if (type == "float") return 1;
+    if (type == "vector3") return 2;
+    if (type == "color4") return 3;
+    if (type == "vector2") return 4;
+    if (type == "vector4") return 5;
+    if (type == "integer" || type == "boolean") return 6;
+    return 10;
+}
+
+#if SOLSTICE_HAVE_MATERIALX
+QVector<MaterialXNodeInputDef> inputsFromNodeDef(const mx::NodeDefPtr& def) {
+    QVector<MaterialXNodeInputDef> inputs;
+    if (!def) return inputs;
+    for (const mx::InputPtr& input : def->getActiveInputs()) {
+        if (!input) continue;
+        MaterialXNodeInputDef in;
+        in.name = QString::fromStdString(input->getName());
+        in.type = QString::fromStdString(input->getType());
+        if (input->hasValueString()) in.value = QString::fromStdString(input->getValueString());
+        else if (input->getValue()) in.value = QString::fromStdString(input->getValue()->getValueString());
+        if (in.type == "filename") in.value.clear();
+        inputs.push_back(in);
+    }
+    return inputs;
+}
+#endif
+
+void finalizeCatalogEntry(MaterialXNodeCatalogEntry& entry, const QString& nodeGroup = QString()) {
+    std::sort(entry.typeVariants.begin(), entry.typeVariants.end(),
+              [](const QString& a, const QString& b) {
+                  const int ra = materialXTypePreferenceRank(a);
+                  const int rb = materialXTypePreferenceRank(b);
+                  if (ra != rb) return ra < rb;
+                  return a < b;
+              });
+    if (entry.type.isEmpty() && !entry.typeVariants.isEmpty()) entry.type = entry.typeVariants.front();
+    else if (!entry.typeVariants.isEmpty()) {
+        QString best = entry.typeVariants.front();
+        for (const QString& variant : entry.typeVariants) {
+            if (materialXTypePreferenceRank(variant) < materialXTypePreferenceRank(best)) best = variant;
+        }
+        entry.type = best;
+    }
+    entry.group = catalogGroupFor(entry.category, entry.type, nodeGroup);
+    entry.label = entry.category;
+}
+
 QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
-    const auto entry = [](const char* category, const char* type, const char* group,
-                          std::initializer_list<MaterialXNodeInputDef> inputs) {
-        MaterialXNodeCatalogEntry e;
-        e.category = QString::fromUtf8(category);
-        e.type = QString::fromUtf8(type);
-        e.group = QString::fromUtf8(group);
-        e.label = e.category + " (" + e.type + ")";
-        for (const MaterialXNodeInputDef& input : inputs) e.inputs.push_back(input);
-        return e;
+    QHash<QString, MaterialXNodeCatalogEntry> byCategory;
+    auto add = [&](const char* category, const char* type, const char* group,
+                   std::initializer_list<MaterialXNodeInputDef> inputs) {
+        const QString cat = QString::fromUtf8(category);
+        const QString typ = QString::fromUtf8(type);
+        MaterialXNodeCatalogEntry& e = byCategory[cat];
+        e.category = cat;
+        if (!e.typeVariants.contains(typ)) e.typeVariants.push_back(typ);
+        QVector<MaterialXNodeInputDef> defs;
+        for (const MaterialXNodeInputDef& input : inputs) defs.push_back(input);
+        e.inputsByType.insert(typ, defs);
+        if (e.group.isEmpty()) e.group = QString::fromUtf8(group);
     };
-    return {
-        entry("image", "color3", "Texture", {{"file", "filename", {}}, {"default", "color3", "0, 0, 0"}}),
-        entry("tiledimage", "color3", "Texture",
-              {{"file", "filename", {}}, {"uvtiling", "vector2", "1, 1"}, {"default", "color3", "0, 0, 0"}}),
-        entry("constant", "color3", "Math", {{"value", "color3", "1, 1, 1"}}),
-        entry("multiply", "color3", "Math",
-              {{"in1", "color3", "1, 1, 1"}, {"in2", "color3", "1, 1, 1"}}),
-        entry("add", "color3", "Math", {{"in1", "color3", "0, 0, 0"}, {"in2", "color3", "0, 0, 0"}}),
-        entry("mix", "color3", "Math",
-              {{"bg", "color3", "0, 0, 0"}, {"fg", "color3", "1, 1, 1"}, {"mix", "float", "0.5"}}),
-        entry("normalmap", "vector3", "Texture", {{"in", "vector3", {}}, {"scale", "float", "1"}}),
-        entry("texcoord", "vector2", "Geometric", {{"index", "integer", "0"}}),
-        entry("standard_surface", "surfaceshader", "PBR / Shading",
-              {{"base", "float", "0.8"},
-               {"base_color", "color3", "0.8, 0.8, 0.8"},
-               {"specular_roughness", "float", "0.35"},
-               {"metalness", "float", "0"},
-               {"specular", "float", "0.5"},
-               {"specular_IOR", "float", "1.5"},
-               {"transmission", "float", "0"},
-               {"opacity", "color3", "1, 1, 1"},
-               {"emission", "float", "0"},
-               {"emission_color", "color3", "1, 1, 1"},
-               {"subsurface", "float", "0"},
-               {"subsurface_color", "color3", "1, 0.75, 0.55"},
-               {"subsurface_radius", "color3", "1, 0.35, 0.2"},
-               {"subsurface_scale", "float", "1"},
-               {"normal", "vector3", {}}}),
-        entry("surfacematerial", "material", "PBR / Shading", {{"surfaceshader", "surfaceshader", {}}}),
-    };
+
+    add("image", "color3", "Texture", {{"file", "filename", {}}, {"default", "color3", "0, 0, 0"}});
+    add("image", "color4", "Texture", {{"file", "filename", {}}, {"default", "color4", "0, 0, 0, 1"}});
+    add("image", "float", "Texture", {{"file", "filename", {}}, {"default", "float", "0"}});
+    add("image", "vector2", "Texture", {{"file", "filename", {}}, {"default", "vector2", "0, 0"}});
+    add("image", "vector3", "Texture", {{"file", "filename", {}}, {"default", "vector3", "0, 0, 0"}});
+    add("image", "vector4", "Texture", {{"file", "filename", {}}, {"default", "vector4", "0, 0, 0, 1"}});
+    add("tiledimage", "color3", "Texture",
+        {{"file", "filename", {}}, {"uvtiling", "vector2", "1, 1"}, {"default", "color3", "0, 0, 0"}});
+    add("tiledimage", "float", "Texture",
+        {{"file", "filename", {}}, {"uvtiling", "vector2", "1, 1"}, {"default", "float", "0"}});
+    add("tiledimage", "vector3", "Texture",
+        {{"file", "filename", {}}, {"uvtiling", "vector2", "1, 1"}, {"default", "vector3", "0, 0, 0"}});
+    add("constant", "color3", "Math", {{"value", "color3", "1, 1, 1"}});
+    add("constant", "color4", "Math", {{"value", "color4", "1, 1, 1, 1"}});
+    add("constant", "float", "Math", {{"value", "float", "1"}});
+    add("constant", "vector2", "Math", {{"value", "vector2", "1, 1"}});
+    add("constant", "vector3", "Math", {{"value", "vector3", "1, 1, 1"}});
+    add("constant", "vector4", "Math", {{"value", "vector4", "1, 1, 1, 1"}});
+    add("multiply", "color3", "Math", {{"in1", "color3", "1, 1, 1"}, {"in2", "color3", "1, 1, 1"}});
+    add("multiply", "float", "Math", {{"in1", "float", "1"}, {"in2", "float", "1"}});
+    add("multiply", "vector3", "Math", {{"in1", "vector3", "1, 1, 1"}, {"in2", "vector3", "1, 1, 1"}});
+    add("add", "color3", "Math", {{"in1", "color3", "0, 0, 0"}, {"in2", "color3", "0, 0, 0"}});
+    add("add", "float", "Math", {{"in1", "float", "0"}, {"in2", "float", "0"}});
+    add("add", "vector3", "Math", {{"in1", "vector3", "0, 0, 0"}, {"in2", "vector3", "0, 0, 0"}});
+    add("mix", "color3", "Math",
+        {{"bg", "color3", "0, 0, 0"}, {"fg", "color3", "1, 1, 1"}, {"mix", "float", "0.5"}});
+    add("mix", "float", "Math", {{"bg", "float", "0"}, {"fg", "float", "1"}, {"mix", "float", "0.5"}});
+    add("mix", "vector3", "Math",
+        {{"bg", "vector3", "0, 0, 0"}, {"fg", "vector3", "1, 1, 1"}, {"mix", "float", "0.5"}});
+    add("range", "float", "Math",
+        {{"in", "float", "0"}, {"inlow", "float", "0"}, {"inhigh", "float", "1"}, {"outlow", "float", "0"},
+         {"outhigh", "float", "1"}, {"gamma", "float", "1"}, {"doclamp", "boolean", "false"}});
+    add("range", "color3", "Math",
+        {{"in", "color3", "0, 0, 0"}, {"inlow", "color3", "0, 0, 0"}, {"inhigh", "color3", "1, 1, 1"},
+         {"outlow", "color3", "0, 0, 0"}, {"outhigh", "color3", "1, 1, 1"}, {"gamma", "color3", "1, 1, 1"},
+         {"doclamp", "boolean", "false"}});
+    add("range", "vector3", "Math",
+        {{"in", "vector3", "0, 0, 0"}, {"inlow", "vector3", "0, 0, 0"}, {"inhigh", "vector3", "1, 1, 1"},
+         {"outlow", "vector3", "0, 0, 0"}, {"outhigh", "vector3", "1, 1, 1"}, {"gamma", "vector3", "1, 1, 1"},
+         {"doclamp", "boolean", "false"}});
+    add("normalmap", "vector3", "Texture", {{"in", "vector3", {}}, {"scale", "float", "1"}});
+    add("texcoord", "vector2", "Geometric", {{"index", "integer", "0"}});
+    add("standard_surface", "surfaceshader", "PBR / Shading",
+        {{"base", "float", "0.8"},
+         {"base_color", "color3", "0.8, 0.8, 0.8"},
+         {"specular_roughness", "float", "0.35"},
+         {"metalness", "float", "0"},
+         {"specular", "float", "0.5"},
+         {"specular_IOR", "float", "1.5"},
+         {"transmission", "float", "0"},
+         {"opacity", "color3", "1, 1, 1"},
+         {"emission", "float", "0"},
+         {"emission_color", "color3", "1, 1, 1"},
+         {"subsurface", "float", "0"},
+         {"subsurface_color", "color3", "1, 0.75, 0.55"},
+         {"subsurface_radius", "color3", "1, 0.35, 0.2"},
+         {"subsurface_scale", "float", "1"},
+         {"normal", "vector3", {}}});
+    add("surfacematerial", "material", "PBR / Shading", {{"surfaceshader", "surfaceshader", {}}});
+
+    QVector<MaterialXNodeCatalogEntry> out;
+    out.reserve(byCategory.size());
+    for (auto it = byCategory.begin(); it != byCategory.end(); ++it) {
+        finalizeCatalogEntry(it.value());
+        out.push_back(it.value());
+    }
+    std::sort(out.begin(), out.end(), [](const MaterialXNodeCatalogEntry& a, const MaterialXNodeCatalogEntry& b) {
+        if (a.group != b.group) return a.group < b.group;
+        return a.category < b.category;
+    });
+    return out;
 }
 
 }  // namespace
@@ -387,48 +482,45 @@ QVector<MaterialXNodeCatalogEntry> listMaterialXNodeCatalog() {
         return fallbackMaterialXCatalog();
     }
 
-    // Prefer useful typed variants: for a category keep one nodedef per output type,
-    // preferring color3 / float / vector3 / surfaceshader / material when available.
-    std::map<std::pair<std::string, std::string>, mx::NodeDefPtr> chosen;
+    // One menu entry per category; all typed nodedef signatures live as typeVariants.
+    struct Bucket {
+        QString nodeGroup;
+        QHash<QString, QVector<MaterialXNodeInputDef>> inputsByType;
+        QStringList typeVariants;
+    };
+    QHash<QString, Bucket> byCategory;
+
     for (const mx::NodeDefPtr& def : doc->getNodeDefs()) {
         if (!def) continue;
-        const std::string category = def->getNodeString().empty() ? def->getName() : def->getNodeString();
-        if (category.empty()) continue;
-        // Skip interface / token helpers that are not graph nodes.
-        if (category == "backdrop" || category == "tokengraph" || category == "nodedef") continue;
-        const std::string type = def->getType();
-        if (type.empty() || type == "none" || type == "multioutput") continue;
-        const auto key = std::make_pair(category, type);
-        if (!chosen.count(key)) chosen.emplace(key, def);
+        const std::string categoryStd = def->getNodeString().empty() ? def->getName() : def->getNodeString();
+        if (categoryStd.empty()) continue;
+        if (categoryStd == "backdrop" || categoryStd == "tokengraph" || categoryStd == "nodedef") continue;
+        const std::string typeStd = def->getType();
+        if (typeStd.empty() || typeStd == "none" || typeStd == "multioutput") continue;
+
+        const QString category = QString::fromStdString(categoryStd);
+        const QString type = QString::fromStdString(typeStd);
+        Bucket& bucket = byCategory[category];
+        if (bucket.nodeGroup.isEmpty()) bucket.nodeGroup = QString::fromStdString(def->getNodeGroup());
+        if (!bucket.typeVariants.contains(type)) bucket.typeVariants.push_back(type);
+        if (!bucket.inputsByType.contains(type)) bucket.inputsByType.insert(type, inputsFromNodeDef(def));
     }
 
     QVector<MaterialXNodeCatalogEntry> entries;
-    entries.reserve(int(chosen.size()));
-    for (const auto& [key, def] : chosen) {
+    entries.reserve(byCategory.size());
+    for (auto it = byCategory.begin(); it != byCategory.end(); ++it) {
         MaterialXNodeCatalogEntry entry;
-        entry.category = QString::fromStdString(key.first);
-        entry.type = QString::fromStdString(key.second);
-        entry.group = catalogGroupFor(entry.category, entry.type, QString::fromStdString(def->getNodeGroup()));
-        entry.label = entry.category + " (" + entry.type + ")";
-        for (const mx::InputPtr& input : def->getActiveInputs()) {
-            if (!input) continue;
-            MaterialXNodeInputDef in;
-            in.name = QString::fromStdString(input->getName());
-            in.type = QString::fromStdString(input->getType());
-            if (input->hasValueString()) in.value = QString::fromStdString(input->getValueString());
-            else if (input->getValue()) in.value = QString::fromStdString(input->getValue()->getValueString());
-            // Filename defaults are usually empty placeholders — keep empty for dialogs.
-            if (in.type == "filename") in.value.clear();
-            entry.inputs.push_back(in);
-        }
+        entry.category = it.key();
+        entry.typeVariants = it.value().typeVariants;
+        entry.inputsByType = it.value().inputsByType;
+        finalizeCatalogEntry(entry, it.value().nodeGroup);
         entries.push_back(entry);
     }
 
     std::sort(entries.begin(), entries.end(), [](const MaterialXNodeCatalogEntry& a,
                                                  const MaterialXNodeCatalogEntry& b) {
         if (a.group != b.group) return a.group < b.group;
-        if (a.category != b.category) return a.category < b.category;
-        return a.type < b.type;
+        return a.category < b.category;
     });
     return entries;
 #else

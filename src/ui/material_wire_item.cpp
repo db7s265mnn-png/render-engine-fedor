@@ -20,7 +20,7 @@ QPainterPath strokedShape(const QPainterPath& path) {
 
 }  // namespace
 
-MaterialWireItem::MaterialWireItem(QString sourceNodeName, QString targetNodeName, QString inputName,
+MaterialWireItem::MaterialWireItem(QString sourceNodeName, QString targetNodeName, QString inputName, QColor color,
                                    QGraphicsItem* parent)
     : QGraphicsPathItem(parent),
       sourceNodeName_(std::move(sourceNodeName)),
@@ -32,10 +32,14 @@ MaterialWireItem::MaterialWireItem(QString sourceNodeName, QString targetNodeNam
     setFlag(QGraphicsItem::ItemIsSelectable, false);
     setAcceptedMouseButtons(Qt::RightButton);
     setZValue(-0.5);
-    setPen(QPen(theme::wireActive(), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    setWireColor(color.isValid() ? color : theme::wireActive());
 }
 
 void MaterialWireItem::setWirePath(const QPainterPath& path) { setPath(path); }
+
+void MaterialWireItem::setWireColor(const QColor& color) {
+    setPen(QPen(color.isValid() ? color : theme::wireActive(), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+}
 
 QPainterPath MaterialWireItem::shape() const { return strokedShape(path()); }
 

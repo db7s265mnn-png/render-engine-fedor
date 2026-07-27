@@ -6,6 +6,7 @@
 #include <QFocusEvent>
 #include <QGraphicsPathItem>
 #include <QGraphicsScene>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -124,10 +125,19 @@ private:
         list_->clear();
         QString currentGroup;
         for (const MaterialXNodeCatalogEntry& entry : catalogCache()) {
+            bool matchesVariant = false;
+            if (!filter.isEmpty()) {
+                for (const QString& variant : entry.typeVariants) {
+                    if (variant.contains(filter, Qt::CaseInsensitive)) {
+                        matchesVariant = true;
+                        break;
+                    }
+                }
+            }
             if (!filter.isEmpty() && !entry.label.contains(filter, Qt::CaseInsensitive) &&
                 !entry.category.contains(filter, Qt::CaseInsensitive) &&
                 !entry.type.contains(filter, Qt::CaseInsensitive) &&
-                !entry.group.contains(filter, Qt::CaseInsensitive))
+                !entry.group.contains(filter, Qt::CaseInsensitive) && !matchesVariant)
                 continue;
             if (currentGroup != entry.group) {
                 currentGroup = entry.group;
@@ -136,10 +146,13 @@ private:
                 header->setForeground(theme::accent());
                 list_->addItem(header);
             }
-            auto* item = new QListWidgetItem("   " + entry.label);
+            auto* item = new QListWidgetItem("   " + entry.category);
             item->setData(Qt::UserRole, entry.category);
             item->setData(Qt::UserRole + 1, entry.type);
-            item->setToolTip(entry.category + " / " + entry.type);
+            const QString tip = entry.typeVariants.isEmpty()
+                                    ? (entry.category + " / " + entry.type)
+                                    : (entry.category + "  [" + entry.typeVariants.join(", ") + "]");
+            item->setToolTip(tip);
             list_->addItem(item);
         }
         for (int i = 0; i < list_->count(); ++i) {
@@ -168,20 +181,12 @@ private:
 
 namespace {
 
-const MaterialXNodeCatalogEntry* findCatalogEntry(const QString& category, const QString& type = QString()) {
+const MaterialXNodeCatalogEntry* findCatalogEntry(const QString& category) {
     const QVector<MaterialXNodeCatalogEntry>& catalog = catalogCache();
-    const MaterialXNodeCatalogEntry* fallback = nullptr;
     for (const MaterialXNodeCatalogEntry& entry : catalog) {
-        if (entry.category != category) continue;
-        if (!type.isEmpty() && entry.type == type) return &entry;
-        if (!fallback) fallback = &entry;
-        // Prefer color3 / surfaceshader / material / float variants when type omitted.
-        if (type.isEmpty()) {
-            if (entry.type == "color3" || entry.type == "surfaceshader" || entry.type == "material")
-                return &entry;
-        }
+        if (entry.category == category) return &entry;
     }
-    return fallback;
+    return nullptr;
 }
 
 bool isKnownMaterialXCategory(const QString& category) {
@@ -256,6 +261,7 @@ public:
 
     struct InputPort {
         QString name;
+        QString type;
         int modelIndex = -1;
         bool connected = false;
     };
@@ -278,9 +284,11 @@ public:
 
     int type() const override { return Type; }
     const QString& nodeName() const { return nodeName_; }
+    const QString& typeName() const { return typeName_; }
     bool containsBody(QPointF scenePosition) const { return bodyRect().contains(mapFromScene(scenePosition)); }
     const QString& category() const { return category_; }
     QString inputPortName(int portIndex) const { return inputs_.value(portIndex).name; }
+    QString inputPortType(int portIndex) const { return inputs_.value(portIndex).type; }
     int inputPortIndexByName(const QString& name) const {
         for (int i = 0; i < inputs_.size(); ++i) {
             if (inputs_[i].name == name) return i;
@@ -427,18 +435,18 @@ private:
     }
 
     void paintPorts(QPainter* painter) const {
-        auto drawPort = [painter](QPointF local, bool connected, QColor color) {
+        auto drawPort = [painter](QPointF local, bool connected, const QColor& color) {
             painter->setPen(Qt::NoPen);
-            painter->setBrush(QColor(color.red(), color.green(), color.blue(), connected ? 76 : 42));
+            painter->setBrush(QColor(color.red(), color.green(), color.blue(), connected ? 90 : 48));
             painter->drawEllipse(local, kPortRadius + 3.0, kPortRadius + 3.0);
             painter->setPen(QPen(QColor(17, 18, 22), 1.0));
-            painter->setBrush(connected ? theme::wireActive() : QColor(128, 132, 140));
+            painter->setBrush(connected ? color.lighter(118) : color);
             painter->drawEllipse(local, kPortRadius, kPortRadius);
         };
 
-        const QColor categoryColor = colorForCategory(category_);
-        for (int i = 0; i < inputs_.size(); ++i) drawPort(inputPortLocal(i), inputs_[i].connected, categoryColor);
-        drawPort(outputPortLocal(), true, categoryColor);
+        for (int i = 0; i < inputs_.size(); ++i)
+            drawPort(inputPortLocal(i), inputs_[i].connected, theme::colorForMaterialXType(inputs_[i].type));
+        drawPort(outputPortLocal(), true, theme::colorForMaterialXType(typeName_));
     }
 
     MaterialNetworkGraphView* view_ = nullptr;
@@ -524,8 +532,8 @@ MaterialWireItem* wireItemAt(QGraphicsView* view, const QPoint& viewPosition) {
 }
 
 void addWire(QGraphicsScene* scene, QPointF from, QPointF to, const QString& sourceName, const QString& targetName,
-             const QString& inputName) {
-    auto* wire = new MaterialWireItem(sourceName, targetName, inputName);
+             const QString& inputName, const QColor& color = QColor()) {
+    auto* wire = new MaterialWireItem(sourceName, targetName, inputName, color);
     wire->setWirePath(makeWirePath(from, to));
     scene->addItem(wire);
 }
@@ -663,8 +671,9 @@ QString MaterialNetworkGraphView::defaultTypeForCategory(const QString& category
 QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultInputsForCategory(const QString& category,
                                                                                       const QString& type) {
     QVector<MtlxInput> inputs;
-    if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category, type)) {
-        for (const MaterialXNodeInputDef& def : entry->inputs) {
+    if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
+        const QString signature = type.isEmpty() ? entry->type : type;
+        for (const MaterialXNodeInputDef& def : entry->inputsFor(signature)) {
             // Keep standard_surface UI focused on the common shading ports; full nodedef is huge.
             if (category == "standard_surface") {
                 static const QStringList keep = {"base", "base_color", "specular_roughness", "metalness", "specular",
@@ -869,7 +878,7 @@ void MaterialNetworkGraphView::rebuild() {
         for (int i = 0; i < node.inputs.size(); ++i) {
             const MtlxInput& input = node.inputs[i];
             if (!isConnectableInput(input.name, input.type)) continue;
-            ports.push_back({input.name, i, !input.nodename.isEmpty()});
+            ports.push_back({input.name, input.type, i, !input.nodename.isEmpty()});
         }
 
         QString subtitle = node.category;
@@ -901,7 +910,8 @@ void MaterialNetworkGraphView::rebuild() {
                 MaterialNetworkNodeItem* sourceItem = nodeItemByName(graphScene_, input.nodename);
                 if (sourceItem)
                     addWire(graphScene_, sourceItem->outputPortScene(), targetItem->inputPortScene(visiblePort),
-                            sourceItem->nodeName(), target.name, input.name);
+                            sourceItem->nodeName(), target.name, input.name,
+                            theme::colorForMaterialXType(sourceItem->typeName()));
             }
             ++visiblePort;
         }
@@ -1473,8 +1483,11 @@ void MaterialNetworkGraphView::beginWire(const QString& sourceName, QPointF sour
     wireSourceNode_ = sourceName;
     wireSourcePosition_ = sourcePosition;
     setDragMode(QGraphicsView::NoDrag);
+    QColor wireColor = theme::wireActive();
+    if (const MtlxNode* source = findModelNode(sourceName))
+        wireColor = theme::colorForMaterialXType(source->type);
     previewWire_ = graphScene_->addPath(makeWirePath(sourcePosition, sourcePosition),
-                                        QPen(theme::wireActive(), 1.8, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin));
+                                        QPen(wireColor, 1.8, Qt::DashLine, Qt::RoundCap, Qt::RoundJoin));
     previewWire_->setZValue(4.0);
 }
 
@@ -1636,6 +1649,38 @@ bool MaterialNetworkGraphView::setInputValue(const QString& nodeName, const QStr
         return true;
     }
     return false;
+}
+
+bool MaterialNetworkGraphView::setNodeType(const QString& nodeName, const QString& type) {
+    MtlxNode* node = findModelNode(nodeName);
+    if (!node || type.isEmpty() || type == node->type) return false;
+
+    const MaterialXNodeCatalogEntry* entry = findCatalogEntry(node->category);
+    if (entry && !entry->typeVariants.isEmpty() && !entry->typeVariants.contains(type)) {
+        emit statusMessage("Unsupported type for " + node->category + ": " + type);
+        return false;
+    }
+
+    QHash<QString, MtlxInput> previous;
+    previous.reserve(node->inputs.size());
+    for (const MtlxInput& input : node->inputs) previous.insert(input.name, input);
+
+    node->type = type;
+    node->inputs = defaultInputsForCategory(node->category, type);
+    for (MtlxInput& input : node->inputs) {
+        const auto it = previous.constFind(input.name);
+        if (it == previous.constEnd()) continue;
+        // Keep wired connections when the port still exists; keep values when types match.
+        if (!it->nodename.isEmpty()) input.nodename = it->nodename;
+        if (it->type == input.type && !it->value.isEmpty()) input.value = it->value;
+        else if (it->type == input.type) input.value = it->value;
+    }
+
+    preservedSelection_ = nodeName;
+    writeModel(true);
+    rebuild();
+    emit statusMessage(QString("%1 type → %2").arg(nodeName, type));
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2076,6 +2121,12 @@ bool MaterialNetworkView::selectedMaterialX(MaterialXSelection& out) const {
     out.category = node->category;
     out.type = node->type;
     out.name = node->name;
+    if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(node->category)) {
+        out.typeVariants = entry->typeVariants;
+        if (out.typeVariants.isEmpty() && !entry->type.isEmpty()) out.typeVariants << entry->type;
+    } else if (!node->type.isEmpty()) {
+        out.typeVariants << node->type;
+    }
     out.inputs.reserve(node->inputs.size());
     for (const MaterialNetworkGraphView::MtlxInput& input : node->inputs) {
         MaterialXInputParam param;
@@ -2100,6 +2151,13 @@ bool MaterialNetworkView::setSelectedMaterialXInput(const QString& inputName, co
     const QString nodeName = graphView_->selectedNodeName();
     if (nodeName.isEmpty()) return false;
     return graphView_->setInputValue(nodeName, inputName, value);
+}
+
+bool MaterialNetworkView::setSelectedMaterialXType(const QString& type) {
+    if (!graphView_) return false;
+    const QString nodeName = graphView_->selectedNodeName();
+    if (nodeName.isEmpty()) return false;
+    return graphView_->setNodeType(nodeName, type);
 }
 
 }  // namespace sol

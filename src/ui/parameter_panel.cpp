@@ -454,11 +454,27 @@ void ParameterPanel::rebuildLop() {
 void ParameterPanel::rebuildMaterialX() {
     auto* header = new QGroupBox("MaterialX Node");
     auto* headerLayout = new QFormLayout(header);
-    auto* typeLabel = new QLabel(materialX_.category +
-                                 (materialX_.type.isEmpty() ? QString() : ("  ·  " + materialX_.type)));
-    typeLabel->setStyleSheet("color: #969aa0;");
-    typeLabel->setWordWrap(true);
-    headerLayout->addRow("Type", typeLabel);
+
+    if (materialX_.typeVariants.size() > 1) {
+        auto* typeCombo = new QComboBox();
+        for (const QString& variant : materialX_.typeVariants) typeCombo->addItem(variant);
+        const int current = typeCombo->findText(materialX_.type);
+        typeCombo->setCurrentIndex(current >= 0 ? current : 0);
+        typeCombo->setToolTip("Output data type for this node");
+        connect(typeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, typeCombo](int) {
+            if (updating_ || !materialXMode_ || !materialX_.hostMaterial) return;
+            const QString type = typeCombo->currentText();
+            if (type.isEmpty() || type == materialX_.type) return;
+            emit materialXTypeEdited(materialX_.hostMaterial, materialX_.name, type);
+        });
+        headerLayout->addRow("Type", typeCombo);
+    } else {
+        auto* typeLabel = new QLabel(materialX_.category +
+                                     (materialX_.type.isEmpty() ? QString() : ("  ·  " + materialX_.type)));
+        typeLabel->setStyleSheet("color: #969aa0;");
+        typeLabel->setWordWrap(true);
+        headerLayout->addRow("Type", typeLabel);
+    }
 
     nameEdit_ = new QLineEdit(materialX_.name);
     nameEdit_->setPlaceholderText("node name");

@@ -2,7 +2,9 @@
 // user nodes, and evaluate standard_surface (+ image maps) into Solstice Material.
 #pragma once
 
+#include <QHash>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <limits>
 #include <memory>
@@ -36,10 +38,24 @@ struct MaterialXNodeInputDef {
 
 struct MaterialXNodeCatalogEntry {
     QString category;
-    QString type;
+    QString type;              // preferred default signature
+    QStringList typeVariants;  // all available output types for this category
     QString group;
     QString label;
-    QVector<MaterialXNodeInputDef> inputs;
+    // Inputs keyed by output type (signature). Prefer inputsFor(type).
+    QHash<QString, QVector<MaterialXNodeInputDef>> inputsByType;
+
+    QVector<MaterialXNodeInputDef> inputsFor(const QString& signature) const {
+        const QString key = signature.isEmpty() ? type : signature;
+        auto it = inputsByType.constFind(key);
+        if (it != inputsByType.constEnd()) return it.value();
+        if (!type.isEmpty()) {
+            it = inputsByType.constFind(type);
+            if (it != inputsByType.constEnd()) return it.value();
+        }
+        if (!inputsByType.isEmpty()) return inputsByType.constBegin().value();
+        return {};
+    }
 };
 
 bool materialXAvailable();

@@ -1,6 +1,7 @@
 // Selectable bezier wire between MaterialX ports (right-click to disconnect).
 #pragma once
 
+#include <QColor>
 #include <QGraphicsPathItem>
 #include <QPainterPath>
 #include <QString>
@@ -12,7 +13,7 @@ public:
     enum { Type = UserType + 73 };
 
     MaterialWireItem(QString sourceNodeName, QString targetNodeName, QString inputName,
-                     QGraphicsItem* parent = nullptr);
+                     QColor color = QColor(), QGraphicsItem* parent = nullptr);
 
     int type() const override { return Type; }
     const QString& sourceNodeName() const { return sourceNodeName_; }
@@ -20,6 +21,7 @@ public:
     const QString& inputName() const { return inputName_; }
 
     void setWirePath(const QPainterPath& path);
+    void setWireColor(const QColor& color);
 
     QPainterPath shape() const override;
     QRectF boundingRect() const override;
@@ -29,5 +31,4 @@ private:
     QString targetNodeName_;
     QString inputName_;
 };
-
 }  // namespace sol

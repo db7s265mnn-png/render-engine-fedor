@@ -33,6 +33,7 @@ signals:
     void materialXRenamed(sol::Node* hostMaterial, const QString& oldName, const QString& newName);
     void materialXInputEdited(sol::Node* hostMaterial, const QString& nodeName, const QString& inputName,
                               const QString& value);
+    void materialXTypeEdited(sol::Node* hostMaterial, const QString& nodeName, const QString& type);
     // Camera Focus Pick: toggle viewport pick for DOF focus distance.
     void focusPickToggled(bool active);
 
