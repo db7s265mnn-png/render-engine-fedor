@@ -276,11 +276,11 @@ Node* NodeGraphView::selectedNode() const {
     return nullptr;
 }
 
-void NodeGraphView::selectNode(Node* node) {
+void NodeGraphView::selectNode(Node* node, bool centerOnSelection) {
     graphScene_->clearSelection();
     if (NodeItem* item = graphScene_->itemForNode(node)) {
         item->setSelected(true);
-        centerOn(item);
+        if (centerOnSelection) centerOn(item);
     }
 }
 

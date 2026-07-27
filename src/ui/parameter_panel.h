@@ -9,6 +9,7 @@
 
 class QVBoxLayout;
 class QLineEdit;
+class QPushButton;
 
 namespace sol {
 
@@ -24,6 +25,7 @@ public:
     Node* node() const { return node_; }
     bool showingMaterialX() const { return materialXMode_; }
     void refresh();
+    void setFocusPickActive(bool active);
 
 signals:
     void parameterEdited(sol::Node* node, const QString& parameterName);
@@ -31,6 +33,8 @@ signals:
     void materialXRenamed(sol::Node* hostMaterial, const QString& oldName, const QString& newName);
     void materialXInputEdited(sol::Node* hostMaterial, const QString& nodeName, const QString& inputName,
                               const QString& value);
+    // Camera Focus Pick: toggle viewport pick for DOF focus distance.
+    void focusPickToggled(bool active);
 
 private:
     void rebuild();
@@ -45,6 +49,8 @@ private:
     QVBoxLayout* contentLayout_ = nullptr;
     QLineEdit* nameEdit_ = nullptr;
     bool updating_ = false;
+    bool focusPickActive_ = false;
+    QPushButton* focusPickButton_ = nullptr;
 };
 
 }  // namespace sol

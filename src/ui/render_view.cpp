@@ -327,6 +327,7 @@ void RenderView::setTransformTool(TransformTool tool) {
     }
     transformTool_ = tool;
     if (mode_ == 4) endGizmoDrag();
+    if (focusPickActive_) setFocusPickActive(false);
     hoverAxis_ = GizmoAxis::None;
     syncToolButtons();
     emit transformToolChanged(transformTool_);
@@ -355,6 +356,19 @@ void RenderView::setTransformSpace(TransformSpace space) {
     hoverAxis_ = GizmoAxis::None;
     syncToolButtons();
     emit transformSpaceChanged(transformSpace_);
+    update();
+}
+
+void RenderView::setFocusPickActive(bool active) {
+    if (focusPickActive_ == active) return;
+    focusPickActive_ = active;
+    if (focusPickActive_) {
+        if (mode_ == 4) endGizmoDrag();
+        setCursor(Qt::CrossCursor);
+    } else if (mode_ == 0) {
+        unsetCursor();
+    }
+    emit focusPickChanged(focusPickActive_);
     update();
 }
 
@@ -892,6 +906,15 @@ void RenderView::paintEvent(QPaintEvent*) {
         painter.fillRect(textRect, QColor(0, 0, 0, 130));
         painter.setPen(QColor(235, 237, 240));
         painter.drawText(textRect.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, statusText_);
+    } else if (focusPickActive_) {
+        QFont font = painter.font();
+        font.setPointSizeF(8.5);
+        painter.setFont(font);
+        const QRect textRect(target.left(), target.bottom() - 22, target.width(), 20);
+        painter.fillRect(textRect, QColor(0, 0, 0, 130));
+        painter.setPen(QColor(255, 210, 70));
+        painter.drawText(textRect.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                         "Focus Pick — click geometry to set DOF focus distance");
     }
 }
 
@@ -921,21 +944,36 @@ void RenderView::mousePressEvent(QMouseEvent* event) {
     }
 
     if (event->button() == Qt::LeftButton && !alt) {
+        // Focus Pick (camera DOF): click geometry → distance from camera eye to hit.
+        if (focusPickActive_) {
+            Vec3 hit;
+            if (pickUnderMouse(event->pos(), hit)) {
+                const float distance = length(hit - camera_.eye());
+                if (distance > 1e-4f) {
+                    emit focusDistancePicked(distance);
+                    setFocusPickActive(false);
+                    event->accept();
+                    return;
+                }
+            }
+            event->accept();
+            return;
+        }
+
         if (hasTransformTarget()) {
             if (beginGizmoDrag(event->pos())) {
                 event->accept();
                 return;
             }
         }
-        // Click geometry to select the authoring node (Select tool, or miss on gizmo).
-        QString sourceNode;
-        if (pickObjectUnderMouse(event->pos(), sourceNode)) {
-            emit objectSelected(sourceNode);
-            event->accept();
-            return;
-        }
+        // Object selection only in Select tool — TRS must not steal clicks for pick.
         if (transformTool_ == TransformTool::Select) {
-            emit objectSelected(QString());
+            QString sourceNode;
+            if (pickObjectUnderMouse(event->pos(), sourceNode)) {
+                emit objectSelected(sourceNode);
+            } else {
+                emit objectSelected(QString());
+            }
             event->accept();
             return;
         }
@@ -952,6 +990,11 @@ void RenderView::mouseMoveEvent(QMouseEvent* event) {
         return;
     }
     if (mode_ == 0) {
+        if (focusPickActive_) {
+            setCursor(Qt::CrossCursor);
+            QWidget::mouseMoveEvent(event);
+            return;
+        }
         if (hasTransformTarget()) {
             const GizmoAxis hit = hitTestGizmo(event->pos());
             if (hit != hoverAxis_) {

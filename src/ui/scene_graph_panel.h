@@ -21,6 +21,8 @@ public:
     void setStage(const StagePtr& stage, const QStringList& materialContainers = {});
     QString selectedPath() const;
     QString selectedSourceNode() const;
+    // Highlight a prim authored by sourceNode (or clear when empty). Does not emit itemSelected.
+    void selectBySourceNode(const QString& sourceNode);
 
 signals:
     // Fired when the user picks a prim or material container.

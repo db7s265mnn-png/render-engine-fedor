@@ -1,6 +1,7 @@
 #include "ui/scene_graph_panel.h"
 
 #include <QApplication>
+#include <QAbstractItemView>
 #include <QClipboard>
 #include <QDrag>
 #include <QHBoxLayout>
@@ -103,6 +104,22 @@ QTreeWidgetItem* findItemByPath(QTreeWidget* tree, const QString& path) {
     return nullptr;
 }
 
+QTreeWidgetItem* findItemBySourceNode(QTreeWidget* tree, const QString& sourceNode) {
+    if (!tree || sourceNode.isEmpty()) return nullptr;
+    std::function<QTreeWidgetItem*(QTreeWidgetItem*)> walk = [&](QTreeWidgetItem* item) -> QTreeWidgetItem* {
+        if (!item) return nullptr;
+        if (item->data(0, kRoleSourceNode).toString() == sourceNode) return item;
+        for (int i = 0; i < item->childCount(); ++i) {
+            if (QTreeWidgetItem* hit = walk(item->child(i))) return hit;
+        }
+        return nullptr;
+    };
+    for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+        if (QTreeWidgetItem* hit = walk(tree->topLevelItem(i))) return hit;
+    }
+    return nullptr;
+}
+
 }  // namespace
 
 SceneGraphPanel::SceneGraphPanel(QWidget* parent) : QWidget(parent) {
@@ -158,6 +175,20 @@ void SceneGraphPanel::emitCurrentSelection() {
     if (selected.isEmpty()) return;
     emit itemSelected(selected.first()->data(0, kRolePath).toString(),
                       selected.first()->data(0, kRoleSourceNode).toString());
+}
+
+void SceneGraphPanel::selectBySourceNode(const QString& sourceNode) {
+    const QSignalBlocker blocker(tree_);
+    tree_->clearSelection();
+    if (sourceNode.isEmpty()) {
+        tree_->setCurrentItem(nullptr);
+        return;
+    }
+    if (QTreeWidgetItem* item = findItemBySourceNode(tree_, sourceNode)) {
+        tree_->setCurrentItem(item);
+        item->setSelected(true);
+        tree_->scrollToItem(item, QAbstractItemView::EnsureVisible);
+    }
 }
 
 void SceneGraphPanel::setStage(const StagePtr& stage, const QStringList& materialContainers) {

@@ -322,30 +322,60 @@ void MainWindow::createDocks() {
         renderView_->setTransformTarget(node && node->findParameter("translate") ? node : nullptr);
     };
 
-    auto selectNodeForEditing = [this, syncTransformTarget](Node* node) {
+    auto selectNodeForEditing = [this, syncTransformTarget](Node* node, bool centerNetwork = false) {
         parameterPanel_->setNode(node);
         syncTransformTarget(node);
-        if (node) networkView_->selectNode(node);
-        else networkView_->selectNode(nullptr);
+        networkView_->selectNode(node, centerNetwork);
+        sceneGraphPanel_->selectBySourceNode(node ? node->name() : QString());
     };
 
     connect(renderView_, &RenderView::objectSelected, this,
             [this, selectNodeForEditing](const QString& sourceNode) {
                 if (sourceNode.isEmpty()) {
-                    selectNodeForEditing(nullptr);
+                    selectNodeForEditing(nullptr, false);
                     statusBar()->showMessage("Selection cleared", 1500);
                     return;
                 }
                 if (Node* node = graph_.findNode(sourceNode)) {
-                    selectNodeForEditing(node);
+                    selectNodeForEditing(node, false);
                     statusBar()->showMessage("Selected " + sourceNode, 2000);
                 }
             });
+
+    connect(renderView_, &RenderView::focusDistancePicked, this, [this](float distanceMetres) {
+        Node* camera = findCameraNode();
+        if (!camera) {
+            statusBar()->showMessage("No camera node — add Camera in the Scene Network", 4000);
+            parameterPanel_->setFocusPickActive(false);
+            return;
+        }
+        camera->setParameterValue("focusdistance", double(distanceMetres));
+        if (scene_) {
+            scene_->camera.focusDistance = distanceMetres;
+            session_.updateSceneData();
+            if (iprAction_->isChecked()) session_.start();
+        }
+        if (parameterPanel_->node() == camera) parameterPanel_->refresh();
+        parameterPanel_->setFocusPickActive(false);
+        statusBar()->showMessage(QString("Focus distance set to %1 m").arg(double(distanceMetres), 0, 'f', 3),
+                                 3000);
+        scheduleCook(0);
+    });
+    connect(renderView_, &RenderView::focusPickChanged, this,
+            [this](bool active) { parameterPanel_->setFocusPickActive(active); });
+    connect(parameterPanel_, &ParameterPanel::focusPickToggled, this, [this](bool active) {
+        renderView_->setFocusPickActive(active);
+        if (active) {
+            statusBar()->showMessage("Focus Pick: click geometry in the viewport", 4000);
+            renderView_->setFocus(Qt::OtherFocusReason);
+        }
+    });
 
     connect(networkView_, &NodeGraphView::nodeSelected, this, [this, syncTransformTarget](Node* node) {
         // Scene Network is the selection source — don't let Material Network steal it.
         parameterPanel_->setNode(node);
         syncTransformTarget(node);
+        sceneGraphPanel_->selectBySourceNode(node ? node->name() : QString());
     });
     connect(networkView_, &NodeGraphView::statusMessage, this,
             [this](const QString& message) { statusBar()->showMessage(message, 3000); });
@@ -377,7 +407,7 @@ void MainWindow::createDocks() {
             [this, selectNodeForEditing](const QString& path, const QString& sourceNode) {
                 Q_UNUSED(path);
                 if (sourceNode.isEmpty()) return;
-                if (Node* node = graph_.findNode(sourceNode)) selectNodeForEditing(node);
+                if (Node* node = graph_.findNode(sourceNode)) selectNodeForEditing(node, false);
             });
     connect(parameterPanel_, &ParameterPanel::parameterEdited, this,
             [this](Node*, const QString&) {
@@ -757,10 +787,10 @@ void MainWindow::onShowShortcuts() {
                              "Render view (Houdini style)\n"
                              "  F             frame selected object\n"
                              "  H / Home      frame all\n"
-                             "  Sel / Q       select — LMB click geometry\n"
+                             "  Sel / Q       select — LMB click geometry (Select tool only)\n"
                              "  T / R / S     translate / rotate / scale\n"
                              "  LMB on gizmo  transform (IPR restarts on release)\n"
-                             "  LMB on geo    select object (also when missing gizmo)\n"
+                             "  Focus Pick    camera Lens → click geo to set DOF focus\n"
                              "  Alt + LMB     tumble (pivot on geometry under cursor)\n"
                              "  RMB           tumble / orbit\n"
                              "  MMB           pan\n"

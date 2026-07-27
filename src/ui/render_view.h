@@ -62,6 +62,10 @@ public:
     Node* transformTarget() const { return transformTarget_; }
     bool isGizmoDragging() const { return mode_ == 4; }
 
+    // One-shot: next LMB on geometry sets camera DOF focus distance.
+    bool focusPickActive() const { return focusPickActive_; }
+    void setFocusPickActive(bool active);
+
     using PickCallback = std::function<bool(float u, float v, Vec3& hitPoint)>;
     void setPickCallback(PickCallback callback) { pickCallback_ = std::move(callback); }
 
@@ -92,6 +96,9 @@ signals:
     void transformSpaceChanged(sol::TransformSpace space);
     // Viewport object pick: empty string clears selection.
     void objectSelected(const QString& sourceNode);
+    // Focus-distance pick for DOF (metres along the view ray to the hit).
+    void focusDistancePicked(float distanceMetres);
+    void focusPickChanged(bool active);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -175,6 +182,7 @@ private:
     bool showPivotMarker_ = false;
     Vec3 pivotMarkerWorld_{0.0f};
     qint64 pivotMarkerUntilMs_ = 0;
+    bool focusPickActive_ = false;
 };
 
 }  // namespace sol

@@ -74,7 +74,8 @@ public:
     NodeGraph* graph() const { return graph_; }
     Node* selectedNode() const;
     void frameAll();
-    void selectNode(Node* node);
+    // Select a node in the graph. When centerOnSelection is false, pan/zoom stay put.
+    void selectNode(Node* node, bool centerOnSelection = true);
 
 signals:
     void nodeSelected(sol::Node* node);

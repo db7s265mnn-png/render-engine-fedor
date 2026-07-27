@@ -326,6 +326,7 @@ void ParameterPanel::clearSelection() {
     node_ = nullptr;
     materialXMode_ = false;
     materialX_ = {};
+    focusPickButton_ = nullptr;
     rebuild();
 }
 
@@ -334,6 +335,7 @@ void ParameterPanel::setNode(Node* node) {
     node_ = node;
     materialXMode_ = false;
     materialX_ = {};
+    focusPickButton_ = nullptr;
     rebuild();
 }
 
@@ -341,6 +343,7 @@ void ParameterPanel::setMaterialXSelection(const MaterialXSelection& selection) 
     node_ = selection.hostMaterial;
     materialXMode_ = selection.hostMaterial && !selection.name.isEmpty();
     materialX_ = selection;
+    focusPickButton_ = nullptr;
     if (!materialXMode_) {
         materialX_ = {};
         rebuild();
@@ -351,8 +354,17 @@ void ParameterPanel::setMaterialXSelection(const MaterialXSelection& selection) 
 
 void ParameterPanel::refresh() { rebuild(); }
 
+void ParameterPanel::setFocusPickActive(bool active) {
+    focusPickActive_ = active;
+    if (focusPickButton_) {
+        const QSignalBlocker blocker(focusPickButton_);
+        focusPickButton_->setChecked(active);
+    }
+}
+
 void ParameterPanel::rebuild() {
     updating_ = true;
+    focusPickButton_ = nullptr;
     QLayoutItem* child = nullptr;
     while ((child = contentLayout_->takeAt(0)) != nullptr) {
         if (child->widget()) child->widget()->deleteLater();
@@ -706,8 +718,29 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
         case ParamType::Float: {
             const double lo = parameter.minValue;
             const double hi = parameter.maxValue;
-            return makeFreeFloatSliderRow(parameter.toDouble(), lo, hi,
-                                          [notify](double value) { notify(value); });
+            QWidget* slider = makeFreeFloatSliderRow(parameter.toDouble(), lo, hi,
+                                                    [notify](double value) { notify(value); });
+            // Camera DOF: Focus Pick next to Focus Distance.
+            if (name == QLatin1String("focusdistance") && node_ && node_->typeName() == QLatin1String("camera")) {
+                auto* row = new QWidget();
+                auto* layout = new QHBoxLayout(row);
+                layout->setContentsMargins(0, 0, 0, 0);
+                layout->setSpacing(6);
+                layout->addWidget(slider, 1);
+                auto* pick = new QPushButton("Focus Pick");
+                pick->setCheckable(true);
+                pick->setChecked(focusPickActive_);
+                pick->setToolTip("Click in the viewport on geometry to set focus distance for DOF");
+                pick->setMaximumWidth(96);
+                focusPickButton_ = pick;
+                connect(pick, &QPushButton::toggled, this, [this](bool on) {
+                    focusPickActive_ = on;
+                    emit focusPickToggled(on);
+                });
+                layout->addWidget(pick, 0);
+                return row;
+            }
+            return slider;
         }
         case ParamType::Int: {
             const int lo = int(parameter.minValue);
