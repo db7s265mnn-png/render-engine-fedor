@@ -31,6 +31,8 @@ struct SurfaceInteraction {
     Vec3 ng{0.0f, 0.0f, 1.0f};  // geometric normal
     Vec3 ns{0.0f, 0.0f, 1.0f};  // shading normal
     Vec2 uv{0.0f, 0.0f};
+    // Approximate UV footprint diameter of one camera pixel at the hit (for mip LOD).
+    float uvFilterWidth = 0.0f;
     int instanceIndex = -1;
     int materialIndex = -1;
     int lightIndex = -1;
@@ -97,6 +99,23 @@ SR_INL SR_HD bool buildSurfaceInteraction(const SceneView& scene, const RayHit& 
     if (mesh.uvs) {
         const Vec2 uv0 = mesh.uvs[i0], uv1 = mesh.uvs[i1], uv2 = mesh.uvs[i2];
         si.uv = Vec2(uv0.x * w + uv1.x * hit.u + uv2.x * hit.v, uv0.y * w + uv1.y * hit.u + uv2.y * hit.v);
+
+        // Pixel footprint → UV filter width for .tx / mip LOD.
+        const Vec3 e1w = transformVector(inst.xform, p1 - p0);
+        const Vec3 e2w = transformVector(inst.xform, p2 - p0);
+        const Vec2 d1 = uv1 - uv0;
+        const Vec2 d2 = uv2 - uv0;
+        const float lenE1 = length(e1w);
+        const float lenE2 = length(e2w);
+        const float lenD1 = sqrtf(d1.x * d1.x + d1.y * d1.y);
+        const float lenD2 = sqrtf(d2.x * d2.x + d2.y * d2.y);
+        const float uvPerWorld =
+            srMax(lenE1 > 1e-8f ? lenD1 / lenE1 : 0.0f, lenE2 > 1e-8f ? lenD2 / lenE2 : 0.0f);
+        const float resX = float(srMax(1, scene.settings.resolutionX));
+        const float resY = float(srMax(1, scene.settings.resolutionY));
+        const float sensorH = scene.camera.sensorWidth * (resY / resX);
+        const float pixelAngle = (sensorH / srMax(1e-3f, scene.camera.focalLength)) / resY;
+        si.uvFilterWidth = srMax(0.0f, hit.t) * pixelAngle * uvPerWorld;
     }
     si.instanceIndex = hit.instanceIndex;
     si.materialIndex = inst.materialIndex;
@@ -318,7 +337,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         Material baseMat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
                                ? scene.materials[si.materialIndex]
                                : defaultMaterial();
-        Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns);
+        Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.uvFilterWidth);
 
         // Two sided shading for opaque surfaces. Winding order varies between
         // DCCs, so back faces are shaded as if their normals pointed at us.

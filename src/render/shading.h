@@ -62,50 +62,21 @@ SR_INL SR_HD Vec4 sampleTextureClampedRGBA(const float* pixels, int width, int h
                 c0.w * (1.0f - fy) + c1.w * fy);
 }
 
-// Bilinear texture fetch for MaterialX image maps.
-// Regular maps wrap U / clamp V.
-// UDIM atlases follow MaterialX View: floor(uv) selects the tile (Mari 1001+U+V*10),
-// fract(uv) samples inside that tile — equivalent to setUdimString + wrap.
-SR_INL SR_HD Vec4 sampleTextureRGBA(const TextureView& tex, Vec2 uv) {
-    if (!tex.valid()) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
-
-    if (tex.isUdimAtlas()) {
-        const int gridU = tex.udimGridU;
-        const int gridV = tex.udimGridV;
-        // Select tile the same way MaterialX Mesh::splitByUdims does.
-        int tileU = int(floorf(uv.x));
-        int tileV = int(floorf(uv.y));
-        float fu = uv.x - float(tileU);
-        float fv = uv.y - float(tileV);
-        // Keep fractional part in [0,1) even for negative UVs.
-        if (fu < 0.0f) fu += 1.0f;
-        if (fv < 0.0f) fv += 1.0f;
-        if (tileU < 0 || tileV < 0 || tileU >= gridU || tileV >= gridV) {
-            // Missing tile (or UV authored slightly past the set) → opaque black.
-            return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
-        }
-        // Sample strictly inside the tile cell to avoid cross-tile bilinear bleed.
-        // Atlas is baked with OpenGL/MaterialX V (V=0 at bottom of each tile image).
-        const float cellW = 1.0f / float(gridU);
-        const float cellH = 1.0f / float(gridV);
-        const float u = (float(tileU) + clampf(fu, 0.0f, 0.999999f)) * cellW;
-        const float v = (float(tileV) + clampf(fv, 0.0f, 0.999999f)) * cellH;
-        return sampleTextureClampedRGBA(tex.pixels, tex.width, tex.height, u, v);
-    }
-
-    const float u = uv.x - floorf(uv.x);
-    const float v = clampf(uv.y, 0.0f, 1.0f);
-    const float x = u * float(tex.width) - 0.5f;
-    const float y = v * float(tex.height) - 0.5f;
+SR_INL SR_HD Vec4 sampleTextureWrappedRGBA(const float* pixels, int width, int height, float u, float v) {
+    if (!pixels || width <= 0 || height <= 0) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    u = u - floorf(u);
+    v = clampf(v, 0.0f, 1.0f);
+    const float x = u * float(width) - 0.5f;
+    const float y = v * float(height) - 0.5f;
     const int x0 = int(floorf(x));
     const int y0 = int(floorf(y));
     const float fx = x - float(x0);
     const float fy = y - float(y0);
     auto fetchX = [&](int ix, int iy) -> Vec4 {
-        ix = ((ix % tex.width) + tex.width) % tex.width;
-        iy = iy < 0 ? 0 : (iy >= tex.height ? tex.height - 1 : iy);
-        const size_t idx = (size_t(iy) * size_t(tex.width) + size_t(ix)) * 4;
-        return Vec4(tex.pixels[idx + 0], tex.pixels[idx + 1], tex.pixels[idx + 2], tex.pixels[idx + 3]);
+        ix = ((ix % width) + width) % width;
+        iy = iy < 0 ? 0 : (iy >= height ? height - 1 : iy);
+        const size_t idx = (size_t(iy) * size_t(width) + size_t(ix)) * 4;
+        return Vec4(pixels[idx + 0], pixels[idx + 1], pixels[idx + 2], pixels[idx + 3]);
     };
     const Vec4 c00 = fetchX(x0, y0);
     const Vec4 c10 = fetchX(x0 + 1, y0);
@@ -119,37 +90,126 @@ SR_INL SR_HD Vec4 sampleTextureRGBA(const TextureView& tex, Vec2 uv) {
                 c0.w * (1.0f - fy) + c1.w * fy);
 }
 
-SR_INL SR_HD Vec3 sampleTextureRGB(const SceneView& scene, int texIndex, Vec2 uv, Vec3 fallback) {
+SR_INL SR_HD void mipLevelSize(const TextureView& tex, int level, int& width, int& height) {
+    width = srMax(1, tex.width >> level);
+    height = srMax(1, tex.height >> level);
+}
+
+SR_INL SR_HD const float* mipLevelPixels(const TextureView& tex, int level) {
+    if (!tex.pixels) return nullptr;
+    const float* p = tex.pixels;
+    int w = tex.width;
+    int h = tex.height;
+    const int maxLevel = srMax(0, tex.mipCount - 1);
+    level = level < 0 ? 0 : (level > maxLevel ? maxLevel : level);
+    for (int i = 0; i < level; ++i) {
+        p += size_t(srMax(1, w)) * size_t(srMax(1, h)) * 4;
+        w = srMax(1, w >> 1);
+        h = srMax(1, h >> 1);
+    }
+    return p;
+}
+
+// Trilinear mip sample. lod = 0 is level 0 (full res).
+SR_INL SR_HD Vec4 sampleTextureRGBALod(const TextureView& tex, Vec2 uv, float lod) {
+    if (!tex.valid()) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+
+    auto sampleLevel = [&](int level, float u, float v) -> Vec4 {
+        int w = 0, h = 0;
+        mipLevelSize(tex, level, w, h);
+        const float* pixels = mipLevelPixels(tex, level);
+        if (tex.isUdimAtlas()) return sampleTextureClampedRGBA(pixels, w, h, u, v);
+        return sampleTextureWrappedRGBA(pixels, w, h, u, v);
+    };
+
+    float sampleU = uv.x;
+    float sampleV = uv.y;
+    if (tex.isUdimAtlas()) {
+        const int gridU = tex.udimGridU;
+        const int gridV = tex.udimGridV;
+        int tileU = int(floorf(uv.x));
+        int tileV = int(floorf(uv.y));
+        float fu = uv.x - float(tileU);
+        float fv = uv.y - float(tileV);
+        if (fu < 0.0f) fu += 1.0f;
+        if (fv < 0.0f) fv += 1.0f;
+        if (tileU < 0 || tileV < 0 || tileU >= gridU || tileV >= gridV)
+            return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+        const float cellW = 1.0f / float(gridU);
+        const float cellH = 1.0f / float(gridV);
+        sampleU = (float(tileU) + clampf(fu, 0.0f, 0.999999f)) * cellW;
+        sampleV = (float(tileV) + clampf(fv, 0.0f, 0.999999f)) * cellH;
+    }
+
+    if (!tex.hasMips()) {
+        if (tex.isUdimAtlas())
+            return sampleTextureClampedRGBA(tex.pixels, tex.width, tex.height, sampleU, sampleV);
+        return sampleTextureWrappedRGBA(tex.pixels, tex.width, tex.height, sampleU, sampleV);
+    }
+
+    const float maxLod = float(tex.mipCount - 1);
+    lod = clampf(lod, 0.0f, maxLod);
+    const int level0 = int(floorf(lod));
+    const int level1 = level0 < tex.mipCount - 1 ? level0 + 1 : level0;
+    const float frac = lod - float(level0);
+    const Vec4 c0 = sampleLevel(level0, sampleU, sampleV);
+    if (frac < 1e-4f || level0 == level1) return c0;
+    const Vec4 c1 = sampleLevel(level1, sampleU, sampleV);
+    return Vec4(c0.x * (1.0f - frac) + c1.x * frac, c0.y * (1.0f - frac) + c1.y * frac,
+                c0.z * (1.0f - frac) + c1.z * frac, c0.w * (1.0f - frac) + c1.w * frac);
+}
+
+// Bilinear texture fetch for MaterialX image maps (LOD 0).
+// Regular maps wrap U / clamp V.
+// UDIM atlases follow MaterialX View: floor(uv) selects the tile (Mari 1001+U+V*10),
+// fract(uv) samples inside that tile — equivalent to setUdimString + wrap.
+SR_INL SR_HD Vec4 sampleTextureRGBA(const TextureView& tex, Vec2 uv) {
+    return sampleTextureRGBALod(tex, uv, 0.0f);
+}
+
+SR_INL SR_HD float textureLodFromFilterWidth(const TextureView& tex, float uvFilterWidth) {
+    if (!tex.valid() || uvFilterWidth <= 0.0f || !tex.hasMips()) return 0.0f;
+    const float texels = uvFilterWidth * float(srMax(tex.width, tex.height));
+    if (texels <= 1.0f) return 0.0f;
+    return log2f(texels);
+}
+
+SR_INL SR_HD Vec3 sampleTextureRGB(const SceneView& scene, int texIndex, Vec2 uv, Vec3 fallback,
+                                   float uvFilterWidth = 0.0f) {
     if (texIndex < 0 || texIndex >= scene.textureCount || !scene.textures) return fallback;
-    const Vec4 c = sampleTextureRGBA(scene.textures[texIndex], uv);
+    const TextureView& tex = scene.textures[texIndex];
+    const Vec4 c = sampleTextureRGBALod(tex, uv, textureLodFromFilterWidth(tex, uvFilterWidth));
     return vmax(Vec3(0.0f), c.xyz());
 }
 
-SR_INL SR_HD float sampleTextureScalar(const SceneView& scene, int texIndex, Vec2 uv, float fallback) {
+SR_INL SR_HD float sampleTextureScalar(const SceneView& scene, int texIndex, Vec2 uv, float fallback,
+                                       float uvFilterWidth = 0.0f) {
     if (texIndex < 0 || texIndex >= scene.textureCount || !scene.textures) return fallback;
-    const Vec4 c = sampleTextureRGBA(scene.textures[texIndex], uv);
+    const TextureView& tex = scene.textures[texIndex];
+    const Vec4 c = sampleTextureRGBALod(tex, uv, textureLodFromFilterWidth(tex, uvFilterWidth));
     return saturatef(c.x);
 }
 
 // Apply MaterialX-style texture maps and normal mapping to a base material.
-SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Material& base, Vec2 uv, Vec3& ns) {
+SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Material& base, Vec2 uv, Vec3& ns,
+                                               float uvFilterWidth = 0.0f) {
     Material mat = base;
-    mat.baseColor = sampleTextureRGB(scene, base.baseColorTex, uv, base.baseColor);
+    mat.baseColor = sampleTextureRGB(scene, base.baseColorTex, uv, base.baseColor, uvFilterWidth);
     if (base.baseColorTex >= 0) mat.baseColor = mat.baseColor * vmax(Vec3(0.0f), base.baseColor);
-    mat.roughness = sampleTextureScalar(scene, base.roughnessTex, uv, base.roughness);
+    mat.roughness = sampleTextureScalar(scene, base.roughnessTex, uv, base.roughness, uvFilterWidth);
     if (base.roughnessTex >= 0) mat.roughness = saturatef(mat.roughness * base.roughness);
-    mat.metallic = sampleTextureScalar(scene, base.metallicTex, uv, base.metallic);
+    mat.metallic = sampleTextureScalar(scene, base.metallicTex, uv, base.metallic, uvFilterWidth);
     if (base.metallicTex >= 0) mat.metallic = saturatef(mat.metallic * base.metallic);
-    mat.opacity = sampleTextureScalar(scene, base.opacityTex, uv, base.opacity);
+    mat.opacity = sampleTextureScalar(scene, base.opacityTex, uv, base.opacity, uvFilterWidth);
     if (base.opacityTex >= 0) mat.opacity = saturatef(mat.opacity * base.opacity);
-    mat.emissionColor = sampleTextureRGB(scene, base.emissionTex, uv, base.emissionColor);
+    mat.emissionColor = sampleTextureRGB(scene, base.emissionTex, uv, base.emissionColor, uvFilterWidth);
     if (base.emissionTex >= 0) mat.emissionColor = mat.emissionColor * vmax(Vec3(0.0f), base.emissionColor);
-    mat.subsurfaceColor = sampleTextureRGB(scene, base.subsurfaceTex, uv, base.subsurfaceColor);
+    mat.subsurfaceColor = sampleTextureRGB(scene, base.subsurfaceTex, uv, base.subsurfaceColor, uvFilterWidth);
     if (base.subsurfaceTex >= 0)
         mat.subsurfaceColor = mat.subsurfaceColor * vmax(Vec3(0.0f), base.subsurfaceColor);
 
     if (base.normalTex >= 0 && base.normalTex < scene.textureCount && scene.textures) {
-        Vec3 nMap = sampleTextureRGB(scene, base.normalTex, uv, Vec3(0.5f, 0.5f, 1.0f));
+        Vec3 nMap = sampleTextureRGB(scene, base.normalTex, uv, Vec3(0.5f, 0.5f, 1.0f), uvFilterWidth);
         nMap = nMap * 2.0f - Vec3(1.0f);
         nMap.z = srMax(0.05f, nMap.z);
         nMap = normalize(nMap);

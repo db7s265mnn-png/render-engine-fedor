@@ -53,15 +53,19 @@ struct Material {
 // RGBA32F texture view shared by CPU / GPU shading.
 // UDIM sets are baked into a single atlas covering UV [0,udimGridU]×[0,udimGridV]
 // (Houdini/MaterialX <UDIM> → Mari index 1001 + U + V*10).
+// Optional mip pyramid is packed contiguously after level 0 (maketx /.tx).
 struct TextureView {
     const float* pixels = nullptr;
     int width = 0;
     int height = 0;
     int udimGridU = 0;  // 0 = regular texture
     int udimGridV = 0;
+    int mipCount = 1;   // 1 = level 0 only
+    int padMip = 0;
 
     SR_HD bool valid() const { return pixels != nullptr && width > 0 && height > 0; }
     SR_HD bool isUdimAtlas() const { return udimGridU > 0 && udimGridV > 0; }
+    SR_HD bool hasMips() const { return mipCount > 1; }
 };
 
 // ---------------------------------------------------------------------------

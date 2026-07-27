@@ -294,10 +294,11 @@ public:
                 TextureView view;
                 if (image && !image->empty()) {
                     DeviceBuffer pixels;
-                    pixels.upload(image->data(), size_t(image->width()) * size_t(image->height()) * 4);
+                    pixels.upload(image->data(), image->sizeInFloats());
                     view.pixels = pixels.as<const float>();
                     view.width = image->width();
                     view.height = image->height();
+                    view.mipCount = image->mipCount() > 0 ? image->mipCount() : 1;
                     if (image->isUdimAtlas()) {
                         view.udimGridU = image->udimGridU();
                         view.udimGridV = image->udimGridV();

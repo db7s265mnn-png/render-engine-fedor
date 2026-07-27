@@ -1,5 +1,6 @@
 // Floating point RGBA image buffer plus a 2D distribution used for
 // importance sampling environment maps. May also be a baked UDIM atlas.
+// Optional mip pyramid is stored contiguously after level 0 (RGBA32F).
 #pragma once
 
 #include <memory>
@@ -22,9 +23,21 @@ public:
     int height() const { return height_; }
     bool empty() const { return width_ <= 0 || height_ <= 0; }
 
+    // Level-0 pixels (RGBA32F). Full pyramid is contiguous in data().
     float* data() { return pixels_.data(); }
     const float* data() const { return pixels_.data(); }
     size_t sizeInFloats() const { return pixels_.size(); }
+    size_t level0Floats() const { return size_t(width_ > 0 ? width_ : 0) * size_t(height_ > 0 ? height_ : 0) * 4; }
+
+    int mipCount() const { return mipCount_; }
+    int mipWidth(int level) const;
+    int mipHeight(int level) const;
+    const float* mipData(int level) const;
+    float* mipData(int level);
+    // Replace the whole pyramid (level 0 first). Clears UDIM metadata.
+    void setMipPyramid(std::vector<float> packedPixels, int width, int height, int mipCount);
+    // Box-filter mip chain from the current level 0 (non-UDIM textures).
+    void generateMipChain();
 
     Vec4& at(int x, int y) { return *reinterpret_cast<Vec4*>(&pixels_[(size_t(y) * width_ + x) * 4]); }
     const Vec4& at(int x, int y) const {
@@ -36,6 +49,8 @@ public:
 
     // Bilinear lookup with wrapping in u and clamping in v (equirect friendly).
     Vec3 sampleBilinear(float u, float v) const;
+    // Trilinear mip lookup (falls back to bilinear when mipCount==1).
+    Vec3 sampleTrilinear(float u, float v, float lod) const;
     // Nearest texel fetch with clamping.
     Vec3 texel(int x, int y) const;
 
@@ -54,6 +69,7 @@ public:
 private:
     int width_ = 0;
     int height_ = 0;
+    int mipCount_ = 1;
     int udimGridU_ = 0;
     int udimGridV_ = 0;
     std::vector<float> pixels_;

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -23,6 +24,10 @@
 #  include <ImfOutputFile.h>
 #  include <ImfRgbaFile.h>
 #  include <ImfFrameBuffer.h>
+#endif
+
+#if SOLSTICE_HAVE_TIFF
+#  include <tiffio.h>
 #endif
 
 namespace sol {
@@ -250,6 +255,196 @@ bool loadLdr(const std::string& path, Image& out, std::string& error) {
     return true;
 }
 
+#if SOLSTICE_HAVE_TIFF
+
+float decodeTiffChannel(const void* row, int x, int sample, uint16_t samples, uint16_t bits,
+                        uint16_t sampleFormat, bool linearize) {
+    if (bits == 32 && sampleFormat == SAMPLEFORMAT_IEEEFP) {
+        const float* f = static_cast<const float*>(row);
+        return f[size_t(x) * samples + sample];
+    }
+    if (bits == 16 && sampleFormat == SAMPLEFORMAT_UINT) {
+        const uint16_t* u = static_cast<const uint16_t*>(row);
+        const float v = u[size_t(x) * samples + sample] / 65535.0f;
+        return linearize ? srgbToLinear(v) : v;
+    }
+    if (bits == 8) {
+        const uint8_t* u = static_cast<const uint8_t*>(row);
+        const float v = u[size_t(x) * samples + sample] / 255.0f;
+        return linearize ? srgbToLinear(v) : v;
+    }
+    return 0.0f;
+}
+
+bool readTiffDirectoryLevel(TIFF* tif, std::vector<float>& rgba, int& width, int& height, std::string& error) {
+    uint32_t w = 0, h = 0;
+    uint16_t samples = 1, bits = 8, sampleFormat = SAMPLEFORMAT_UINT, photometric = PHOTOMETRIC_RGB;
+    if (!TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w) || !TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h) || w == 0 ||
+        h == 0) {
+        error = "TIFF directory missing width/height";
+        return false;
+    }
+    TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLESPERPIXEL, &samples);
+    TIFFGetFieldDefaulted(tif, TIFFTAG_BITSPERSAMPLE, &bits);
+    TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLEFORMAT, &sampleFormat);
+    TIFFGetFieldDefaulted(tif, TIFFTAG_PHOTOMETRIC, &photometric);
+
+    const bool supportedBits =
+        (bits == 8) || (bits == 16 && sampleFormat == SAMPLEFORMAT_UINT) ||
+        (bits == 32 && sampleFormat == SAMPLEFORMAT_IEEEFP);
+    if (!supportedBits || samples < 1 || samples > 4) {
+        error = "unsupported TIFF sample format";
+        return false;
+    }
+
+    // 8/16-bit colour textures are usually sRGB; float .tx from maketx is linear.
+    const bool linearize = !(bits == 32 && sampleFormat == SAMPLEFORMAT_IEEEFP);
+
+    const tsize_t stride = TIFFScanlineSize(tif);
+    if (stride <= 0) {
+        error = "invalid TIFF scanline size";
+        return false;
+    }
+    std::vector<uint8_t> scanline(static_cast<size_t>(stride), 0);
+    rgba.assign(size_t(w) * size_t(h) * 4, 0.0f);
+    width = int(w);
+    height = int(h);
+
+    for (uint32_t y = 0; y < h; ++y) {
+        if (TIFFReadScanline(tif, scanline.data(), y, 0) < 0) {
+            error = "TIFFReadScanline failed";
+            return false;
+        }
+        for (uint32_t x = 0; x < w; ++x) {
+            float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
+            if (photometric == PHOTOMETRIC_MINISBLACK || samples == 1) {
+                r = g = b = decodeTiffChannel(scanline.data(), int(x), 0, samples, bits, sampleFormat, linearize);
+                if (samples > 1)
+                    a = decodeTiffChannel(scanline.data(), int(x), 1, samples, bits, sampleFormat, false);
+            } else {
+                r = decodeTiffChannel(scanline.data(), int(x), 0, samples, bits, sampleFormat, linearize);
+                g = samples > 1
+                        ? decodeTiffChannel(scanline.data(), int(x), 1, samples, bits, sampleFormat, linearize)
+                        : r;
+                b = samples > 2
+                        ? decodeTiffChannel(scanline.data(), int(x), 2, samples, bits, sampleFormat, linearize)
+                        : r;
+                if (samples > 3)
+                    a = decodeTiffChannel(scanline.data(), int(x), 3, samples, bits, sampleFormat, false);
+            }
+            const size_t idx = (size_t(y) * size_t(w) + size_t(x)) * 4;
+            rgba[idx + 0] = r;
+            rgba[idx + 1] = g;
+            rgba[idx + 2] = b;
+            rgba[idx + 3] = a;
+        }
+    }
+    return true;
+}
+
+bool loadTiffWithMips(const std::string& path, Image& out, std::string& error) {
+    TIFF* tif = TIFFOpen(path.c_str(), "r");
+    if (!tif) {
+        error = "cannot open TIFF/TX: " + path;
+        return false;
+    }
+
+    std::vector<std::vector<float>> levels;
+    std::vector<std::pair<int, int>> sizes;
+
+    auto appendLevel = [&](TIFF* dir) -> bool {
+        std::vector<float> rgba;
+        int w = 0, h = 0;
+        std::string levelError;
+        if (!readTiffDirectoryLevel(dir, rgba, w, h, levelError)) {
+            error = levelError;
+            return false;
+        }
+        // Skip duplicate / ascending sizes (not a mip).
+        if (!sizes.empty()) {
+            if (w > sizes.back().first || h > sizes.back().second) return true;
+            if (w == sizes.back().first && h == sizes.back().second) return true;
+        }
+        levels.push_back(std::move(rgba));
+        sizes.emplace_back(w, h);
+        return true;
+    };
+
+    if (!appendLevel(tif)) {
+        TIFFClose(tif);
+        return false;
+    }
+
+    // Prefer SUBIFD mip chain (maketx / OIIO / Arnold .tx).
+    uint16_t subCount = 0;
+    uint64_t* subOffsets = nullptr;
+    if (TIFFGetField(tif, TIFFTAG_SUBIFD, &subCount, &subOffsets) && subCount > 0 && subOffsets) {
+        const uint16_t toRead = std::min<uint16_t>(subCount, 31);
+        std::vector<uint64_t> offsets(subOffsets, subOffsets + toRead);
+        for (uint16_t i = 0; i < toRead; ++i) {
+            if (!TIFFSetSubDirectory(tif, offsets[i])) continue;
+            if (!appendLevel(tif)) {
+                TIFFClose(tif);
+                return false;
+            }
+        }
+    } else {
+        // Fallback: successive TIFF directories (some exporters).
+        while (TIFFReadDirectory(tif)) {
+            if (!appendLevel(tif)) {
+                TIFFClose(tif);
+                return false;
+            }
+            if (levels.size() >= 32) break;
+        }
+    }
+    TIFFClose(tif);
+
+    if (levels.empty()) {
+        error = "empty TIFF/TX: " + path;
+        return false;
+    }
+
+    const int width = sizes.front().first;
+    const int height = sizes.front().second;
+    int mipCount = int(levels.size());
+
+    // Packed layout assumes classic half-size mips from level 0.
+    bool regularPyramid = true;
+    for (int i = 0; i < mipCount; ++i) {
+        const int expectW = std::max(1, width >> i);
+        const int expectH = std::max(1, height >> i);
+        if (sizes[size_t(i)].first != expectW || sizes[size_t(i)].second != expectH) {
+            regularPyramid = false;
+            break;
+        }
+    }
+    if (!regularPyramid || mipCount == 1) {
+        out.setMipPyramid(std::move(levels.front()), width, height, 1);
+        out.generateMipChain();
+        logInfo("TX/TIFF " + path + ": " + std::string(mipCount == 1 ? "generated" : "rebuilt") + " " +
+                std::to_string(out.mipCount()) + " mip levels (" + std::to_string(width) + "x" +
+                std::to_string(height) + ")");
+        return true;
+    }
+
+    std::vector<float> packed;
+    size_t total = 0;
+    for (const auto& level : levels) total += level.size();
+    packed.reserve(total);
+    for (auto& level : levels) {
+        packed.insert(packed.end(), level.begin(), level.end());
+        level.clear();
+        level.shrink_to_fit();
+    }
+    out.setMipPyramid(std::move(packed), width, height, mipCount);
+    logInfo("TX/TIFF " + path + ": loaded " + std::to_string(mipCount) + " mip levels (" +
+            std::to_string(width) + "x" + std::to_string(height) + ")");
+    return true;
+}
+
+#endif  // SOLSTICE_HAVE_TIFF
+
 }  // namespace
 
 bool imageFormatIsHdr(const std::string& path) {
@@ -266,6 +461,18 @@ bool loadImage(const std::string& path, Image& out, std::string& error) {
 #else
         error = "this build has no OpenEXR support, use .hdr instead";
         return false;
+#endif
+    }
+    if (ext == "tx" || ext == "tif" || ext == "tiff") {
+#if SOLSTICE_HAVE_TIFF
+        return loadTiffWithMips(path, out, error);
+#else
+        if (ext == "tx") {
+            error = "this build has no libtiff support — cannot load .tx mipmaps";
+            return false;
+        }
+        // Fall back to Qt for plain TIFF when libtiff is unavailable.
+        return loadLdr(path, out, error);
 #endif
     }
     return loadLdr(path, out, error);

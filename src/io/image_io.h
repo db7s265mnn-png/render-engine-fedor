@@ -1,5 +1,6 @@
 // Image loading and saving. Radiance .hdr is handled natively, OpenEXR through
-// the optional OpenEXR dependency and every LDR format through Qt.
+// the optional OpenEXR dependency, Arnold/OIIO .tx (and .tif) mip pyramids through
+// libtiff, and every other LDR format through Qt.
 #pragma once
 
 #include <memory>

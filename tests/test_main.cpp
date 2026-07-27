@@ -21,6 +21,11 @@
 #include "render/integrator.h"
 #include "render/render_session.h"
 #include "render/shading.h"
+#include "solstice_config.h"
+
+#if SOLSTICE_HAVE_TIFF
+#  include <tiffio.h>
+#endif
 
 namespace {
 
@@ -683,6 +688,61 @@ void testCameraDofFocus() {
     checkNear(hitAvg.y, 0.0f, 0.02f, "average dof hit y");
 }
 
+void testTxMipmaps() {
+    std::printf("tx-mipmaps\n");
+#if !SOLSTICE_HAVE_TIFF
+    std::printf("  skip (libtiff unavailable)\n");
+    return;
+#else
+    QTemporaryDir dir;
+    check(dir.isValid(), "temp dir for tx");
+    const QString txPath = dir.path() + "/checker.tx";
+
+    TIFF* tif = TIFFOpen(txPath.toUtf8().constData(), "w");
+    check(tif != nullptr, "create .tx via libtiff");
+    if (!tif) return;
+
+    auto writeLevel = [&](int w, int h, uint8_t value, bool last) {
+        TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, uint32_t(w));
+        TIFFSetField(tif, TIFFTAG_IMAGELENGTH, uint32_t(h));
+        TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, uint16_t(3));
+        TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, uint16_t(8));
+        TIFFSetField(tif, TIFFTAG_ORIENTATION, ORIENTATION_TOPLEFT);
+        TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+        TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
+        TIFFSetField(tif, TIFFTAG_COMPRESSION, COMPRESSION_NONE);
+        TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, uint32_t(h));
+        std::vector<uint8_t> row(size_t(w) * 3, value);
+        for (int y = 0; y < h; ++y) TIFFWriteScanline(tif, row.data(), y, 0);
+        TIFFWriteDirectory(tif);
+        (void)last;
+    };
+    // Multi-directory mip chain (fallback path when SUBIFD is absent).
+    writeLevel(8, 8, 200, false);
+    writeLevel(4, 4, 120, false);
+    writeLevel(2, 2, 60, false);
+    writeLevel(1, 1, 30, true);
+    TIFFClose(tif);
+
+    Image image;
+    std::string error;
+    check(loadImage(txPath.toStdString(), image, error), "load .tx with mips");
+    if (!error.empty() && image.empty()) std::printf("  load error: %s\n", error.c_str());
+    check(image.mipCount() >= 4, "loaded or rebuilt mip pyramid");
+    check(image.width() == 8 && image.height() == 8, "level 0 is 8x8");
+
+    TextureView view;
+    view.pixels = image.data();
+    view.width = image.width();
+    view.height = image.height();
+    view.mipCount = image.mipCount();
+    const Vec4 sharp = sampleTextureRGBALod(view, Vec2(0.5f, 0.5f), 0.0f);
+    const Vec4 soft = sampleTextureRGBALod(view, Vec2(0.5f, 0.5f), float(image.mipCount() - 1));
+    check(sharp.x > 0.5f, "LOD0 samples fine level");
+    check(soft.x > 0.0f, "max LOD samples coarse level");
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -697,6 +757,7 @@ int main() {
     testRender();
     testInstanceTransform();
     testUdimMaterialX();
+    testTxMipmaps();
     testMaterialXNoiseAndTriplanar();
     testMaterialXUdimCubeAsset();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

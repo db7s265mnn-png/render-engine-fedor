@@ -1380,7 +1380,7 @@ void MaterialNetworkGraphView::chooseTexture(const QString& nodeName) {
         fileInput = node->inputs.size() - 1;
     }
 
-    const QString filter = "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)";
+    const QString filter = "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tx *.tif *.tiff *.bmp *.webp);;All Files (*)";
     const QString path =
         QFileDialog::getOpenFileName(this, "Choose texture for " + nodeName, node->inputs[fileInput].value, filter);
     if (path.isEmpty()) return;

@@ -600,7 +600,7 @@ void ParameterPanel::rebuildMaterialX() {
             connect(browse, &QPushButton::clicked, this, [this, edit, commit] {
                 const QString path = QFileDialog::getOpenFileName(
                     this, "Choose file", edit->text(),
-                    "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.webp);;All Files (*)");
+                    "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tx *.tif *.tiff *.bmp *.webp);;All Files (*)");
                 if (path.isEmpty()) return;
                 edit->setText(path);
                 commit(path);
