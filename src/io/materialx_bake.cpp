@@ -48,6 +48,10 @@ float grad3(uint32_t h, float x, float y, float z) {
 }
 
 float perlin2(float x, float y) {
+    // Non-finite / extreme coords → int(floor) is UB (INT_MIN) and crashes MSVC builds.
+    if (!std::isfinite(x) || !std::isfinite(y)) return 0.0f;
+    x = std::clamp(x, -1.0e5f, 1.0e5f);
+    y = std::clamp(y, -1.0e5f, 1.0e5f);
     const int x0 = int(std::floor(x));
     const int y0 = int(std::floor(y));
     const float fx = x - float(x0);
@@ -68,6 +72,10 @@ float perlin2(float x, float y) {
 }
 
 float perlin3(float x, float y, float z) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return 0.0f;
+    x = std::clamp(x, -1.0e5f, 1.0e5f);
+    y = std::clamp(y, -1.0e5f, 1.0e5f);
+    z = std::clamp(z, -1.0e5f, 1.0e5f);
     const int x0 = int(std::floor(x));
     const int y0 = int(std::floor(y));
     const int z0 = int(std::floor(z));
@@ -77,8 +85,8 @@ float perlin3(float x, float y, float z) {
     const float u = fade(fx);
     const float v = fade(fy);
     const float w = fade(fz);
-    auto H = [](int x, int y, int z) {
-        return hashU32(uint32_t(x) * 374761393u + uint32_t(y) * 668265263u + uint32_t(z) * 2147483647u);
+    auto H = [](int ix, int iy, int iz) {
+        return hashU32(uint32_t(ix) * 374761393u + uint32_t(iy) * 668265263u + uint32_t(iz) * 2147483647u);
     };
     float n = 0.0f;
     for (int dz = 0; dz <= 1; ++dz) {
@@ -105,12 +113,19 @@ Vec3 perlin3Vec3(float x, float y, float z) {
 }
 
 float cellNoise2(float x, float y) {
+    if (!std::isfinite(x) || !std::isfinite(y)) return 0.0f;
+    x = std::clamp(x, -1.0e5f, 1.0e5f);
+    y = std::clamp(y, -1.0e5f, 1.0e5f);
     const int xi = int(std::floor(x));
     const int yi = int(std::floor(y));
     return hashToFloat(hashU32(uint32_t(xi) * 374761393u + uint32_t(yi) * 668265263u)) * 2.0f - 1.0f;
 }
 
 float cellNoise3(float x, float y, float z) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return 0.0f;
+    x = std::clamp(x, -1.0e5f, 1.0e5f);
+    y = std::clamp(y, -1.0e5f, 1.0e5f);
+    z = std::clamp(z, -1.0e5f, 1.0e5f);
     const int xi = int(std::floor(x));
     const int yi = int(std::floor(y));
     const int zi = int(std::floor(z));
@@ -174,7 +189,11 @@ std::string inputValueString(const mx::NodePtr& node, const std::string& inputNa
 mx::NodePtr connected(const mx::NodePtr& node, const std::string& inputName) {
     if (!node) return nullptr;
     mx::InputPtr input = node->getInput(inputName);
-    return input ? input->getConnectedNode() : nullptr;
+    if (!input) return nullptr;
+    // Only follow explicit wires. defaultgeomprop (Pobject etc.) must not invent
+    // phantom connections — that path has been a source of cook crashes.
+    if (!input->hasNodeName() || input->getNodeName().empty()) return nullptr;
+    return input->getConnectedNode();
 }
 
 Vec4 asColor(const Vec4& v, const std::string& type) {
@@ -253,19 +272,26 @@ Vec3 evalVec3(const mx::NodePtr& node, const std::string& inputName, float u, fl
 bool isBakableCategory(const std::string& cat) {
     return cat == "noise2d" || cat == "noise3d" || cat == "fractal2d" || cat == "fractal3d" ||
            cat == "cellnoise2d" || cat == "cellnoise3d" || cat == "worleynoise2d" || cat == "worleynoise3d" ||
-           cat == "constant" || cat == "image" || cat == "tiledimage" || cat == "triplanarprojection" ||
-           cat == "multiply" || cat == "mix" || cat == "add" || cat == "subtract" || cat == "divide" ||
-           cat == "clamp" || cat == "saturate" || cat == "invert" || cat == "absval" || cat == "power" ||
-           cat == "convert" || cat == "swizzle" || cat == "combine2" || cat == "combine3" || cat == "combine4" ||
-           cat == "extract" || cat == "dotproduct" || cat == "magnitude" || cat == "normalize" ||
-           cat == "texcoord" || cat == "place2d" || cat == "ramplr" || cat == "ramptb" || cat == "uniform" ||
-           cat == "checkerboard";
+           cat == "unifiednoise2d" || cat == "unifiednoise3d" || cat == "constant" || cat == "image" ||
+           cat == "tiledimage" || cat == "triplanarprojection" || cat == "multiply" || cat == "mix" ||
+           cat == "add" || cat == "subtract" || cat == "divide" || cat == "clamp" || cat == "saturate" ||
+           cat == "invert" || cat == "absval" || cat == "power" || cat == "convert" || cat == "swizzle" ||
+           cat == "combine2" || cat == "combine3" || cat == "combine4" || cat == "extract" ||
+           cat == "dotproduct" || cat == "magnitude" || cat == "normalize" || cat == "texcoord" ||
+           cat == "position" || cat == "normal" || cat == "tangent" || cat == "place2d" || cat == "ramplr" ||
+           cat == "ramptb" || cat == "uniform" || cat == "checkerboard";
 }
+
+struct BakeDepthGuard {
+    int& depth;
+    explicit BakeDepthGuard(int& d) : depth(d) { ++depth; }
+    ~BakeDepthGuard() { --depth; }
+};
 
 Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
     if (!node) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
     if (state.depth > 48) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
-    ++state.depth;
+    BakeDepthGuard depthGuard(state.depth);
 
     const std::string cat = node->getCategory();
     const std::string type = node->getType();
@@ -273,6 +299,13 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
 
     if (cat == "texcoord") {
         result = Vec4(u, v, 0.0f, 1.0f);
+    } else if (cat == "position") {
+        // UV bake stand-in for object-space P (defaultgeomprop Pobject).
+        result = Vec4(u * 2.0f - 1.0f, v * 2.0f - 1.0f, 0.0f, 1.0f);
+    } else if (cat == "normal") {
+        result = Vec4(0.0f, 0.0f, 1.0f, 1.0f);
+    } else if (cat == "tangent") {
+        result = Vec4(1.0f, 0.0f, 0.0f, 1.0f);
     } else if (cat == "constant" || cat == "uniform") {
         result = evalInput(node, "value", u, v, state, splat4(0.0f));
         result = asColor(result, type);
@@ -308,11 +341,13 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
             result = Vec4(n.x * amp.x + pivot, n.y * amp.y + pivot, n.z * amp.z + pivot, 1.0f);
         }
         result = asColor(result, type);
-    } else if (cat == "noise3d") {
+    } else if (cat == "noise3d" || cat == "unifiednoise3d") {
         Vec3 pos(u * 8.0f, v * 8.0f, 0.0f);
         if (mx::NodePtr pn = connected(node, "position")) {
             const Vec4 p = evalNode(pn, u, v, state);
             pos = Vec3(p.x, p.y, p.z);
+            if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z))
+                pos = Vec3(u * 8.0f, v * 8.0f, 0.0f);
         }
         const float pivot = evalFloat(node, "pivot", u, v, state, 0.0f);
         if (type == "float") {
@@ -324,7 +359,7 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
             result = Vec4(n.x * amp.x + pivot, n.y * amp.y + pivot, n.z * amp.z + pivot, 1.0f);
         }
         result = asColor(result, type);
-    } else if (cat == "fractal3d" || cat == "fractal2d") {
+    } else if (cat == "fractal3d" || cat == "fractal2d" || cat == "unifiednoise2d") {
         Vec3 pos(u * 4.0f, v * 4.0f, 0.0f);
         if (mx::NodePtr pn = connected(node, "position")) {
             const Vec4 p = evalNode(pn, u, v, state);
@@ -333,6 +368,8 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
             const Vec4 t = evalNode(tcn, u, v, state);
             pos = Vec3(t.x * 4.0f, t.y * 4.0f, 0.0f);
         }
+        if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z))
+            pos = Vec3(u * 4.0f, v * 4.0f, 0.0f);
         const int octaves = int(std::lround(evalFloat(node, "octaves", u, v, state, 3.0f)));
         const float lacunarity = evalFloat(node, "lacunarity", u, v, state, 2.0f);
         const float diminish = evalFloat(node, "diminish", u, v, state, 0.5f);
@@ -483,7 +520,6 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
             result = asColor(Vec4(0.5f, 0.5f, 0.5f, 1.0f), type);
     }
 
-    --state.depth;
     return result;
 }
 
@@ -492,6 +528,7 @@ bool subtreeHasBakable(const mx::NodePtr& node, int depth) {
     if (isBakableCategory(node->getCategory())) return true;
     for (const mx::InputPtr& input : node->getInputs()) {
         if (!input) continue;
+        if (!input->hasNodeName() || input->getNodeName().empty()) continue;
         if (subtreeHasBakable(input->getConnectedNode(), depth + 1)) return true;
     }
     return false;

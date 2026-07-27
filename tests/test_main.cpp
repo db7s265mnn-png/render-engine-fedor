@@ -590,6 +590,54 @@ void testMaterialXNoiseAndTriplanar() {
     check(eval.ok, "evaluate float-noise→color3 ok (no crash)");
     check(eval.baseColorTexture != nullptr, "float noise bakes into color3 slot");
     std::printf("  floatNoise ok=%d tex=%s\n", int(eval.ok), eval.baseColorTexture ? "yes" : "no");
+
+    // noise3d → base_color (the UI cook path that was crashing on Windows).
+    const QString noise3dXml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <noise3d name=\"noise3d1\" type=\"color3\">\n"
+        "    <input name=\"amplitude\" type=\"vector3\" value=\"1, 1, 1\"/>\n"
+        "    <input name=\"pivot\" type=\"float\" value=\"0\"/>\n"
+        "    <input name=\"position\" type=\"vector3\"/>\n"
+        "  </noise3d>\n"
+        "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" nodename=\"noise3d1\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n");
+    QVector<MaterialXGraphNode> noise3dNodes;
+    check(parseMaterialXGraph(noise3dXml, noise3dNodes, &err), "parse noise3d graph");
+    const QString noise3dRound = serializeMaterialXGraph(noise3dNodes);
+    check(!noise3dRound.isEmpty(), "serialize noise3d graph");
+    check(!noise3dRound.contains("name=\"position\""), "serialize skips empty noise3d position");
+    eval = evaluateMaterialXDocument(noise3dXml, QString());
+    check(eval.ok, "evaluate noise3d (empty position) ok");
+    check(eval.baseColorTexture != nullptr, "noise3d bakes to baseColorTexture");
+    eval = evaluateMaterialXDocument(noise3dRound, QString());
+    check(eval.ok, "evaluate serialized noise3d ok");
+    check(eval.baseColorTexture != nullptr, "serialized noise3d bakes");
+
+    const QString noise3dPos = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <position name=\"pos1\" type=\"vector3\"/>\n"
+        "  <noise3d name=\"noise3d1\" type=\"color3\">\n"
+        "    <input name=\"amplitude\" type=\"vector3\" value=\"1, 1, 1\"/>\n"
+        "    <input name=\"position\" type=\"vector3\" nodename=\"pos1\"/>\n"
+        "  </noise3d>\n"
+        "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" nodename=\"noise3d1\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n");
+    eval = evaluateMaterialXDocument(noise3dPos, QString());
+    check(eval.ok, "evaluate noise3d+position ok");
+    check(eval.baseColorTexture != nullptr, "noise3d+position bakes");
+    std::printf("  noise3d ok=%d tex=%s\n", int(eval.ok), eval.baseColorTexture ? "yes" : "no");
 }
 
 void testMaterialXUdimCubeAsset() {

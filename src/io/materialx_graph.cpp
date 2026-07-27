@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <mutex>
 
 #include "core/log.h"
 #include "io/image_io.h"
@@ -51,7 +52,12 @@ QString findLibraryRoot() {
     return {};
 }
 
-mx::DocumentPtr makeLibraryDocument(std::string& error) {
+mx::DocumentPtr libraryDocument(std::string& error) {
+    static std::mutex mutex;
+    static mx::DocumentPtr cached;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (cached) return cached;
+
     const QString root = findLibraryRoot();
     if (root.isEmpty()) {
         error = "MaterialX libraries not found (stdlib/pbrlib/bxdf)";
@@ -62,6 +68,21 @@ mx::DocumentPtr makeLibraryDocument(std::string& error) {
     auto doc = mx::createDocument();
     try {
         mx::loadLibraries({"targets", "stdlib", "pbrlib", "bxdf"}, searchPath, doc);
+    } catch (const std::exception& e) {
+        error = e.what();
+        return nullptr;
+    }
+    cached = doc;
+    return cached;
+}
+
+mx::DocumentPtr makeLibraryDocument(std::string& error) {
+    mx::DocumentPtr libs = libraryDocument(error);
+    if (!libs) return nullptr;
+    // Fresh document per call so concurrent cooks / UI catalog never share mutable state.
+    auto doc = mx::createDocument();
+    try {
+        doc->importLibrary(libs);
     } catch (const std::exception& e) {
         error = e.what();
         return nullptr;
@@ -158,6 +179,8 @@ mx::NodePtr resolveConnectedNode(const mx::NodePtr& node, const std::string& inp
     if (!node) return nullptr;
     mx::InputPtr input = node->getInput(inputName);
     if (!input) return nullptr;
+    // Ignore defaultgeomprop-only ports (Pobject / UV0 / …) — they are not graph wires.
+    if (!input->hasNodeName() || input->getNodeName().empty()) return nullptr;
     return input->getConnectedNode();
 }
 
@@ -778,35 +801,47 @@ bool parseMaterialXGraph(const QString& xml, QVector<MaterialXGraphNode>& outNod
 
 QString serializeMaterialXGraph(const QVector<MaterialXGraphNode>& nodes, const QVector<int>& udimSet) {
 #if SOLSTICE_HAVE_MATERIALX
-    auto out = mx::createDocument();
-    out->setVersionString("1.38");
-    for (const MaterialXGraphNode& graphNode : nodes) {
-        if (graphNode.category.isEmpty() || graphNode.name.isEmpty()) continue;
-        mx::NodePtr node =
-            out->addNode(graphNode.category.toStdString(), graphNode.name.toStdString(), graphNode.type.toStdString());
-        if (!std::isnan(graphNode.xpos)) node->setAttribute("xpos", std::to_string(graphNode.xpos));
-        if (!std::isnan(graphNode.ypos)) node->setAttribute("ypos", std::to_string(graphNode.ypos));
-        for (const MaterialXGraphInput& graphInput : graphNode.inputs) {
-            if (graphInput.name.isEmpty()) continue;
-            mx::InputPtr input = node->addInput(graphInput.name.toStdString(), graphInput.type.toStdString());
-            if (!graphInput.nodename.isEmpty()) {
-                input->setNodeName(graphInput.nodename.toStdString());
-            } else if (!graphInput.value.isEmpty()) {
-                // Keep MaterialX filename tokens such as <UDIM> unresolved.
-                input->setValueString(graphInput.value.toStdString());
+    try {
+        auto out = mx::createDocument();
+        out->setVersionString("1.38");
+        for (const MaterialXGraphNode& graphNode : nodes) {
+            if (graphNode.category.isEmpty() || graphNode.name.isEmpty()) continue;
+            mx::NodePtr node = out->addNode(graphNode.category.toStdString(), graphNode.name.toStdString(),
+                                            graphNode.type.toStdString());
+            if (!std::isnan(graphNode.xpos)) node->setAttribute("xpos", std::to_string(graphNode.xpos));
+            if (!std::isnan(graphNode.ypos)) node->setAttribute("ypos", std::to_string(graphNode.ypos));
+            for (const MaterialXGraphInput& graphInput : graphNode.inputs) {
+                if (graphInput.name.isEmpty()) continue;
+                // Skip empty unconnected ports — MaterialX nodedefs supply defaults
+                // (including defaultgeomprop like Pobject). Authoring empty typed
+                // inputs has crashed some MaterialX builds on cook/validate.
+                if (graphInput.nodename.isEmpty() && graphInput.value.isEmpty()) continue;
+                mx::InputPtr input = node->addInput(graphInput.name.toStdString(), graphInput.type.toStdString());
+                if (!graphInput.nodename.isEmpty()) {
+                    input->setNodeName(graphInput.nodename.toStdString());
+                } else if (!graphInput.value.isEmpty()) {
+                    // Keep MaterialX filename tokens such as <UDIM> unresolved.
+                    input->setValueString(graphInput.value.toStdString());
+                }
             }
         }
+        // MaterialX UDIM assets declare the tile list on geominfo/udimset (see TestSuite udim.mtlx).
+        if (!udimSet.isEmpty()) {
+            mx::GeomInfoPtr geomInfo = out->addGeomInfo("udim_geom");
+            geomInfo->setGeom("/");
+            mx::StringVec ids;
+            ids.reserve(size_t(udimSet.size()));
+            for (int udim : udimSet) ids.push_back(std::to_string(udim));
+            geomInfo->setGeomPropValue(mx::UDIM_SET_PROPERTY, ids);
+        }
+        return QString::fromStdString(mx::writeToXmlString(out));
+    } catch (const std::exception& e) {
+        logWarning(std::string("MaterialX serialize failed: ") + e.what());
+        return {};
+    } catch (...) {
+        logWarning("MaterialX serialize failed: unknown error");
+        return {};
     }
-    // MaterialX UDIM assets declare the tile list on geominfo/udimset (see TestSuite udim.mtlx).
-    if (!udimSet.isEmpty()) {
-        mx::GeomInfoPtr geomInfo = out->addGeomInfo("udim_geom");
-        geomInfo->setGeom("/");
-        mx::StringVec ids;
-        ids.reserve(size_t(udimSet.size()));
-        for (int udim : udimSet) ids.push_back(std::to_string(udim));
-        geomInfo->setGeomPropValue(mx::UDIM_SET_PROPERTY, ids);
-    }
-    return QString::fromStdString(mx::writeToXmlString(out));
 #else
     Q_UNUSED(nodes);
     Q_UNUSED(udimSet);
