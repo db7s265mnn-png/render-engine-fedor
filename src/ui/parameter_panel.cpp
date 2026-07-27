@@ -740,6 +740,42 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                 layout->addWidget(pick, 0);
                 return row;
             }
+            // Camera DOF: common f-stop presets next to F-Stop.
+            if (name == QLatin1String("fstop") && node_ && node_->typeName() == QLatin1String("camera")) {
+                auto* row = new QWidget();
+                auto* layout = new QHBoxLayout(row);
+                layout->setContentsMargins(0, 0, 0, 0);
+                layout->setSpacing(6);
+                layout->addWidget(slider, 1);
+
+                static const double kFStopPresets[] = {1.0,  1.2, 1.4, 1.8, 2.0,  2.5,  2.8, 4.0,
+                                                      5.6,  8.0, 11.0, 16.0, 22.0, 32.0, 64.0};
+                auto* combo = new QComboBox();
+                combo->setToolTip("F-Stop presets");
+                combo->setMaximumWidth(78);
+                combo->addItem(QStringLiteral("f/…"));
+                const double current = parameter.toDouble();
+                int matched = 0;
+                for (double stop : kFStopPresets) {
+                    QString label;
+                    if (std::fabs(stop - std::round(stop)) < 1e-6)
+                        label = QString::number(int(std::lround(stop)));
+                    else
+                        label = QString::number(stop, 'g', 3);
+                    combo->addItem(QStringLiteral("f/%1").arg(label), stop);
+                    if (matched == 0 && std::fabs(current - stop) < 1e-4) matched = combo->count() - 1;
+                }
+                combo->setCurrentIndex(matched);
+                connect(combo, QOverload<int>::of(&QComboBox::activated), this,
+                        [this, notify, combo](int index) {
+                            if (updating_ || index <= 0) return;
+                            notify(combo->itemData(index).toDouble());
+                            // Rebuild so the free-float slider reflects the preset.
+                            QMetaObject::invokeMethod(this, [this] { refresh(); }, Qt::QueuedConnection);
+                        });
+                layout->addWidget(combo, 0);
+                return row;
+            }
             return slider;
         }
         case ParamType::Int: {
