@@ -372,6 +372,7 @@ void MainWindow::createDocks() {
         }
         camera->setParameterValue("focusdistance", double(distanceMetres));
         if (scene_) {
+            applyLensFromCameraNode(camera, scene_->camera);
             scene_->camera.focusDistance = distanceMetres;
             session_.updateSceneData();
             if (iprAction_->isChecked()) session_.start();
@@ -628,16 +629,34 @@ void MainWindow::cookNow() {
     // Do not rebuild Parameters on every cook — that steals focus / selection while editing.
 
     if (!stage_) return;
-    scene_ = stage_->toScene();
 
     // Keep look-through camera if it still exists.
     if (!lookThroughCameraName_.isEmpty() && !findCameraNodeByName(lookThroughCameraName_)) {
         lookThroughCameraName_.clear();
     }
 
+    // Prefer the look-through camera as the stage render camera so toScene()
+    // picks its lens (focusDistance / fStop), not another camera or a framed default.
     if (Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
-        // Looking through: camera node is source of truth after cook (nav writes back quietly).
+        for (StagePrim& prim : stage_->prims) {
+            if (prim.type != PrimType::Camera || prim.sourceNode != cam->name()) continue;
+            stage_->renderCameraPath = prim.path;
+            // Live node params win (Focus Pick / quiet nav may be ahead of a stale cache).
+            prim.camera.focalLength = float(cam->floatValue("focal", prim.camera.focalLength));
+            prim.camera.sensorWidth = float(cam->floatValue("aperture", prim.camera.sensorWidth));
+            prim.camera.fStop = float(cam->floatValue("fstop", prim.camera.fStop));
+            const float focus = float(cam->floatValue("focusdistance", prim.camera.focusDistance));
+            if (focus > 0.0f) prim.camera.focusDistance = focus;
+            break;
+        }
+    }
+
+    scene_ = stage_->toScene();
+
+    if (Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
+        // Looking through: transform + full thin-lens params from that camera node.
         applyCameraNodeToView(cam);
+        applyLensFromCameraNode(cam, scene_->camera);
         scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
     } else if (cameraOverride_) {
         // Free persp — keep authored DOF focusDistance; only override the transform.
@@ -704,6 +723,10 @@ void MainWindow::onCameraMoved() {
     if (!scene_) return;
     scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
     // Do not overwrite CameraData.focusDistance with the orbit radius — that broke DOF.
+    // Re-assert lens from the look-through node so DOF survives tumble/IPR refresh.
+    if (const Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
+        applyLensFromCameraNode(cam, scene_->camera);
+    }
     session_.updateSceneData();
     if (iprAction_->isChecked()) session_.start();
 }
@@ -779,16 +802,21 @@ void MainWindow::lookThroughCamera(const QString& cameraName) {
     applyCameraNodeToView(camera);
     refreshViewportCameraMenu();
     if (scene_) {
+        applyLensFromCameraNode(camera, scene_->camera);
         scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
-        // Keep DOF focus from the node.
-        scene_->camera.focusDistance = float(camera->floatValue("focusdistance", scene_->camera.focusDistance));
-        scene_->camera.fStop = float(camera->floatValue("fstop", scene_->camera.fStop));
-        scene_->camera.focalLength = float(camera->floatValue("focal", scene_->camera.focalLength));
-        scene_->camera.sensorWidth = float(camera->floatValue("aperture", scene_->camera.sensorWidth));
         session_.updateSceneData();
         if (iprAction_->isChecked()) session_.start();
     }
     statusBar()->showMessage("Looking through " + camera->name(), 3000);
+}
+
+void MainWindow::applyLensFromCameraNode(const Node* camera, CameraData& out) const {
+    if (!camera) return;
+    out.focalLength = float(camera->floatValue("focal", out.focalLength));
+    out.sensorWidth = float(camera->floatValue("aperture", out.sensorWidth));
+    out.fStop = float(camera->floatValue("fstop", out.fStop));
+    const float focus = float(camera->floatValue("focusdistance", out.focusDistance));
+    if (focus > 0.0f) out.focusDistance = focus;
 }
 
 void MainWindow::applyCameraNodeToView(Node* camera) {
@@ -833,8 +861,7 @@ void MainWindow::onCopyViewToCameraNode() {
         return;
     }
     writeViewToCameraNode(camera);
-    // Also push focus distance from current orbit framing as a convenience.
-    camera->setParameterValue("focusdistance", double(renderView_->camera().distance));
+    // Do not overwrite focusdistance with orbit radius — that is framing, not DOF focus.
     lookThroughCamera(camera->name());
     parameterPanel_->refresh();
     scheduleCook(0);

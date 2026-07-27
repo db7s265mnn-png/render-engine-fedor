@@ -55,7 +55,8 @@ public:
     StagePrim* find(const QString& path);
     const StagePrim* find(const QString& path) const;
     QString uniquePath(const QString& desiredPath) const;
-    void addPrim(StagePrim prim);
+    // Returns the final path after uniquePath resolution.
+    QString addPrim(StagePrim prim);
     void appendFrom(const Stage& other);
 
     int countOfType(PrimType type) const;

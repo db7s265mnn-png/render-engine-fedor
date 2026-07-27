@@ -30,7 +30,9 @@ inline const char* importScaleTooltip() {
 }
 
 inline const char* focusDistanceTooltip() {
-    return "Focus distance in metres (scene units)";
+    return "Focus distance in metres (scene units). "
+           "Requires F-Stop > 0 for depth of field. "
+           "Use Focus Pick to set from a viewport click";
 }
 
 }  // namespace units

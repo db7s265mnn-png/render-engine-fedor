@@ -47,9 +47,11 @@ QString Stage::uniquePath(const QString& desiredPath) const {
     return desiredPath;
 }
 
-void Stage::addPrim(StagePrim prim) {
+QString Stage::addPrim(StagePrim prim) {
     prim.path = uniquePath(prim.path);
+    const QString path = prim.path;
     prims.push_back(std::move(prim));
+    return path;
 }
 
 void Stage::appendFrom(const Stage& other) {

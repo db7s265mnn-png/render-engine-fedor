@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QImage>
 #include <QTemporaryDir>
+#include <QVector3D>
 
 #include "app/default_scene.h"
 #include "core/image.h"
@@ -530,6 +531,73 @@ void testMaterialXUdimCubeAsset() {
     check(length(c1001.xyz() - c1011.xyz()) > 0.15f, "1001 vs 1011 centers differ");
 }
 
+void testCameraDofFocus() {
+    std::printf("camera-dof-focus\n");
+    registerBuiltinNodes();
+    NodeGraph graph;
+    Node* sphere = graph.createNode("sphere", "sphere1");
+    Node* camera = graph.createNode("camera", "camera1");
+    Node* settings = graph.createNode("rendersettings", "rendersettings1");
+    check(sphere && camera && settings, "dof graph nodes created");
+    if (!camera) return;
+
+    camera->setParameterValue("fstop", 2.8);
+    camera->setParameterValue("focusdistance", 3.25);
+    camera->setParameterValue("focal", 50.0);
+    camera->setParameterValue("aperture", 36.0);
+    camera->setParameterValue("eye", QVariant::fromValue(QVector3D(0.0f, 0.0f, 8.0f)));
+    camera->setParameterValue("target", QVariant::fromValue(QVector3D(0.0f, 0.0f, 0.0f)));
+
+    graph.connectNodes(sphere, camera, 0);
+    graph.connectNodes(camera, settings, 0);
+    graph.setDisplayNode(settings);
+
+    CookContext context;
+    StagePtr stage = graph.cookDisplay(context);
+    check(stage != nullptr, "dof cook produces stage");
+    check(!stage->renderCameraPath.isEmpty(), "renderCameraPath set");
+    check(stage->find(stage->renderCameraPath) != nullptr, "renderCameraPath resolves");
+
+    ScenePtr scene = stage->toScene();
+    check(scene->cameraAuthored, "camera authored in scene");
+    checkNear(scene->camera.focusDistance, 3.25f, 1e-4f, "scene focusDistance from camera node");
+    checkNear(scene->camera.fStop, 2.8f, 1e-4f, "scene fStop from camera node");
+    checkNear(scene->camera.focalLength, 50.0f, 1e-4f, "scene focalLength from camera node");
+
+    // Thin-lens rays through the centre pixel must meet near the focus plane (z = -focusDistance
+    // in camera space → world z ≈ +focusDistance when camera looks toward -Z from +Z).
+    SceneView view = scene->view();
+    view.settings.resolutionX = 64;
+    view.settings.resolutionY = 64;
+    const float focus = scene->camera.focusDistance;
+    Vec3 hitSum(0.0f);
+    const int samples = 16;
+    for (int i = 0; i < samples; ++i) {
+        const float lu = (float(i) + 0.5f) / float(samples);
+        const float lv = 0.3f;
+        Vec3 origin, direction;
+        generateCameraRay(view, 32.0f, 32.0f, lu, lv, origin, direction);
+        // Intersect optical-axis focus plane in world: camera at z=8 looking at origin →
+        // forward is -Z, focus plane is at z = 8 - focus.
+        const Vec3 eye(0.0f, 0.0f, 8.0f);
+        const Vec3 forward(0.0f, 0.0f, -1.0f);
+        const float denom = dot(direction, forward);
+        check(denom > 1e-4f, "dof ray travels forward");
+        const float t = focus / denom;
+        const Vec3 hit = origin + direction * t;
+        // Project hit onto the focus plane along forward from eye.
+        const Vec3 onPlane = hit - forward * (dot(hit - (eye + forward * focus), forward));
+        hitSum = hitSum + onPlane;
+        // Off-axis lens samples should still land close to the optical axis on the focus plane.
+        checkNear(onPlane.x, 0.0f, 0.05f, "dof focus plane x near axis");
+        checkNear(onPlane.y, 0.0f, 0.05f, "dof focus plane y near axis");
+        checkNear(dot(onPlane - eye, forward), focus, 0.05f, "dof focus plane depth");
+    }
+    const Vec3 hitAvg = hitSum * (1.0f / float(samples));
+    checkNear(hitAvg.x, 0.0f, 0.02f, "average dof hit x");
+    checkNear(hitAvg.y, 0.0f, 0.02f, "average dof hit y");
+}
+
 }  // namespace
 
 int main() {
@@ -539,6 +607,7 @@ int main() {
     testBsdf();
     testGlob();
     testGraphCook();
+    testCameraDofFocus();
     testEnvironment();
     testRender();
     testInstanceTransform();

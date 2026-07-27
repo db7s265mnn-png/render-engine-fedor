@@ -73,6 +73,7 @@ private:
     void refreshViewportCameraMenu();
     void lookThroughCamera(const QString& cameraName);
     void applyCameraNodeToView(Node* camera);
+    void applyLensFromCameraNode(const Node* camera, CameraData& out) const;
     void writeViewToCameraNode(Node* camera);
     void selectDisplayNode();
 

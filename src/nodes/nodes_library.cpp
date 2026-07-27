@@ -595,8 +595,8 @@ public:
         }
         camera.cameraToWorld = prim.xform;
         prim.camera = camera;
-        stage.renderCameraPath = prim.path;
-        stage.addPrim(std::move(prim));
+        // addPrim may rename on collision — bind render camera to the final path.
+        stage.renderCameraPath = stage.addPrim(std::move(prim));
     }
 };
 
