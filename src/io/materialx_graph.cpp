@@ -10,6 +10,7 @@
 
 #include "core/log.h"
 #include "io/image_io.h"
+#include "io/materialx_bake.h"
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_MATERIALX
@@ -517,75 +518,105 @@ QString normalizeMaterialXDocument(const QString& xml) {
 MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString& searchDirectory) {
     MaterialXEvalResult result;
 #if SOLSTICE_HAVE_MATERIALX
-    std::string error;
-    auto doc = loadUserDocument(xml.isEmpty() ? createDefaultMaterialXDocument() : xml, error);
-    if (!doc) {
-        result.error = QString::fromStdString(error);
-        return result;
-    }
-
-    mx::NodePtr surface;
-    for (const mx::NodePtr& node : doc->getNodes()) {
-        if (node->getName() == "surface" && node->getCategory() == "surfacematerial") {
-            surface = node;
-            break;
+    try {
+        std::string error;
+        auto doc = loadUserDocument(xml.isEmpty() ? createDefaultMaterialXDocument() : xml, error);
+        if (!doc) {
+            result.error = QString::fromStdString(error);
+            return result;
         }
-    }
-    if (!surface) {
+
+        mx::NodePtr surface;
         for (const mx::NodePtr& node : doc->getNodes()) {
-            if (node->getCategory() == "surfacematerial") {
+            if (node->getName() == "surface" && node->getCategory() == "surfacematerial") {
                 surface = node;
                 break;
             }
         }
-    }
-
-    mx::NodePtr ss;
-    if (surface) ss = resolveConnectedNode(surface, "surfaceshader");
-    if (!ss) {
-        for (const mx::NodePtr& node : doc->getNodes()) {
-            if (node->getCategory() == "standard_surface") {
-                ss = node;
-                break;
+        if (!surface) {
+            for (const mx::NodePtr& node : doc->getNodes()) {
+                if (node->getCategory() == "surfacematerial") {
+                    surface = node;
+                    break;
+                }
             }
         }
-    }
-    if (!ss) {
-        result.error = "MaterialX graph has no standard_surface";
+
+        mx::NodePtr ss;
+        if (surface) ss = resolveConnectedNode(surface, "surfaceshader");
+        if (!ss) {
+            for (const mx::NodePtr& node : doc->getNodes()) {
+                if (node->getCategory() == "standard_surface") {
+                    ss = node;
+                    break;
+                }
+            }
+        }
+        if (!ss) {
+            result.error = "MaterialX graph has no standard_surface";
+            return result;
+        }
+
+        applyStandardSurface(ss, result.material);
+
+        const std::vector<int> udimSet = readUdimSet(doc);
+        if (!udimSet.empty()) {
+            std::string ids;
+            for (size_t i = 0; i < udimSet.size(); ++i) {
+                if (i) ids += ",";
+                ids += std::to_string(udimSet[i]);
+            }
+            logInfo("MaterialX udimset=[" + ids + "]");
+        }
+
+        auto bindTex = [&](const char* inputName, std::shared_ptr<Image>& slot) {
+            mx::NodePtr connected = resolveConnectedNode(ss, inputName);
+            if (!connected) return;
+
+            // Prefer a concrete image/tiledimage (possibly behind multiply/mix/normalmap).
+            mx::NodePtr image = findImageNode(connected);
+            if (image) {
+                std::string texError;
+                slot = loadTextureFromImageNode(image, searchDirectory, udimSet, texError);
+                if (!slot && !texError.empty()) logWarning("MaterialX: " + texError);
+                return;
+            }
+
+            // Procedural / triplanar / math graphs → bake to a UV texture.
+            if (materialXNodeIsBakable(connected)) {
+                std::string bakeError;
+                slot = bakeMaterialXNodeToTexture(connected, searchDirectory, udimSet, 512, bakeError);
+                if (slot) {
+                    logInfo(std::string("MaterialX: baked ") + connected->getCategory() + " → " + inputName +
+                            " (" + std::to_string(slot->width()) + "x" + std::to_string(slot->height()) + ")");
+                } else if (!bakeError.empty()) {
+                    logWarning("MaterialX bake (" + std::string(inputName) + "): " + bakeError);
+                }
+            } else {
+                logWarning(std::string("MaterialX: unsupported upstream node '") + connected->getCategory() +
+                           "' on " + inputName + " (connect image / noise / triplanar / math)");
+            }
+        };
+
+        bindTex("base_color", result.baseColorTexture);
+        bindTex("specular_roughness", result.roughnessTexture);
+        bindTex("metalness", result.metallicTexture);
+        bindTex("opacity", result.opacityTexture);
+        bindTex("emission_color", result.emissionTexture);
+        bindTex("normal", result.normalTexture);
+        bindTex("subsurface_color", result.subsurfaceTexture);
+
+        result.ok = true;
+        return result;
+    } catch (const std::exception& e) {
+        result.error = QString("MaterialX evaluate failed: %1").arg(e.what());
+        result.ok = false;
+        return result;
+    } catch (...) {
+        result.error = "MaterialX evaluate failed: unknown error";
+        result.ok = false;
         return result;
     }
-
-    applyStandardSurface(ss, result.material);
-
-    const std::vector<int> udimSet = readUdimSet(doc);
-    if (!udimSet.empty()) {
-        std::string ids;
-        for (size_t i = 0; i < udimSet.size(); ++i) {
-            if (i) ids += ",";
-            ids += std::to_string(udimSet[i]);
-        }
-        logInfo("MaterialX udimset=[" + ids + "]");
-    }
-
-    auto bindTex = [&](const char* inputName, std::shared_ptr<Image>& slot) {
-        mx::NodePtr connected = resolveConnectedNode(ss, inputName);
-        mx::NodePtr image = findImageNode(connected);
-        if (!image) return;
-        std::string texError;
-        slot = loadTextureFromImageNode(image, searchDirectory, udimSet, texError);
-        if (!slot && !texError.empty()) logWarning("MaterialX: " + texError);
-    };
-
-    bindTex("base_color", result.baseColorTexture);
-    bindTex("specular_roughness", result.roughnessTexture);
-    bindTex("metalness", result.metallicTexture);
-    bindTex("opacity", result.opacityTexture);
-    bindTex("emission_color", result.emissionTexture);
-    bindTex("normal", result.normalTexture);
-    bindTex("subsurface_color", result.subsurfaceTexture);
-
-    result.ok = true;
-    return result;
 #else
     Q_UNUSED(xml);
     Q_UNUSED(searchDirectory);
@@ -599,45 +630,53 @@ bool parseMaterialXGraph(const QString& xml, QVector<MaterialXGraphNode>& outNod
     outNodes.clear();
     if (outUdimSet) outUdimSet->clear();
 #if SOLSTICE_HAVE_MATERIALX
-    std::string err;
-    // MaterialX's pugixml fork accepts raw <UDIM> and escaped &lt;UDIM&gt;.
-    auto doc = loadUserDocument(xml, err);
-    if (!doc) {
-        if (error) *error = QString::fromStdString(err);
+    try {
+        std::string err;
+        // MaterialX's pugixml fork accepts raw <UDIM> and escaped &lt;UDIM&gt;.
+        auto doc = loadUserDocument(xml, err);
+        if (!doc) {
+            if (error) *error = QString::fromStdString(err);
+            return false;
+        }
+        if (outUdimSet) {
+            for (int udim : readUdimSet(doc)) outUdimSet->push_back(udim);
+        }
+        for (const mx::NodePtr& node : doc->getNodes()) {
+            if (!node || !node->getSourceUri().empty()) continue;
+            MaterialXGraphNode graphNode;
+            graphNode.name = QString::fromStdString(node->getName());
+            graphNode.category = QString::fromStdString(node->getCategory());
+            graphNode.type = QString::fromStdString(node->getType());
+            if (node->hasAttribute("xpos"))
+                graphNode.xpos = QString::fromStdString(node->getAttribute("xpos")).toDouble();
+            else
+                graphNode.xpos = std::numeric_limits<double>::quiet_NaN();
+            if (node->hasAttribute("ypos"))
+                graphNode.ypos = QString::fromStdString(node->getAttribute("ypos")).toDouble();
+            else
+                graphNode.ypos = std::numeric_limits<double>::quiet_NaN();
+            for (const mx::InputPtr& input : node->getInputs()) {
+                if (!input) continue;
+                MaterialXGraphInput graphInput;
+                graphInput.name = QString::fromStdString(input->getName());
+                graphInput.type = QString::fromStdString(input->getType());
+                graphInput.nodename = QString::fromStdString(input->getNodeName());
+                if (input->hasValueString())
+                    graphInput.value = QString::fromStdString(input->getValueString());
+                else if (input->getValue())
+                    graphInput.value = QString::fromStdString(input->getValue()->getValueString());
+                graphNode.inputs.push_back(graphInput);
+            }
+            outNodes.push_back(graphNode);
+        }
+        return true;
+    } catch (const std::exception& e) {
+        if (error) *error = QString::fromStdString(e.what());
+        return false;
+    } catch (...) {
+        if (error) *error = "unknown MaterialX parse failure";
         return false;
     }
-    if (outUdimSet) {
-        for (int udim : readUdimSet(doc)) outUdimSet->push_back(udim);
-    }
-    for (const mx::NodePtr& node : doc->getNodes()) {
-        if (!node || !node->getSourceUri().empty()) continue;
-        MaterialXGraphNode graphNode;
-        graphNode.name = QString::fromStdString(node->getName());
-        graphNode.category = QString::fromStdString(node->getCategory());
-        graphNode.type = QString::fromStdString(node->getType());
-        if (node->hasAttribute("xpos"))
-            graphNode.xpos = QString::fromStdString(node->getAttribute("xpos")).toDouble();
-        else
-            graphNode.xpos = std::numeric_limits<double>::quiet_NaN();
-        if (node->hasAttribute("ypos"))
-            graphNode.ypos = QString::fromStdString(node->getAttribute("ypos")).toDouble();
-        else
-            graphNode.ypos = std::numeric_limits<double>::quiet_NaN();
-        for (const mx::InputPtr& input : node->getInputs()) {
-            if (!input) continue;
-            MaterialXGraphInput graphInput;
-            graphInput.name = QString::fromStdString(input->getName());
-            graphInput.type = QString::fromStdString(input->getType());
-            graphInput.nodename = QString::fromStdString(input->getNodeName());
-            if (input->hasValueString())
-                graphInput.value = QString::fromStdString(input->getValueString());
-            else if (input->getValue())
-                graphInput.value = QString::fromStdString(input->getValue()->getValueString());
-            graphNode.inputs.push_back(graphInput);
-        }
-        outNodes.push_back(graphNode);
-    }
-    return true;
 #else
     if (error) *error = "MaterialX unavailable";
     Q_UNUSED(xml);

@@ -214,7 +214,8 @@ QColor colorForCategory(const QString& category) {
 
 bool isConnectableInput(const QString& name, const QString& type) {
     Q_UNUSED(name);
-    return type != "filename";
+    // Filenames and freeform strings are edited in Parameters, not via wires.
+    return type != "filename" && type != "string";
 }
 
 QString fallbackDefaultDocument() {

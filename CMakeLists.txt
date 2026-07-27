@@ -195,6 +195,7 @@ set(SOLSTICE_LIB_SOURCES
     src/io/alembic_loader.cpp
     src/io/usd_loader.cpp
     src/io/materialx_graph.cpp
+    src/io/materialx_bake.cpp
     src/render/framebuffer.cpp
     src/render/render_session.cpp
     src/render/scene_picker.cpp
@@ -225,6 +226,7 @@ set(SOLSTICE_LIB_HEADERS
     src/io/alembic_loader.h
     src/io/usd_loader.h
     src/io/materialx_graph.h
+    src/io/materialx_bake.h
     src/render/shading.h
     src/render/lights.h
     src/render/integrator.h

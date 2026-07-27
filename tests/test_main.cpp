@@ -502,6 +502,91 @@ void testUdimMaterialX() {
     check(sawGreen, "render shows UDIM 1002 green");
 }
 
+
+void testMaterialXNoiseAndTriplanar() {
+    std::printf("materialx-noise-triplanar\n");
+    if (!materialXAvailable()) {
+        std::printf("  skip (no MaterialX)\n");
+        return;
+    }
+    const QString noiseXml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.39\">\n"
+        "  <noise2d name=\"noise2d1\" type=\"color3\">\n"
+        "    <input name=\"amplitude\" type=\"vector3\" value=\"1, 1, 1\"/>\n"
+        "    <input name=\"pivot\" type=\"float\" value=\"0\"/>\n"
+        "  </noise2d>\n"
+        "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" nodename=\"noise2d1\"/>\n"
+        "    <input name=\"specular_roughness\" type=\"float\" value=\"0.4\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n");
+    QVector<MaterialXGraphNode> nodes;
+    QString err;
+    check(parseMaterialXGraph(noiseXml, nodes, &err), "parse noise graph");
+    check(err.isEmpty(), "noise parse has no error");
+    const QString round = serializeMaterialXGraph(nodes);
+    check(!round.isEmpty(), "serialize noise graph");
+    MaterialXEvalResult eval = evaluateMaterialXDocument(noiseXml, QString());
+    check(eval.ok, "evaluate noise graph ok");
+    check(eval.error.isEmpty(), "evaluate noise no error string");
+    check(eval.baseColorTexture != nullptr, "noise bakes to baseColorTexture");
+    if (eval.baseColorTexture) {
+        check(eval.baseColorTexture->width() >= 64 && eval.baseColorTexture->height() >= 64,
+              "baked noise texture has size");
+        // At least some variation across the bake.
+        const Vec3 a = eval.baseColorTexture->rgb(8, 8);
+        const Vec3 b = eval.baseColorTexture->rgb(40, 40);
+        check(length(a - b) > 1e-4f || maxComponent(a) > 0.01f, "baked noise is not flat black");
+    }
+    std::printf("  noise baseTex=%s\n", eval.baseColorTexture ? "yes" : "no");
+
+    const QString triXml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.39\">\n"
+        "  <triplanarprojection name=\"tri1\" type=\"color3\">\n"
+        "    <input name=\"filex\" type=\"filename\" value=\"\"/>\n"
+        "    <input name=\"filey\" type=\"filename\" value=\"\"/>\n"
+        "    <input name=\"filez\" type=\"filename\" value=\"\"/>\n"
+        "    <input name=\"default\" type=\"color3\" value=\"0.2, 0.5, 0.8\"/>\n"
+        "    <input name=\"blend\" type=\"float\" value=\"1\"/>\n"
+        "  </triplanarprojection>\n"
+        "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" nodename=\"tri1\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n");
+    eval = evaluateMaterialXDocument(triXml, QString());
+    check(eval.ok, "evaluate empty triplanar ok (no crash)");
+    check(eval.baseColorTexture != nullptr, "triplanar bakes default color texture");
+    std::printf("  triplanar ok=%d err=%s tex=%s\n", int(eval.ok), eval.error.toStdString().c_str(),
+                eval.baseColorTexture ? "yes" : "no");
+
+    // float noise → color3 (type mismatch users often make)
+    const QString floatNoise = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.39\">\n"
+        "  <noise2d name=\"n1\" type=\"float\">\n"
+        "    <input name=\"amplitude\" type=\"float\" value=\"1\"/>\n"
+        "  </noise2d>\n"
+        "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" nodename=\"n1\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n");
+    eval = evaluateMaterialXDocument(floatNoise, QString());
+    check(eval.ok, "evaluate float-noise→color3 ok (no crash)");
+    check(eval.baseColorTexture != nullptr, "float noise bakes into color3 slot");
+    std::printf("  floatNoise ok=%d tex=%s\n", int(eval.ok), eval.baseColorTexture ? "yes" : "no");
+}
+
 void testMaterialXUdimCubeAsset() {
     std::printf("udim-materialx-cube-asset\n");
     const QString root = QStringLiteral("/workspace/examples/udim_cube");
@@ -612,6 +697,7 @@ int main() {
     testRender();
     testInstanceTransform();
     testUdimMaterialX();
+    testMaterialXNoiseAndTriplanar();
     testMaterialXUdimCubeAsset();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
