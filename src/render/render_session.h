@@ -62,6 +62,10 @@ private:
     int deviceThreads_ = -1;
 
     Framebuffer framebuffer_;
+    // Last resolved display image — shown while the accumulation buffer is empty
+    // so IPR restarts do not flash black tile holes.
+    mutable Image displayHold_;
+    mutable std::mutex displayHoldMutex_;
     std::thread thread_;
     std::atomic<bool> cancel_{false};
     std::atomic<bool> rendering_{false};

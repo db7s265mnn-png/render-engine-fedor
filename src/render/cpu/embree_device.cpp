@@ -173,7 +173,8 @@ public:
         return true;
     }
 
-    void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel) override {
+    void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
+                      const RenderMidProgressFn& midProgress) override {
         if (!topScene_ || !scene_) return;
         const RenderSettingsData& settings = view_.settings;
         const int width = fb.width();
@@ -197,44 +198,74 @@ public:
         const bool useGuiding = false;
 #endif
 
-        pool_->parallelFor(tileCount, [&](int tileIndex, int threadId) {
-            if (cancel.load(std::memory_order_relaxed)) return;
-            const int tx = tileIndex % tilesX;
-            const int ty = tileIndex / tilesX;
-            const int x0 = tx * tileSize;
-            const int y0 = ty * tileSize;
-            const int x1 = std::min(x0 + tileSize, width);
-            const int y1 = std::min(y0 + tileSize, height);
-
-            for (int y = y0; y < y1; ++y) {
-                if (cancel.load(std::memory_order_relaxed)) return;
-                for (int x = x0; x < x1; ++x) {
-                    const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
-                    Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
-                    const float jx = sampleIndex == 0 ? 0.5f : rng.nextFloat();
-                    const float jy = sampleIndex == 0 ? 0.5f : rng.nextFloat();
-                    Vec3 origin, direction;
-                    generateCameraRay(scene, float(x) + jx, float(y) + jy, rng.nextFloat(), rng.nextFloat(),
-                                      origin, direction);
+        auto shadePixel = [&](int x, int y, int threadId) {
+            const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
+            Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
+            const float jx = sampleIndex == 0 ? 0.5f : rng.nextFloat();
+            const float jy = sampleIndex == 0 ? 0.5f : rng.nextFloat();
+            Vec3 origin, direction;
+            generateCameraRay(scene, float(x) + jx, float(y) + jy, rng.nextFloat(), rng.nextFloat(), origin,
+                              direction);
 #if SOLSTICE_HAVE_OPENPGL
-                    Vec3 radiance;
-                    if (useGuiding) {
-                        PathGuiding::ThreadState& guiding = pathGuiding_->thread(threadId);
-                        guiding.beginPath();
-                        radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding);
-                        guiding.endPath();
-                    } else {
-                        radiance = traceRadiance(scene, tracer, origin, direction, rng);
-                    }
-#else
-                    (void)threadId;
-                    (void)useGuiding;
-                    const Vec3 radiance = traceRadiance(scene, tracer, origin, direction, rng);
-#endif
-                    fb.addSample(x, y, radiance);
-                }
+            Vec3 radiance;
+            if (useGuiding) {
+                PathGuiding::ThreadState& guiding = pathGuiding_->thread(threadId);
+                guiding.beginPath();
+                radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding);
+                guiding.endPath();
+            } else {
+                radiance = traceRadiance(scene, tracer, origin, direction, rng);
             }
-        });
+#else
+            (void)threadId;
+            (void)useGuiding;
+            const Vec3 radiance = traceRadiance(scene, tracer, origin, direction, rng);
+#endif
+            fb.addSample(x, y, radiance);
+        };
+
+        // First sample: interleaved 4x4 bootstrap so the whole frame appears
+        // gradually (with hole-fill in resolveDisplay) instead of black tiles.
+        constexpr int kBootstrapStep = 4;
+        if (sampleIndex == 0) {
+            const int phaseCount = kBootstrapStep * kBootstrapStep;
+            for (int phase = 0; phase < phaseCount; ++phase) {
+                if (cancel.load(std::memory_order_relaxed)) break;
+                pool_->parallelFor(tileCount, [&](int tileIndex, int threadId) {
+                    if (cancel.load(std::memory_order_relaxed)) return;
+                    const int tx = tileIndex % tilesX;
+                    const int ty = tileIndex / tilesX;
+                    const int x0 = tx * tileSize;
+                    const int y0 = ty * tileSize;
+                    const int x1 = std::min(x0 + tileSize, width);
+                    const int y1 = std::min(y0 + tileSize, height);
+                    for (int y = y0; y < y1; ++y) {
+                        if (cancel.load(std::memory_order_relaxed)) return;
+                        for (int x = x0; x < x1; ++x) {
+                            if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) != phase)
+                                continue;
+                            shadePixel(x, y, threadId);
+                        }
+                    }
+                });
+                if (midProgress) midProgress();
+            }
+        } else {
+            pool_->parallelFor(tileCount, [&](int tileIndex, int threadId) {
+                if (cancel.load(std::memory_order_relaxed)) return;
+                const int tx = tileIndex % tilesX;
+                const int ty = tileIndex / tilesX;
+                const int x0 = tx * tileSize;
+                const int y0 = ty * tileSize;
+                const int x1 = std::min(x0 + tileSize, width);
+                const int y1 = std::min(y0 + tileSize, height);
+
+                for (int y = y0; y < y1; ++y) {
+                    if (cancel.load(std::memory_order_relaxed)) return;
+                    for (int x = x0; x < x1; ++x) shadePixel(x, y, threadId);
+                }
+            });
+        }
 
 #if SOLSTICE_HAVE_OPENPGL
         if (useGuiding) pathGuiding_->commitSample();

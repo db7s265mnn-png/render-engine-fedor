@@ -688,6 +688,8 @@ void MainWindow::cookNow() {
 }
 
 void MainWindow::restartRender() {
+    // Drop stale UI blits so we do not resolve a freshly cleared buffer mid-pass.
+    framePending_.store(false, std::memory_order_relaxed);
     session_.stop();
     session_.framebuffer().clear();
     session_.start();

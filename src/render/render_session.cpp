@@ -45,7 +45,26 @@ RenderProgress RenderSession::progress() const {
 Image RenderSession::displayImage() const {
     ScenePtr scene = this->scene();
     RenderSettingsData settings = scene ? scene->settings : RenderSettingsData();
-    return framebuffer_.resolveDisplay(settings);
+
+    // After a clear / restart, keep the last finished preview until the first
+    // bootstrap pixels land — avoids a harsh black flash and tile holes.
+    if (!framebuffer_.hasAccumulatedData()) {
+        std::lock_guard<std::mutex> lock(displayHoldMutex_);
+        if (!displayHold_.empty() && displayHold_.width() == framebuffer_.width() &&
+            displayHold_.height() == framebuffer_.height()) {
+            return displayHold_;
+        }
+        // Soft charcoal placeholder (less jarring than pure black).
+        return Image(std::max(1, framebuffer_.width()), std::max(1, framebuffer_.height()),
+                     Vec4(0.07f, 0.07f, 0.08f, 1.0f));
+    }
+
+    Image image = framebuffer_.resolveDisplay(settings);
+    {
+        std::lock_guard<std::mutex> lock(displayHoldMutex_);
+        displayHold_ = image;
+    }
+    return image;
 }
 
 Image RenderSession::linearImage() const { return framebuffer_.resolveLinear(); }
@@ -171,9 +190,32 @@ void RenderSession::threadMain() {
     const auto startTime = std::chrono::steady_clock::now();
     auto lastNotify = startTime;
 
+    auto notifyUi = [&](bool force) {
+        const auto now = std::chrono::steady_clock::now();
+        const double sinceNotify = std::chrono::duration<double>(now - lastNotify).count();
+        // Bootstrap phases update ~20 Hz; early samples immediately; later ~10 Hz.
+        if (!force && sinceNotify < 0.05) return;
+        lastNotify = now;
+        std::function<void()> update;
+        {
+            std::lock_guard<std::mutex> lock(callbackMutex_);
+            update = updateCallback_;
+        }
+        if (update) update();
+    };
+
     for (int sample = startSample; sample < targetSamples; ++sample) {
         if (cancel_.load(std::memory_order_relaxed)) break;
-        device_->renderSample(framebuffer_, sample, cancel_);
+
+        RenderMidProgressFn midProgress;
+        if (sample == 0) {
+            midProgress = [&] {
+                if (cancel_.load(std::memory_order_relaxed)) return;
+                notifyUi(false);
+            };
+        }
+
+        device_->renderSample(framebuffer_, sample, cancel_, midProgress);
         if (cancel_.load(std::memory_order_relaxed)) break;
 
         framebuffer_.setSampleCount(sample + 1);
@@ -190,13 +232,7 @@ void RenderSession::threadMain() {
         // ones at roughly 10 Hz.
         const double sinceNotify = std::chrono::duration<double>(now - lastNotify).count();
         if (sample < 4 || sinceNotify > 0.1 || sample + 1 == targetSamples) {
-            lastNotify = now;
-            std::function<void()> update;
-            {
-                std::lock_guard<std::mutex> lock(callbackMutex_);
-                update = updateCallback_;
-            }
-            if (update) update();
+            notifyUi(true);
         }
     }
 

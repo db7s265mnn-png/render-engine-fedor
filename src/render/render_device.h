@@ -2,6 +2,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -20,6 +21,9 @@ struct RenderProgress {
     std::string message;
 };
 
+// Optional mid-sample preview hook (e.g. after each bootstrap phase).
+using RenderMidProgressFn = std::function<void()>;
+
 class RenderDevice {
 public:
     virtual ~RenderDevice() = default;
@@ -33,7 +37,9 @@ public:
 
     // Renders `sampleIndex` (one sample per pixel) into the framebuffer.
     // `cancel` is polled frequently so the UI stays responsive.
-    virtual void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel) = 0;
+    // `midProgress` may be invoked during long passes (bootstrap) for smoother IPR.
+    virtual void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
+                              const RenderMidProgressFn& midProgress) = 0;
 
     // Picks up in-place edits of the scene that do not touch geometry, such as
     // a camera move or a change of film settings, without rebuilding the

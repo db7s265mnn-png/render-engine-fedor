@@ -333,7 +333,8 @@ public:
         }
     }
 
-    void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel) override {
+    void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
+                      const RenderMidProgressFn& midProgress) override {
         if (!initialized_ || !scene_) return;
         if (cancel.load(std::memory_order_relaxed)) return;
         try {
@@ -367,6 +368,8 @@ public:
 
             // Mirror the accumulation buffer into the host framebuffer.
             accumBuffer_.download(fb.data(), pixelCount);
+            fb.markHasData();
+            if (midProgress) midProgress();
         } catch (const std::exception& e) {
             logError(std::string("OptiX render failed: ") + e.what());
         }

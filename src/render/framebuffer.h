@@ -19,6 +19,8 @@ public:
     int height() const { return height_; }
     int sampleCount() const { return samples_.load(std::memory_order_relaxed); }
     void setSampleCount(int n) { samples_.store(n, std::memory_order_relaxed); }
+    bool hasAccumulatedData() const { return hasData_.load(std::memory_order_relaxed); }
+    void markHasData() { hasData_.store(true, std::memory_order_relaxed); }
 
     // Accumulates one sample. Safe as long as different threads own different
     // pixels, which is how the tile scheduler works. The UI resolves the buffer
@@ -30,11 +32,13 @@ public:
         px.y += radiance.y;
         px.z += radiance.z;
         px.w += 1.0f;
+        hasData_.store(true, std::memory_order_relaxed);
     }
 
     void setPixel(int x, int y, Vec3 radiance, float weight) {
         Vec4& px = accum_[size_t(y) * size_t(width_) + size_t(x)];
         px = Vec4(radiance, weight);
+        if (weight > 0.0f) hasData_.store(true, std::memory_order_relaxed);
     }
 
     Vec3 resolvePixel(int x, int y) const {
@@ -48,6 +52,8 @@ public:
     // Linear HDR image with the accumulation weight divided out.
     Image resolveLinear() const;
     // Display ready image: exposure, tone mapping and gamma applied.
+    // Incomplete bootstrap pixels are filled from nearby samples so IPR does
+    // not flash black tile holes.
     Image resolveDisplay(const RenderSettingsData& settings) const;
 
     std::mutex& mutex() { return mutex_; }
@@ -57,6 +63,7 @@ private:
     int height_ = 0;
     std::vector<Vec4> accum_;
     std::atomic<int> samples_{0};
+    std::atomic<bool> hasData_{false};
     mutable std::mutex mutex_;
 };
 
