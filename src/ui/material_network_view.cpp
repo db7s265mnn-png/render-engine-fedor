@@ -271,12 +271,13 @@ public:
         setFlag(ItemIsMovable, true);
         setFlag(ItemSendsGeometryChanges, true);
         setCacheMode(NoCache);
-        setCursor(Qt::OpenHandCursor);
+        // Arrow cursor like Scene Network — OpenHand looked like "drag only".
         setZValue(2.0);
     }
 
     int type() const override { return Type; }
     const QString& nodeName() const { return nodeName_; }
+    bool containsBody(QPointF scenePosition) const { return bodyRect().contains(mapFromScene(scenePosition)); }
     const QString& category() const { return category_; }
     QString inputPortName(int portIndex) const { return inputs_.value(portIndex).name; }
     int inputPortIndexByName(const QString& name) const {
@@ -291,8 +292,11 @@ public:
     QPainterPath shape() const override {
         QPainterPath path;
         path.addRoundedRect(bodyRect(), 6.0, 6.0);
-        for (int i = 0; i < inputs_.size(); ++i) path.addEllipse(inputPortLocal(i), kPortHitRadius, kPortHitRadius);
-        path.addEllipse(outputPortLocal(), kPortHitRadius, kPortHitRadius);
+        // Keep port hit pads small so they don't swallow body clicks (Scene Network
+        // puts ports outside the tile; MaterialX ports sit on the edge).
+        const qreal pad = kPortRadius + 3.0;
+        for (int i = 0; i < inputs_.size(); ++i) path.addEllipse(inputPortLocal(i), pad, pad);
+        path.addEllipse(outputPortLocal(), pad, pad);
         return path;
     }
 
@@ -1157,15 +1161,83 @@ void MaterialNetworkGraphView::mousePressEvent(QMouseEvent* event) {
     }
 
     if (event->button() == Qt::LeftButton) {
-        if (MaterialNetworkNodeItem* source =
-                outputPortAt(graphScene_, mapToScene(event->pos()), kPortHitRadius * 1.8)) {
+        const QPointF scenePos = mapToScene(event->pos());
+        // Tight radius: MaterialX ports sit on the node edge; a wide scan used to
+        // steal body clicks for wire-drag (fist cursor) instead of selection.
+        constexpr qreal kTightPort = kPortRadius + 4.0;
+
+        if (MaterialNetworkNodeItem* item = nodeItemAt(this, event->pos())) {
+            const bool onBody = item->containsBody(scenePos);
+            const bool onOutput = item->hitOutputPort(scenePos, kTightPort);
+            const int onInput = item->hitInputPort(scenePos, kTightPort);
+
+            if (onOutput) {
+                beginWire(item->nodeName(), item->outputPortScene());
+                event->accept();
+                return;
+            }
+            if (onInput >= 0 && !onBody) {
+                const int modelInput = item->inputModelIndex(onInput);
+                if (MtlxNode* target = findModelNode(item->nodeName());
+                    target && modelInput >= 0 && modelInput < target->inputs.size()) {
+                    const QString existing = target->inputs[modelInput].nodename;
+                    if (!existing.isEmpty()) {
+                        target->inputs[modelInput].nodename.clear();
+                        writeModel(false);
+                        rebuild();
+                        if (MaterialNetworkNodeItem* sourceItem = nodeItemByName(graphScene_, existing)) {
+                            beginWire(existing, sourceItem->outputPortScene());
+                            updateWire(scenePos);
+                            event->accept();
+                            return;
+                        }
+                    }
+                }
+            }
+            if (onInput >= 0 && onBody) {
+                // Click on the port knob itself (inside body margin) → rewire.
+                if (QLineF(scenePos, item->inputPortScene(onInput)).length() <= kTightPort) {
+                    const int modelInput = item->inputModelIndex(onInput);
+                    if (MtlxNode* target = findModelNode(item->nodeName());
+                        target && modelInput >= 0 && modelInput < target->inputs.size()) {
+                        const QString existing = target->inputs[modelInput].nodename;
+                        if (!existing.isEmpty()) {
+                            target->inputs[modelInput].nodename.clear();
+                            writeModel(false);
+                            rebuild();
+                            if (MaterialNetworkNodeItem* sourceItem = nodeItemByName(graphScene_, existing)) {
+                                beginWire(existing, sourceItem->outputPortScene());
+                                updateWire(scenePos);
+                                event->accept();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Body click: select immediately so Parameters update (Scene Network style).
+            {
+                const QSignalBlocker blocker(graphScene_);
+                if (!(event->modifiers() & Qt::ShiftModifier)) graphScene_->clearSelection();
+                item->setSelected(true);
+            }
+            if (item->category() == "image" || item->category() == "tiledimage")
+                clickImageNode_ = item->nodeName();
+            QGraphicsView::mousePressEvent(event);
+            // Always push Parameters — Qt skips selectionChanged when the item
+            // was already selected, which left the panel stuck on the container.
+            emitSelectionChanged();
+            return;
+        }
+
+        // Empty canvas near a port — start / pull a wire.
+        if (MaterialNetworkNodeItem* source = outputPortAt(graphScene_, scenePos, kPortHitRadius)) {
             beginWire(source->nodeName(), source->outputPortScene());
             event->accept();
             return;
         }
-        // Pull existing wire off an input (rewire), matching the Scene Network.
-        if (const InputHit hit = inputPortAt(graphScene_, mapToScene(event->pos()), kPortHitRadius * 1.8);
-            hit.item) {
+        if (const InputHit hit = inputPortAt(graphScene_, scenePos, kPortHitRadius); hit.item) {
             const int modelInput = hit.item->inputModelIndex(hit.inputIndex);
             if (MtlxNode* target = findModelNode(hit.item->nodeName());
                 target && modelInput >= 0 && modelInput < target->inputs.size()) {
@@ -1176,16 +1248,12 @@ void MaterialNetworkGraphView::mousePressEvent(QMouseEvent* event) {
                     rebuild();
                     if (MaterialNetworkNodeItem* sourceItem = nodeItemByName(graphScene_, existing)) {
                         beginWire(existing, sourceItem->outputPortScene());
-                        updateWire(mapToScene(event->pos()));
+                        updateWire(scenePos);
                         event->accept();
                         return;
                     }
                 }
             }
-        }
-        if (MaterialNetworkNodeItem* item = nodeItemAt(this, event->pos())) {
-            if (item->category() == "image" || item->category() == "tiledimage")
-                clickImageNode_ = item->nodeName();
         }
     }
 
@@ -1582,7 +1650,6 @@ public:
     explicit MaterialContainerItem(Node* node) : node_(node) {
         setFlag(ItemIsSelectable, true);
         setFlag(ItemIsMovable, true);
-        setCursor(Qt::OpenHandCursor);
         setZValue(2.0);
     }
 

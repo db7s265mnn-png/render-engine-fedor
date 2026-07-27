@@ -10,7 +10,7 @@ Official MaterialX TestSuite UDIM textures (`grid.1001.png` … `grid.1013.png`)
 sol_obj_to_abc examples/udim_cube/cube.obj examples/udim_cube/cube.abc udim_cube
 ```
 
-In Sonya_Render:
+In Bob_Render:
 1. Load `examples/udim_cube/cube.abc`
 2. Open the Material Network on the material node
 3. Set the image `file` to `…/examples/udim_cube/grid.<UDIM>.png`

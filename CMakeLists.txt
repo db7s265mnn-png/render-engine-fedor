@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(Solstice VERSION 0.9.0 LANGUAGES CXX)
 
-set(SOLSTICE_APP_DISPLAY_NAME "Sonya_Render" CACHE STRING "User-visible application name")
+set(SOLSTICE_APP_DISPLAY_NAME "Bob_Render" CACHE STRING "User-visible application name")
 
 # ---------------------------------------------------------------------------
 # Options

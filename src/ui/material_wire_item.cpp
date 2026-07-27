@@ -27,7 +27,10 @@ MaterialWireItem::MaterialWireItem(QString sourceNodeName, QString targetNodeNam
       targetNodeName_(std::move(targetNodeName)),
       inputName_(std::move(inputName)) {
     setAcceptHoverEvents(true);
-    setFlag(QGraphicsItem::ItemIsSelectable, true);
+    // Not selectable — Scene Network style: wires are for rewire/context menu,
+    // not for stealing node clicks / Parameters selection.
+    setFlag(QGraphicsItem::ItemIsSelectable, false);
+    setAcceptedMouseButtons(Qt::RightButton);
     setZValue(-0.5);
     setPen(QPen(theme::wireActive(), 2.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 }

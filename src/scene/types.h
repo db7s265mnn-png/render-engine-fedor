@@ -199,7 +199,7 @@ struct RenderSettingsData {
     int threads = 0;               // 0 = hardware concurrency
 
     float aoDistance = 1.0f;
-    int pathGuiding = 1;           // OpenPGL on CPU (Embree); ignored on OptiX
+    int pathGuiding = 0;           // OpenPGL on CPU (Embree); ignored on OptiX
     float pad2 = 0.0f;
     float pad3 = 0.0f;
 };
