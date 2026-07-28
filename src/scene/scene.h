@@ -58,6 +58,7 @@ public:
     std::vector<LightData> lights;
     std::vector<std::shared_ptr<EnvironmentMap>> envMaps;
     std::vector<std::shared_ptr<Image>> textures;
+    std::vector<ProceduralNode> procedurals;
     std::vector<PrimRecord> prims;
 
     CameraData camera;

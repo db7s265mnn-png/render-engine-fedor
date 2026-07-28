@@ -28,8 +28,10 @@ struct RayHit {
 
 struct SurfaceInteraction {
     Vec3 p{0.0f, 0.0f, 0.0f};
-    Vec3 ng{0.0f, 0.0f, 1.0f};  // geometric normal
-    Vec3 ns{0.0f, 0.0f, 1.0f};  // shading normal
+    Vec3 pObject{0.0f, 0.0f, 0.0f};
+    Vec3 ng{0.0f, 0.0f, 1.0f};  // geometric normal (world)
+    Vec3 ns{0.0f, 0.0f, 1.0f};  // shading normal (world)
+    Vec3 nObject{0.0f, 0.0f, 1.0f};
     Vec2 uv{0.0f, 0.0f};
     // Approximate UV footprint diameter of one camera pixel at the hit (for mip LOD).
     float uvFilterWidth = 0.0f;
@@ -82,15 +84,18 @@ SR_INL SR_HD bool buildSurfaceInteraction(const SceneView& scene, const RayHit& 
     const float w = 1.0f - hit.u - hit.v;
 
     const Vec3 pLocal = p0 * w + p1 * hit.u + p2 * hit.v;
+    si.pObject = pLocal;
     si.p = transformPoint(inst.xform, pLocal);
     // The hit distance is authoritative for ray offsets.
     si.p = origin + dir * hit.t;
 
     Vec3 ngLocal = cross(p1 - p0, p2 - p0);
+    si.nObject = lengthSquared(ngLocal) > 0.0f ? normalize(ngLocal) : Vec3(0.0f, 0.0f, 1.0f);
     si.ng = normalize(transformNormalWithInverse(inst.xformInv, ngLocal));
 
     if (mesh.normals) {
         const Vec3 nLocal = mesh.normals[i0] * w + mesh.normals[i1] * hit.u + mesh.normals[i2] * hit.v;
+        si.nObject = lengthSquared(nLocal) > 0.0f ? normalize(nLocal) : si.nObject;
         Vec3 ns = transformNormalWithInverse(inst.xformInv, nLocal);
         si.ns = lengthSquared(ns) > 0.0f ? normalize(ns) : si.ng;
     } else {
@@ -337,7 +342,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         Material baseMat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
                                ? scene.materials[si.materialIndex]
                                : defaultMaterial();
-        Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.uvFilterWidth);
+        Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject,
+                                                si.uvFilterWidth);
 
         // Two sided shading for opaque surfaces. Winding order varies between
         // DCCs, so back faces are shaded as if their normals pointed at us.

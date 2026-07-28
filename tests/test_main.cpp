@@ -538,16 +538,10 @@ void testMaterialXNoiseAndTriplanar() {
     MaterialXEvalResult eval = evaluateMaterialXDocument(noiseXml, QString());
     check(eval.ok, "evaluate noise graph ok");
     check(eval.error.isEmpty(), "evaluate noise no error string");
-    check(eval.baseColorTexture != nullptr, "noise bakes to baseColorTexture");
-    if (eval.baseColorTexture) {
-        check(eval.baseColorTexture->width() >= 64 && eval.baseColorTexture->height() >= 64,
-              "baked noise texture has size");
-        // At least some variation across the bake.
-        const Vec3 a = eval.baseColorTexture->rgb(8, 8);
-        const Vec3 b = eval.baseColorTexture->rgb(40, 40);
-        check(length(a - b) > 1e-4f || maxComponent(a) > 0.01f, "baked noise is not flat black");
-    }
-    std::printf("  noise baseTex=%s\n", eval.baseColorTexture ? "yes" : "no");
+    check(eval.material.baseColorProc >= 0 || eval.baseColorTexture != nullptr, "noise binds base color map");
+    check(eval.material.baseColorProc >= 0, "noise2d compiles to shade-time procedural");
+    check(!eval.procedurals.empty(), "noise emits procedural ops");
+    std::printf("  noise baseProc=%d ops=%zu\n", eval.material.baseColorProc, eval.procedurals.size());
 
     const QString triXml = QStringLiteral(
         "<?xml version=\"1.0\"?>\n"
@@ -568,9 +562,9 @@ void testMaterialXNoiseAndTriplanar() {
         "</materialx>\n");
     eval = evaluateMaterialXDocument(triXml, QString());
     check(eval.ok, "evaluate empty triplanar ok (no crash)");
-    check(eval.baseColorTexture != nullptr, "triplanar bakes default color texture");
-    std::printf("  triplanar ok=%d err=%s tex=%s\n", int(eval.ok), eval.error.toStdString().c_str(),
-                eval.baseColorTexture ? "yes" : "no");
+    check(eval.material.baseColorProc >= 0, "triplanar compiles to shade-time procedural");
+    std::printf("  triplanar ok=%d err=%s proc=%d\n", int(eval.ok), eval.error.toStdString().c_str(),
+                eval.material.baseColorProc);
 
     // float noise → color3 (type mismatch users often make)
     const QString floatNoise = QStringLiteral(
@@ -588,8 +582,8 @@ void testMaterialXNoiseAndTriplanar() {
         "</materialx>\n");
     eval = evaluateMaterialXDocument(floatNoise, QString());
     check(eval.ok, "evaluate float-noise→color3 ok (no crash)");
-    check(eval.baseColorTexture != nullptr, "float noise bakes into color3 slot");
-    std::printf("  floatNoise ok=%d tex=%s\n", int(eval.ok), eval.baseColorTexture ? "yes" : "no");
+    check(eval.material.baseColorProc >= 0, "float noise compiles into color3 slot");
+    std::printf("  floatNoise ok=%d proc=%d\n", int(eval.ok), eval.material.baseColorProc);
 
     // noise3d → base_color (the UI cook path that was crashing on Windows).
     const QString noise3dXml = QStringLiteral(
@@ -614,10 +608,10 @@ void testMaterialXNoiseAndTriplanar() {
     check(!noise3dRound.contains("name=\"position\""), "serialize skips empty noise3d position");
     eval = evaluateMaterialXDocument(noise3dXml, QString());
     check(eval.ok, "evaluate noise3d (empty position) ok");
-    check(eval.baseColorTexture != nullptr, "noise3d bakes to baseColorTexture");
+    check(eval.material.baseColorProc >= 0, "noise3d compiles to baseColorProc");
     eval = evaluateMaterialXDocument(noise3dRound, QString());
     check(eval.ok, "evaluate serialized noise3d ok");
-    check(eval.baseColorTexture != nullptr, "serialized noise3d bakes");
+    check(eval.material.baseColorProc >= 0, "serialized noise3d compiles");
 
     const QString noise3dPos = QStringLiteral(
         "<?xml version=\"1.0\"?>\n"
@@ -636,8 +630,36 @@ void testMaterialXNoiseAndTriplanar() {
         "</materialx>\n");
     eval = evaluateMaterialXDocument(noise3dPos, QString());
     check(eval.ok, "evaluate noise3d+position ok");
-    check(eval.baseColorTexture != nullptr, "noise3d+position bakes");
-    std::printf("  noise3d ok=%d tex=%s\n", int(eval.ok), eval.baseColorTexture ? "yes" : "no");
+    check(eval.material.baseColorProc >= 0, "noise3d+position compiles");
+
+    // unifiednoise3d with high frequency must compile (no spinbox clamp on authoring).
+    const QString unified = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <unifiednoise3d name=\"u1\" type=\"float\">\n"
+        "    <input name=\"freq\" type=\"vector3\" value=\"64, 64, 64\"/>\n"
+        "    <input name=\"offset\" type=\"vector3\" value=\"0, 0, 0\"/>\n"
+        "    <input name=\"type\" type=\"integer\" value=\"0\"/>\n"
+        "  </unifiednoise3d>\n"
+        "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" nodename=\"u1\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n");
+    eval = evaluateMaterialXDocument(unified, QString());
+    check(eval.ok, "evaluate unifiednoise3d freq=64 ok");
+    check(eval.material.baseColorProc >= 0, "unifiednoise3d compiles");
+    if (eval.material.baseColorProc >= 0 && size_t(eval.material.baseColorProc) < eval.procedurals.size()) {
+        const ProceduralNode& node = eval.procedurals[size_t(eval.material.baseColorProc)];
+        check(node.op == kProcUnified3d, "unifiednoise3d opcode");
+        check(std::fabs(node.p0.x - 64.0f) < 1e-4f, "freq 64 preserved (no clamp)");
+    }
+    std::printf("  noise3d ok=%d proc=%d unified freq=%g\n", int(eval.ok), eval.material.baseColorProc,
+                eval.material.baseColorProc >= 0 && size_t(eval.material.baseColorProc) < eval.procedurals.size()
+                    ? double(eval.procedurals[size_t(eval.material.baseColorProc)].p0.x)
+                    : 0.0);
 }
 
 void testMaterialXUdimCubeAsset() {

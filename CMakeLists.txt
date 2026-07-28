@@ -232,6 +232,7 @@ set(SOLSTICE_LIB_SOURCES
     src/io/usd_loader.cpp
     src/io/materialx_graph.cpp
     src/io/materialx_bake.cpp
+    src/io/materialx_compile.cpp
     src/render/framebuffer.cpp
     src/render/render_session.cpp
     src/render/scene_picker.cpp
@@ -263,6 +264,8 @@ set(SOLSTICE_LIB_HEADERS
     src/io/usd_loader.h
     src/io/materialx_graph.h
     src/io/materialx_bake.h
+    src/io/materialx_compile.h
+    src/render/procedural.h
     src/render/shading.h
     src/render/lights.h
     src/render/integrator.h

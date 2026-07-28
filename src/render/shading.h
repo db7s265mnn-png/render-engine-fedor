@@ -8,6 +8,7 @@
 
 #include "core/math.h"
 #include "core/rng.h"
+#include "render/procedural.h"
 #include "scene/types.h"
 
 namespace sol {
@@ -190,26 +191,51 @@ SR_INL SR_HD float sampleTextureScalar(const SceneView& scene, int texIndex, Vec
     return saturatef(c.x);
 }
 
-// Apply MaterialX-style texture maps and normal mapping to a base material.
+// Apply MaterialX-style texture maps, shade-time procedurals, and normal mapping.
 SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Material& base, Vec2 uv, Vec3& ns,
-                                               float uvFilterWidth = 0.0f) {
+                                               Vec3 pObject, Vec3 nObject, float uvFilterWidth = 0.0f) {
     Material mat = base;
-    mat.baseColor = sampleTextureRGB(scene, base.baseColorTex, uv, base.baseColor, uvFilterWidth);
-    if (base.baseColorTex >= 0) mat.baseColor = mat.baseColor * vmax(Vec3(0.0f), base.baseColor);
-    mat.roughness = sampleTextureScalar(scene, base.roughnessTex, uv, base.roughness, uvFilterWidth);
-    if (base.roughnessTex >= 0) mat.roughness = saturatef(mat.roughness * base.roughness);
-    mat.metallic = sampleTextureScalar(scene, base.metallicTex, uv, base.metallic, uvFilterWidth);
-    if (base.metallicTex >= 0) mat.metallic = saturatef(mat.metallic * base.metallic);
-    mat.opacity = sampleTextureScalar(scene, base.opacityTex, uv, base.opacity, uvFilterWidth);
-    if (base.opacityTex >= 0) mat.opacity = saturatef(mat.opacity * base.opacity);
-    mat.emissionColor = sampleTextureRGB(scene, base.emissionTex, uv, base.emissionColor, uvFilterWidth);
-    if (base.emissionTex >= 0) mat.emissionColor = mat.emissionColor * vmax(Vec3(0.0f), base.emissionColor);
-    mat.subsurfaceColor = sampleTextureRGB(scene, base.subsurfaceTex, uv, base.subsurfaceColor, uvFilterWidth);
-    if (base.subsurfaceTex >= 0)
+    ProceduralCtx ctx;
+    ctx.uv = uv;
+    ctx.pObject = pObject;
+    ctx.nObject = nObject;
+    ctx.filterWidth = uvFilterWidth;
+
+    auto sampleRgbSlot = [&](int proc, int tex, Vec3 fallback) -> Vec3 {
+        if (proc >= 0) {
+            const Vec4 c = evalProceduralRoot(scene, proc, ctx);
+            return vmax(Vec3(0.0f), Vec3(c.x, c.y, c.z));
+        }
+        return sampleTextureRGB(scene, tex, uv, fallback, uvFilterWidth);
+    };
+    auto sampleScalarSlot = [&](int proc, int tex, float fallback) -> float {
+        if (proc >= 0) {
+            const Vec4 c = evalProceduralRoot(scene, proc, ctx);
+            return saturatef(c.x);
+        }
+        return sampleTextureScalar(scene, tex, uv, fallback, uvFilterWidth);
+    };
+
+    mat.baseColor = sampleRgbSlot(base.baseColorProc, base.baseColorTex, base.baseColor);
+    if (base.baseColorProc >= 0 || base.baseColorTex >= 0)
+        mat.baseColor = mat.baseColor * vmax(Vec3(0.0f), base.baseColor);
+    mat.roughness = sampleScalarSlot(base.roughnessProc, base.roughnessTex, base.roughness);
+    if (base.roughnessProc >= 0 || base.roughnessTex >= 0)
+        mat.roughness = saturatef(mat.roughness * base.roughness);
+    mat.metallic = sampleScalarSlot(base.metallicProc, base.metallicTex, base.metallic);
+    if (base.metallicProc >= 0 || base.metallicTex >= 0)
+        mat.metallic = saturatef(mat.metallic * base.metallic);
+    mat.opacity = sampleScalarSlot(base.opacityProc, base.opacityTex, base.opacity);
+    if (base.opacityProc >= 0 || base.opacityTex >= 0) mat.opacity = saturatef(mat.opacity * base.opacity);
+    mat.emissionColor = sampleRgbSlot(base.emissionProc, base.emissionTex, base.emissionColor);
+    if (base.emissionProc >= 0 || base.emissionTex >= 0)
+        mat.emissionColor = mat.emissionColor * vmax(Vec3(0.0f), base.emissionColor);
+    mat.subsurfaceColor = sampleRgbSlot(base.subsurfaceProc, base.subsurfaceTex, base.subsurfaceColor);
+    if (base.subsurfaceProc >= 0 || base.subsurfaceTex >= 0)
         mat.subsurfaceColor = mat.subsurfaceColor * vmax(Vec3(0.0f), base.subsurfaceColor);
 
-    if (base.normalTex >= 0 && base.normalTex < scene.textureCount && scene.textures) {
-        Vec3 nMap = sampleTextureRGB(scene, base.normalTex, uv, Vec3(0.5f, 0.5f, 1.0f), uvFilterWidth);
+    if (base.normalProc >= 0 || (base.normalTex >= 0 && base.normalTex < scene.textureCount && scene.textures)) {
+        Vec3 nMap = sampleRgbSlot(base.normalProc, base.normalTex, Vec3(0.5f, 0.5f, 1.0f));
         nMap = nMap * 2.0f - Vec3(1.0f);
         nMap.z = srMax(0.05f, nMap.z);
         nMap = normalize(nMap);

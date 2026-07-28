@@ -106,6 +106,51 @@ ScenePtr Stage::toScene() const {
                 material.emissionTex = scene->addTexture(prim.emissionTexture);
                 material.normalTex = scene->addTexture(prim.normalTexture);
                 material.subsurfaceTex = scene->addTexture(prim.subsurfaceTexture);
+
+                // Append shade-time procedurals; remap local child / texture indices.
+                if (!prim.procedurals.empty()) {
+                    const int texBase = int(scene->textures.size());
+                    for (const std::shared_ptr<Image>& image : prim.proceduralImages)
+                        scene->addTexture(image);
+                    const int procBase = int(scene->procedurals.size());
+                    auto remapProc = [&](int& idx) {
+                        if (idx >= 0) idx += procBase;
+                    };
+                    auto remapTex = [&](int& idx) {
+                        if (idx >= 0) idx += texBase;
+                    };
+                    auto remapRoot = [&](int& idx) {
+                        if (idx >= 0) idx += procBase;
+                    };
+                    for (ProceduralNode node : prim.procedurals) {
+                        switch (node.op) {
+                            case kProcImage:
+                                remapTex(node.in0);
+                                remapProc(node.in1);
+                                break;
+                            case kProcTriplanar:
+                                remapTex(node.in0);
+                                remapTex(node.in1);
+                                remapTex(node.in2);
+                                break;
+                            default:
+                                remapProc(node.in0);
+                                remapProc(node.in1);
+                                remapProc(node.in2);
+                                remapProc(node.in3);
+                                break;
+                        }
+                        scene->procedurals.push_back(node);
+                    }
+                    remapRoot(material.baseColorProc);
+                    remapRoot(material.roughnessProc);
+                    remapRoot(material.metallicProc);
+                    remapRoot(material.opacityProc);
+                    remapRoot(material.emissionProc);
+                    remapRoot(material.normalProc);
+                    remapRoot(material.subsurfaceProc);
+                }
+
                 const int materialIndex = scene->addMaterial(material);
                 InstanceData inst;
                 inst.xform = prim.xform;

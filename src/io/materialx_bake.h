@@ -1,6 +1,6 @@
 // CPU bake of MaterialX procedural / texture subgraphs into UV textures.
-// Solstice does not run ShaderGen; noise / math / triplanar are evaluated here
-// at cook time so path tracing can sample them like ordinary image maps.
+// Prefer shade-time compilation (materialx_compile + render/procedural.h); this
+// bake path remains for tooling / fallbacks only.
 #pragma once
 
 #include <memory>

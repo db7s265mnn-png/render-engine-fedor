@@ -12,7 +12,7 @@
 
 #include "core/log.h"
 #include "io/image_io.h"
-#include "io/materialx_bake.h"
+#include "io/materialx_compile.h"
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_MATERIALX
@@ -684,42 +684,54 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
             logInfo("MaterialX udimset=[" + ids + "]");
         }
 
-        auto bindTex = [&](const char* inputName, std::shared_ptr<Image>& slot) {
+        auto bindSlot = [&](const char* inputName, std::shared_ptr<Image>& slot, int& procIndex) {
             mx::NodePtr connected = resolveConnectedNode(ss, inputName);
             if (!connected) return;
+            const std::string cat = connected->getCategory();
 
-            // Prefer a concrete image/tiledimage (possibly behind multiply/mix/normalmap).
-            mx::NodePtr image = findImageNode(connected);
-            if (image) {
+            // Pure image maps keep the texture path (mips / UDIM).
+            if (cat == "image" || cat == "tiledimage") {
                 std::string texError;
-                slot = loadTextureFromImageNode(image, searchDirectory, udimSet, texError);
+                slot = loadTextureFromImageNode(connected, searchDirectory, udimSet, texError);
                 if (!slot && !texError.empty()) logWarning("MaterialX: " + texError);
                 return;
             }
-
-            // Procedural / triplanar / math graphs → bake to a UV texture.
-            if (materialXNodeIsBakable(connected)) {
-                std::string bakeError;
-                slot = bakeMaterialXNodeToTexture(connected, searchDirectory, udimSet, 512, bakeError);
-                if (slot) {
-                    logInfo(std::string("MaterialX: baked ") + connected->getCategory() + " → " + inputName +
-                            " (" + std::to_string(slot->width()) + "x" + std::to_string(slot->height()) + ")");
-                } else if (!bakeError.empty()) {
-                    logWarning("MaterialX bake (" + std::string(inputName) + "): " + bakeError);
+            if (cat == "normalmap") {
+                if (mx::NodePtr image = findImageNode(connected)) {
+                    std::string texError;
+                    slot = loadTextureFromImageNode(image, searchDirectory, udimSet, texError);
+                    if (!slot && !texError.empty()) logWarning("MaterialX: " + texError);
+                    return;
                 }
-            } else {
-                logWarning(std::string("MaterialX: unsupported upstream node '") + connected->getCategory() +
-                           "' on " + inputName + " (connect image / noise / triplanar / math)");
             }
+
+            // Noise / math / triplanar / image blends → shade-time procedural (not UV bake).
+            if (materialXNodeIsProcedural(connected)) {
+                std::string compileError;
+                const int localRoot =
+                    compileMaterialXNode(connected, searchDirectory, udimSet, result.procedurals,
+                                         result.proceduralImages, compileError);
+                if (localRoot >= 0) {
+                    procIndex = localRoot;
+                    logInfo(std::string("MaterialX: compiled ") + connected->getCategory() + " → " + inputName +
+                            " (shade-time procedural, " + std::to_string(result.procedurals.size()) + " ops)");
+                } else if (!compileError.empty()) {
+                    logWarning("MaterialX procedural (" + std::string(inputName) + "): " + compileError);
+                }
+                return;
+            }
+
+            logWarning(std::string("MaterialX: unsupported upstream node '") + connected->getCategory() +
+                       "' on " + inputName + " (connect image / noise / triplanar / math)");
         };
 
-        bindTex("base_color", result.baseColorTexture);
-        bindTex("specular_roughness", result.roughnessTexture);
-        bindTex("metalness", result.metallicTexture);
-        bindTex("opacity", result.opacityTexture);
-        bindTex("emission_color", result.emissionTexture);
-        bindTex("normal", result.normalTexture);
-        bindTex("subsurface_color", result.subsurfaceTexture);
+        bindSlot("base_color", result.baseColorTexture, result.material.baseColorProc);
+        bindSlot("specular_roughness", result.roughnessTexture, result.material.roughnessProc);
+        bindSlot("metalness", result.metallicTexture, result.material.metallicProc);
+        bindSlot("opacity", result.opacityTexture, result.material.opacityProc);
+        bindSlot("emission_color", result.emissionTexture, result.material.emissionProc);
+        bindSlot("normal", result.normalTexture, result.material.normalProc);
+        bindSlot("subsurface_color", result.subsurfaceTexture, result.material.subsurfaceProc);
 
         result.ok = true;
         return result;

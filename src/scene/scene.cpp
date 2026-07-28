@@ -260,12 +260,14 @@ SceneView Scene::view() const {
     v.lights = lights.data();
     v.envMaps = envViews_.data();
     v.textures = textureViews_.data();
+    v.procedurals = procedurals.data();
     v.meshCount = static_cast<int>(meshViews_.size());
     v.instanceCount = static_cast<int>(instances.size());
     v.materialCount = static_cast<int>(materials.size());
     v.lightCount = static_cast<int>(lights.size());
     v.envMapCount = static_cast<int>(envViews_.size());
     v.textureCount = static_cast<int>(textureViews_.size());
+    v.proceduralCount = static_cast<int>(procedurals.size());
     v.domeLightIndex = domeLightIndex_;
     v.camera = camera;
     v.settings = settings;

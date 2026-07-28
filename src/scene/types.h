@@ -47,7 +47,66 @@ struct Material {
     int emissionTex = -1;
     int normalTex = -1;
     int subsurfaceTex = -1;
-    int pad2 = 0;
+    // Indices into SceneView::procedurals (-1 = none). Procedurals win over textures.
+    int baseColorProc = -1;
+
+    int roughnessProc = -1;
+    int metallicProc = -1;
+    int opacityProc = -1;
+    int emissionProc = -1;
+
+    int normalProc = -1;
+    int subsurfaceProc = -1;
+    int padProc0 = 0;
+    int padProc1 = 0;
+};
+
+// Shade-time MaterialX procedural opcode (see render/procedural.h for evaluation).
+enum ProceduralOp : int {
+    kProcConst = 0,
+    kProcUv = 1,
+    kProcPosition = 2,
+    kProcNormal = 3,
+    kProcNoise2d = 4,
+    kProcNoise3d = 5,
+    kProcFractal = 6,
+    kProcCell2d = 7,
+    kProcCell3d = 8,
+    kProcImage = 9,
+    kProcTriplanar = 10,
+    kProcMul = 11,
+    kProcAdd = 12,
+    kProcSub = 13,
+    kProcDiv = 14,
+    kProcMix = 15,
+    kProcClamp = 16,
+    kProcSaturate = 17,
+    kProcInvert = 18,
+    kProcAbs = 19,
+    kProcPower = 20,
+    kProcCombine = 21,
+    kProcExtract = 22,
+    kProcRampLR = 23,
+    kProcRampTB = 24,
+    kProcChecker = 25,
+    kProcUnified2d = 26,
+    kProcUnified3d = 27,
+};
+
+struct ProceduralNode {
+    int op = kProcConst;
+    int channels = 3;
+    int in0 = -1;
+    int in1 = -1;
+    int in2 = -1;
+    int in3 = -1;
+    Vec4 p0{0.0f, 0.0f, 0.0f, 1.0f};
+    Vec4 p1{0.0f, 0.0f, 0.0f, 0.0f};
+    Vec4 p2{0.0f, 1.0f, 0.0f, 0.0f};
+    float s0 = 0.0f;
+    float s1 = 2.0f;
+    float s2 = 0.5f;
+    float s3 = 1.0f;
 };
 
 // RGBA32F texture view shared by CPU / GPU shading.
@@ -218,6 +277,7 @@ struct SceneView {
     const LightData* lights = nullptr;
     const EnvMapView* envMaps = nullptr;
     const TextureView* textures = nullptr;
+    const ProceduralNode* procedurals = nullptr;
 
     int meshCount = 0;
     int instanceCount = 0;
@@ -225,6 +285,7 @@ struct SceneView {
     int lightCount = 0;
     int envMapCount = 0;
     int textureCount = 0;
+    int proceduralCount = 0;
     int domeLightIndex = -1;  // first dome light, used for ray misses
 
     CameraData camera;

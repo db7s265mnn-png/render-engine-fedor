@@ -201,6 +201,19 @@ void materialXFloatRange(const QString& name, double& lo, double& hi) {
         hi = 10.0;
         return;
     }
+    // Soft slider only — typed values may exceed these for procedural authoring.
+    if (n.contains(QLatin1String("freq")) || n.contains(QLatin1String("frequency")) ||
+        n == QLatin1String("lacunarity")) {
+        lo = 0.0;
+        hi = 100.0;
+        return;
+    }
+    if (n.contains(QLatin1String("amplitude")) || n.contains(QLatin1String("offset")) ||
+        n == QLatin1String("pivot")) {
+        lo = -10.0;
+        hi = 10.0;
+        return;
+    }
     if (n == QLatin1String("emission") || n.contains(QLatin1String("intensity")) ||
         n.contains(QLatin1String("exposure"))) {
         lo = 0.0;
@@ -496,28 +509,36 @@ void ParameterPanel::rebuildMaterialX() {
     auto* form = new QFormLayout(paramsBox);
     form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
-    auto makeComponentRow = [this](int count, const QVector<double>& values, double lo, double hi, bool showSwatch,
-                                   const QString& pickerTitle, const std::function<void(const QString&)>& commit) {
+    auto makeComponentRow = [this](int count, const QVector<double>& values, double sliderLo, double sliderHi,
+                                   bool showSwatch, const QString& pickerTitle,
+                                   const std::function<void(const QString&)>& commit) {
         auto* row = new QWidget();
         auto* layout = new QHBoxLayout(row);
         layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(4);
 
-        QVector<QDoubleSpinBox*> spins;
-        spins.reserve(count);
+        // Soft slider range is display-only — typed values are never hard-clamped
+        // (procedural freq / amplitude often need values well beyond the slider).
+        QVector<FreeFloatLineEdit*> edits;
+        edits.reserve(count);
         for (int i = 0; i < count; ++i) {
             const double v = i < values.size() ? values[i] : (i < 3 ? 0.0 : 1.0);
-            auto* spin = makeDoubleSpin(std::clamp(v, lo, hi), lo, hi);
-            spin->setDecimals(3);
-            spin->setMaximumWidth(64);
-            spins.push_back(spin);
-            layout->addWidget(spin, 0);
+            auto* edit = new FreeFloatLineEdit(v);
+            edit->setMinimumWidth(56);
+            edit->setMaximumWidth(72);
+            edits.push_back(edit);
+            layout->addWidget(edit, 0);
         }
 
-        auto pushValue = [spins, commit] {
+        auto pushValue = [edits, commit] {
             QVector<double> out;
-            out.reserve(spins.size());
-            for (QDoubleSpinBox* spin : spins) out.push_back(spin->value());
+            out.reserve(edits.size());
+            for (FreeFloatLineEdit* edit : edits) {
+                bool ok = false;
+                double v = edit->value(&ok);
+                if (!ok) v = 0.0;
+                out.push_back(v);
+            }
             commit(formatFloatList(out));
         };
 
@@ -526,46 +547,55 @@ void ParameterPanel::rebuildMaterialX() {
             swatch = new QPushButton();
             swatch->setFixedSize(28, 22);
             swatch->setToolTip("Pick colour");
-            // Swatch on the right of the component fields (Houdini-like, mirrored).
             layout->addWidget(swatch, 0);
         }
         layout->addStretch(1);
 
-        auto refreshSwatch = [spins, swatch] {
-            if (!swatch || spins.size() < 3) return;
+        auto refreshSwatch = [edits, swatch] {
+            if (!swatch || edits.size() < 3) return;
+            bool ok0 = false, ok1 = false, ok2 = false;
+            const double r = edits[0]->value(&ok0);
+            const double g = edits[1]->value(&ok1);
+            const double b = edits[2]->value(&ok2);
             swatch->setStyleSheet(
                 QString("background:%1; border:1px solid #222;")
-                    .arg(QColor::fromRgbF(qBound(0.0, spins[0]->value(), 1.0), qBound(0.0, spins[1]->value(), 1.0),
-                                          qBound(0.0, spins[2]->value(), 1.0))
+                    .arg(QColor::fromRgbF(qBound(0.0, ok0 ? r : 0.0, 1.0), qBound(0.0, ok1 ? g : 0.0, 1.0),
+                                          qBound(0.0, ok2 ? b : 0.0, 1.0))
                              .name()));
         };
         refreshSwatch();
+        Q_UNUSED(sliderLo);
+        Q_UNUSED(sliderHi);
 
         if (swatch) {
-            connect(swatch, &QPushButton::clicked, this, [this, spins, pushValue, refreshSwatch, pickerTitle] {
-                if (spins.size() < 3) return;
+            connect(swatch, &QPushButton::clicked, this, [this, edits, pushValue, refreshSwatch, pickerTitle] {
+                if (edits.size() < 3) return;
+                bool ok0 = false, ok1 = false, ok2 = false;
                 const QColor chosen = QColorDialog::getColor(
-                    QColor::fromRgbF(qBound(0.0, spins[0]->value(), 1.0), qBound(0.0, spins[1]->value(), 1.0),
-                                     qBound(0.0, spins[2]->value(), 1.0)),
+                    QColor::fromRgbF(qBound(0.0, edits[0]->value(&ok0), 1.0), qBound(0.0, edits[1]->value(&ok1), 1.0),
+                                     qBound(0.0, edits[2]->value(&ok2), 1.0)),
                     this, pickerTitle);
                 if (!chosen.isValid()) return;
-                QSignalBlocker b0(spins[0]);
-                QSignalBlocker b1(spins[1]);
-                QSignalBlocker b2(spins[2]);
-                spins[0]->setValue(chosen.redF());
-                spins[1]->setValue(chosen.greenF());
-                spins[2]->setValue(chosen.blueF());
+                edits[0]->setValue(chosen.redF(), true);
+                edits[1]->setValue(chosen.greenF(), true);
+                edits[2]->setValue(chosen.blueF(), true);
                 refreshSwatch();
                 pushValue();
             });
         }
 
-        for (QDoubleSpinBox* spin : spins) {
-            connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
-                    [pushValue, refreshSwatch](double) {
-                        refreshSwatch();
-                        pushValue();
-                    });
+        for (FreeFloatLineEdit* edit : edits) {
+            connect(edit, &QLineEdit::editingFinished, this, [edit, pushValue, refreshSwatch] {
+                bool ok = false;
+                const double v = edit->value(&ok);
+                if (!ok) {
+                    edit->setValue(0.0, true);
+                    return;
+                }
+                edit->setValue(v, true);
+                refreshSwatch();
+                pushValue();
+            });
         }
         return row;
     };

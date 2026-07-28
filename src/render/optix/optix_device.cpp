@@ -309,6 +309,8 @@ public:
             }
             textureViewBuffer_.upload(textureViews);
 
+            proceduralBuffer_.upload(scene_->procedurals);
+
             meshViewBuffer_.upload(meshViews);
             instanceBuffer_.upload(scene_->instances);
             materialBuffer_.upload(scene_->materials);
@@ -323,10 +325,13 @@ public:
             deviceScene_.envMaps = envViewBuffer_.as<const EnvMapView>();
             deviceScene_.textures = textureViewBuffer_.as<const TextureView>();
             deviceScene_.textureCount = int(textureViews.size());
+            deviceScene_.procedurals = proceduralBuffer_.as<const ProceduralNode>();
+            deviceScene_.proceduralCount = int(scene_->procedurals.size());
 
             logInfo("OptiX: uploaded " + std::to_string(scene_->instances.size()) + " instances, " +
                     std::to_string(scene_->totalTriangles()) + " triangles, " +
-                    std::to_string(textureViews.size()) + " textures");
+                    std::to_string(textureViews.size()) + " textures, " +
+                    std::to_string(scene_->procedurals.size()) + " procedurals");
             return true;
         } catch (const std::exception& e) {
             error = e.what();
@@ -588,6 +593,7 @@ private:
         lightBuffer_.free();
         envViewBuffer_.free();
         textureViewBuffer_.free();
+        proceduralBuffer_.free();
         iasHandle_ = 0;
         deviceScene_ = SceneView();
         scene_.reset();
@@ -634,6 +640,7 @@ private:
     DeviceBuffer launchParamsBuffer_, accumBuffer_;
     DeviceBuffer meshViewBuffer_, instanceBuffer_, materialBuffer_, lightBuffer_, envViewBuffer_;
     DeviceBuffer textureViewBuffer_;
+    DeviceBuffer proceduralBuffer_;
     DeviceBuffer instanceDescBuffer_;
     std::vector<DeviceBuffer> geometryBuffers_;
     std::vector<DeviceBuffer> accelBuffers_;

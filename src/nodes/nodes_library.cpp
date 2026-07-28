@@ -396,6 +396,8 @@ public:
             prim.emissionTexture = evaluated.emissionTexture;
             prim.normalTexture = evaluated.normalTexture;
             prim.subsurfaceTexture = evaluated.subsurfaceTexture;
+            prim.procedurals = evaluated.procedurals;
+            prim.proceduralImages = evaluated.proceduralImages;
         }
     }
 };

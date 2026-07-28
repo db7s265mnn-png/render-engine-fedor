@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "scene/types.h"
 
@@ -26,6 +27,10 @@ struct MaterialXEvalResult {
     std::shared_ptr<Image> emissionTexture;
     std::shared_ptr<Image> normalTexture;
     std::shared_ptr<Image> subsurfaceTexture;
+    // Shade-time procedural graphs (noise / math / triplanar). Indices on `material.*Proc`
+    // are local to `procedurals`. Image leaves store local indices into `proceduralImages`.
+    std::vector<ProceduralNode> procedurals;
+    std::vector<std::shared_ptr<Image>> proceduralImages;
     QString error;
     bool ok = false;
 };
