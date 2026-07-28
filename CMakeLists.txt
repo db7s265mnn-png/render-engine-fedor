@@ -362,10 +362,15 @@ set(SOLSTICE_APP_HEADERS
 
 if(SOLSTICE_BUILD_APP)
     set(CMAKE_AUTORCC ON)
+    set(SOLSTICE_APP_ICON_SOURCES resources/icons.qrc)
+    if(WIN32)
+        # Embed multi-size .ico so Explorer / taskbar / shortcuts use the Bob icon.
+        list(APPEND SOLSTICE_APP_ICON_SOURCES resources/app_icon.rc)
+    endif()
     qt_add_executable(Solstice WIN32 MACOSX_BUNDLE
         ${SOLSTICE_APP_SOURCES}
         ${SOLSTICE_APP_HEADERS}
-        resources/icons.qrc)
+        ${SOLSTICE_APP_ICON_SOURCES})
     target_link_libraries(Solstice PRIVATE solstice_lib Qt6::Widgets)
     set_target_properties(Solstice PROPERTIES
         OUTPUT_NAME "${SOLSTICE_APP_DISPLAY_NAME}"

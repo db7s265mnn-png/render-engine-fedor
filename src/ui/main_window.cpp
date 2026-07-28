@@ -10,7 +10,9 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenuBar>
+#include <QIcon>
 #include <QMessageBox>
+#include <QPixmap>
 #include <QMouseEvent>
 #include <QSplitter>
 #include <QStatusBar>
@@ -81,6 +83,19 @@ protected:
     }
 };
 
+QMessageBox::StandardButton appMessageBox(QWidget* parent, const QString& title, const QString& text,
+                                          QMessageBox::StandardButtons buttons = QMessageBox::Ok,
+                                          QMessageBox::StandardButton def = QMessageBox::NoButton) {
+    QMessageBox box(parent);
+    box.setWindowTitle(title);
+    box.setText(text);
+    box.setStandardButtons(buttons);
+    if (def != QMessageBox::NoButton) box.setDefaultButton(def);
+    box.setIconPixmap(QPixmap(QStringLiteral(":/icons/app_icon_64.png")));
+    if (parent) box.setWindowIcon(parent->windowIcon());
+    return static_cast<QMessageBox::StandardButton>(box.exec());
+}
+
 QImage toQImage(const Image& image) {
     if (image.empty()) return {};
     QImage result(image.width(), image.height(), QImage::Format_RGB888);
@@ -102,6 +117,7 @@ QImage toQImage(const Image& image) {
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     registerBuiltinNodes();
     setWindowTitle(SOLSTICE_APP_NAME);
+    setWindowIcon(QIcon(QStringLiteral(":/icons/app_icon.png")));
     resize(1720, 1000);
 
     renderView_ = new RenderView(this);
@@ -579,7 +595,7 @@ bool MainWindow::openScene(const QString& path) {
     session_.stop();
     QString error;
     if (!loadGraphFromFile(graph_, path, error)) {
-        QMessageBox::warning(this, "Open scene", error);
+        appMessageBox(this, "Open scene", error);
         return false;
     }
     networkView_->setGraph(&graph_);
@@ -599,7 +615,7 @@ bool MainWindow::openScene(const QString& path) {
 bool MainWindow::saveScene(const QString& path) {
     QString error;
     if (!saveGraphToFile(graph_, path, error)) {
-        QMessageBox::warning(this, "Save scene", error);
+        appMessageBox(this, "Save scene", error);
         return false;
     }
     graph_.setFilePath(QFileInfo(path).absoluteFilePath());
@@ -669,13 +685,13 @@ void MainWindow::onSaveImage() {
     if (path.isEmpty()) return;
     const Image linear = session_.linearImage();
     if (linear.empty()) {
-        QMessageBox::information(this, "Save image", "Nothing has been rendered yet.");
+        appMessageBox(this, "Save image", "Nothing has been rendered yet.");
         return;
     }
     std::string error;
     const RenderSettingsData settings = scene_ ? scene_->settings : RenderSettingsData();
     if (!saveImageAuto(path.toStdString(), linear, settings, error)) {
-        QMessageBox::warning(this, "Save image", QString::fromStdString(error));
+        appMessageBox(this, "Save image", QString::fromStdString(error));
         return;
     }
     statusBar()->showMessage("Wrote " + path, 4000);
@@ -944,8 +960,7 @@ void MainWindow::onCopyViewToCameraNode() {
     Node* camera = findCameraNodeByName(lookThroughCameraName_);
     if (!camera) camera = findCameraNode();
     if (!camera) {
-        QMessageBox::information(this, "Copy view",
-                                 "This network has no camera node. Add one with Tab > Camera.");
+        appMessageBox(this, "Copy view", "This network has no camera node. Add one with Tab > Camera.");
         return;
     }
     writeViewToCameraNode(camera);
@@ -992,11 +1007,18 @@ void MainWindow::updateStatusBar() {
     renderView_->setStatusText(overlay);
 }
 
+
 bool MainWindow::maybeSaveChanges() {
     if (!graph_.isModified()) return true;
-    const QMessageBox::StandardButton answer =
-        QMessageBox::question(this, SOLSTICE_APP_NAME, "The current scene has unsaved changes. Save it?",
-                              QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+    QMessageBox box(this);
+    box.setWindowTitle(SOLSTICE_APP_NAME);
+    box.setText("The current scene has unsaved changes. Save it?");
+    box.setStandardButtons(QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel);
+    box.setDefaultButton(QMessageBox::Save);
+    // Replace the default "?" system glyph with the Bob app icon.
+    box.setIconPixmap(QPixmap(QStringLiteral(":/icons/app_icon_64.png")));
+    box.setWindowIcon(windowIcon());
+    const auto answer = static_cast<QMessageBox::StandardButton>(box.exec());
     if (answer == QMessageBox::Cancel) return false;
     if (answer == QMessageBox::Save) {
         onSaveScene();
@@ -1015,8 +1037,12 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::onShowAbout() {
-    QMessageBox::about(
-        this, QString("About %1").arg(SOLSTICE_APP_NAME),
+    QMessageBox about(this);
+    about.setWindowTitle(QString("About %1").arg(SOLSTICE_APP_NAME));
+    about.setWindowIcon(windowIcon());
+    about.setIconPixmap(QPixmap(QStringLiteral(":/icons/app_icon_64.png")));
+    about.setTextFormat(Qt::RichText);
+    about.setText(
         QString("<h3>%1 %2</h3>"
                 "<p>A node based path tracer in the spirit of Houdini Solaris.</p>"
                 "<ul>"
@@ -1027,10 +1053,11 @@ void MainWindow::onShowAbout() {
                 "</ul>")
             .arg(SOLSTICE_APP_NAME, SOLSTICE_VERSION,
                  optixBackendCompiledIn() ? "" : " (not compiled into this build)"));
+    about.exec();
 }
 
 void MainWindow::onShowShortcuts() {
-    QMessageBox::information(this, "Keyboard shortcuts",
+    appMessageBox(this, "Keyboard shortcuts",
                              "Scene Network\n"
                              "  Tab           add node (search)\n"
                              "  Ctrl+C / Ctrl+V   copy / paste nodes\n"

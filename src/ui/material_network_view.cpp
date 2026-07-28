@@ -1122,21 +1122,30 @@ void MaterialNetworkGraphView::writeModel(bool emitEdited) { writeXmlToMaterial(
 
 void MaterialNetworkGraphView::showEvent(QShowEvent* event) {
     QGraphicsView::showEvent(event);
-    if (pendingFrame_) scheduleFrameGraph();
+    // Always reframe when the MaterialX canvas becomes visible. Previously this
+    // only ran when pendingFrame_ was already set, so dive-into left nodes stuck
+    // on the left edge of the dock after the first tiny layout pass.
+    requestFrame();
 }
 
 void MaterialNetworkGraphView::resizeEvent(QResizeEvent* event) {
     QGraphicsView::resizeEvent(event);
-    if (pendingFrame_) scheduleFrameGraph();
+    requestFrame();
 }
+
+void MaterialNetworkGraphView::requestFrame() { scheduleFrameGraph(); }
 
 void MaterialNetworkGraphView::scheduleFrameGraph() {
     pendingFrame_ = true;
-    QTimer::singleShot(0, this, [this] {
+    auto attemptFrame = [this]() {
         if (!pendingFrame_) return;
         if (!isVisible() || width() < 80 || height() < 60) return;
         frameGraph();
-    });
+    };
+    // Dock/tabify often settles over a few events — reframe now and again shortly after.
+    QTimer::singleShot(0, this, attemptFrame);
+    QTimer::singleShot(33, this, attemptFrame);
+    QTimer::singleShot(100, this, attemptFrame);
 }
 
 void MaterialNetworkGraphView::frameGraph() {
@@ -1146,23 +1155,33 @@ void MaterialNetworkGraphView::frameGraph() {
     }
     pendingFrame_ = false;
     graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
-    const QRectF bounds = graphScene_->itemsBoundingRect();
+
+    // Bounds from node bodies only — long wires / port pads used to skew fitInView
+    // so the graph sat on the left of a huge empty scene.
+    QRectF bounds;
+    for (QGraphicsItem* item : graphScene_->items()) {
+        if (item->type() == MaterialNetworkNodeItem::Type) bounds |= item->sceneBoundingRect();
+    }
+    if (bounds.isEmpty()) bounds = graphScene_->itemsBoundingRect();
+
+    const QGraphicsView::ViewportAnchor savedAnchor = transformationAnchor();
+    setTransformationAnchor(QGraphicsView::AnchorViewCenter);
     resetTransform();
     if (bounds.isEmpty()) {
         centerOn(0.0, 0.0);
+        setTransformationAnchor(savedAnchor);
         return;
     }
-    const QRectF padded = bounds.adjusted(-80.0, -80.0, 80.0, 80.0);
+    const QRectF padded = bounds.adjusted(-140.0, -100.0, 140.0, 100.0);
     fitInView(padded, Qt::KeepAspectRatio);
     const double scaleValue = transform().m11();
-    if (scaleValue > 1.0 || scaleValue < 0.55) {
+    if (scaleValue > 1.15 || scaleValue < 0.55) {
         resetTransform();
-        const double clamped = std::clamp(scaleValue, 0.55, 1.0);
+        const double clamped = std::clamp(scaleValue, 0.55, 1.15);
         scale(clamped, clamped);
     }
-    // Always re-center — fitInView alone can leave content stuck on the left when
-    // the dock was framed at a tiny size before the tab was raised.
     centerOn(bounds.center());
+    setTransformationAnchor(savedAnchor);
 }
 
 void MaterialNetworkGraphView::wheelEvent(QWheelEvent* event) {
@@ -2299,16 +2318,19 @@ void MaterialContainerGraphView::showEvent(QShowEvent* event) {
 
 void MaterialContainerGraphView::resizeEvent(QResizeEvent* event) {
     QGraphicsView::resizeEvent(event);
-    if (pendingFrame_) scheduleFrameGraph();
+    scheduleFrameGraph();
 }
 
 void MaterialContainerGraphView::scheduleFrameGraph() {
     pendingFrame_ = true;
-    QTimer::singleShot(0, this, [this] {
+    auto attemptFrame = [this]() {
         if (!pendingFrame_) return;
         if (!isVisible() || width() < 80 || height() < 60) return;
         frameGraph();
-    });
+    };
+    QTimer::singleShot(0, this, attemptFrame);
+    QTimer::singleShot(33, this, attemptFrame);
+    QTimer::singleShot(100, this, attemptFrame);
 }
 
 void MaterialContainerGraphView::frameGraph() {
@@ -2323,7 +2345,16 @@ void MaterialContainerGraphView::frameGraph() {
         centerOn(0.0, 0.0);
         return;
     }
-    const QRectF bounds = graphScene_->itemsBoundingRect().adjusted(-40.0, -40.0, 40.0, 40.0);
+    QRectF bounds;
+    for (QGraphicsItem* item : graphScene_->items()) {
+        if (item->type() == MaterialContainerItem::Type) bounds |= item->sceneBoundingRect();
+    }
+    if (bounds.isEmpty()) bounds = graphScene_->itemsBoundingRect();
+    bounds = bounds.adjusted(-60.0, -60.0, 60.0, 60.0);
+
+    const QGraphicsView::ViewportAnchor savedAnchor = transformationAnchor();
+    setTransformationAnchor(QGraphicsView::AnchorViewCenter);
+    resetTransform();
     fitInView(bounds, Qt::KeepAspectRatio);
     const double scaleValue = transform().m11();
     if (scaleValue > 1.35 || scaleValue < 0.5) {
@@ -2332,6 +2363,7 @@ void MaterialContainerGraphView::frameGraph() {
         scale(clamped, clamped);
     }
     centerOn(bounds.center());
+    setTransformationAnchor(savedAnchor);
 }
 
 void MaterialContainerGraphView::wheelEvent(QWheelEvent* event) {
@@ -2581,6 +2613,8 @@ void MaterialNetworkView::diveInto(Node* material) {
     containerView_->hide();
     graphView_->show();
     graphView_->setMaterialNode(material);
+    // Force center after dive — rebuild may have framed while the view was still tiny.
+    graphView_->requestFrame();
     updateChrome();
     emit selectionChanged();
 }

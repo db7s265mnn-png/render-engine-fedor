@@ -7,5 +7,8 @@
         <file alias="LOP_merge.png">icons/LOP_merge.png</file>
         <file alias="MaterialX.png">icons/MaterialX.png</file>
         <file alias="ARRI.png">icons/ARRI.png</file>
+        <file alias="app_icon.png">icons/app_icon.png</file>
+        <file alias="app_icon_32.png">icons/app_icon_32.png</file>
+        <file alias="app_icon_64.png">icons/app_icon_64.png</file>
     </qresource>
 </RCC>

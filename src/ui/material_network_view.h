@@ -164,6 +164,8 @@ public:
     void selectNodeByName(const QString& name);
     // Live-update MaterialX wires while a node is dragged.
     void updateWiresLive();
+    // Reframe the graph into the viewport center (safe to call after dive/show/resize).
+    void requestFrame();
 
 signals:
     void materialEdited(sol::Node* node);

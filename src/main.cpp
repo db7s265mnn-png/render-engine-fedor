@@ -3,6 +3,7 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QStringList>
 
 #include "app/headless.h"
@@ -104,6 +105,13 @@ int main(int argc, char** argv) {
     QCoreApplication::setOrganizationName("Bob");
     QCoreApplication::setApplicationVersion(SOLSTICE_VERSION);
     QGuiApplication::setApplicationDisplayName(QString::fromUtf8(SOLSTICE_APP_NAME));
+    // Window / taskbar / message-box icon (exe icon on Windows comes from app_icon.rc).
+    {
+        QIcon appIcon(QStringLiteral(":/icons/app_icon.png"));
+        appIcon.addFile(QStringLiteral(":/icons/app_icon_32.png"), QSize(32, 32));
+        appIcon.addFile(QStringLiteral(":/icons/app_icon_64.png"), QSize(64, 64));
+        application.setWindowIcon(appIcon);
+    }
 
     QCommandLineParser parser;
     configureParser(parser);
