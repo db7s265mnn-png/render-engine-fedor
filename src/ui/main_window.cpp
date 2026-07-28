@@ -663,6 +663,10 @@ void MainWindow::cookNow() {
             prim.camera.fStop = float(cam->floatValue("fstop", prim.camera.fStop));
             const float focus = float(cam->floatValue("focusdistance", prim.camera.focusDistance));
             if (focus > 0.0f) prim.camera.focusDistance = focus;
+            prim.camera.opticalModel = cam->intValue("opticalmodel", prim.camera.opticalModel);
+            prim.camera.lensModel = cam->intValue("lensmodel", prim.camera.lensModel);
+            prim.camera.opticalWavelengthNm =
+                float(cam->floatValue("wavelength", prim.camera.opticalWavelengthNm));
             break;
         }
     }

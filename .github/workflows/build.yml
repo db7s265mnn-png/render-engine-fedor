@@ -143,13 +143,8 @@ jobs:
           arch: win64_msvc2019_64
           cache: true
 
-      - name: Install CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.23
-        with:
-          cuda: "12.6.3"
-          method: network
-          sub-packages: '["nvcc","cudart","visual_studio_integration"]'
-          use-github-cache: true
+      # OptiX/CUDA disabled on Windows CI: nvcc hangs the Build step for 30–80+ min.
+      # GPU OptiX is still exercised by the separate Linux OptiX job.
 
       - name: Cache the third party dependencies
         id: deps-cache
@@ -210,19 +205,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:DEPS_PREFIX/libraries" | Out-Null
           Copy-Item -Recurse materialx-src/libraries/* "$env:DEPS_PREFIX/libraries/"
 
-      - name: Fetch the OptiX headers
-        run: |
-          if (-not (Test-Path "$env:DEPS_PREFIX/optix-dev/include/optix.h")) {
-            git clone --depth 1 https://github.com/NVIDIA/optix-dev.git "$env:DEPS_PREFIX/optix-dev"
-          }
-
       - name: Configure
         run: >
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64
           -DCMAKE_PREFIX_PATH="${{ env.DEPS_PREFIX }};${{ env.DEPS_PREFIX }}/embree"
           -DSOLSTICE_MATERIALX_LIBRARIES="${{ env.DEPS_PREFIX }}/libraries"
-          -DSOLSTICE_ENABLE_OPTIX=ON
-          -DOptiX_ROOT="${{ env.DEPS_PREFIX }}/optix-dev"
+          -DSOLSTICE_ENABLE_OPTIX=OFF
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -238,14 +226,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item build/bin/Release/* dist/ -Recurse -Force
           Copy-Item "$env:DEPS_PREFIX/embree/bin/*.dll" dist/ -Force
-          # CUDA runtime for the OptiX backend (cudart / cuda driver stub).
-          $cudaBin = $env:CUDA_PATH
-          if ($cudaBin) {
-            Get-ChildItem -Path "$cudaBin/bin" -Filter "cudart64_*.dll" -ErrorAction SilentlyContinue |
-              ForEach-Object { Copy-Item $_.FullName dist/ -Force }
-            Get-ChildItem -Path "$cudaBin/bin" -Filter "cuda-*.dll" -ErrorAction SilentlyContinue |
-              ForEach-Object { Copy-Item $_.FullName dist/ -Force }
-          }
           # oneTBB / OpenPGL runtime (FetchContent build trees)
           Get-ChildItem -Path build -Recurse -Filter "tbb*.dll" -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName dist/ -Force }
