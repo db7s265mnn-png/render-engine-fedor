@@ -14,6 +14,9 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QResizeEvent>
+#include <QShowEvent>
+#include <QTimer>
 #include <QToolTip>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -251,27 +254,17 @@ void NodeGraphView::setGraph(NodeGraph* graph) {
     connect(graph, &NodeGraph::displayNodeChanged, this, [this](Node*) { graphScene_->refreshAllNodeItems(); });
     // Framing needs the final widget size, which is only known once the layout
     // has run, so it is deferred to the first show/resize.
-    pendingFrameAll_ = true;
-    if (isVisible() && width() > 50) {
-        pendingFrameAll_ = false;
-        frameAll();
-    }
+    scheduleFrameAll();
 }
 
 void NodeGraphView::showEvent(QShowEvent* event) {
     QGraphicsView::showEvent(event);
-    if (pendingFrameAll_ && width() > 50) {
-        pendingFrameAll_ = false;
-        frameAll();
-    }
+    if (pendingFrameAll_) scheduleFrameAll();
 }
 
 void NodeGraphView::resizeEvent(QResizeEvent* event) {
     QGraphicsView::resizeEvent(event);
-    if (pendingFrameAll_ && width() > 50) {
-        pendingFrameAll_ = false;
-        frameAll();
-    }
+    if (pendingFrameAll_) scheduleFrameAll();
 }
 
 Node* NodeGraphView::selectedNode() const {
@@ -290,22 +283,38 @@ void NodeGraphView::selectNode(Node* node, bool centerOnSelection) {
     }
 }
 
+void NodeGraphView::scheduleFrameAll() {
+    pendingFrameAll_ = true;
+    QTimer::singleShot(0, this, [this] {
+        if (!pendingFrameAll_) return;
+        if (!isVisible() || width() < 80 || height() < 60) return;
+        frameAll();
+    });
+}
+
 void NodeGraphView::frameAll() {
+    if (width() < 80 || height() < 60) {
+        pendingFrameAll_ = true;
+        return;
+    }
+    pendingFrameAll_ = false;
     const QRectF bounds = graphScene_->itemsBoundingRect();
     if (bounds.isEmpty()) {
         resetTransform();
         centerOn(0, 0);
         return;
     }
-    fitInView(bounds.adjusted(-60, -60, 60, 60), Qt::KeepAspectRatio);
+    const QRectF padded = bounds.adjusted(-60, -60, 60, 60);
+    fitInView(padded, Qt::KeepAspectRatio);
     // Keep the zoom in a range where node labels stay readable.
     const double scale = transform().m11();
     if (scale > 1.0 || scale < 0.5) {
         resetTransform();
         const double clamped = std::clamp(scale, 0.5, 1.0);
         this->scale(clamped, clamped);
-        centerOn(bounds.center());
     }
+    // Always re-center — fitInView alone can leave content stuck after a tab/dock resize.
+    centerOn(bounds.center());
 }
 
 void NodeGraphView::createNodeOfType(const QString& typeName) {

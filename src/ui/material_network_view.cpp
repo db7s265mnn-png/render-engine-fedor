@@ -31,6 +31,7 @@
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStyleOptionGraphicsItem>
+#include <QTimer>
 #include <QToolButton>
 #include <QToolTip>
 #include <QVBoxLayout>
@@ -1067,8 +1068,7 @@ void MaterialNetworkGraphView::rebuild() {
     // Keep a large scene rect so sticky pan is not clamped to content bounds.
     graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
     graphScene_->blockSignals(blocked);
-    pendingFrame_ = true;
-    if (isVisible() && width() > 50) frameGraph();
+    scheduleFrameGraph();
     emitSelectionChanged();
 }
 
@@ -1098,15 +1098,28 @@ void MaterialNetworkGraphView::writeModel(bool emitEdited) { writeXmlToMaterial(
 
 void MaterialNetworkGraphView::showEvent(QShowEvent* event) {
     QGraphicsView::showEvent(event);
-    if (pendingFrame_ && width() > 50) frameGraph();
+    if (pendingFrame_) scheduleFrameGraph();
 }
 
 void MaterialNetworkGraphView::resizeEvent(QResizeEvent* event) {
     QGraphicsView::resizeEvent(event);
-    if (pendingFrame_ && width() > 50) frameGraph();
+    if (pendingFrame_) scheduleFrameGraph();
+}
+
+void MaterialNetworkGraphView::scheduleFrameGraph() {
+    pendingFrame_ = true;
+    QTimer::singleShot(0, this, [this] {
+        if (!pendingFrame_) return;
+        if (!isVisible() || width() < 80 || height() < 60) return;
+        frameGraph();
+    });
 }
 
 void MaterialNetworkGraphView::frameGraph() {
+    if (width() < 80 || height() < 60) {
+        pendingFrame_ = true;
+        return;
+    }
     pendingFrame_ = false;
     graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
     const QRectF bounds = graphScene_->itemsBoundingRect();
@@ -2209,21 +2222,24 @@ void MaterialContainerGraphView::setMaterials(const QVector<Node*>& materials) {
         graphScene_->clear();
         const int count = int(materials.size());
         const int columns = std::max(1, int(std::ceil(std::sqrt(double(std::max(1, count))))));
+        const int rows = std::max(1, int(std::ceil(double(count) / double(columns))));
+        // Center the grid on the scene origin so a default view looks framed.
+        const double originX = -0.5 * double(columns - 1) * 190.0;
+        const double originY = -0.5 * double(rows - 1) * 110.0;
         for (int i = 0; i < count; ++i) {
             Node* material = materials[i];
             if (!material) continue;
             auto* item = new MaterialContainerItem(material);
             const int col = i % columns;
             const int row = i / columns;
-            item->setPos(col * 190.0, row * 110.0);
+            item->setPos(originX + col * 190.0, originY + row * 110.0);
             graphScene_->addItem(item);
             if (material == keep) item->setSelected(true);
         }
         // clear() can shrink the scene rect — keep pan room on both axes.
         graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
     }
-    pendingFrame_ = true;
-    if (isVisible() && width() > 50) frameGraph();
+    scheduleFrameGraph();
     // Only notify when the selected container identity actually changed.
     if (selectedMaterial() != keep) emit selectionChanged();
 }
@@ -2241,15 +2257,30 @@ Node* MaterialContainerGraphView::selectedMaterial() const {
 
 void MaterialContainerGraphView::showEvent(QShowEvent* event) {
     QGraphicsView::showEvent(event);
-    if (pendingFrame_ && width() > 50) frameGraph();
+    // Always reframe when the Materials tab becomes visible — tabify often left
+    // containers stuck on the left after a zero-size first frame.
+    scheduleFrameGraph();
 }
 
 void MaterialContainerGraphView::resizeEvent(QResizeEvent* event) {
     QGraphicsView::resizeEvent(event);
-    if (pendingFrame_ && width() > 50) frameGraph();
+    if (pendingFrame_) scheduleFrameGraph();
+}
+
+void MaterialContainerGraphView::scheduleFrameGraph() {
+    pendingFrame_ = true;
+    QTimer::singleShot(0, this, [this] {
+        if (!pendingFrame_) return;
+        if (!isVisible() || width() < 80 || height() < 60) return;
+        frameGraph();
+    });
 }
 
 void MaterialContainerGraphView::frameGraph() {
+    if (width() < 80 || height() < 60) {
+        pendingFrame_ = true;
+        return;
+    }
     pendingFrame_ = false;
     graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
     if (graphScene_->items().isEmpty()) {

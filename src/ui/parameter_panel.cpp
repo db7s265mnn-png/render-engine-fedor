@@ -334,7 +334,7 @@ QWidget* makeSpinSliderRow(QWidget* spin, double value, double minimum, double m
 }  // namespace
 
 ParameterPanel::ParameterPanel(QWidget* parent) : QWidget(parent) {
-    setMinimumWidth(0);
+    setMinimumWidth(280);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
@@ -991,7 +991,7 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
             combo->setMinimumContentsLength(10);
             combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-            combo->setMaximumWidth(240);
+            combo->setMaximumWidth(320);
             for (const QString& item : parameter.menuItems) {
                 // Show a shorter label; keep the full id as tooltip via item data.
                 QString label = item;

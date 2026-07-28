@@ -209,7 +209,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     // Chrome strip above the framebuffer — matches app chrome (docks / status bar).
     chromeBar_ = new QWidget(this);
     chromeBar_->setObjectName("viewportChromeBar");
-    chromeBar_->setFixedHeight(kChromeHeight);
+    chromeBar_->setFixedHeight(theme::chromeBarHeight());
     chromeBar_->setStyleSheet(
         "QWidget#viewportChromeBar {"
         "  background: #2e3136;"
@@ -410,10 +410,11 @@ void RenderView::setFocusPickActive(bool active) {
 
 void RenderView::layoutToolStrip() {
     if (!chromeBar_ || !toolStrip_) return;
-    chromeBar_->setGeometry(0, 0, width(), kChromeHeight);
+    const int chromeH = theme::chromeBarHeight();
+    chromeBar_->setGeometry(0, 0, width(), chromeH);
     toolStrip_->adjustSize();
     const int x = std::max(8, (chromeBar_->width() - toolStrip_->width()) / 2);
-    const int y = std::max(0, (kChromeHeight - toolStrip_->height()) / 2);
+    const int y = std::max(0, (chromeH - toolStrip_->height()) / 2);
     toolStrip_->move(x, y);
     toolStrip_->raise();
     chromeBar_->raise();
@@ -466,7 +467,7 @@ void RenderView::setTransformTarget(Node* node) {
 }
 
 QRect RenderView::imageRect() const {
-    const int top = kChromeHeight + 8;
+    const int top = theme::chromeBarHeight() + 8;
     const double aspect = double(resolutionX_) / double(std::max(1, resolutionY_));
     int w = width() - 16;
     int h = int(w / aspect);

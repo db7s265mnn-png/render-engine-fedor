@@ -118,6 +118,7 @@ protected:
 
 private:
     void frameGraph();
+    void scheduleFrameGraph();
     bool shouldBeginPan(const QMouseEvent* event) const;
     void beginPan(const QPoint& viewPosition);
     void updatePan(const QPoint& viewPosition);
@@ -196,6 +197,7 @@ private:
     void writeXmlToMaterial(const QString& xml, bool emitEdited);
     void writeModel(bool emitEdited);
     void frameGraph();
+    void scheduleFrameGraph();
     void showAddNodeMenu(const QPoint& viewPosition);
     void onCreateMenuChosen(const QString& category, const QString& type);
     void addNode(const QString& category, const QString& type, QPointF scenePosition);

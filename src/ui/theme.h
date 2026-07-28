@@ -24,6 +24,9 @@ inline QColor wireActive() { return QColor(255, 190, 90); }
 inline QColor displayFlag() { return QColor(80, 170, 255); }
 inline QColor error() { return QColor(220, 90, 80); }
 
+// Shared height for viewport chrome + side-dock title bars.
+inline constexpr int chromeBarHeight() { return 34; }
+
 // Houdini / Arnold-style MaterialX port colours by data type.
 inline QColor colorForMaterialXType(const QString& type) {
     const QString t = type.trimmed().toLower();

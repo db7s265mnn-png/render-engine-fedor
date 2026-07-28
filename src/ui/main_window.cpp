@@ -7,6 +7,7 @@
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -35,6 +36,24 @@
 
 namespace sol {
 namespace {
+
+QWidget* makeDockTitleBar(QDockWidget* dock, const QString& title) {
+    auto* bar = new QWidget(dock);
+    bar->setObjectName("dockTitleBar");
+    bar->setFixedHeight(theme::chromeBarHeight());
+    bar->setStyleSheet(
+        "QWidget#dockTitleBar {"
+        "  background: #2e3136;"
+        "  border-bottom: 1px solid #22242a;"
+        "}");
+    auto* layout = new QHBoxLayout(bar);
+    layout->setContentsMargins(10, 0, 10, 0);
+    layout->setSpacing(0);
+    auto* label = new QLabel(title, bar);
+    label->setStyleSheet("color: #dcdee2; font-weight: 700; background: transparent; border: none;");
+    layout->addWidget(label, 1);
+    return bar;
+}
 
 QImage toQImage(const Image& image) {
     if (image.empty()) return {};
@@ -317,16 +336,18 @@ void MainWindow::createDocks() {
 
     auto* parameterDock = new QDockWidget("Parameters", this);
     parameterDock->setObjectName("parameterDock");
+    parameterDock->setTitleBarWidget(makeDockTitleBar(parameterDock, "Parameters"));
     parameterPanel_ = new ParameterPanel(parameterDock);
     parameterDock->setWidget(parameterPanel_);
-    // Allow the dock to shrink; long Optics lens names must not force the window wider.
-    parameterDock->setMinimumWidth(260);
+    parameterDock->setMinimumWidth(300);
     addDockWidget(Qt::RightDockWidgetArea, parameterDock);
 
     auto* sceneDock = new QDockWidget("Scene Graph", this);
     sceneDock->setObjectName("sceneDock");
+    sceneDock->setTitleBarWidget(makeDockTitleBar(sceneDock, "Scene Graph"));
     sceneGraphPanel_ = new SceneGraphPanel(sceneDock);
     sceneDock->setWidget(sceneGraphPanel_);
+    sceneDock->setMinimumWidth(300);
     addDockWidget(Qt::LeftDockWidgetArea, sceneDock);
 
     auto* logDock = new QDockWidget("Log", this);
@@ -341,6 +362,13 @@ void MainWindow::createDocks() {
     networkDock->raise();
 
     resizeDocks({networkDock}, {330}, Qt::Vertical);
+    // Match left/right dock widths so Parameters is as wide as Scene Graph.
+    constexpr int kSideDockWidth = 340;
+    resizeDocks({sceneDock, parameterDock}, {kSideDockWidth, kSideDockWidth}, Qt::Horizontal);
+    // Apply again after the first layout pass — early resizeDocks can be ignored.
+    QTimer::singleShot(0, this, [this, sceneDock, parameterDock, kSideDockWidth] {
+        resizeDocks({sceneDock, parameterDock}, {kSideDockWidth, kSideDockWidth}, Qt::Horizontal);
+    });
 
     materialNetworkView_->setGraph(&graph_);
 

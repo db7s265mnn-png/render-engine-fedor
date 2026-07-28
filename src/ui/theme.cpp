@@ -32,7 +32,12 @@ void applyDarkTheme(QApplication& application) {
     application.setStyleSheet(R"(
         QToolTip { color: #dcdee2; background-color: #3a3e44; border: 1px solid #22242a; }
         QDockWidget { titlebar-close-icon: none; font-weight: bold; }
-        QDockWidget::title { background: #2e3136; padding: 5px; }
+        QDockWidget::title {
+            background: #2e3136;
+            padding: 0 10px;
+            min-height: 34px;
+            max-height: 34px;
+        }
         QGroupBox { border: 1px solid #3a3e44; border-radius: 3px; margin-top: 14px; padding-top: 6px; }
         QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #ffa82e; }
         QLineEdit, QComboBox, QPlainTextEdit, QTreeWidget {
