@@ -73,10 +73,11 @@ extern "C" __global__ void __raygen__path() {
 
     float jitterX = 0.5f, jitterY = 0.5f;
     blueNoisePixelJitter(x, y, params.sampleIndex, jitterX, jitterY);
+    float lensU = 0.5f, lensV = 0.5f;
+    blueNoiseLensSample(x, y, params.sampleIndex, lensU, lensV);
 
     Vec3 origin, direction;
-    generateCameraRay(params.scene, float(x) + jitterX, float(y) + jitterY, rng.nextFloat(), rng.nextFloat(),
-                      origin, direction);
+    generateCameraRay(params.scene, float(x) + jitterX, float(y) + jitterY, lensU, lensV, origin, direction);
 
     OptixTracer tracer;
     const Vec3 radiance = traceRadiance(params.scene, tracer, origin, direction, rng);

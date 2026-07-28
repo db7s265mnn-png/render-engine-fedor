@@ -204,9 +204,10 @@ public:
             Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
             float jx = 0.5f, jy = 0.5f;
             blueNoisePixelJitter(x, y, sampleIndex, jx, jy);
+            float lensU = 0.5f, lensV = 0.5f;
+            blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
             Vec3 origin, direction;
-            generateCameraRay(scene, float(x) + jx, float(y) + jy, rng.nextFloat(), rng.nextFloat(), origin,
-                              direction);
+            generateCameraRay(scene, float(x) + jx, float(y) + jy, lensU, lensV, origin, direction);
 #if SOLSTICE_HAVE_OPENPGL
             Vec3 radiance;
             if (useGuiding) {

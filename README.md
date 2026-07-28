@@ -124,16 +124,16 @@ bottom exactly like a Solaris LOP chain.
 
 ```bash
 # Render an existing network
-Solstice --headless scene.solstice -o beauty.exr -s 512
+Solstice --headless scene.bobsc -o beauty.exr -s 512
 
 # Build a network from an Alembic cache and an HDRI, then render it
 Solstice --headless -a cache.abc -e studio.hdr -o render.png -s 256 --width 1920 --height 1080
 
 # Write that generated network to disk instead of rendering it
-Solstice --headless -a cache.abc -e studio.hdr --no-render --save-scene shot.solstice
+Solstice --headless -a cache.abc -e studio.hdr --no-render --save-scene shot.bobsc
 
 # Force a backend
-Solstice --headless scene.solstice -b gpu -o gpu.png
+Solstice --headless scene.bobsc -b gpu -o gpu.png
 ```
 
 `--help` lists every option. Output format follows the file extension: `.png` is tone mapped
@@ -147,14 +147,14 @@ those first:
 ```bash
 ./build/bin/sol_make_test_abc examples/kit.abc      # writes a small Alembic archive
 python3 tools/make_test_hdri.py examples/sky.hdr    # writes a synthetic HDRI sky
-./build/bin/Solstice examples/alembic_hdri.solstice
+./build/bin/Solstice examples/alembic_hdri.bobsc
 ```
 
 | Scene | Shows |
 | --- | --- |
-| `studio_sphere.solstice` | the default studio setup: ground, sphere, dome, sun and a rect key light |
-| `alembic_hdri.solstice` | an Alembic import lit by an HDRI dome and a sun |
-| `glass_sphere.solstice` | the same import with a smooth dielectric assigned to the sphere |
+| `studio_sphere.bobsc` | the default studio setup: ground, sphere, dome, sun and a rect key light |
+| `alembic_hdri.bobsc` | an Alembic import lit by an HDRI dome and a sun |
+| `glass_sphere.bobsc` | the same import with a smooth dielectric assigned to the sphere |
 
 ## Tests
 
