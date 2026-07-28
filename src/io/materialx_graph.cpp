@@ -498,6 +498,14 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
 
 QVector<MaterialXNodeCatalogEntry> listMaterialXNodeCatalog() {
 #if SOLSTICE_HAVE_MATERIALX
+    static std::mutex catalogMutex;
+    static QVector<MaterialXNodeCatalogEntry> cached;
+    static bool ready = false;
+    {
+        std::lock_guard<std::mutex> lock(catalogMutex);
+        if (ready) return cached;
+    }
+
     std::string error;
     auto doc = makeLibraryDocument(error);
     if (!doc) {
@@ -545,7 +553,11 @@ QVector<MaterialXNodeCatalogEntry> listMaterialXNodeCatalog() {
         if (a.group != b.group) return a.group < b.group;
         return a.category < b.category;
     });
-    return entries;
+
+    std::lock_guard<std::mutex> lock(catalogMutex);
+    cached = entries;
+    ready = true;
+    return cached;
 #else
     return fallbackMaterialXCatalog();
 #endif

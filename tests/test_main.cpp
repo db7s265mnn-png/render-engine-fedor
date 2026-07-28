@@ -18,9 +18,11 @@
 #include "io/materialx_graph.h"
 #include "nodes/node_graph.h"
 #include "nodes/node_registry.h"
+#include "nodes/stage.h"
 #include "render/integrator.h"
 #include "render/render_session.h"
 #include "render/shading.h"
+#include "scene/scene.h"
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_TIFF
@@ -508,6 +510,72 @@ void testUdimMaterialX() {
 }
 
 
+
+void testMaterialXTypeMismatchConnect() {
+    std::printf("materialx-type-mismatch-connect\n");
+    if (!materialXAvailable()) { std::printf("  skip\n"); return; }
+    // Soft-snap often hits standard_surface.base (float) first — color noise wired there
+    // must not crash cook/evaluate (Arnold validates connection types).
+    const QString bad = QStringLiteral(
+        "<?xml version=\"1.0\"?><materialx version=\"1.38\">"
+        "<noise2d name=\"n\" type=\"color3\">"
+        "<input name=\"amplitude\" type=\"vector3\" value=\"1,1,1\"/>"
+        "</noise2d>"
+        "<standard_surface name=\"ss\" type=\"surfaceshader\">"
+        "<input name=\"base\" type=\"float\" nodename=\"n\"/>"
+        "<input name=\"base_color\" type=\"color3\" value=\"0.2,0.3,0.4\"/>"
+        "</standard_surface>"
+        "<surfacematerial name=\"surface\" type=\"material\">"
+        "<input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>"
+        "</surfacematerial></materialx>");
+    MaterialXEvalResult eval = evaluateMaterialXDocument(bad, QString());
+    check(eval.ok, "color→base float connection evaluates without hard failure");
+    check(eval.material.baseColorProc < 0, "base float wire does not bind baseColorProc");
+    std::printf("  mismatch ok=%d err=%s\n", int(eval.ok), eval.error.toStdString().c_str());
+
+    // Full stage→scene→shade path for noise→base_color (diffuse)
+    const QString good = QStringLiteral(
+        "<?xml version=\"1.0\"?><materialx version=\"1.38\">"
+        "<noise2d name=\"n\" type=\"color3\">"
+        "<input name=\"amplitude\" type=\"vector3\" value=\"1,1,1\"/>"
+        "</noise2d>"
+        "<standard_surface name=\"ss\" type=\"surfaceshader\">"
+        "<input name=\"base\" type=\"float\" value=\"1\"/>"
+        "<input name=\"base_color\" type=\"color3\" nodename=\"n\"/>"
+        "</standard_surface>"
+        "<surfacematerial name=\"surface\" type=\"material\">"
+        "<input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>"
+        "</surfacematerial></materialx>");
+    eval = evaluateMaterialXDocument(good, QString());
+    check(eval.ok && eval.material.baseColorProc >= 0, "noise→base_color compiles");
+    Stage stage;
+    StagePrim prim;
+    prim.type = PrimType::Mesh;
+    prim.path = "/geo/sphere";
+    prim.mesh = makeSphereMesh(1.0f, 16, 8);
+    prim.material = eval.material;
+    prim.materialAssigned = true;
+    prim.procedurals = eval.procedurals;
+    prim.proceduralImages = eval.proceduralImages;
+    stage.prims.push_back(prim);
+    ScenePtr scene = stage.toScene();
+    check(scene != nullptr, "toScene with procedural material");
+    scene->finalize();
+    SceneView view = scene->view();
+    check(view.proceduralCount > 0, "scene has procedurals");
+    check(view.materials[0].baseColorProc >= 0, "material proc index remapped");
+    Vec3 ns(0,0,1);
+    bool finite = true;
+    for (int i = 0; i < 256; ++i) {
+        Vec2 uv(float(i % 16) / 16.f, float(i / 16) / 16.f);
+        Material m = evaluateTexturedMaterial(view, view.materials[0], uv, ns,
+                                              Vec3(uv.x, uv.y, 0.2f), Vec3(0,1,0), 0.01f);
+        if (!srIsFinite(m.baseColor.x) || !srIsFinite(m.baseColor.y) || !srIsFinite(m.baseColor.z)) finite = false;
+    }
+    check(finite, "shaded noise samples are finite");
+    std::printf("  diffuse shade ok procs=%d\n", view.proceduralCount);
+}
+
 void testMaterialXNoiseAndTriplanar() {
     std::printf("materialx-noise-triplanar\n");
     if (!materialXAvailable()) {
@@ -828,6 +896,7 @@ int main() {
     testInstanceTransform();
     testUdimMaterialX();
     testTxMipmaps();
+    testMaterialXTypeMismatchConnect();
     testMaterialXNoiseAndTriplanar();
     testMaterialXUdimCubeAsset();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

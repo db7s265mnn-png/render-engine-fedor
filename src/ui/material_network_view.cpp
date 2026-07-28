@@ -223,13 +223,43 @@ bool isConnectableInput(const QString& name, const QString& type) {
     return type != "filename" && type != "string";
 }
 
+// Arnold/USD-style loose MaterialX type compatibility for graph wires.
+bool materialXTypesConnectable(const QString& sourceType, const QString& destType) {
+    const QString s = sourceType.toLower();
+    const QString d = destType.toLower();
+    if (s.isEmpty() || d.isEmpty()) return true;
+    if (s == d) return true;
+    auto isFloatish = [](const QString& t) {
+        return t == "float" || t == "integer" || t == "int" || t == "boolean";
+    };
+    auto isColorish = [](const QString& t) { return t.startsWith(QLatin1String("color")); };
+    auto isVectorish = [](const QString& t) { return t.startsWith(QLatin1String("vector")); };
+    if (isFloatish(s) && (isFloatish(d) || isColorish(d) || isVectorish(d))) return true;
+    if ((isColorish(s) || isVectorish(s)) && (isFloatish(d) || isColorish(d) || isVectorish(d))) return true;
+    if (s == "surfaceshader" && d == "surfaceshader") return true;
+    if (s == "material" && d == "material") return true;
+    return false;
+}
+
+int connectionScore(const QString& sourceType, const QString& destName, const QString& destType, bool occupied) {
+    if (!materialXTypesConnectable(sourceType, destType)) return -1;
+    int score = (sourceType.toLower() == destType.toLower()) ? 100 : 20;
+    const QString s = sourceType.toLower();
+    const QString n = destName.toLower();
+    // Prefer the Arnold "Diffuse → Color" port when wiring color/vector patterns.
+    if ((s.startsWith("color") || s.startsWith("vector") || s == "float") && n == "base_color") score += 80;
+    if (n == "base" && s != "float" && s != "integer" && s != "int") score -= 40;
+    if (!occupied) score += 5;
+    return score;
+}
+
 QString fallbackDefaultDocument() {
     return QStringLiteral(
         "<?xml version=\"1.0\"?>\n"
         "<materialx version=\"1.38\">\n"
         "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\" xpos=\"0\" ypos=\"0\">\n"
-        "    <input name=\"base\" type=\"float\" value=\"0.8\"/>\n"
         "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\"/>\n"
+        "    <input name=\"base\" type=\"float\" value=\"0.8\"/>\n"
         "    <input name=\"specular_roughness\" type=\"float\" value=\"0.35\"/>\n"
         "    <input name=\"metalness\" type=\"float\" value=\"0\"/>\n"
         "    <input name=\"subsurface_scale\" type=\"float\" value=\"1\"/>\n"
@@ -676,7 +706,8 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         for (const MaterialXNodeInputDef& def : entry->inputsFor(signature)) {
             // Keep standard_surface UI focused on the common shading ports; full nodedef is huge.
             if (category == "standard_surface") {
-                static const QStringList keep = {"base", "base_color", "specular_roughness", "metalness", "specular",
+                // Arnold Standard Surface: Diffuse group leads with color, then weight.
+                static const QStringList keep = {"base_color", "base", "specular_roughness", "metalness", "specular",
                                                  "specular_IOR", "transmission", "opacity", "emission",
                                                  "emission_color", "normal", "subsurface", "subsurface_color",
                                                  "subsurface_radius", "subsurface_scale"};
@@ -704,8 +735,8 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         inputs.push_back({"in", "vector3", {}, {}});
         inputs.push_back({"scale", "float", "1", {}});
     } else if (category == "standard_surface") {
-        inputs.push_back({"base", "float", "0.8", {}});
         inputs.push_back({"base_color", "color3", "0.8, 0.8, 0.8", {}});
+        inputs.push_back({"base", "float", "0.8", {}});
         inputs.push_back({"specular_roughness", "float", "0.35", {}});
         inputs.push_back({"metalness", "float", "0", {}});
         inputs.push_back({"specular", "float", "0.5", {}});
@@ -1103,8 +1134,15 @@ void MaterialNetworkGraphView::addNode(const QString& category, const QString& t
 void MaterialNetworkGraphView::connectNodes(const QString& sourceName, const QString& targetName, int inputIndex) {
     if (sourceName.isEmpty() || targetName.isEmpty() || sourceName == targetName) return;
     MtlxNode* target = findModelNode(targetName);
-    if (!target || inputIndex < 0 || inputIndex >= target->inputs.size()) return;
+    const MtlxNode* source = findModelNode(sourceName);
+    if (!target || !source || inputIndex < 0 || inputIndex >= target->inputs.size()) return;
     if (!isConnectableInput(target->inputs[inputIndex].name, target->inputs[inputIndex].type)) return;
+    if (!materialXTypesConnectable(source->type, target->inputs[inputIndex].type)) {
+        emit statusMessage(QString("Cannot connect %1 (%2) → %3.%4 (%5)")
+                               .arg(sourceName, source->type, targetName, target->inputs[inputIndex].name,
+                                    target->inputs[inputIndex].type));
+        return;
+    }
     target->inputs[inputIndex].nodename = sourceName;
     target->inputs[inputIndex].value.clear();
     writeModel(true);
@@ -1510,12 +1548,30 @@ void MaterialNetworkGraphView::endWire(const QPoint& viewPosition) {
 
     if (sourceName.isEmpty()) return;
     if (!hit.item) {
-        // Soft snap: drop on a node body and pick nearest free/connectable input.
+        // Soft snap: drop on a node body and pick the best type-compatible input
+        // (Arnold-style: color patterns prefer base_color / Diffuse Color, not base weight).
         if (MaterialNetworkNodeItem* item = nodeItemAt(this, viewPosition)) {
             if (item->nodeName() != sourceName && item->inputCount() > 0) {
-                int port = item->hitInputPort(scenePosition, kPortSnapRadius * 2.0);
-                if (port < 0) port = 0;
-                hit = {item, port};
+                const MtlxNode* source = findModelNode(sourceName);
+                const QString sourceType = source ? source->type : QString();
+                int bestPort = -1;
+                int bestScore = -1;
+                int nearPort = item->hitInputPort(scenePosition, kPortSnapRadius * 2.0);
+                for (int port = 0; port < item->inputCount(); ++port) {
+                    const int modelInput = item->inputModelIndex(port);
+                    const MtlxNode* target = findModelNode(item->nodeName());
+                    if (!target || modelInput < 0 || modelInput >= target->inputs.size()) continue;
+                    const MtlxInput& input = target->inputs[modelInput];
+                    if (!isConnectableInput(input.name, input.type)) continue;
+                    int score = connectionScore(sourceType, input.name, input.type, !input.nodename.isEmpty());
+                    if (score < 0) continue;
+                    if (port == nearPort) score += 15;
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestPort = port;
+                    }
+                }
+                if (bestPort >= 0) hit = {item, bestPort};
             }
         }
     }

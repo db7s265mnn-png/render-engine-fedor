@@ -378,15 +378,15 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             const float sum = nAbs.x + nAbs.y + nAbs.z;
             if (sum > 0.0f) nAbs = nAbs * (1.0f / sum);
             else nAbs = Vec3(0.0f, 1.0f, 0.0f);
-            auto sampleAxis = [&](int texIndex, float u, float v) -> Vec4 {
-                if (texIndex >= 0 && texIndex < scene.textureCount && scene.textures) {
-                    return procSampleTexture(scene.textures[texIndex], Vec2(u, v));
-                }
-                return n.p0;
-            };
-            const Vec4 cx = sampleAxis(n.in0, ctx.pObject.z, ctx.pObject.y);
-            const Vec4 cy = sampleAxis(n.in1, ctx.pObject.x, ctx.pObject.z);
-            const Vec4 cz = sampleAxis(n.in2, ctx.pObject.x, ctx.pObject.y);
+            Vec4 cx = n.p0;
+            Vec4 cy = n.p0;
+            Vec4 cz = n.p0;
+            if (n.in0 >= 0 && n.in0 < scene.textureCount && scene.textures)
+                cx = procSampleTexture(scene.textures[n.in0], Vec2(ctx.pObject.z, ctx.pObject.y));
+            if (n.in1 >= 0 && n.in1 < scene.textureCount && scene.textures)
+                cy = procSampleTexture(scene.textures[n.in1], Vec2(ctx.pObject.x, ctx.pObject.z));
+            if (n.in2 >= 0 && n.in2 < scene.textureCount && scene.textures)
+                cz = procSampleTexture(scene.textures[n.in2], Vec2(ctx.pObject.x, ctx.pObject.y));
             result = Vec4(cx.x * nAbs.x + cy.x * nAbs.y + cz.x * nAbs.z,
                           cx.y * nAbs.x + cy.y * nAbs.y + cz.y * nAbs.z,
                           cx.z * nAbs.x + cy.z * nAbs.y + cz.z * nAbs.z, 1.0f);

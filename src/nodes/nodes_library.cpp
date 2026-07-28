@@ -367,37 +367,58 @@ public:
     }
 
     void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
-        QString xml = stringValue("mtlx");
-        if (xml.trimmed().isEmpty()) {
-            xml = createDefaultMaterialXDocument();
-            if (!xml.isEmpty()) setParameterValue("mtlx", xml);
-        }
+        try {
+            QString xml = stringValue("mtlx");
+            if (xml.trimmed().isEmpty()) {
+                xml = createDefaultMaterialXDocument();
+                if (!xml.isEmpty()) setParameterValue("mtlx", xml);
+            }
 
-        MaterialXEvalResult evaluated = evaluateMaterialXDocument(xml, context.sceneDirectory);
-        if (!evaluated.ok) {
-            if (!evaluated.error.isEmpty()) context.reportError(this, evaluated.error);
-            // Fallback constant material so the scene still renders.
-            evaluated.material = Material{};
-            evaluated.material.baseColor = Vec3(0.8f);
-            evaluated.material.roughness = 0.35f;
-        }
+            MaterialXEvalResult evaluated = evaluateMaterialXDocument(xml, context.sceneDirectory);
+            if (!evaluated.ok) {
+                if (!evaluated.error.isEmpty()) context.reportError(this, evaluated.error);
+                // Fallback constant material so the scene still renders.
+                evaluated.material = Material{};
+                evaluated.material.baseColor = Vec3(0.8f);
+                evaluated.material.roughness = 0.35f;
+                evaluated.procedurals.clear();
+                evaluated.proceduralImages.clear();
+            }
 
-        const QString pattern = stringValue("pattern", "*");
-        for (StagePrim& prim : stage.prims) {
-            if (prim.type != PrimType::Mesh) continue;
-            if (!matchesPattern(pattern, prim.path)) continue;
-            prim.material = evaluated.material;
-            prim.materialAssigned = true;
-            prim.materialName = name();
-            prim.baseColorTexture = evaluated.baseColorTexture;
-            prim.roughnessTexture = evaluated.roughnessTexture;
-            prim.metallicTexture = evaluated.metallicTexture;
-            prim.opacityTexture = evaluated.opacityTexture;
-            prim.emissionTexture = evaluated.emissionTexture;
-            prim.normalTexture = evaluated.normalTexture;
-            prim.subsurfaceTexture = evaluated.subsurfaceTexture;
-            prim.procedurals = evaluated.procedurals;
-            prim.proceduralImages = evaluated.proceduralImages;
+            // Drop dangling procedural roots (corrupt XML / failed partial compiles).
+            auto sanitizeProc = [&](int& idx) {
+                if (idx < 0) return;
+                if (idx >= int(evaluated.procedurals.size())) idx = -1;
+            };
+            sanitizeProc(evaluated.material.baseColorProc);
+            sanitizeProc(evaluated.material.roughnessProc);
+            sanitizeProc(evaluated.material.metallicProc);
+            sanitizeProc(evaluated.material.opacityProc);
+            sanitizeProc(evaluated.material.emissionProc);
+            sanitizeProc(evaluated.material.normalProc);
+            sanitizeProc(evaluated.material.subsurfaceProc);
+
+            const QString pattern = stringValue("pattern", "*");
+            for (StagePrim& prim : stage.prims) {
+                if (prim.type != PrimType::Mesh) continue;
+                if (!matchesPattern(pattern, prim.path)) continue;
+                prim.material = evaluated.material;
+                prim.materialAssigned = true;
+                prim.materialName = name();
+                prim.baseColorTexture = evaluated.baseColorTexture;
+                prim.roughnessTexture = evaluated.roughnessTexture;
+                prim.metallicTexture = evaluated.metallicTexture;
+                prim.opacityTexture = evaluated.opacityTexture;
+                prim.emissionTexture = evaluated.emissionTexture;
+                prim.normalTexture = evaluated.normalTexture;
+                prim.subsurfaceTexture = evaluated.subsurfaceTexture;
+                prim.procedurals = evaluated.procedurals;
+                prim.proceduralImages = evaluated.proceduralImages;
+            }
+        } catch (const std::exception& e) {
+            context.reportError(this, QString("MaterialX cook failed: %1").arg(e.what()));
+        } catch (...) {
+            context.reportError(this, "MaterialX cook failed: unknown error");
         }
     }
 };

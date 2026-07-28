@@ -149,6 +149,16 @@ ScenePtr Stage::toScene() const {
                     remapRoot(material.emissionProc);
                     remapRoot(material.normalProc);
                     remapRoot(material.subsurfaceProc);
+                    auto clampRoot = [&](int& idx) {
+                        if (idx >= int(scene->procedurals.size())) idx = -1;
+                    };
+                    clampRoot(material.baseColorProc);
+                    clampRoot(material.roughnessProc);
+                    clampRoot(material.metallicProc);
+                    clampRoot(material.opacityProc);
+                    clampRoot(material.emissionProc);
+                    clampRoot(material.normalProc);
+                    clampRoot(material.subsurfaceProc);
                 }
 
                 const int materialIndex = scene->addMaterial(material);
