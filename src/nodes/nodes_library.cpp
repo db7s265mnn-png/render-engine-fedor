@@ -14,6 +14,7 @@
 #include "io/materialx_graph.h"
 #include "io/usd_loader.h"
 #include "nodes/node_registry.h"
+#include "render/cpu/polynomial_optics.h"
 #include "render/render_device.h"
 
 namespace sol {
@@ -586,6 +587,21 @@ public:
         addParameter(Parameter::makeFloat("focusdistance", "Focus Distance", 5.0, 0.01, 1000.0, false)
                          .withGroup("Lens")
                          .withTooltip(units::focusDistanceTooltip()));
+        addParameter(Parameter::makeMenu("opticalmodel", "Camera Model",
+                                         QStringList{"Thin Lens", "Polynomial Optics (Embree)"}, 0)
+                         .withGroup("Optics")
+                         .withTooltip("Polynomial Optics uses Lentil-style fitted real lenses "
+                                      "(Embree only; OptiX falls back to Thin Lens)"));
+        {
+            QStringList lenses;
+            for (const std::string& name : polynomialOpticsLensNames()) lenses << QString::fromStdString(name);
+            addParameter(Parameter::makeMenu("lensmodel", "Lens", lenses, 19)
+                             .withGroup("Optics")
+                             .withTooltip("Real lens prescription (polynomial optics)"));
+        }
+        addParameter(Parameter::makeFloat("wavelength", "Wavelength (nm)", 550.0, 380.0, 780.0)
+                         .withGroup("Optics")
+                         .withTooltip("Wavelength for chromatic polynomial evaluation"));
         addParameter(Parameter::makeBool("uselookat", "Use Look At", true).withGroup("Placement"));
         addParameter(Parameter::makeVec3("eye", "Eye", Vec3(6.0f, 4.0f, 9.0f))
                          .withGroup("Placement")
@@ -608,6 +624,9 @@ public:
         camera.sensorWidth = float(floatValue("aperture", 36.0));
         camera.fStop = float(floatValue("fstop", 0.0));
         camera.focusDistance = float(floatValue("focusdistance", 5.0));
+        camera.opticalModel = intValue("opticalmodel", 0);
+        camera.lensModel = intValue("lensmodel", 19);
+        camera.opticalWavelengthNm = float(floatValue("wavelength", 550.0));
 
         if (boolValue("uselookat", true)) {
             const Vec3 eye = vec3Value("eye", Vec3(6.0f, 4.0f, 9.0f));

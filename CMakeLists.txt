@@ -237,6 +237,7 @@ set(SOLSTICE_LIB_SOURCES
     src/render/render_session.cpp
     src/render/scene_picker.cpp
     src/render/cpu/embree_device.cpp
+    src/render/cpu/polynomial_optics.cpp
     src/render/cpu/path_guiding.cpp
     src/render/optix/optix_device_stub.cpp
     src/nodes/parameter.cpp
@@ -285,6 +286,7 @@ set(SOLSTICE_LIB_HEADERS
 
 add_library(solstice_lib STATIC ${SOLSTICE_LIB_SOURCES} ${SOLSTICE_LIB_HEADERS})
 target_include_directories(solstice_lib PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/generated)
+target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lentil)
 target_link_libraries(solstice_lib PUBLIC Qt6::Core Qt6::Gui embree)
 
 if(SOLSTICE_HAVE_ALEMBIC_01)

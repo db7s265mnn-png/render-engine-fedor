@@ -19,6 +19,7 @@
 #include "nodes/node_graph.h"
 #include "nodes/node_registry.h"
 #include "nodes/stage.h"
+#include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
 #include "render/render_session.h"
 #include "render/shading.h"
@@ -935,6 +936,41 @@ void testCameraDofFocus() {
     checkNear(hitAvg.y, 0.0f, 0.02f, "average dof hit y");
 }
 
+void testPolynomialOpticsCamera() {
+    std::printf("polynomial-optics-camera\n");
+    check(!sol::polynomialOpticsLensNames().empty(), "lens catalogue non-empty");
+
+    CameraData cam;
+    cam.opticalModel = 1;
+    cam.lensModel = 19;  // cooke speed panchro 50mm
+    cam.sensorWidth = 36.0f;
+    cam.fStop = 2.8f;
+    cam.focusDistance = 2.0f;
+    cam.opticalWavelengthNm = 550.0f;
+    cam.cameraToWorld = Mat4::identity();
+
+    sol::PolynomialOpticsCamera lens;
+    lens.prepare(cam);
+    check(lens.active, "poly optics prepared");
+    check(lens.apertureRadiusMm > 0.0, "aperture radius > 0");
+    check(lens.lensEffectiveFocalLength > 0.0, "effective focal length loaded");
+
+    Rng rng(1u, 2u);
+    int ok = 0;
+    for (int i = 0; i < 32; ++i) {
+        Vec3 o, d;
+        if (sol::generatePolynomialOpticsRay(lens, cam, 48.0f, 27.0f, 96, 54, rng.nextFloat(), rng.nextFloat(),
+                                             rng, o, d)) {
+            ++ok;
+            check(std::isfinite(o.x) && std::isfinite(d.x), "poly ray finite");
+            check(length(d) > 0.5f, "poly ray direction non-zero");
+            // Looking down -Z in camera space after world transform (identity).
+            check(d.z < 0.0f, "poly ray looks forward (-Z)");
+        }
+    }
+    check(ok >= 8, "poly optics produces some valid rays through centre");
+}
+
 void testTxMipmaps() {
     std::printf("tx-mipmaps\n");
 #if !SOLSTICE_HAVE_TIFF
@@ -1000,6 +1036,7 @@ int main() {
     testGlob();
     testGraphCook();
     testCameraDofFocus();
+    testPolynomialOpticsCamera();
     testEnvironment();
     testRender();
     testInstanceTransform();

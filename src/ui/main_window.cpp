@@ -835,6 +835,9 @@ void MainWindow::applyLensFromCameraNode(const Node* camera, CameraData& out) co
     out.fStop = float(camera->floatValue("fstop", out.fStop));
     const float focus = float(camera->floatValue("focusdistance", out.focusDistance));
     if (focus > 0.0f) out.focusDistance = focus;
+    out.opticalModel = camera->intValue("opticalmodel", out.opticalModel);
+    out.lensModel = camera->intValue("lensmodel", out.lensModel);
+    out.opticalWavelengthNm = float(camera->floatValue("wavelength", out.opticalWavelengthNm));
 }
 
 void MainWindow::applyCameraNodeToView(Node* camera) {

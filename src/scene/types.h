@@ -227,6 +227,12 @@ struct CameraData {
     float fStop = 0.0f;           // 0 disables depth of field
     float focusDistance = 5.0f;
 
+    // 0 = thin lens (default), 1 = polynomial optics (Embree only; OptiX falls back).
+    int opticalModel = 0;
+    // Index into polynomialOpticsLensNames() when opticalModel == 1.
+    int lensModel = 19;  // cooke__speed_panchro__1920__50mm
+    float opticalWavelengthNm = 550.0f;
+
     float shutterOpen = 0.0f;
     float shutterClose = 0.0f;
     float nearClip = 0.001f;

@@ -10,6 +10,7 @@
 #include "core/log.h"
 #include "core/thread_pool.h"
 #include "render/blue_noise.h"
+#include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
 #include "render/render_device.h"
 #include "solstice_config.h"
@@ -104,6 +105,7 @@ public:
             return false;
         }
         view_ = scene_->view();
+        polyOptics_.prepare(view_.camera);
 
         const auto start = std::chrono::steady_clock::now();
 
@@ -207,7 +209,15 @@ public:
             float lensU = 0.5f, lensV = 0.5f;
             blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
             Vec3 origin, direction;
-            generateCameraRay(scene, float(x) + jx, float(y) + jy, lensU, lensV, origin, direction);
+            if (polyOptics_.active) {
+                if (!generatePolynomialOpticsRay(polyOptics_, scene.camera, float(x) + jx, float(y) + jy,
+                                                 width, height, lensU, lensV, rng, origin, direction)) {
+                    fb.addSample(x, y, Vec3(0.0f, 0.0f, 0.0f));
+                    return;
+                }
+            } else {
+                generateCameraRay(scene, float(x) + jx, float(y) + jy, lensU, lensV, origin, direction);
+            }
 #if SOLSTICE_HAVE_OPENPGL
             Vec3 radiance;
             if (useGuiding) {
@@ -275,7 +285,10 @@ public:
     }
 
     void refreshSceneData() override {
-        if (scene_) view_ = scene_->view();
+        if (scene_) {
+            view_ = scene_->view();
+            polyOptics_.prepare(view_.camera);
+        }
     }
 
     void release() override { releaseScene(); }
@@ -298,6 +311,7 @@ private:
     std::vector<RTCScene> meshScenes_;
     ScenePtr scene_;
     SceneView view_;
+    PolynomialOpticsCamera polyOptics_;
     std::unique_ptr<ThreadPool> pool_;
     int threadCount_ = 0;
 #if SOLSTICE_HAVE_OPENPGL
