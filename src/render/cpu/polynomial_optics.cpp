@@ -417,12 +417,17 @@ void PolynomialOpticsCamera::prepare(const CameraData& camera) {
 }
 
 bool PolynomialOpticsCamera::generateRayCameraSpace(double sensorXmm, double sensorYmm, float lensU, float lensV,
-                                                    Rng& rng, Vec3& originCam, Vec3& dirCam) const {
+                                                    Rng& rng, Vec3& originCam, Vec3& dirCam, float wavelengthNm,
+                                                    float* outTransmittance) const {
     if (!active) return false;
+    if (outTransmittance) *outTransmittance = 0.0f;
+
+    const double sampleLambda =
+        wavelengthNm > 0.0f ? double(wavelengthNm) * 0.001 : lambda;
 
     LensState state;
     state.lensModel = LensModel(lensModel);
-    state.lambda = lambda;
+    state.lambda = sampleLambda;
     state.aperture_radius = apertureRadiusMm;
     state.sensor_shift = sensorShiftMm;
     state.lens_outer_pupil_radius = lensOuterPupilRadius;
@@ -438,7 +443,8 @@ bool PolynomialOpticsCamera::generateRayCameraSpace(double sensorXmm, double sen
     float r2 = lensV;
     bool success = false;
     double out[5] = {0, 0, 0, 0, 0};
-    double sensor[5] = {0, 0, 0, 0, lambda};
+    double sensor[5] = {0, 0, 0, 0, sampleLambda};
+    double transmittance = 0.0;
 
     for (int tries = 0; tries <= vignettingRetries && !success; ++tries) {
         if (tries > 0) {
@@ -450,7 +456,7 @@ bool PolynomialOpticsCamera::generateRayCameraSpace(double sensorXmm, double sen
         sensor[1] = sensorYmm;
         sensor[2] = 0.0;
         sensor[3] = 0.0;
-        sensor[4] = lambda;
+        sensor[4] = sampleLambda;
 
         double aperture[5] = {0, 0, 0, 0, 0};
         double diskX = 0.0, diskY = 0.0;
@@ -464,7 +470,7 @@ bool PolynomialOpticsCamera::generateRayCameraSpace(double sensorXmm, double sen
         sensor[0] += sensor[2] * sensorShiftMm;
         sensor[1] += sensor[3] * sensorShiftMm;
 
-        const double transmittance = lensEvaluate(state, sensor, out);
+        transmittance = lensEvaluate(state, sensor, out);
         if (transmittance <= 0.0) continue;
 
         if (out[0] * out[0] + out[1] * out[1] > lensOuterPupilRadius * lensOuterPupilRadius) continue;
@@ -493,12 +499,14 @@ bool PolynomialOpticsCamera::generateRayCameraSpace(double sensorXmm, double sen
         !std::isfinite(dirCam.x) || !std::isfinite(dirCam.y) || !std::isfinite(dirCam.z)) {
         return false;
     }
+    if (outTransmittance) *outTransmittance = float(std::max(0.0, transmittance));
     return true;
 }
 
 bool generatePolynomialOpticsRay(const PolynomialOpticsCamera& lens, const CameraData& camera, float pixelX,
                                  float pixelY, int resolutionX, int resolutionY, float lensU, float lensV,
-                                 Rng& rng, Vec3& origin, Vec3& direction) {
+                                 Rng& rng, Vec3& origin, Vec3& direction, float wavelengthNm,
+                                 float* outTransmittance) {
     const float resX = float(std::max(1, resolutionX));
     const float resY = float(std::max(1, resolutionY));
     const float sensorHeight = camera.sensorWidth * (resY / resX);
@@ -506,7 +514,9 @@ bool generatePolynomialOpticsRay(const PolynomialOpticsCamera& lens, const Camer
     const double sy = double((0.5f - pixelY / resY) * sensorHeight);
 
     Vec3 originCam, dirCam;
-    if (!lens.generateRayCameraSpace(sx, sy, lensU, lensV, rng, originCam, dirCam)) return false;
+    if (!lens.generateRayCameraSpace(sx, sy, lensU, lensV, rng, originCam, dirCam, wavelengthNm,
+                                     outTransmittance))
+        return false;
 
     origin = transformPoint(camera.cameraToWorld, originCam);
     direction = normalize(transformVector(camera.cameraToWorld, dirCam));

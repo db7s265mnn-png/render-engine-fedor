@@ -232,6 +232,9 @@ struct CameraData {
     // Index into polynomialOpticsLensNames() when opticalModel == 1.
     int lensModel = 19;  // cooke__speed_panchro__1920__50mm
     float opticalWavelengthNm = 550.0f;
+    // When set with polynomial optics: each camera sample picks R, G or B wavelength
+    // so longitudinal/lateral chromatic aberration appears as coloured fringing.
+    int chromaticAberration = 0;
 
     float shutterOpen = 0.0f;
     float shutterClose = 0.0f;

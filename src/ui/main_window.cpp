@@ -727,6 +727,7 @@ void MainWindow::cookNow() {
             prim.camera.lensModel = cam->intValue("lensmodel", prim.camera.lensModel);
             prim.camera.opticalWavelengthNm =
                 float(cam->floatValue("wavelength", prim.camera.opticalWavelengthNm));
+            prim.camera.chromaticAberration = cam->boolValue("chromatic", false) ? 1 : 0;
             break;
         }
     }
@@ -902,6 +903,7 @@ void MainWindow::applyLensFromCameraNode(const Node* camera, CameraData& out) co
     out.opticalModel = camera->intValue("opticalmodel", out.opticalModel);
     out.lensModel = camera->intValue("lensmodel", out.lensModel);
     out.opticalWavelengthNm = float(camera->floatValue("wavelength", out.opticalWavelengthNm));
+    out.chromaticAberration = camera->boolValue("chromatic", false) ? 1 : 0;
 }
 
 void MainWindow::applyCameraNodeToView(Node* camera) {

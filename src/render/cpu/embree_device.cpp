@@ -209,9 +209,18 @@ public:
             float lensU = 0.5f, lensV = 0.5f;
             blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
             Vec3 origin, direction;
+            int chromaticChannel = -1;
+            float lensTau = 1.0f;
             if (polyOptics_.active) {
+                float wavelengthNm = -1.0f;
+                if (scene.camera.chromaticAberration != 0) {
+                    chromaticChannel = int(rng.nextFloat() * 3.0f);
+                    if (chromaticChannel > 2) chromaticChannel = 2;
+                    wavelengthNm = chromaticWavelengthNm(chromaticChannel);
+                }
                 if (!generatePolynomialOpticsRay(polyOptics_, scene.camera, float(x) + jx, float(y) + jy,
-                                                 width, height, lensU, lensV, rng, origin, direction)) {
+                                                 width, height, lensU, lensV, rng, origin, direction,
+                                                 wavelengthNm, &lensTau)) {
                     fb.addSample(x, y, Vec3(0.0f, 0.0f, 0.0f));
                     return;
                 }
@@ -231,8 +240,23 @@ public:
 #else
             (void)threadId;
             (void)useGuiding;
-            const Vec3 radiance = traceRadiance(scene, tracer, origin, direction, rng);
+            Vec3 radiance = traceRadiance(scene, tracer, origin, direction, rng);
 #endif
+            if (chromaticChannel >= 0) {
+                // Hero-wavelength RGB: deposit only the sampled channel, scaled by 3 / pdf.
+                radiance = radiance * std::max(0.0f, lensTau);
+                const float hero = (chromaticChannel == 0   ? radiance.x
+                                    : chromaticChannel == 1 ? radiance.y
+                                                           : radiance.z) *
+                                   3.0f;
+                radiance = Vec3(0.0f, 0.0f, 0.0f);
+                if (chromaticChannel == 0)
+                    radiance.x = hero;
+                else if (chromaticChannel == 1)
+                    radiance.y = hero;
+                else
+                    radiance.z = hero;
+            }
             fb.addSample(x, y, radiance);
         };
 

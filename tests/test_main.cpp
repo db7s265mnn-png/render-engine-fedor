@@ -1019,6 +1019,21 @@ void testPolynomialOpticsCamera() {
         }
     }
     check(ok >= 8, "poly optics produces some valid rays through centre");
+
+    // Off-axis pixel: R vs B wavelength should bend differently (chromatic terms in poly).
+    Rng rngR(7u, 11u);
+    Rng rngB(7u, 11u);
+    Vec3 oR, dR, oB, dB;
+    const bool okR =
+        sol::generatePolynomialOpticsRay(lens, cam, 90.0f, 10.0f, 96, 54, 0.3f, 0.7f, rngR, oR, dR,
+                                         chromaticWavelengthNm(0));
+    const bool okB =
+        sol::generatePolynomialOpticsRay(lens, cam, 90.0f, 10.0f, 96, 54, 0.3f, 0.7f, rngB, oB, dB,
+                                         chromaticWavelengthNm(2));
+    check(okR && okB, "chromatic R/B rays valid");
+    const float dirDelta = length(dR - dB);
+    const float originDelta = length(oR - oB);
+    check(dirDelta > 1e-5f || originDelta > 1e-6f, "R and B wavelengths produce different lens rays");
 }
 
 void testTxMipmaps() {

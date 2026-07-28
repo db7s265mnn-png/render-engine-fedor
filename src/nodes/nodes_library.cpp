@@ -603,7 +603,11 @@ public:
         }
         addParameter(Parameter::makeFloat("wavelength", "Wavelength (nm)", 550.0, 380.0, 780.0)
                          .withGroup("Optics")
-                         .withTooltip("Wavelength for chromatic polynomial evaluation"));
+                         .withTooltip("Wavelength for polynomial evaluation when Chromatic Aberration is off"));
+        addParameter(Parameter::makeBool("chromatic", "Chromatic Aberration", false)
+                         .withGroup("Optics")
+                         .withTooltip("RGB chromatic aberration via per-sample R/G/B wavelengths "
+                                      "(Polynomial Optics + Embree only)"));
         addParameter(Parameter::makeBool("uselookat", "Use Look At", true).withGroup("Placement"));
         addParameter(Parameter::makeVec3("eye", "Eye", Vec3(6.0f, 4.0f, 9.0f))
                          .withGroup("Placement")
@@ -629,6 +633,7 @@ public:
         camera.opticalModel = intValue("opticalmodel", 0);
         camera.lensModel = intValue("lensmodel", 19);
         camera.opticalWavelengthNm = float(floatValue("wavelength", 550.0));
+        camera.chromaticAberration = boolValue("chromatic", false) ? 1 : 0;
 
         if (boolValue("uselookat", true)) {
             const Vec3 eye = vec3Value("eye", Vec3(6.0f, 4.0f, 9.0f));
