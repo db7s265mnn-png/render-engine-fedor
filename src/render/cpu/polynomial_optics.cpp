@@ -242,22 +242,6 @@ static double y0IntersectionDistance(const LensState& s, double sensorShift) {
     return linePlaneIntersectionY0(cameraSpacePos, cameraSpaceOmega)(2);
 }
 
-static double logarithmicFocusSearch(const LensState& s, double focalDistanceMm) {
-    double closestDistance = 1e30;
-    double bestSensorShift = 0.0;
-    // Coarser than Lentil's 0.0001 grid — enough for IPR/production focus.
-    for (double i = -1.0; i <= 1.0; i += 0.002) {
-        const double sensorshift = (i < 0.0 ? -1.0 : 1.0) * (i * i) * 45.0;
-        const double intersectionDistance = y0IntersectionDistance(s, sensorshift);
-        const double newDistance = focalDistanceMm - intersectionDistance;
-        if (newDistance < closestDistance && newDistance > 0.0) {
-            closestDistance = newDistance;
-            bestSensorShift = sensorshift;
-        }
-    }
-    return bestSensorShift;
-}
-
 static void concentricDisk(double u, double v, double& dx, double& dy) {
     const double a = 2.0 * u - 1.0;
     const double b = 2.0 * v - 1.0;
@@ -275,6 +259,91 @@ static void concentricDisk(double u, double v, double& dx, double& dy) {
     }
     dx = r * std::cos(phi);
     dy = r * std::sin(phi);
+}
+
+static double sampleBundleCoCAtDistance(const LensState& s, double sensorShift, double apertureRadius,
+                                        double focusDistanceMm) {
+    // Approximate circle-of-confusion diameter (mm) of an on-axis pixel at focusDistanceMm.
+    double minX = 1e30, maxX = -1e30, minY = 1e30, maxY = -1e30;
+    int ok = 0;
+    static const double kSamples[12][2] = {
+        {0.0, 0.0}, {0.5, 0.5}, {0.15, 0.5}, {0.85, 0.5}, {0.5, 0.15}, {0.5, 0.85},
+        {0.2, 0.2}, {0.8, 0.2}, {0.2, 0.8}, {0.8, 0.8}, {0.35, 0.65}, {0.65, 0.35},
+    };
+    for (const auto& uv : kSamples) {
+        double sensor[5] = {0.0, 0.0, 0.0, 0.0, s.lambda};
+        double aperture[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+        double diskX = 0.0, diskY = 0.0;
+        concentricDisk(uv[0], uv[1], diskX, diskY);
+        aperture[0] = diskX * apertureRadius;
+        aperture[1] = diskY * apertureRadius;
+        lensPtSampleAperture(s, sensor, aperture, sensorShift);
+        sensor[0] += sensor[2] * sensorShift;
+        sensor[1] += sensor[3] * sensorShift;
+        double out[5] = {0, 0, 0, 0, 0};
+        if (lensEvaluate(s, sensor, out) <= 0.0) continue;
+        if (out[0] * out[0] + out[1] * out[1] > s.lens_outer_pupil_radius * s.lens_outer_pupil_radius) continue;
+        Eigen::Vector2d outpos(out[0], out[1]);
+        Eigen::Vector2d outdir(out[2], out[3]);
+        Eigen::Vector3d pos(0, 0, 0), dir(0, 0, 0);
+        sphereToCs(outpos, outdir, pos, dir, -s.lens_outer_pupil_curvature_radius,
+                   s.lens_outer_pupil_curvature_radius);
+        if (std::abs(dir(2)) < 1e-12) continue;
+        // Lentil camera space: +Z into the scene. Intersect plane z = focusDistanceMm.
+        const double t = (focusDistanceMm - pos(2)) / dir(2);
+        if (!(t > 0.0)) continue;
+        const double hx = pos(0) + dir(0) * t;
+        const double hy = pos(1) + dir(1) * t;
+        minX = std::min(minX, hx);
+        maxX = std::max(maxX, hx);
+        minY = std::min(minY, hy);
+        maxY = std::max(maxY, hy);
+        ++ok;
+    }
+    if (ok < 3) return 1e30;
+    const double dx = maxX - minX;
+    const double dy = maxY - minY;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+static double logarithmicFocusSearch(const LensState& s, double focalDistanceMm, double apertureRadius) {
+    // 1) Paraxial y0 search (Lentil) for a good starting shift.
+    double bestErr = 1e30;
+    double bestSensorShift = 0.0;
+    for (double i = -1.0; i <= 1.0; i += 0.0005) {
+        const double sensorshift = (i < 0.0 ? -1.0 : 1.0) * (i * i) * 45.0;
+        const double intersectionDistance = y0IntersectionDistance(s, sensorshift);
+        if (!(intersectionDistance > 0.0) || !std::isfinite(intersectionDistance)) continue;
+        const double err = std::abs(intersectionDistance - focalDistanceMm);
+        if (err < bestErr) {
+            bestErr = err;
+            bestSensorShift = sensorshift;
+        }
+    }
+
+    // 2) Refine for the actual wide-open / stopped-down bundle. Vintage lenses have
+    //    spherical aberration, so the paraxial focus plane is soft at low f-stops —
+    //    pick the sensor shift that minimises CoC at the requested focus distance.
+    double bestCoC = sampleBundleCoCAtDistance(s, bestSensorShift, apertureRadius, focalDistanceMm);
+    double span = 2.0;
+    for (int iter = 0; iter < 20; ++iter) {
+        bool improved = false;
+        for (double delta : {-span, -0.5 * span, 0.5 * span, span}) {
+            const double sensorshift = bestSensorShift + delta;
+            const double coc = sampleBundleCoCAtDistance(s, sensorshift, apertureRadius, focalDistanceMm);
+            if (coc < bestCoC) {
+                bestCoC = coc;
+                bestSensorShift = sensorshift;
+                improved = true;
+            }
+        }
+        span *= improved ? 0.6 : 0.5;
+        if (span < 1e-4) break;
+    }
+
+    logInfo(std::string("Polynomial optics focus: target=") + std::to_string(focalDistanceMm) +
+            "mm  shift=" + std::to_string(bestSensorShift) + "mm  CoC=" + std::to_string(bestCoC) + "mm");
+    return bestSensorShift;
 }
 
 }  // namespace
@@ -301,15 +370,22 @@ void PolynomialOpticsCamera::prepare(const CameraData& camera) {
 
     // Focus distance is authored in metres → mm for the polynomial model.
     const double focusMm = double(std::max(0.01f, camera.focusDistance)) * 1000.0;
-    state.sensor_shift = logarithmicFocusSearch(state, focusMm);
 
+    // Aperture first — focus refinement uses the real bundle size (SA depends on it).
     if (camera.fStop <= 0.0f) {
         state.aperture_radius = state.lens_aperture_radius_at_fstop;
     } else {
-        const double approx =
-            state.lens_effective_focal_length / (2.0 * double(std::max(0.01f, camera.fStop)));
-        state.aperture_radius = std::min(state.lens_aperture_radius_at_fstop, approx);
+        // Map f-stop relative to the lens's native wide-open stop. This matches
+        // thin-lens intuition (lower f → more bokeh) while never exceeding the
+        // physical iris. Requesting f/1 on an f/1.1 lens → wide open.
+        const double userF = double(std::max(0.05f, camera.fStop));
+        const double nativeF = std::max(0.05, state.lens_fstop);
+        state.aperture_radius =
+            std::min(state.lens_aperture_radius_at_fstop,
+                     state.lens_aperture_radius_at_fstop * (nativeF / userF));
     }
+
+    state.sensor_shift = logarithmicFocusSearch(state, focusMm, state.aperture_radius);
 
     active = true;
     lensModel = int(state.lensModel);

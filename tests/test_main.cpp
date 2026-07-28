@@ -1,5 +1,7 @@
 // Unit tests for the maths, sampling, node graph and renderer plumbing.
 #include <cmath>
+#include <functional>
+#include <utility>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -936,6 +938,54 @@ void testCameraDofFocus() {
     checkNear(hitAvg.y, 0.0f, 0.02f, "average dof hit y");
 }
 
+
+void testPolyOpticsApertureSpread() {
+    std::printf("polynomial-optics-aperture-spread\n");
+    CameraData cam;
+    cam.opticalModel = 1;
+    cam.lensModel = 3;  // angenieux 55mm ~f/1.1
+    cam.sensorWidth = 36.0f;
+    cam.fStop = 1.0f;
+    cam.focusDistance = 2.5f;
+    cam.opticalWavelengthNm = 550.0f;
+    cam.cameraToWorld = Mat4::identity();
+
+    sol::PolynomialOpticsCamera lens;
+    lens.prepare(cam);
+    check(lens.active, "poly active");
+    check(lens.apertureRadiusMm > 10.0, "wide-open aperture for f/1 request");
+
+    auto cocAt = [&](float planeZ) {
+        Rng rng(3u, 5u);
+        float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+        int ok = 0;
+        for (int i = 0; i < 64; ++i) {
+            Vec3 o, d;
+            if (!sol::generatePolynomialOpticsRay(lens, cam, 48.0f, 27.0f, 96, 54,
+                                                  float(i) / 64.0f, 0.37f, rng, o, d))
+                continue;
+            if (std::abs(d.z) < 1e-8f) continue;
+            const float t = (planeZ - o.z) / d.z;
+            if (t <= 0.0f) continue;
+            const Vec3 hit = o + d * t;
+            minX = std::min(minX, hit.x);
+            maxX = std::max(maxX, hit.x);
+            minY = std::min(minY, hit.y);
+            maxY = std::max(maxY, hit.y);
+            ++ok;
+        }
+        const float dx = maxX - minX, dy = maxY - minY;
+        return std::make_pair(ok, std::sqrt(dx * dx + dy * dy));
+    };
+
+    const float focusCoC = cocAt(-2.5f).second;
+    const float farCoC = cocAt(-10.0f).second;
+    std::printf("  focusCoC=%g farCoC=%g aperture=%gmm\n", focusCoC, farCoC, lens.apertureRadiusMm);
+    // Bundle-focus refinement must put the sharp plane near the requested focus distance.
+    check(focusCoC < 0.006f, "poly focused near focus plane");
+    check(farCoC > focusCoC * 5.0f, "far plane much softer than focus plane");
+}
+
 void testPolynomialOpticsCamera() {
     std::printf("polynomial-optics-camera\n");
     check(!sol::polynomialOpticsLensNames().empty(), "lens catalogue non-empty");
@@ -1036,6 +1086,7 @@ int main() {
     testGlob();
     testGraphCook();
     testCameraDofFocus();
+    testPolyOpticsApertureSpread();
     testPolynomialOpticsCamera();
     testEnvironment();
     testRender();
