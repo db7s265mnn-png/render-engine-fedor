@@ -206,14 +206,14 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     pal.setColor(QPalette::Window, theme::gridDark());
     setPalette(pal);
 
-    // Chrome strip above the framebuffer — keeps camera / T/R/S off the 3D image.
+    // Chrome strip above the framebuffer — matches app chrome (docks / status bar).
     chromeBar_ = new QWidget(this);
     chromeBar_->setObjectName("viewportChromeBar");
     chromeBar_->setFixedHeight(kChromeHeight);
     chromeBar_->setStyleSheet(
         "QWidget#viewportChromeBar {"
-        "  background: #3a3e44;"
-        "  border-bottom: 1px solid #2a2d32;"
+        "  background: #2e3136;"
+        "  border-bottom: 1px solid #22242a;"
         "}");
 
     toolStrip_ = new QWidget(chromeBar_);
@@ -225,20 +225,22 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         "}"
         "QToolButton {"
         "  color: #e8eaed;"
-        "  background: transparent;"
-        "  border: none;"
+        "  background: #3a3e44;"
+        "  border: 1px solid #4a4f57;"
         "  border-radius: 4px;"
         "  min-width: 28px;"
         "  min-height: 24px;"
         "  font-weight: 700;"
         "  font-size: 12px;"
+        "  padding: 0 4px;"
         "}"
         "QToolButton:checked {"
-        "  background: rgba(80, 170, 255, 70);"
+        "  background: rgba(80, 170, 255, 90);"
+        "  border-color: #50aaff;"
         "  color: #ffffff;"
         "}"
         "QToolButton:hover {"
-        "  background: rgba(255,255,255,22);"
+        "  background: #474c54;"
         "}");
     auto* stripLayout = new QHBoxLayout(toolStrip_);
     stripLayout->setContentsMargins(4, 3, 4, 3);
@@ -251,7 +253,9 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     cameraMenuButton_->setAutoRaise(true);
     cameraMenuButton_->setStyleSheet(
         "QToolButton { min-width: 72px; max-width: 140px; font-size: 10px; font-weight: 600; "
-        "text-align: left; padding-left: 6px; padding-right: 6px; }"
+        "text-align: left; padding-left: 6px; padding-right: 6px; "
+        "background: #3a3e44; border: 1px solid #4a4f57; color: #e8eaed; }"
+        "QToolButton:hover { background: #474c54; }"
         "QToolButton::menu-indicator { width: 10px; }");
     stripLayout->addWidget(cameraMenuButton_);
     rebuildCameraMenu();
@@ -299,8 +303,10 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         button->setToolTip(tip);
         button->setAutoRaise(true);
         button->setStyleSheet(
-            "QToolButton { min-width: 42px; font-size: 10px; font-weight: 600; }"
-            "QToolButton:checked { background: rgba(255, 190, 90, 70); color: #fff; }");
+            "QToolButton { min-width: 42px; font-size: 10px; font-weight: 600; "
+            "background: #3a3e44; border: 1px solid #4a4f57; color: #e8eaed; }"
+            "QToolButton:checked { background: rgba(255, 190, 90, 90); border-color: #ffbe5a; color: #fff; }"
+            "QToolButton:hover { background: #474c54; }");
         spaceGroup->addButton(button);
         stripLayout->addWidget(button);
         return button;

@@ -314,7 +314,8 @@ void MainWindow::createDocks() {
     parameterDock->setObjectName("parameterDock");
     parameterPanel_ = new ParameterPanel(parameterDock);
     parameterDock->setWidget(parameterPanel_);
-    parameterDock->setMinimumWidth(380);
+    // Allow the dock to shrink; long Optics lens names must not force the window wider.
+    parameterDock->setMinimumWidth(260);
     addDockWidget(Qt::RightDockWidgetArea, parameterDock);
 
     auto* sceneDock = new QDockWidget("Scene Graph", this);

@@ -1107,14 +1107,17 @@ void MaterialNetworkGraphView::frameGraph() {
         centerOn(0.0, 0.0);
         return;
     }
-    fitInView(bounds.adjusted(-80.0, -80.0, 80.0, 80.0), Qt::KeepAspectRatio);
+    const QRectF padded = bounds.adjusted(-80.0, -80.0, 80.0, 80.0);
+    fitInView(padded, Qt::KeepAspectRatio);
     const double scaleValue = transform().m11();
     if (scaleValue > 1.0 || scaleValue < 0.55) {
         resetTransform();
         const double clamped = std::clamp(scaleValue, 0.55, 1.0);
         scale(clamped, clamped);
-        centerOn(bounds.center());
     }
+    // Always re-center — fitInView alone can leave content stuck on the left when
+    // the dock was framed at a tiny size before the tab was raised.
+    centerOn(bounds.center());
 }
 
 void MaterialNetworkGraphView::wheelEvent(QWheelEvent* event) {
@@ -2044,7 +2047,7 @@ void MaterialContainerGraphView::setMaterials(const QVector<Node*>& materials) {
         graphScene_->setSceneRect(-8000, -8000, 16000, 16000);
     }
     pendingFrame_ = true;
-    if (isVisible()) frameGraph();
+    if (isVisible() && width() > 50) frameGraph();
     // Only notify when the selected container identity actually changed.
     if (selectedMaterial() != keep) emit selectionChanged();
 }
@@ -2062,12 +2065,12 @@ Node* MaterialContainerGraphView::selectedMaterial() const {
 
 void MaterialContainerGraphView::showEvent(QShowEvent* event) {
     QGraphicsView::showEvent(event);
-    if (pendingFrame_) frameGraph();
+    if (pendingFrame_ && width() > 50) frameGraph();
 }
 
 void MaterialContainerGraphView::resizeEvent(QResizeEvent* event) {
     QGraphicsView::resizeEvent(event);
-    if (pendingFrame_) frameGraph();
+    if (pendingFrame_ && width() > 50) frameGraph();
 }
 
 void MaterialContainerGraphView::frameGraph() {
@@ -2080,14 +2083,13 @@ void MaterialContainerGraphView::frameGraph() {
     }
     const QRectF bounds = graphScene_->itemsBoundingRect().adjusted(-40.0, -40.0, 40.0, 40.0);
     fitInView(bounds, Qt::KeepAspectRatio);
-    // Keep zoom readable — same clamp idea as Scene Network.
     const double scaleValue = transform().m11();
     if (scaleValue > 1.35 || scaleValue < 0.5) {
         resetTransform();
         const double clamped = std::clamp(scaleValue, 0.5, 1.35);
         scale(clamped, clamped);
-        centerOn(bounds.center());
     }
+    centerOn(bounds.center());
 }
 
 void MaterialContainerGraphView::wheelEvent(QWheelEvent* event) {

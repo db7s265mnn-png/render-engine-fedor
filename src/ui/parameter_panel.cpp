@@ -20,6 +20,7 @@
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
 #include <QVBoxLayout>
@@ -333,15 +334,21 @@ QWidget* makeSpinSliderRow(QWidget* spin, double value, double minimum, double m
 }  // namespace
 
 ParameterPanel::ParameterPanel(QWidget* parent) : QWidget(parent) {
+    setMinimumWidth(0);
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
 
     auto* scroll = new QScrollArea(this);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     outer->addWidget(scroll);
 
     content_ = new QWidget();
+    content_->setMinimumWidth(0);
+    content_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     contentLayout_ = new QVBoxLayout(content_);
     contentLayout_->setContentsMargins(8, 8, 8, 8);
     contentLayout_->setSpacing(8);
@@ -467,6 +474,8 @@ void ParameterPanel::rebuildLop() {
                 auto* box = new QGroupBox(group.isEmpty() ? QString("Parameters") : group);
                 form = new QFormLayout(box);
                 form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+                form->setRowWrapPolicy(QFormLayout::WrapLongRows);
                 contentLayout_->addWidget(box);
             }
             QWidget* editor = createEditor(parameter);
@@ -978,7 +987,19 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
         }
         case ParamType::Menu: {
             auto* combo = new NoWheelComboBox();
-            combo->addItems(parameter.menuItems);
+            // Long lens catalogue names must not inflate the Parameters dock width.
+            combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+            combo->setMinimumContentsLength(10);
+            combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            combo->setMaximumWidth(240);
+            for (const QString& item : parameter.menuItems) {
+                // Show a shorter label; keep the full id as tooltip via item data.
+                QString label = item;
+                label.replace(QLatin1String("__"), QLatin1String(" / "));
+                label.replace(QLatin1Char('_'), QLatin1Char(' '));
+                combo->addItem(label, item);
+                combo->setItemData(combo->count() - 1, item, Qt::ToolTipRole);
+            }
             combo->setCurrentIndex(parameter.toInt());
             connect(combo, &QComboBox::currentIndexChanged, this, [notify](int index) { notify(index); });
             return combo;
