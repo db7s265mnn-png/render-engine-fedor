@@ -156,8 +156,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (!scene_ || scene_->instances.empty()) return false;
         CameraData camera = scene_->camera;
         camera.cameraToWorld = renderView_->camera().toMatrix();
-        // Pinhole pick — do not mix orbit distance into DOF focus.
-        camera.fStop = 0.0f;
+        // Thin-lens Focus Pick uses a pinhole ray. Polynomial Optics keeps its
+        // prescription so the click matches the rendered image.
+        if (camera.opticalModel != 1) camera.fStop = 0.0f;
         return pickSceneSurface(scene_, camera, scene_->settings.resolutionX, scene_->settings.resolutionY, u, v,
                                 hit);
     });

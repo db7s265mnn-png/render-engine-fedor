@@ -6,7 +6,7 @@
 namespace sol {
 
 struct HeadlessOptions {
-    QString scenePath;      // .bobsc / legacy .solstice network, optional
+    QString scenePath;      // .bobsc network, optional
     QString alembicPath;    // used when no scene file is given
     QString hdriPath;       // dome light texture for the generated network
     QString outputPath = "render.png";

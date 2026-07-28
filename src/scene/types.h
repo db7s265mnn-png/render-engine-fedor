@@ -25,7 +25,8 @@ struct Material {
     // Mix weight vs diffuse (Standard Surface): base_mix = (1-w)*diffuse + w*SSS.
     float subsurface = 0.0f;
     int doubleSided = 1;
-    int pad0 = 0;
+    // Allow specular→diffuse light transport (reflective caustics).
+    int reflectiveCaustics = 1;
 
     Vec3 subsurfaceColor{1.0f, 0.75f, 0.55f};
     // Arnold: MFP (scene units / metres) = subsurfaceScale * subsurfaceRadius.
@@ -57,8 +58,11 @@ struct Material {
 
     int normalProc = -1;
     int subsurfaceProc = -1;
-    int padProc0 = 0;
-    int padProc1 = 0;
+    // Fake-caustics style shadow control (MaterialX): 1 = fully opaque shadow, 0 = none.
+    // Only applies to transmissive surfaces when refractiveCaustics is on.
+    float shadowOpacity = 1.0f;
+    // Allow transmission→... light transport / transparent shadows (refractive caustics).
+    int refractiveCaustics = 1;
 };
 
 // Shade-time MaterialX procedural opcode (see render/procedural.h for evaluation).

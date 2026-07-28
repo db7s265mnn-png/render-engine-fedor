@@ -245,7 +245,7 @@ void materialXFloatRange(const QString& name, double& lo, double& hi) {
         n == QLatin1String("specular") || n == QLatin1String("base") || n == QLatin1String("transmission") ||
         n == QLatin1String("subsurface") || n == QLatin1String("sheen") || n == QLatin1String("coat") ||
         n == QLatin1String("mix") || n.contains(QLatin1String("opacity")) ||
-        n.contains(QLatin1String("weight"))) {
+        n.contains(QLatin1String("weight")) || n == QLatin1String("shadow_opacity")) {
         lo = 0.0;
         hi = 1.0;
         return;

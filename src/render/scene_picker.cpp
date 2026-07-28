@@ -5,6 +5,8 @@
 #include <mutex>
 #include <vector>
 
+#include "core/rng.h"
+#include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
 
 namespace sol {
@@ -96,6 +98,36 @@ bool ensurePickScene(const ScenePtr& scene) {
     return cache.topScene != nullptr;
 }
 
+bool generatePickRay(const CameraData& camera, float px, float py, int resolutionX, int resolutionY,
+                     Vec3& origin, Vec3& direction) {
+    SceneView view{};
+    view.camera = camera;
+    view.settings.resolutionX = std::max(1, resolutionX);
+    view.settings.resolutionY = std::max(1, resolutionY);
+
+    // Match the beauty camera: polynomial optics when that model is active, otherwise
+    // thin-lens / pinhole. Focus Pick previously always used thin-lens rays, so clicks
+    // missed what the Embree poly-optics image showed.
+    if (camera.opticalModel == 1) {
+        PolynomialOpticsCamera lens;
+        lens.prepare(camera);
+        if (!lens.active) {
+            generateCameraRay(view, px, py, 0.5f, 0.5f, origin, direction);
+            return true;
+        }
+        Rng rng(0xC0FFEEu, 0xF0CALu);
+        float tau = 1.0f;
+        if (!generatePolynomialOpticsRay(lens, camera, px, py, resolutionX, resolutionY, 0.5f, 0.5f, rng,
+                                         origin, direction, -1.0f, &tau)) {
+            // Centre aperture vignetted — fall back to thin lens so the click still works.
+            generateCameraRay(view, px, py, 0.5f, 0.5f, origin, direction);
+        }
+        return true;
+    }
+    generateCameraRay(view, px, py, 0.5f, 0.5f, origin, direction);
+    return true;
+}
+
 }  // namespace
 
 bool pickSceneSurface(const ScenePtr& scene, const CameraData& camera, int resolutionX, int resolutionY,
@@ -107,15 +139,10 @@ bool pickSceneSurface(const ScenePtr& scene, const CameraData& camera, int resol
     std::lock_guard<std::mutex> lock(cache.mutex);
     if (!ensurePickScene(scene)) return false;
 
-    SceneView view{};
-    view.camera = camera;
-    view.settings.resolutionX = std::max(1, resolutionX);
-    view.settings.resolutionY = std::max(1, resolutionY);
-
-    const float px = u * float(view.settings.resolutionX);
-    const float py = v * float(view.settings.resolutionY);
+    const float px = u * float(std::max(1, resolutionX));
+    const float py = v * float(std::max(1, resolutionY));
     Vec3 origin, direction;
-    generateCameraRay(view, px, py, 0.5f, 0.5f, origin, direction);
+    generatePickRay(camera, px, py, resolutionX, resolutionY, origin, direction);
 
     RTCRayHit rayhit{};
     rayhit.ray.org_x = origin.x;

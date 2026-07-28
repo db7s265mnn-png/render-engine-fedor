@@ -195,6 +195,47 @@ SR_INL SR_HD Vec3 clampContribution(Vec3 contrib, float clampValue) {
     return contrib;
 }
 
+// Multi-hit shadow visibility (Embree filter-function style): opaque surfaces
+// block fully; transmissive surfaces attenuate by Material::shadowOpacity when
+// refractive caustics are enabled (MaterialX / Arnold fake-caustics control).
+template <typename Tracer>
+SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 dir,
+                                    float tMax) {
+    float visibility = 1.0f;
+    Vec3 o = origin;
+    float remaining = tMax;
+    for (int hop = 0; hop < 24 && visibility > 1e-4f; ++hop) {
+        RayHit hit;
+        if (!tracer.intersect(o, dir, remaining, hit)) return visibility;
+        if (!(hit.t > 1e-5f) || hit.t >= remaining) return visibility;
+
+        SurfaceInteraction si;
+        if (!buildSurfaceInteraction(scene, hit, o, dir, si)) return 0.0f;
+
+        // Reached light proxy geometry along the shadow segment — connection ok.
+        if (si.lightIndex >= 0) return visibility;
+
+        Material mat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
+                           ? scene.materials[si.materialIndex]
+                           : defaultMaterial();
+
+        float block = 1.0f;
+        if (mat.transmission > 1e-3f) {
+            // Glass / dielectric: refractive caustics off → solid shadow;
+            // on → shadow_opacity (1 = opaque fake shadow, 0 = fully open).
+            block = mat.refractiveCaustics != 0 ? saturatef(mat.shadowOpacity) : 1.0f;
+        }
+        visibility *= (1.0f - block);
+        if (block >= 0.999f || visibility <= 1e-5f) return 0.0f;
+
+        const Vec3 p = o + dir * hit.t;
+        o = offsetRayOrigin(p, si.ng, dir);
+        remaining -= hit.t;
+        if (remaining <= 1e-4f) return visibility;
+    }
+    return 0.0f;
+}
+
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& tracer,
                                           const SurfaceInteraction& si, const Material& mat,
@@ -209,13 +250,18 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     LightSample ls;
     if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) return result;
     if (ls.pdf <= 0.0f || isBlack(ls.radiance)) return result;
+
+    float visibility = 1.0f;
     if (scene.lights[lightIndex].shadowEnable) {
         const Vec3 shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
         // Use a large finite tMax for distant/dome lights — Embree is more stable
         // with that than with FLT_MAX, and it still reaches any scene geometry.
         float tMax = 1.0e8f;
         if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-        if (tracer.occluded(shadowOrigin, ls.wi, tMax)) return result;
+        // Transparent / fake-caustic shadows: walk interfaces with shadow_opacity
+        // (Embree-style multi-hit visibility instead of binary rtcOccluded).
+        visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax);
+        if (visibility <= 1e-5f) return result;
     }
 
     const Vec3 woLocal = frame.toLocal(wo);
@@ -236,7 +282,7 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
 
     const float lightPdf = ls.pdf * selectPdf;
     const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
-    result = ls.radiance * be.f * (fabsf(wiLocal.z) * misWeight / lightPdf);
+    result = ls.radiance * be.f * (fabsf(wiLocal.z) * misWeight / lightPdf) * visibility;
     return result;
 }
 
@@ -264,6 +310,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     Vec3 throughput(1.0f);
     float bsdfPdf = 0.0f;
     bool specularBounce = true;   // primary rays behave like a specular bounce for MIS
+    // When a bounce disables reflective/refractive caustics, suppress later diffuse lighting.
+    bool suppressCausticLight = false;
     int depth = 0;
     int passThrough = 0;
     const RenderSettingsData& settings = scene.settings;
@@ -275,6 +323,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
         if (!didHit) {
             if (scene.domeLightIndex >= 0) {
+                if (!(suppressCausticLight && !specularBounce)) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
                 const bool primary = depth == 0 && passThrough == 0;
                 if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
@@ -288,7 +337,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         Vec3 contrib = throughput * envL * weight;
-                        if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
+                        if (depth > 0 && !specularBounce)
+                            contrib = clampContribution(contrib, settings.clampIndirect);
                         radiance += contrib;
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active())
@@ -297,6 +347,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         (void)guiding;
 #endif
                     }
+                }
                 }
             }
             break;
@@ -317,6 +368,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
         // Emission from area light geometry.
         if (si.lightIndex >= 0) {
+            // Reflective/refractive caustics off: don't accept light via a prior specular path onto diffuse.
+            if (suppressCausticLight && !specularBounce) break;
             const LightData& light = scene.lights[si.lightIndex];
             const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
             Vec3 emitted = areaLightEmission(scene, light, direction, lightN);
@@ -328,7 +381,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                 }
                 Vec3 contrib = throughput * emitted * weight;
-                if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
+                // Caustic paths (specular chain) keep more energy — clamp less aggressively.
+                if (depth > 0 && !specularBounce)
+                    contrib = clampContribution(contrib, settings.clampIndirect);
                 radiance += contrib;
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active())
@@ -641,17 +696,17 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         const bool guideReady = false;
 #endif
 
-        const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, guiding);
-        {
+        // NEE on diffuse after a caustic-disabled specular/transmission bounce is suppressed.
+        if (!(suppressCausticLight && !specularBounce)) {
+            const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, guiding);
             Vec3 contrib = throughput * nee;
-            // Direct lighting on the first hit is left unclamped; secondary is clamped.
-            if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
+            if (depth > 0 && !specularBounce)
+                contrib = clampContribution(contrib, settings.clampIndirect);
             radiance += contrib;
-        }
 #if !defined(__CUDACC__)
-        if (guiding && guiding->active()) guiding->addScattered(nee);
+            if (guiding && guiding->active()) guiding->addScattered(nee);
 #endif
-
+        }
         const Vec3 woLocal = frame.toLocal(wo);
         BsdfSample bs;
         bool gotSample = false;
@@ -717,6 +772,13 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         direction = wiWorld;
         bsdfPdf = bs.pdf;
         specularBounce = bs.specular;
+        if (bs.specular) {
+            if (bs.transmitted) {
+                if (mat.refractiveCaustics == 0) suppressCausticLight = true;
+            } else if (mat.reflectiveCaustics == 0) {
+                suppressCausticLight = true;
+            }
+        }
         ++depth;
 
         // Russian roulette.
