@@ -63,6 +63,13 @@ struct Material {
     float shadowOpacity = 1.0f;
     // Allow transmission→... light transport / transparent shadows (refractive caustics).
     int refractiveCaustics = 1;
+
+    // MaterialX normalmap.scale / bump.scale (tangent XY strength).
+    float normalScale = 1.0f;
+    // Height-field bump (MaterialX <bump>). When set, wins over normalTex/normalProc.
+    int bumpTex = -1;
+    int bumpProc = -1;
+    int _padBump = 0;
 };
 
 // Shade-time MaterialX procedural opcode (see render/procedural.h for evaluation).

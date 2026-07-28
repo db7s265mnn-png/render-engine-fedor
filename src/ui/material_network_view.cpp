@@ -206,7 +206,7 @@ bool isKnownMaterialXCategory(const QString& category) {
     // Keep previously hardcoded essentials even if libraries failed to load.
     return category == "standard_surface" || category == "surfacematerial" || category == "image" ||
            category == "constant" || category == "multiply" || category == "mix" || category == "normalmap" ||
-           category == "tiledimage" || category == "add" || category == "texcoord" ||
+           category == "bump" || category == "tiledimage" || category == "add" || category == "texcoord" ||
            category == "triplanarprojection";
 }
 
@@ -214,7 +214,7 @@ QColor colorForCategory(const QString& category) {
     if (category == "image" || category == "tiledimage") return QColor(42, 132, 132);
     if (category == "standard_surface") return QColor(189, 116, 45);
     if (category == "surfacematerial") return QColor(126, 82, 170);
-    if (category == "normalmap") return QColor(96, 101, 108);
+    if (category == "normalmap" || category == "bump") return QColor(96, 101, 108);
     const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category);
     if (entry) {
         if (entry->group.startsWith("PBR")) return QColor(189, 116, 45);
@@ -240,10 +240,12 @@ bool materialXTypesConnectable(const QString& sourceType, const QString& destTyp
     if (s.isEmpty() || d.isEmpty()) return true;
     if (s == d) return true;
     auto isFloatish = [](const QString& t) {
-        return t == "float" || t == "integer" || t == "int" || t == "boolean";
+        return t == "float" || t == "integer" || t == "int";
     };
     auto isColorish = [](const QString& t) { return t.startsWith(QLatin1String("color")); };
     auto isVectorish = [](const QString& t) { return t.startsWith(QLatin1String("vector")); };
+    // Booleans are not auto-wired from colour/vector patterns (was a soft-snap footgun).
+    if (d == "boolean" || s == "boolean") return s == d;
     if (isFloatish(s) && (isFloatish(d) || isColorish(d) || isVectorish(d))) return true;
     if ((isColorish(s) || isVectorish(s)) && (isFloatish(d) || isColorish(d) || isVectorish(d))) return true;
     if (s == "surfaceshader" && d == "surfaceshader") return true;
@@ -255,10 +257,22 @@ int connectionScore(const QString& sourceType, const QString& destName, const QS
     if (!materialXTypesConnectable(sourceType, destType)) return -1;
     int score = (sourceType.toLower() == destType.toLower()) ? 100 : 20;
     const QString s = sourceType.toLower();
+    const QString d = destType.toLower();
     const QString n = destName.toLower();
     // Prefer the Arnold "Diffuse → Color" port when wiring color/vector patterns.
     if ((s.startsWith("color") || s.startsWith("vector") || s == "float") && n == "base_color") score += 80;
     if (n == "base" && s != "float" && s != "integer" && s != "int") score -= 40;
+    // Soft-snap: prefer exact types. Color/vector → float is allowed explicitly but
+    // must not win soft-snap over colour ports (triplanar→roughness was a common miss).
+    if ((s.startsWith("color") || s.startsWith("vector")) && d == "float") {
+        score -= 55;
+        if (n == "specular_roughness" || n == "metalness" || n == "specular" || n == "emission" ||
+            n == "transmission" || n == "subsurface" || n == "specular_ior" || n == "subsurface_scale" ||
+            n == "shadow_opacity")
+            score -= 25;
+    }
+    if (s == "float" && (d.startsWith("color") || d.startsWith("vector"))) score -= 10;
+    if ((s.startsWith("vector") || s.startsWith("color")) && n == "normal") score += 40;
     if (!occupied) score += 5;
     return score;
 }
@@ -284,7 +298,7 @@ QPointF defaultLayoutForCategory(const QString& category, int ordinal) {
     if (category == "surfacematerial") return QPointF(4.0, 0.0);
     if (category == "standard_surface") return QPointF(0.0, 0.0);
     if (category == "image") return QPointF(-4.0, qreal(ordinal) * 1.2);
-    if (category == "normalmap") return QPointF(-2.0, qreal(ordinal) * 1.2);
+    if (category == "normalmap" || category == "bump") return QPointF(-2.0, qreal(ordinal) * 1.2);
     return QPointF(-2.5, qreal(ordinal) * 1.2);
 }
 
@@ -759,6 +773,7 @@ QString MaterialNetworkGraphView::defaultTypeForCategory(const QString& category
     if (category == "standard_surface") return "surfaceshader";
     if (category == "surfacematerial") return "material";
     if (category == "normalmap") return "vector3";
+    if (category == "bump") return "vector3";
     if (category == "texcoord") return "vector2";
     return "color3";
 }
@@ -864,6 +879,9 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         inputs.push_back({"mix", "float", "0.5", {}});
     } else if (category == "normalmap") {
         inputs.push_back({"in", "vector3", {}, {}});
+        inputs.push_back({"scale", "float", "1", {}});
+    } else if (category == "bump") {
+        inputs.push_back({"height", "float", "0", {}});
         inputs.push_back({"scale", "float", "1", {}});
     } else if (category == "surfacematerial") {
         inputs.push_back({"surfaceshader", "surfaceshader", {}, {}});
@@ -1288,7 +1306,14 @@ void MaterialNetworkGraphView::connectNodes(const QString& sourceName, const QSt
     target->inputs[inputIndex].nodename = sourceName;
     target->inputs[inputIndex].value.clear();
     writeModel(true);
-    rebuild();
+    // Defer rebuild: connecting during mouseRelease while Parameters/scene still
+    // walk the old QGraphicsItems was crashing on Windows (same class of bug as
+    // triplanar file-pick rebuild-on-signal).
+    preservedSelection_ = targetName;
+    QTimer::singleShot(0, this, [this] {
+        if (!materialNode_) return;
+        rebuild();
+    });
     emit statusMessage(QString("Connected %1 to %2.%3").arg(sourceName, targetName, target->inputs[inputIndex].name));
 }
 
@@ -1300,7 +1325,11 @@ void MaterialNetworkGraphView::disconnectInput(const QString& targetName, const 
         if (input.nodename.isEmpty()) return;
         input.nodename.clear();
         writeModel(true);
-        rebuild();
+        preservedSelection_ = targetName;
+        QTimer::singleShot(0, this, [this] {
+            if (!materialNode_) return;
+            rebuild();
+        });
         emit statusMessage(QString("Disconnected %1.%2").arg(targetName, inputName));
         return;
     }

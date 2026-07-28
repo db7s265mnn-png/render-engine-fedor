@@ -9,6 +9,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <unordered_map>
 
 #include "core/log.h"
 #include "io/image_io.h"
@@ -194,7 +195,8 @@ std::string inputValueString(const mx::NodePtr& node, const std::string& inputNa
 }
 
 std::shared_ptr<Image> loadTextureFromImageNode(const mx::NodePtr& imageNode, const QString& searchDirectory,
-                                                 const std::vector<int>& udimSet, std::string& error) {
+                                                 const std::vector<int>& udimSet, std::string& error,
+                                                 bool srgbColor = true) {
     if (!imageNode) return nullptr;
     const std::string category = imageNode->getCategory();
     if (category != "image" && category != "tiledimage") return nullptr;
@@ -215,19 +217,24 @@ std::shared_ptr<Image> loadTextureFromImageNode(const mx::NodePtr& imageNode, co
         }
         logInfo("MaterialX image file='" + file + "' → pattern='" + pattern.toStdString() + "' tiles=[" + ids +
                 "]");
-        return loadImageOrUdim(pattern, searchDirectory, error, tiles);
+        return loadImageOrUdim(pattern, searchDirectory, error, tiles, srgbColor);
     }
     logInfo("MaterialX image file='" + file + "'");
-    return loadImageOrUdim(fileQ, searchDirectory, error, udimSet);
+    return loadImageOrUdim(fileQ, searchDirectory, error, udimSet, srgbColor);
 }
 
-// Walk through multiply/mix/normalmap wrappers to find an image node.
+// Walk through multiply/mix/normalmap/bump wrappers to find an image node.
 mx::NodePtr findImageNode(mx::NodePtr node) {
     for (int depth = 0; node && depth < 8; ++depth) {
         const std::string cat = node->getCategory();
         if (cat == "image" || cat == "tiledimage") return node;
         if (cat == "normalmap") {
             node = resolveConnectedNode(node, "in");
+            continue;
+        }
+        if (cat == "bump") {
+            node = resolveConnectedNode(node, "height");
+            if (!node) node = resolveConnectedNode(node, "in");
             continue;
         }
         if (cat == "multiply" || cat == "mix") {
@@ -365,7 +372,7 @@ QString catalogGroupFor(const QString& category, const QString& type, const QStr
         cat.contains("material") || cat.contains("bsdf") || cat.contains("edf") || cat.contains("vdf"))
         return "PBR / Shading";
     if (cat.contains("image") || cat.contains("texture") || cat.contains("triplanar") ||
-        cat == "normalmap" || cat == "tangent")
+        cat == "normalmap" || cat == "bump" || cat == "tangent")
         return "Texture";
     if (cat.contains("noise") || cat.contains("fractal") || cat.contains("cell") || cat.contains("ramp") ||
         cat.contains("checker") || cat.contains("worley"))
@@ -488,6 +495,9 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"outlow", "vector3", "0, 0, 0"}, {"outhigh", "vector3", "1, 1, 1"}, {"gamma", "vector3", "1, 1, 1"},
          {"doclamp", "boolean", "false"}});
     add("normalmap", "vector3", "Texture", {{"in", "vector3", {}}, {"scale", "float", "1"}});
+    add("bump", "vector3", "Geometric",
+        {{"height", "float", "0"}, {"scale", "float", "1"}, {"normal", "vector3", {}}, {"tangent", "vector3", {}},
+         {"bitangent", "vector3", {}}});
     add("texcoord", "vector2", "Geometric", {{"index", "integer", "0"}});
     add("standard_surface", "surfaceshader", "PBR / Shading",
         {{"base_color", "color3", "0.8, 0.8, 0.8"},
@@ -737,45 +747,93 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
             logInfo("MaterialX udimset=[" + ids + "]");
         }
 
-        auto bindSlot = [&](const char* inputName, std::shared_ptr<Image>& slot, int& procIndex) {
+        auto readNodeFloat = [](const mx::NodePtr& node, const char* name, float fallback) -> float {
+            if (!node) return fallback;
+            float v = fallback;
+            if (parseFloat(inputValueString(node, name), v)) return v;
+            return fallback;
+        };
+
+        // Reuse one compile when the same upstream node feeds multiple ports.
+        std::unordered_map<const mx::Node*, int> compiledRoots;
+        auto compileProc = [&](mx::NodePtr connected, int& procIndex, const char* inputName) {
+            if (!connected) return;
+            auto it = compiledRoots.find(connected.get());
+            if (it != compiledRoots.end()) {
+                procIndex = it->second;
+                return;
+            }
+            std::string compileError;
+            const int localRoot = compileMaterialXNode(connected, searchDirectory, udimSet, result.procedurals,
+                                                       result.proceduralImages, compileError);
+            if (localRoot >= 0) {
+                procIndex = localRoot;
+                compiledRoots[connected.get()] = localRoot;
+                logInfo(std::string("MaterialX: compiled ") + connected->getCategory() + " → " + inputName +
+                        " (shade-time procedural, " + std::to_string(result.procedurals.size()) + " ops)");
+            } else if (!compileError.empty()) {
+                logWarning("MaterialX procedural (" + std::string(inputName) + "): " + compileError);
+            }
+        };
+
+        auto bindSlot = [&](const char* inputName, std::shared_ptr<Image>& slot, int& procIndex,
+                            bool dataMap = false) {
             mx::NodePtr connected = resolveConnectedNode(ss, inputName);
             if (!connected) return;
             const std::string cat = connected->getCategory();
+            const bool srgbColor = !dataMap;
 
             // Pure image maps keep the texture path (mips / UDIM).
             if (cat == "image" || cat == "tiledimage") {
                 std::string texError;
-                slot = loadTextureFromImageNode(connected, searchDirectory, udimSet, texError);
+                slot = loadTextureFromImageNode(connected, searchDirectory, udimSet, texError, srgbColor);
                 if (!slot && !texError.empty()) logWarning("MaterialX: " + texError);
                 return;
             }
             if (cat == "normalmap") {
+                result.material.normalScale = readNodeFloat(connected, "scale", 1.0f);
                 if (mx::NodePtr image = findImageNode(connected)) {
                     std::string texError;
-                    slot = loadTextureFromImageNode(image, searchDirectory, udimSet, texError);
+                    slot = loadTextureFromImageNode(image, searchDirectory, udimSet, texError, false);
                     if (!slot && !texError.empty()) logWarning("MaterialX: " + texError);
                     return;
                 }
+                // Procedural/vector upstream of normalmap → compile as RGB tangent map.
+                if (materialXNodeIsProcedural(connected)) {
+                    mx::NodePtr inNode = resolveConnectedNode(connected, "in");
+                    compileProc(inNode ? inNode : connected, procIndex, inputName);
+                }
+                return;
             }
-
-            // Noise / math / triplanar / image blends → shade-time procedural (not UV bake).
-            if (materialXNodeIsProcedural(connected)) {
-                std::string compileError;
-                const int localRoot =
-                    compileMaterialXNode(connected, searchDirectory, udimSet, result.procedurals,
-                                         result.proceduralImages, compileError);
-                if (localRoot >= 0) {
-                    procIndex = localRoot;
-                    logInfo(std::string("MaterialX: compiled ") + connected->getCategory() + " → " + inputName +
-                            " (shade-time procedural, " + std::to_string(result.procedurals.size()) + " ops)");
-                } else if (!compileError.empty()) {
-                    logWarning("MaterialX procedural (" + std::string(inputName) + "): " + compileError);
+            if (cat == "bump") {
+                result.material.normalScale = readNodeFloat(connected, "scale", 1.0f);
+                mx::NodePtr height = resolveConnectedNode(connected, "height");
+                if (!height) height = resolveConnectedNode(connected, "in");
+                if (height && (height->getCategory() == "image" || height->getCategory() == "tiledimage")) {
+                    std::string texError;
+                    result.bumpTexture =
+                        loadTextureFromImageNode(height, searchDirectory, udimSet, texError, false);
+                    if (!result.bumpTexture && !texError.empty()) logWarning("MaterialX: " + texError);
+                    return;
+                }
+                if (height && materialXNodeIsProcedural(height)) {
+                    compileProc(height, result.material.bumpProc, "bump.height");
+                    return;
+                }
+                if (materialXNodeIsProcedural(connected)) {
+                    compileProc(connected, result.material.bumpProc, "bump");
                 }
                 return;
             }
 
+            // Noise / math / triplanar / image blends → shade-time procedural (not UV bake).
+            if (materialXNodeIsProcedural(connected)) {
+                compileProc(connected, procIndex, inputName);
+                return;
+            }
+
             logWarning(std::string("MaterialX: unsupported upstream node '") + connected->getCategory() +
-                       "' on " + inputName + " (connect image / noise / triplanar / math)");
+                       "' on " + inputName + " (connect image / noise / triplanar / math / bump / normalmap)");
         };
 
         bindSlot("base_color", result.baseColorTexture, result.material.baseColorProc);
@@ -783,8 +841,21 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         bindSlot("metalness", result.metallicTexture, result.material.metallicProc);
         bindSlot("opacity", result.opacityTexture, result.material.opacityProc);
         bindSlot("emission_color", result.emissionTexture, result.material.emissionProc);
-        bindSlot("normal", result.normalTexture, result.material.normalProc);
+        bindSlot("normal", result.normalTexture, result.material.normalProc, true);
         bindSlot("subsurface_color", result.subsurfaceTexture, result.material.subsurfaceProc);
+
+        // Drop dangling roots if a compile failed mid-way.
+        auto sanitize = [&](int& idx) {
+            if (idx >= 0 && idx >= int(result.procedurals.size())) idx = -1;
+        };
+        sanitize(result.material.baseColorProc);
+        sanitize(result.material.roughnessProc);
+        sanitize(result.material.metallicProc);
+        sanitize(result.material.opacityProc);
+        sanitize(result.material.emissionProc);
+        sanitize(result.material.normalProc);
+        sanitize(result.material.subsurfaceProc);
+        sanitize(result.material.bumpProc);
 
         result.ok = true;
         return result;

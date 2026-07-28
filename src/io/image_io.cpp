@@ -234,7 +234,7 @@ bool writeExr(const std::string& path, const Image& image, std::string& error) {
 }
 #endif
 
-bool loadLdr(const std::string& path, Image& out, std::string& error) {
+bool loadLdr(const std::string& path, Image& out, std::string& error, bool srgbColor) {
     QImage qimage;
     if (!qimage.load(QString::fromStdString(path))) {
         error = "unsupported or unreadable image: " + path;
@@ -246,9 +246,11 @@ bool loadLdr(const std::string& path, Image& out, std::string& error) {
         const uchar* line = qimage.constScanLine(y);
         for (int x = 0; x < qimage.width(); ++x) {
             const uchar* px = line + size_t(x) * 4;
+            const float r = px[0] / 255.0f;
+            const float g = px[1] / 255.0f;
+            const float b = px[2] / 255.0f;
             out.setRgb(x, y,
-                       Vec3(srgbToLinear(px[0] / 255.0f), srgbToLinear(px[1] / 255.0f),
-                            srgbToLinear(px[2] / 255.0f)),
+                       srgbColor ? Vec3(srgbToLinear(r), srgbToLinear(g), srgbToLinear(b)) : Vec3(r, g, b),
                        px[3] / 255.0f);
         }
     }
@@ -276,7 +278,8 @@ float decodeTiffChannel(const void* row, int x, int sample, uint16_t samples, ui
     return 0.0f;
 }
 
-bool readTiffDirectoryLevel(TIFF* tif, std::vector<float>& rgba, int& width, int& height, std::string& error) {
+bool readTiffDirectoryLevel(TIFF* tif, std::vector<float>& rgba, int& width, int& height, std::string& error,
+                            bool srgbColor) {
     uint32_t w = 0, h = 0;
     uint16_t samples = 1, bits = 8, sampleFormat = SAMPLEFORMAT_UINT, photometric = PHOTOMETRIC_RGB;
     if (!TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w) || !TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h) || w == 0 ||
@@ -298,7 +301,8 @@ bool readTiffDirectoryLevel(TIFF* tif, std::vector<float>& rgba, int& width, int
     }
 
     // 8/16-bit colour textures are usually sRGB; float .tx from maketx is linear.
-    const bool linearize = !(bits == 32 && sampleFormat == SAMPLEFORMAT_IEEEFP);
+    // Data maps (normals/bump) pass srgbColor=false so 8/16-bit stay as-authored.
+    const bool linearize = srgbColor && !(bits == 32 && sampleFormat == SAMPLEFORMAT_IEEEFP);
 
     const tsize_t stride = TIFFScanlineSize(tif);
     if (stride <= 0) {
@@ -342,7 +346,7 @@ bool readTiffDirectoryLevel(TIFF* tif, std::vector<float>& rgba, int& width, int
     return true;
 }
 
-bool loadTiffWithMips(const std::string& path, Image& out, std::string& error) {
+bool loadTiffWithMips(const std::string& path, Image& out, std::string& error, bool srgbColor) {
     TIFF* tif = TIFFOpen(path.c_str(), "r");
     if (!tif) {
         error = "cannot open TIFF/TX: " + path;
@@ -356,7 +360,7 @@ bool loadTiffWithMips(const std::string& path, Image& out, std::string& error) {
         std::vector<float> rgba;
         int w = 0, h = 0;
         std::string levelError;
-        if (!readTiffDirectoryLevel(dir, rgba, w, h, levelError)) {
+        if (!readTiffDirectoryLevel(dir, rgba, w, h, levelError, srgbColor)) {
             error = levelError;
             return false;
         }
@@ -452,7 +456,7 @@ bool imageFormatIsHdr(const std::string& path) {
     return ext == "hdr" || ext == "exr" || ext == "rgbe" || ext == "pic";
 }
 
-bool loadImage(const std::string& path, Image& out, std::string& error) {
+bool loadImage(const std::string& path, Image& out, std::string& error, bool srgbColor) {
     const std::string ext = toLowerExtension(path);
     if (ext == "hdr" || ext == "rgbe" || ext == "pic") return loadHdr(path, out, error);
     if (ext == "exr") {
@@ -465,17 +469,17 @@ bool loadImage(const std::string& path, Image& out, std::string& error) {
     }
     if (ext == "tx" || ext == "tif" || ext == "tiff") {
 #if SOLSTICE_HAVE_TIFF
-        return loadTiffWithMips(path, out, error);
+        return loadTiffWithMips(path, out, error, srgbColor);
 #else
         if (ext == "tx") {
             error = "this build has no libtiff support — cannot load .tx mipmaps";
             return false;
         }
         // Fall back to Qt for plain TIFF when libtiff is unavailable.
-        return loadLdr(path, out, error);
+        return loadLdr(path, out, error, srgbColor);
 #endif
     }
-    return loadLdr(path, out, error);
+    return loadLdr(path, out, error, srgbColor);
 }
 
 bool pathHasUdimToken(const QString& path) {
@@ -565,7 +569,7 @@ bool resolveUdimPattern(const QString& pathIn, const QString& searchDirectory, Q
 }
 
 std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& searchDirectory, std::string& error,
-                                       const std::vector<int>& explicitUdims) {
+                                       const std::vector<int>& explicitUdims, bool srgbColor) {
     QString path = makeAbsoluteTexturePath(pathIn, searchDirectory);
 
     // MaterialX: unresolved <UDIM> in file + tile list from udimset / disk.
@@ -590,7 +594,7 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
             if (!QFileInfo::exists(tilePath)) continue;
             auto tile = std::make_shared<Image>();
             std::string loadError;
-            if (!loadImage(tilePath.toStdString(), *tile, loadError)) {
+            if (!loadImage(tilePath.toStdString(), *tile, loadError, srgbColor)) {
                 logWarning("UDIM tile failed (" + tilePath.toStdString() + "): " + loadError);
                 continue;
             }
@@ -652,7 +656,7 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
         return nullptr;
     }
     auto image = std::make_shared<Image>();
-    if (!loadImage(path.toStdString(), *image, error)) return nullptr;
+    if (!loadImage(path.toStdString(), *image, error, srgbColor)) return nullptr;
     return image;
 }
 

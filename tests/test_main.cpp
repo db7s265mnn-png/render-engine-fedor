@@ -579,6 +579,219 @@ void testMaterialXTypeMismatchConnect() {
     std::printf("  diffuse shade ok procs=%d\n", view.proceduralCount);
 }
 
+
+void testMaterialXColorIntoFloatSlots() {
+    std::printf("materialx-color-into-float-slots\n");
+    if (!materialXAvailable()) { std::printf("  skip\n"); return; }
+
+    auto shadeOk = [](const MaterialXEvalResult& eval, const char* label) {
+        check(eval.ok, (std::string(label) + " evaluates").c_str());
+        if (!eval.ok) {
+            std::printf("  %s err=%s\n", label, eval.error.toStdString().c_str());
+            return;
+        }
+        Stage stage;
+        StagePrim prim;
+        prim.type = PrimType::Mesh;
+        prim.path = "/geo/mesh";
+        prim.mesh = std::make_shared<Mesh>();
+        prim.mesh->positions = {Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0)};
+        prim.mesh->indices = {0,1,2};
+        prim.mesh->normals = {Vec3(0,1,0), Vec3(0,1,0), Vec3(0,1,0)};
+        prim.mesh->uvs = {Vec2(0,0), Vec2(1,0), Vec2(0,1)};
+        prim.mesh->validate();
+        prim.material = eval.material;
+        prim.materialAssigned = true;
+        prim.baseColorTexture = eval.baseColorTexture;
+        prim.roughnessTexture = eval.roughnessTexture;
+        prim.metallicTexture = eval.metallicTexture;
+        prim.opacityTexture = eval.opacityTexture;
+        prim.emissionTexture = eval.emissionTexture;
+        prim.normalTexture = eval.normalTexture;
+        prim.subsurfaceTexture = eval.subsurfaceTexture;
+        prim.procedurals = eval.procedurals;
+        prim.proceduralImages = eval.proceduralImages;
+        stage.prims.push_back(prim);
+        auto scene = stage.toScene();
+        SceneView view = scene->view();
+        check(view.materialCount > 0 && view.materials, (std::string(label) + " has material").c_str());
+        bool finite = true;
+        for (int i = 0; i < 500; ++i) {
+            Vec3 ns(0, 1, 0);
+            Material m = evaluateTexturedMaterial(view, view.materials[0], Vec2(0.1f, 0.25f), ns,
+                                                  Vec3(float(i) * 0.01f, 0.2f, -0.3f), Vec3(0, 1, 0), 0.01f);
+            if (!srIsFinite(m.roughness) || !srIsFinite(m.metallic) || !srIsFinite(m.opacity) ||
+                !srIsFinite(m.baseColor.x) || !srIsFinite(ns.x)) {
+                finite = false;
+                break;
+            }
+        }
+        check(finite, (std::string(label) + " shade finite").c_str());
+        std::printf("  %s ok procs=%d rough=%d metal=%d\n", label, view.proceduralCount,
+                    view.materials[0].roughnessProc, view.materials[0].metallicProc);
+    };
+
+    const char* portNames[] = {"specular_roughness", "metalness", "opacity", "emission_color", "normal",
+                           "subsurface_color"};
+    for (const char* port : portNames) {
+        QString type = QStringLiteral("float");
+        if (QString(port) == "opacity" || QString(port) == "emission_color" ||
+            QString(port) == "subsurface_color")
+            type = QStringLiteral("color3");
+        if (QString(port) == "normal") type = QStringLiteral("vector3");
+        const QString xml = QStringLiteral(
+                                "<?xml version=\"1.0\"?>\n"
+                                "<materialx version=\"1.38\">\n"
+                                "  <triplanarprojection name=\"tri1\" type=\"color3\">\n"
+                                "    <input name=\"scale\" type=\"vector3\" value=\"1, 1, 1\"/>\n"
+                                "    <input name=\"default\" type=\"color3\" value=\"0.2, 0.5, 0.8\"/>\n"
+                                "  </triplanarprojection>\n"
+                                "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+                                "    <input name=\"%1\" type=\"%2\" nodename=\"tri1\"/>\n"
+                                "  </standard_surface>\n"
+                                "  <surfacematerial name=\"surface\" type=\"material\">\n"
+                                "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+                                "  </surfacematerial>\n"
+                                "</materialx>\n")
+                                .arg(port, type);
+        shadeOk(evaluateMaterialXDocument(xml, QString()), port);
+    }
+
+    // Same color node into several float slots at once (shared compile).
+    const QString multi = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <triplanarprojection name=\"tri1\" type=\"color3\">\n"
+        "    <input name=\"default\" type=\"color3\" value=\"0.4, 0.5, 0.6\"/>\n"
+        "  </triplanarprojection>\n"
+        "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+        "    <input name=\"specular_roughness\" type=\"float\" nodename=\"tri1\"/>\n"
+        "    <input name=\"metalness\" type=\"float\" nodename=\"tri1\"/>\n"
+        "    <input name=\"opacity\" type=\"color3\" nodename=\"tri1\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n");
+    MaterialXEvalResult multiEval = evaluateMaterialXDocument(multi, QString());
+    check(multiEval.ok, "multi-slot evaluates");
+    check(multiEval.material.roughnessProc >= 0 && multiEval.material.metallicProc >= 0 &&
+              multiEval.material.opacityProc >= 0,
+          "multi-slot binds all procs");
+    check(multiEval.material.roughnessProc == multiEval.material.metallicProc &&
+              multiEval.material.metallicProc == multiEval.material.opacityProc,
+          "shared upstream reuses one compiled procedural");
+    shadeOk(multiEval, "multi-slot");
+}
+
+
+void testMaterialXBumpAndNormalMap() {
+    std::printf("materialx-bump-normalmap\n");
+    if (!materialXAvailable()) { std::printf("  skip\n"); return; }
+
+    auto makeHeightPng = [](const QString& path) {
+        QImage img(64, 64, QImage::Format_RGB32);
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x) {
+                // Smooth gradient so finite differences are never zero.
+                const int v = int(255.0f * (float(x) / 63.0f));
+                img.setPixel(x, y, qRgb(v, v, v));
+            }
+        return img.save(path);
+    };
+    auto makeNormalPng = [](const QString& path) {
+        // Flat tangent normal (128,128,255)
+        QImage img(32, 32, QImage::Format_RGB32);
+        img.fill(qRgb(128, 128, 255));
+        return img.save(path);
+    };
+
+    QTemporaryDir tmp;
+    check(tmp.isValid(), "temp dir for bump/normal");
+    const QString heightPath = tmp.filePath("height.png");
+    const QString normalPath = tmp.filePath("normal.png");
+    check(makeHeightPng(heightPath), "write height map");
+    check(makeNormalPng(normalPath), "write normal map");
+
+    const QString bumpXml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <image name=\"h1\" type=\"float\">\n"
+        "    <input name=\"file\" type=\"filename\" value=\"%1\"/>\n"
+        "  </image>\n"
+        "  <bump name=\"bump1\" type=\"vector3\">\n"
+        "    <input name=\"height\" type=\"float\" nodename=\"h1\"/>\n"
+        "    <input name=\"scale\" type=\"float\" value=\"2\"/>\n"
+        "  </bump>\n"
+        "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+        "    <input name=\"normal\" type=\"vector3\" nodename=\"bump1\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n").arg(heightPath);
+    MaterialXEvalResult eval = evaluateMaterialXDocument(bumpXml, tmp.path());
+    check(eval.ok, "bump→normal evaluates");
+    check(eval.bumpTexture != nullptr, "bump binds height texture");
+    check(std::fabs(eval.material.normalScale - 2.0f) < 1e-4f, "bump scale authored");
+    check(eval.normalTexture == nullptr && eval.material.bumpProc < 0, "bump uses bumpTexture path");
+
+    Stage stage;
+    StagePrim prim;
+    prim.type = PrimType::Mesh;
+    prim.path = "/geo/mesh";
+    prim.mesh = std::make_shared<Mesh>();
+    prim.mesh->positions = {Vec3(0,0,0), Vec3(1,0,0), Vec3(0,1,0)};
+    prim.mesh->indices = {0,1,2};
+    prim.mesh->normals = {Vec3(0,1,0), Vec3(0,1,0), Vec3(0,1,0)};
+    prim.mesh->uvs = {Vec2(0,0), Vec2(1,0), Vec2(0,1)};
+    prim.mesh->validate();
+    prim.material = eval.material;
+    prim.materialAssigned = true;
+    prim.bumpTexture = eval.bumpTexture;
+    prim.normalTexture = eval.normalTexture;
+    stage.prims.push_back(prim);
+    auto scene = stage.toScene();
+    SceneView view = scene->view();
+    check(view.materialCount > 0 && view.materials[0].bumpTex >= 0, "scene has bumpTex");
+    Vec3 shadingNormalA(0.0f, 1.0f, 0.0f);
+    Vec3 shadingNormalB(0.0f, 1.0f, 0.0f);
+    evaluateTexturedMaterial(view, view.materials[0], Vec2(0.125f, 0.25f), shadingNormalA, Vec3(0.0f, 0.0f, 0.0f),
+                             Vec3(0.0f, 1.0f, 0.0f), 1.0f / 64.0f);
+    evaluateTexturedMaterial(view, view.materials[0], Vec2(0.25f, 0.125f), shadingNormalB, Vec3(0.0f, 0.0f, 0.0f),
+                             Vec3(0.0f, 1.0f, 0.0f), 1.0f / 64.0f);
+    check(srIsFinite(shadingNormalA.x) && srIsFinite(shadingNormalB.x), "bump shading normals finite");
+    const float tilt = std::fabs(shadingNormalA.x) + std::fabs(shadingNormalA.z) + std::fabs(shadingNormalB.x) +
+                       std::fabs(shadingNormalB.z);
+    check(tilt > 1e-4f, "bump perturbs shading normal");
+    std::printf("  bump nA=(%.3f,%.3f,%.3f) nB=(%.3f,%.3f,%.3f) scale=%.2f\n", shadingNormalA.x, shadingNormalA.y,
+                shadingNormalA.z, shadingNormalB.x, shadingNormalB.y, shadingNormalB.z,
+                view.materials[0].normalScale);
+
+    const QString nmapXml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <image name=\"n1\" type=\"vector3\">\n"
+        "    <input name=\"file\" type=\"filename\" value=\"%1\"/>\n"
+        "  </image>\n"
+        "  <normalmap name=\"nm1\" type=\"vector3\">\n"
+        "    <input name=\"in\" type=\"vector3\" nodename=\"n1\"/>\n"
+        "    <input name=\"scale\" type=\"float\" value=\"0.5\"/>\n"
+        "  </normalmap>\n"
+        "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+        "    <input name=\"normal\" type=\"vector3\" nodename=\"nm1\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n").arg(normalPath);
+    eval = evaluateMaterialXDocument(nmapXml, tmp.path());
+    check(eval.ok, "normalmap→normal evaluates");
+    check(eval.normalTexture != nullptr, "normalmap binds texture");
+    check(std::fabs(eval.material.normalScale - 0.5f) < 1e-4f, "normalmap scale authored");
+    std::printf("  normalmap ok scale=%.2f\n", eval.material.normalScale);
+}
+
 void testMaterialXNoiseAndTriplanar() {
     std::printf("materialx-noise-triplanar\n");
     if (!materialXAvailable()) {
@@ -1109,6 +1322,8 @@ int main() {
     testUdimMaterialX();
     testTxMipmaps();
     testMaterialXTypeMismatchConnect();
+    testMaterialXColorIntoFloatSlots();
+    testMaterialXBumpAndNormalMap();
     testMaterialXNoiseAndTriplanar();
     testMaterialXUdimCubeAsset();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

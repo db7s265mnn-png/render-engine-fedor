@@ -211,9 +211,20 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
     auto sampleScalarSlot = [&](int proc, int tex, float fallback) -> float {
         if (proc >= 0) {
             const Vec4 c = evalProceduralRoot(scene, proc, ctx);
-            return saturatef(c.x);
+            // Color/vector patterns wired into float ports: use luminance, not just .x.
+            const float lum = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+            return saturatef(lum);
         }
         return sampleTextureScalar(scene, tex, uv, fallback, uvFilterWidth);
+    };
+    auto sampleHeightAt = [&](Vec2 sampleUv) -> float {
+        ProceduralCtx hctx = ctx;
+        hctx.uv = sampleUv;
+        if (base.bumpProc >= 0) {
+            const Vec4 c = evalProceduralRoot(scene, base.bumpProc, hctx);
+            return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+        }
+        return sampleTextureScalar(scene, base.bumpTex, sampleUv, 0.0f, uvFilterWidth);
     };
 
     mat.baseColor = sampleRgbSlot(base.baseColorProc, base.baseColorTex, base.baseColor);
@@ -234,13 +245,40 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
     if (base.subsurfaceProc >= 0 || base.subsurfaceTex >= 0)
         mat.subsurfaceColor = mat.subsurfaceColor * vmax(Vec3(0.0f), base.subsurfaceColor);
 
-    if (base.normalProc >= 0 || (base.normalTex >= 0 && base.normalTex < scene.textureCount && scene.textures)) {
-        Vec3 nMap = sampleRgbSlot(base.normalProc, base.normalTex, Vec3(0.5f, 0.5f, 1.0f));
-        nMap = nMap * 2.0f - Vec3(1.0f);
-        nMap.z = srMax(0.05f, nMap.z);
+    const float nScale = srIsFinite(base.normalScale) ? base.normalScale : 1.0f;
+    if (base.bumpProc >= 0 || (base.bumpTex >= 0 && base.bumpTex < scene.textureCount && scene.textures)) {
+        // MaterialX <bump>: finite-difference height → tangent-space normal.
+        float eps = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
+        if (base.bumpTex >= 0 && base.bumpTex < scene.textureCount && scene.textures) {
+            const TextureView& tex = scene.textures[base.bumpTex];
+            if (tex.width > 1) eps = srMax(eps, 1.0f / float(tex.width));
+        }
+        eps = srMax(1e-5f, eps);
+        const float h = sampleHeightAt(uv);
+        const float hx = sampleHeightAt(Vec2(uv.x + eps, uv.y));
+        const float hy = sampleHeightAt(Vec2(uv.x, uv.y + eps));
+        const float strength = nScale / eps;
+        Vec3 nMap(-(hx - h) * strength, -(hy - h) * strength, 1.0f);
+        if (!srIsFinite(nMap.x) || !srIsFinite(nMap.y) || !srIsFinite(nMap.z)) nMap = Vec3(0.0f, 0.0f, 1.0f);
         nMap = normalize(nMap);
         const Frame frame(ns);
         ns = normalize(frame.toWorld(nMap));
+        if (!srIsFinite(ns.x) || !srIsFinite(ns.y) || !srIsFinite(ns.z)) ns = frame.n;
+    } else if (base.normalProc >= 0 ||
+               (base.normalTex >= 0 && base.normalTex < scene.textureCount && scene.textures)) {
+        // MaterialX <normalmap> / image→normal: tangent-space RGB normal map.
+        Vec3 nMap = sampleRgbSlot(base.normalProc, base.normalTex, Vec3(0.5f, 0.5f, 1.0f));
+        nMap = nMap * 2.0f - Vec3(1.0f);
+        nMap.x *= nScale;
+        nMap.y *= nScale;
+        // Reconstruct Z so scaled maps stay unit-length and don't fold.
+        const float xy2 = nMap.x * nMap.x + nMap.y * nMap.y;
+        nMap.z = srMax(0.05f, sqrtf(srMax(0.0f, 1.0f - xy2)));
+        nMap = normalize(nMap);
+        if (!srIsFinite(nMap.x) || !srIsFinite(nMap.y) || !srIsFinite(nMap.z)) nMap = Vec3(0.0f, 0.0f, 1.0f);
+        const Frame frame(ns);
+        ns = normalize(frame.toWorld(nMap));
+        if (!srIsFinite(ns.x) || !srIsFinite(ns.y) || !srIsFinite(ns.z)) ns = frame.n;
     }
     return mat;
 }

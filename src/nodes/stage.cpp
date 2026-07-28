@@ -106,6 +106,7 @@ ScenePtr Stage::toScene() const {
                 material.opacityTex = scene->addTexture(prim.opacityTexture);
                 material.emissionTex = scene->addTexture(prim.emissionTexture);
                 material.normalTex = scene->addTexture(prim.normalTexture);
+                material.bumpTex = scene->addTexture(prim.bumpTexture);
                 material.subsurfaceTex = scene->addTexture(prim.subsurfaceTexture);
 
                 // Append shade-time procedurals; remap local child / texture indices.
@@ -157,6 +158,7 @@ ScenePtr Stage::toScene() const {
                     remapRoot(material.emissionProc);
                     remapRoot(material.normalProc);
                     remapRoot(material.subsurfaceProc);
+                    remapRoot(material.bumpProc);
                     auto clampRoot = [&](int& idx) {
                         if (idx >= int(scene->procedurals.size())) idx = -1;
                     };
@@ -167,6 +169,7 @@ ScenePtr Stage::toScene() const {
                     clampRoot(material.emissionProc);
                     clampRoot(material.normalProc);
                     clampRoot(material.subsurfaceProc);
+                    clampRoot(material.bumpProc);
                 }
 
                 const int materialIndex = scene->addMaterial(material);

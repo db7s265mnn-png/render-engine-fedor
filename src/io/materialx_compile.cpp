@@ -83,8 +83,8 @@ bool isProceduralCategory(const std::string& cat) {
            cat == "mix" || cat == "add" || cat == "subtract" || cat == "divide" || cat == "clamp" ||
            cat == "saturate" || cat == "invert" || cat == "absval" || cat == "power" || cat == "convert" ||
            cat == "swizzle" || cat == "combine2" || cat == "combine3" || cat == "combine4" || cat == "extract" ||
-           cat == "texcoord" || cat == "position" || cat == "normal" || cat == "tangent" || cat == "ramplr" ||
-           cat == "ramptb" || cat == "checkerboard";
+           cat == "texcoord" || cat == "position" || cat == "normal" || cat == "tangent" || cat == "bump" ||
+           cat == "normalmap" || cat == "ramplr" || cat == "ramptb" || cat == "checkerboard";
 }
 
 bool subtreeProcedural(const mx::NodePtr& node, int depth) {
@@ -393,12 +393,35 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
         n.in0 = compileConnected(node, "valuet", state, depth);
         n.in1 = compileConnected(node, "valueb", state, depth);
         result = pushNode(state, n);
+    } else if (cat == "normalmap") {
+        // Tangent-space map is applied at the material slot; compile the RGB input.
+        int child = compileConnected(node, "in", state, depth);
+        if (child >= 0) {
+            result = child;
+        } else {
+            n.op = kProcConst;
+            n.p0 = readVec4(node, "in", Vec4(0.5f, 0.5f, 1.0f, 1.0f));
+            result = pushNode(state, n);
+        }
+    } else if (cat == "bump") {
+        // Height field is sampled by the material bump slot; compile height only.
+        int child = compileConnected(node, "height", state, depth);
+        if (child < 0) child = compileConnected(node, "in", state, depth);
+        if (child >= 0) {
+            result = child;
+        } else {
+            n.op = kProcConst;
+            n.p0 = Vec4(readFloat(node, "height", 0.0f), readFloat(node, "height", 0.0f),
+                        readFloat(node, "height", 0.0f), 1.0f);
+            result = pushNode(state, n);
+        }
     } else if (cat == "checkerboard") {
         n.op = kProcChecker;
         result = pushNode(state, n);
     } else {
         int child = compileConnected(node, "in", state, depth);
         if (child < 0) child = compileConnected(node, "in1", state, depth);
+        if (child < 0) child = compileConnected(node, "height", state, depth);
         if (child >= 0) {
             result = child;
         } else {
