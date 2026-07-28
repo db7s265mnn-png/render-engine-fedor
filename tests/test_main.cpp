@@ -784,14 +784,18 @@ void testMaterialXNoiseAndTriplanar() {
     check(eval.ok, "evaluate noise3d+position ok");
     check(eval.material.baseColorProc >= 0, "noise3d+position compiles");
 
-    // unifiednoise3d with high frequency must compile (no spinbox clamp on authoring).
+    // unifiednoise3d with anisotropic frequency — all XYZ components must stick
+    // (regression: comma parse was clobbered by a space re-parse).
     const QString unified = QStringLiteral(
         "<?xml version=\"1.0\"?>\n"
         "<materialx version=\"1.38\">\n"
         "  <unifiednoise3d name=\"u1\" type=\"float\">\n"
-        "    <input name=\"freq\" type=\"vector3\" value=\"64, 64, 64\"/>\n"
+        "    <input name=\"freq\" type=\"vector3\" value=\"2, 8, 32\"/>\n"
         "    <input name=\"offset\" type=\"vector3\" value=\"0, 0, 0\"/>\n"
-        "    <input name=\"type\" type=\"integer\" value=\"0\"/>\n"
+        "    <input name=\"type\" type=\"integer\" value=\"3\"/>\n"
+        "    <input name=\"octaves\" type=\"integer\" value=\"5\"/>\n"
+        "    <input name=\"lacunarity\" type=\"float\" value=\"2.5\"/>\n"
+        "    <input name=\"diminish\" type=\"float\" value=\"0.4\"/>\n"
         "  </unifiednoise3d>\n"
         "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
         "    <input name=\"base_color\" type=\"color3\" nodename=\"u1\"/>\n"
@@ -801,17 +805,38 @@ void testMaterialXNoiseAndTriplanar() {
         "  </surfacematerial>\n"
         "</materialx>\n");
     eval = evaluateMaterialXDocument(unified, QString());
-    check(eval.ok, "evaluate unifiednoise3d freq=64 ok");
+    check(eval.ok, "evaluate unifiednoise3d anisotropic freq ok");
     check(eval.material.baseColorProc >= 0, "unifiednoise3d compiles");
     if (eval.material.baseColorProc >= 0 && size_t(eval.material.baseColorProc) < eval.procedurals.size()) {
         const ProceduralNode& node = eval.procedurals[size_t(eval.material.baseColorProc)];
         check(node.op == kProcUnified3d, "unifiednoise3d opcode");
-        check(std::fabs(node.p0.x - 64.0f) < 1e-4f, "freq 64 preserved (no clamp)");
+        check(std::fabs(node.p0.x - 2.0f) < 1e-4f, "freq.x = 2");
+        check(std::fabs(node.p0.y - 8.0f) < 1e-4f, "freq.y = 8 (not collapsed to x)");
+        check(std::fabs(node.p0.z - 32.0f) < 1e-4f, "freq.z = 32 (not collapsed to x)");
+        check(std::fabs(node.s0 - 5.0f) < 1e-4f, "octaves = 5");
+        check(std::fabs(node.s1 - 2.5f) < 1e-4f, "lacunarity = 2.5");
+        check(int(std::lround(node.p2.z)) == 3, "noise type = Fractal");
     }
-    std::printf("  noise3d ok=%d proc=%d unified freq=%g\n", int(eval.ok), eval.material.baseColorProc,
-                eval.material.baseColorProc >= 0 && size_t(eval.material.baseColorProc) < eval.procedurals.size()
-                    ? double(eval.procedurals[size_t(eval.material.baseColorProc)].p0.x)
-                    : 0.0);
+
+    // cellnoise3d must compile and stay finite with default object P.
+    const QString cell = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <cellnoise3d name=\"c1\" type=\"float\"/>\n"
+        "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" nodename=\"c1\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n");
+    eval = evaluateMaterialXDocument(cell, QString());
+    check(eval.ok, "evaluate cellnoise3d ok");
+    check(eval.material.baseColorProc >= 0, "cellnoise3d compiles");
+    if (eval.material.baseColorProc >= 0 && size_t(eval.material.baseColorProc) < eval.procedurals.size()) {
+        check(eval.procedurals[size_t(eval.material.baseColorProc)].op == kProcCell3d, "cellnoise3d opcode");
+    }
+    std::printf("  noise3d ok=%d proc=%d unified/cell ok\n", int(eval.ok), eval.material.baseColorProc);
 }
 
 void testMaterialXUdimCubeAsset() {

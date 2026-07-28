@@ -175,7 +175,9 @@ private:
     QString dragParameterName_;
     bool gizmoDidEdit_ = false;
 
+    QWidget* chromeBar_ = nullptr;
     QWidget* toolStrip_ = nullptr;
+    static constexpr int kChromeHeight = 34;
     QToolButton* cameraMenuButton_ = nullptr;
     QToolButton* selectButton_ = nullptr;
     QToolButton* translateButton_ = nullptr;

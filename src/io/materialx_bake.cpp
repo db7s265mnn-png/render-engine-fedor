@@ -118,7 +118,7 @@ float cellNoise2(float x, float y) {
     y = std::clamp(y, -1.0e5f, 1.0e5f);
     const int xi = int(std::floor(x));
     const int yi = int(std::floor(y));
-    return hashToFloat(hashU32(uint32_t(xi) * 374761393u + uint32_t(yi) * 668265263u)) * 2.0f - 1.0f;
+    return hashToFloat(hashU32(uint32_t(xi) * 374761393u + uint32_t(yi) * 668265263u));
 }
 
 float cellNoise3(float x, float y, float z) {
@@ -130,9 +130,72 @@ float cellNoise3(float x, float y, float z) {
     const int yi = int(std::floor(y));
     const int zi = int(std::floor(z));
     return hashToFloat(hashU32(uint32_t(xi) * 374761393u + uint32_t(yi) * 668265263u +
-                               uint32_t(zi) * 2147483647u)) *
-               2.0f -
-           1.0f;
+                               uint32_t(zi) * 2147483647u));
+}
+
+float worley2(float x, float y, float jitter, int style) {
+    if (!std::isfinite(x) || !std::isfinite(y)) return 0.0f;
+    x = std::clamp(x, -1.0e5f, 1.0e5f);
+    y = std::clamp(y, -1.0e5f, 1.0e5f);
+    jitter = std::clamp(jitter, 0.0f, 1.0f);
+    const int xi = int(std::floor(x));
+    const int yi = int(std::floor(y));
+    const float fx = x - float(xi);
+    const float fy = y - float(yi);
+    float minD = 1.0e10f;
+    float solid = 0.0f;
+    for (int oy = -1; oy <= 1; ++oy) {
+        for (int ox = -1; ox <= 1; ++ox) {
+            const uint32_t h =
+                hashU32(uint32_t(xi + ox) * 374761393u + uint32_t(yi + oy) * 668265263u);
+            const float px = float(ox) + (hashToFloat(h) - 0.5f) * jitter + 0.5f;
+            const float py = float(oy) + (hashToFloat(h * 0x85ebca6bu + 1u) - 0.5f) * jitter + 0.5f;
+            const float dx = px - fx;
+            const float dy = py - fy;
+            const float d = dx * dx + dy * dy;
+            if (d < minD) {
+                minD = d;
+                solid = hashToFloat(h ^ 0x27d4eb2du);
+            }
+        }
+    }
+    return style != 0 ? solid : std::sqrt(std::max(0.0f, minD));
+}
+
+float worley3(float x, float y, float z, float jitter, int style) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) return 0.0f;
+    x = std::clamp(x, -1.0e5f, 1.0e5f);
+    y = std::clamp(y, -1.0e5f, 1.0e5f);
+    z = std::clamp(z, -1.0e5f, 1.0e5f);
+    jitter = std::clamp(jitter, 0.0f, 1.0f);
+    const int xi = int(std::floor(x));
+    const int yi = int(std::floor(y));
+    const int zi = int(std::floor(z));
+    const float fx = x - float(xi);
+    const float fy = y - float(yi);
+    const float fz = z - float(zi);
+    float minD = 1.0e10f;
+    float solid = 0.0f;
+    for (int oz = -1; oz <= 1; ++oz) {
+        for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -1; ox <= 1; ++ox) {
+                const uint32_t h = hashU32(uint32_t(xi + ox) * 374761393u + uint32_t(yi + oy) * 668265263u +
+                                          uint32_t(zi + oz) * 2147483647u);
+                const float px = float(ox) + (hashToFloat(h) - 0.5f) * jitter + 0.5f;
+                const float py = float(oy) + (hashToFloat(h * 0x85ebca6bu + 1u) - 0.5f) * jitter + 0.5f;
+                const float pz = float(oz) + (hashToFloat(h * 0xc2b2ae3du + 2u) - 0.5f) * jitter + 0.5f;
+                const float dx = px - fx;
+                const float dy = py - fy;
+                const float dz = pz - fz;
+                const float d = dx * dx + dy * dy + dz * dz;
+                if (d < minD) {
+                    minD = d;
+                    solid = hashToFloat(h ^ 0x27d4eb2du);
+                }
+            }
+        }
+    }
+    return style != 0 ? solid : std::sqrt(std::max(0.0f, minD));
 }
 
 float fractal3(float x, float y, float z, int octaves, float lacunarity, float diminish) {
@@ -162,12 +225,28 @@ Vec3 fractal3Vec3(float x, float y, float z, int octaves, float lacunarity, floa
 // Value helpers
 // ---------------------------------------------------------------------------
 bool parseFloats(const std::string& value, float* out, int count) {
+    // Keep the richer of comma / space parses — do not clobber "1, 2, 3" with a
+    // space re-parse that only sees the first float.
     if (!out || count <= 0) return false;
-    float a = 0, b = 0, c = 0, d = 0;
+    float aC = 0, bC = 0, cC = 0, dC = 0;
+    float aS = 0, bS = 0, cS = 0, dS = 0;
+    const int nComma = std::sscanf(value.c_str(), "%f,%f,%f,%f", &aC, &bC, &cC, &dC);
+    const int nSpace = std::sscanf(value.c_str(), "%f %f %f %f", &aS, &bS, &cS, &dS);
     int n = 0;
-    if (count >= 4)
-        n = std::sscanf(value.c_str(), "%f,%f,%f,%f", &a, &b, &c, &d);
-    if (n < count) n = std::sscanf(value.c_str(), "%f %f %f %f", &a, &b, &c, &d);
+    float a = 0, b = 0, c = 0, d = 0;
+    if (nComma >= nSpace) {
+        n = nComma;
+        a = aC;
+        b = bC;
+        c = cC;
+        d = dC;
+    } else {
+        n = nSpace;
+        a = aS;
+        b = bS;
+        c = cS;
+        d = dS;
+    }
     if (n < 1) n = std::sscanf(value.c_str(), "%f", &a);
     if (n < 1) return false;
     out[0] = a;
@@ -341,7 +420,7 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
             result = Vec4(n.x * amp.x + pivot, n.y * amp.y + pivot, n.z * amp.z + pivot, 1.0f);
         }
         result = asColor(result, type);
-    } else if (cat == "noise3d" || cat == "unifiednoise3d") {
+    } else if (cat == "noise3d") {
         Vec3 pos(u * 8.0f, v * 8.0f, 0.0f);
         if (mx::NodePtr pn = connected(node, "position")) {
             const Vec4 p = evalNode(pn, u, v, state);
@@ -359,7 +438,43 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
             result = Vec4(n.x * amp.x + pivot, n.y * amp.y + pivot, n.z * amp.z + pivot, 1.0f);
         }
         result = asColor(result, type);
-    } else if (cat == "fractal3d" || cat == "fractal2d" || cat == "unifiednoise2d") {
+    } else if (cat == "unifiednoise3d") {
+        Vec3 pos(u, v, 0.0f);
+        if (mx::NodePtr pn = connected(node, "position")) {
+            const Vec4 p = evalNode(pn, u, v, state);
+            pos = Vec3(p.x, p.y, p.z);
+            if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z))
+                pos = Vec3(u, v, 0.0f);
+        }
+        const Vec3 freq = evalVec3(node, "freq", u, v, state, Vec3(1.0f));
+        const Vec3 offset = evalVec3(node, "offset", u, v, state, Vec3(0.0f));
+        const float x = pos.x * freq.x + offset.x;
+        const float y = pos.y * freq.y + offset.y;
+        const float z = pos.z * freq.z + offset.z;
+        const int noiseType = int(std::lround(evalFloat(node, "type", u, v, state, 0.0f)));
+        const int octaves = int(std::lround(evalFloat(node, "octaves", u, v, state, 3.0f)));
+        const float lacunarity = evalFloat(node, "lacunarity", u, v, state, 2.0f);
+        const float diminish = evalFloat(node, "diminish", u, v, state, 0.5f);
+        const float jitter = evalFloat(node, "jitter", u, v, state, 1.0f);
+        const int style = int(std::lround(evalFloat(node, "style", u, v, state, 0.0f)));
+        float noise = 0.0f;
+        if (noiseType == 1)
+            noise = cellNoise3(x, y, z);
+        else if (noiseType == 2)
+            noise = worley3(x, y, z, jitter, style);
+        else if (noiseType == 3 || (noiseType == 0 && octaves > 1))
+            noise = fractal3(x, y, z, octaves, lacunarity, diminish);
+        else
+            noise = perlin3(x, y, z);
+        float t = (noiseType == 1 || noiseType == 2) ? noise : (noise * 0.5f + 0.5f);
+        const float outMin = evalFloat(node, "outmin", u, v, state, 0.0f);
+        const float outMax = evalFloat(node, "outmax", u, v, state, 1.0f);
+        float out = outMin * (1.0f - t) + outMax * t;
+        const std::string clampRaw = inputValueString(node, "clampoutput");
+        const bool doClamp = clampRaw.empty() || clampRaw == "true" || clampRaw == "1";
+        if (doClamp) out = std::clamp(out, std::min(outMin, outMax), std::max(outMin, outMax));
+        result = asColor(splat4(out), type);
+    } else if (cat == "fractal3d" || cat == "fractal2d") {
         Vec3 pos(u * 4.0f, v * 4.0f, 0.0f);
         if (mx::NodePtr pn = connected(node, "position")) {
             const Vec4 p = evalNode(pn, u, v, state);
@@ -382,12 +497,48 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
             result = Vec4(n.x * amp.x, n.y * amp.y, n.z * amp.z, 1.0f);
         }
         result = asColor(result, type);
-    } else if (cat == "cellnoise2d") {
-        Vec2 tc(u * 8.0f, v * 8.0f);
+    } else if (cat == "unifiednoise2d") {
+        Vec2 tc(u, v);
         if (mx::NodePtr tcn = connected(node, "texcoord")) {
             const Vec4 t = evalNode(tcn, u, v, state);
-            tc = Vec2(t.x * 8.0f, t.y * 8.0f);
+            tc = Vec2(t.x, t.y);
         }
+        const Vec3 freq3 = evalVec3(node, "freq", u, v, state, Vec3(1.0f, 1.0f, 1.0f));
+        const Vec3 off3 = evalVec3(node, "offset", u, v, state, Vec3(0.0f));
+        const float x = tc.x * freq3.x + off3.x;
+        const float y = tc.y * freq3.y + off3.y;
+        const int noiseType = int(std::lround(evalFloat(node, "type", u, v, state, 0.0f)));
+        const int octaves = int(std::lround(evalFloat(node, "octaves", u, v, state, 3.0f)));
+        const float lacunarity = evalFloat(node, "lacunarity", u, v, state, 2.0f);
+        const float diminish = evalFloat(node, "diminish", u, v, state, 0.5f);
+        const float jitter = evalFloat(node, "jitter", u, v, state, 1.0f);
+        const int style = int(std::lround(evalFloat(node, "style", u, v, state, 0.0f)));
+        float noise = 0.0f;
+        if (noiseType == 1)
+            noise = cellNoise2(x, y);
+        else if (noiseType == 2)
+            noise = worley2(x, y, jitter, style);
+        else if (noiseType == 3 || (noiseType == 0 && octaves > 1))
+            noise = fractal3(x, y, 0.0f, octaves, lacunarity, diminish);
+        else
+            noise = perlin2(x, y);
+        float t = (noiseType == 1 || noiseType == 2) ? noise : (noise * 0.5f + 0.5f);
+        const float outMin = evalFloat(node, "outmin", u, v, state, 0.0f);
+        const float outMax = evalFloat(node, "outmax", u, v, state, 1.0f);
+        float out = outMin * (1.0f - t) + outMax * t;
+        const std::string clampRaw = inputValueString(node, "clampoutput");
+        const bool doClamp = clampRaw.empty() || clampRaw == "true" || clampRaw == "1";
+        if (doClamp) out = std::clamp(out, std::min(outMin, outMax), std::max(outMin, outMax));
+        result = asColor(splat4(out), type);
+    } else if (cat == "cellnoise2d") {
+        Vec2 tc(u, v);
+        if (mx::NodePtr tcn = connected(node, "texcoord")) {
+            const Vec4 t = evalNode(tcn, u, v, state);
+            tc = Vec2(t.x, t.y);
+        } else {
+            tc = Vec2(u * 8.0f, v * 8.0f);
+        }
+        if (!std::isfinite(tc.x) || !std::isfinite(tc.y)) tc = Vec2(u * 8.0f, v * 8.0f);
         result = asColor(splat4(cellNoise2(tc.x, tc.y)), type);
     } else if (cat == "cellnoise3d") {
         Vec3 pos(u * 8.0f, v * 8.0f, 0.0f);
@@ -395,13 +546,27 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
             const Vec4 p = evalNode(pn, u, v, state);
             pos = Vec3(p.x, p.y, p.z);
         }
+        if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z))
+            pos = Vec3(u * 8.0f, v * 8.0f, 0.0f);
         result = asColor(splat4(cellNoise3(pos.x, pos.y, pos.z)), type);
-    } else if (cat == "worleynoise2d" || cat == "worleynoise3d") {
-        // Cheap stand-in: cell noise is enough for a stable preview bake.
-        if (cat == "worleynoise2d")
-            result = asColor(splat4(cellNoise2(u * 8.0f, v * 8.0f)), type);
-        else
-            result = asColor(splat4(cellNoise3(u * 8.0f, v * 8.0f, 0.0f)), type);
+    } else if (cat == "worleynoise2d") {
+        const float jitter = evalFloat(node, "jitter", u, v, state, 1.0f);
+        const int style = int(std::lround(evalFloat(node, "style", u, v, state, 0.0f)));
+        Vec2 tc(u, v);
+        if (mx::NodePtr tcn = connected(node, "texcoord")) {
+            const Vec4 t = evalNode(tcn, u, v, state);
+            tc = Vec2(t.x, t.y);
+        }
+        result = asColor(splat4(worley2(tc.x, tc.y, jitter, style)), type);
+    } else if (cat == "worleynoise3d") {
+        const float jitter = evalFloat(node, "jitter", u, v, state, 1.0f);
+        const int style = int(std::lround(evalFloat(node, "style", u, v, state, 0.0f)));
+        Vec3 pos(u, v, 0.0f);
+        if (mx::NodePtr pn = connected(node, "position")) {
+            const Vec4 p = evalNode(pn, u, v, state);
+            pos = Vec3(p.x, p.y, p.z);
+        }
+        result = asColor(splat4(worley3(pos.x, pos.y, pos.z, jitter, style)), type);
     } else if (cat == "triplanarprojection") {
         const bool perAxis = [&]() {
             const std::string raw = inputValueString(node, "input_per_axis");

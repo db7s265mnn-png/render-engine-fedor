@@ -107,13 +107,14 @@ SR_INL SR_HD Vec3 procPerlin3Vec3(float x, float y, float z) {
                 procPerlin3(x - 5.7f, y + 23.4f, z - 11.8f));
 }
 
+// MaterialX / OSL cell noise → [0,1] (not signed).
 SR_INL SR_HD float procCell2(float x, float y) {
     if (!srIsFinite(x) || !srIsFinite(y)) return 0.0f;
     x = clampf(x, -1.0e5f, 1.0e5f);
     y = clampf(y, -1.0e5f, 1.0e5f);
     const int xi = int(floorf(x));
     const int yi = int(floorf(y));
-    return procHashToFloat(procHashU32(uint32_t(xi) * 374761393u + uint32_t(yi) * 668265263u)) * 2.0f - 1.0f;
+    return procHashToFloat(procHashU32(uint32_t(xi) * 374761393u + uint32_t(yi) * 668265263u));
 }
 
 SR_INL SR_HD float procCell3(float x, float y, float z) {
@@ -125,9 +126,78 @@ SR_INL SR_HD float procCell3(float x, float y, float z) {
     const int yi = int(floorf(y));
     const int zi = int(floorf(z));
     return procHashToFloat(procHashU32(uint32_t(xi) * 374761393u + uint32_t(yi) * 668265263u +
-                                       uint32_t(zi) * 2147483647u)) *
-               2.0f -
-           1.0f;
+                                       uint32_t(zi) * 2147483647u));
+}
+
+// Worley F1 distance (MaterialX style). jitter in [0,1], style 0=distance 1=solid.
+SR_INL SR_HD float procWorley2(float x, float y, float jitter, int style) {
+    if (!srIsFinite(x) || !srIsFinite(y)) return 0.0f;
+    x = clampf(x, -1.0e5f, 1.0e5f);
+    y = clampf(y, -1.0e5f, 1.0e5f);
+    jitter = clampf(jitter, 0.0f, 1.0f);
+    const int xi = int(floorf(x));
+    const int yi = int(floorf(y));
+    const float fx = x - float(xi);
+    const float fy = y - float(yi);
+    float minD = 1.0e10f;
+    float solid = 0.0f;
+    for (int oy = -1; oy <= 1; ++oy) {
+        for (int ox = -1; ox <= 1; ++ox) {
+            const uint32_t h =
+                procHashU32(uint32_t(xi + ox) * 374761393u + uint32_t(yi + oy) * 668265263u);
+            const float px = float(ox) + (procHashToFloat(h) - 0.5f) * jitter + 0.5f;
+            const float py = float(oy) + (procHashToFloat(h * 0x85ebca6bu + 1u) - 0.5f) * jitter + 0.5f;
+            const float dx = px - fx;
+            const float dy = py - fy;
+            const float d = dx * dx + dy * dy;
+            if (d < minD) {
+                minD = d;
+                solid = procHashToFloat(h ^ 0x27d4eb2du);
+            }
+        }
+    }
+    if (style != 0) return solid;
+    return sqrtf(srMax(0.0f, minD));
+}
+
+SR_INL SR_HD float procWorley3(float x, float y, float z, float jitter, int style) {
+    if (!srIsFinite(x) || !srIsFinite(y) || !srIsFinite(z)) return 0.0f;
+    x = clampf(x, -1.0e5f, 1.0e5f);
+    y = clampf(y, -1.0e5f, 1.0e5f);
+    z = clampf(z, -1.0e5f, 1.0e5f);
+    jitter = clampf(jitter, 0.0f, 1.0f);
+    const int xi = int(floorf(x));
+    const int yi = int(floorf(y));
+    const int zi = int(floorf(z));
+    const float fx = x - float(xi);
+    const float fy = y - float(yi);
+    const float fz = z - float(zi);
+    float minD = 1.0e10f;
+    float solid = 0.0f;
+    for (int oz = -1; oz <= 1; ++oz) {
+        for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -1; ox <= 1; ++ox) {
+                const uint32_t h = procHashU32(uint32_t(xi + ox) * 374761393u +
+                                              uint32_t(yi + oy) * 668265263u +
+                                              uint32_t(zi + oz) * 2147483647u);
+                const float px = float(ox) + (procHashToFloat(h) - 0.5f) * jitter + 0.5f;
+                const float py =
+                    float(oy) + (procHashToFloat(h * 0x85ebca6bu + 1u) - 0.5f) * jitter + 0.5f;
+                const float pz =
+                    float(oz) + (procHashToFloat(h * 0xc2b2ae3du + 2u) - 0.5f) * jitter + 0.5f;
+                const float dx = px - fx;
+                const float dy = py - fy;
+                const float dz = pz - fz;
+                const float d = dx * dx + dy * dy + dz * dz;
+                if (d < minD) {
+                    minD = d;
+                    solid = procHashToFloat(h ^ 0x27d4eb2du);
+                }
+            }
+        }
+    }
+    if (style != 0) return solid;
+    return sqrtf(srMax(0.0f, minD));
 }
 
 SR_INL SR_HD float procFractal3(float x, float y, float z, int octaves, float lacunarity, float diminish) {
@@ -280,22 +350,37 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             } else if (lengthSquared(pos) < 1e-20f) {
                 pos = Vec3(ctx.uv.x * 4.0f, ctx.uv.y * 4.0f, 0.0f);
             }
+            if (!srIsFinite(pos.x) || !srIsFinite(pos.y) || !srIsFinite(pos.z))
+                pos = Vec3(ctx.uv.x * 4.0f, ctx.uv.y * 4.0f, 0.0f);
             const int octaves = int(floorf(n.s0 + 0.5f));
+            float lac = n.s1;
+            float dim = n.s2;
+            if (!srIsFinite(lac) || lac < 1.0e-3f) lac = 2.0f;
+            if (!srIsFinite(dim)) dim = 0.5f;
             if (n.channels <= 1) {
-                result = procSplat(procFractal3(pos.x, pos.y, pos.z, octaves, n.s1, n.s2) * n.p0.x);
+                result = procSplat(procFractal3(pos.x, pos.y, pos.z, octaves, lac, dim) * n.p0.x);
             } else {
-                const Vec3 noise = procFractal3Vec3(pos.x, pos.y, pos.z, octaves, n.s1, n.s2);
+                const Vec3 noise = procFractal3Vec3(pos.x, pos.y, pos.z, octaves, lac, dim);
                 result = Vec4(noise.x * n.p0.x, noise.y * n.p0.y, noise.z * n.p0.z, 1.0f);
             }
             break;
         }
         case kProcCell2d: {
-            Vec2 tc = ctx.uv * 8.0f;
+            Vec2 tc = ctx.uv;
             if (n.in0 >= 0) {
                 const Vec4 t = evalProceduralChild(scene, n.in0, ctx, depth, Vec4(ctx.uv.x, ctx.uv.y, 0.0f, 1.0f));
-                tc = Vec2(t.x * 8.0f, t.y * 8.0f);
+                tc = Vec2(t.x, t.y);
             }
-            result = procSplat(procCell2(tc.x, tc.y));
+            if (!srIsFinite(tc.x) || !srIsFinite(tc.y)) tc = ctx.uv;
+            // MaterialX cellnoise uses raw texcoord (no baked *8); keep mild default scale
+            // only when the port is unbound so artists still see structure on [0,1] UVs.
+            if (n.in0 < 0) tc = tc * 8.0f;
+            const float jitter = n.s0 > 0.0f ? n.s0 : 1.0f;
+            const int style = int(floorf(n.s1 + 0.5f));
+            if (n.s2 > 0.5f)
+                result = procSplat(procWorley2(tc.x, tc.y, jitter, style));
+            else
+                result = procSplat(procCell2(tc.x, tc.y));
             break;
         }
         case kProcCell3d: {
@@ -306,7 +391,14 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             } else if (lengthSquared(pos) < 1e-20f) {
                 pos = Vec3(ctx.uv.x * 8.0f, ctx.uv.y * 8.0f, 0.0f);
             }
-            result = procSplat(procCell3(pos.x, pos.y, pos.z));
+            if (!srIsFinite(pos.x) || !srIsFinite(pos.y) || !srIsFinite(pos.z))
+                pos = Vec3(ctx.uv.x * 8.0f, ctx.uv.y * 8.0f, 0.0f);
+            const float jitter = n.s0 > 0.0f ? n.s0 : 1.0f;
+            const int style = int(floorf(n.s1 + 0.5f));
+            if (n.s2 > 0.5f)
+                result = procSplat(procWorley3(pos.x, pos.y, pos.z, jitter, style));
+            else
+                result = procSplat(procCell3(pos.x, pos.y, pos.z));
             break;
         }
         case kProcUnified2d: {
@@ -315,25 +407,52 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
                 const Vec4 t = evalProceduralChild(scene, n.in0, ctx, depth, Vec4(tc.x, tc.y, 0.0f, 1.0f));
                 tc = Vec2(t.x, t.y);
             }
-            const Vec2 freq(n.p0.x, n.p0.y);
-            const Vec2 offset(n.p1.x, n.p1.y);
-            const float x = tc.x * freq.x + offset.x;
-            const float y = tc.y * freq.y + offset.y;
+            if (!srIsFinite(tc.x) || !srIsFinite(tc.y)) tc = ctx.uv;
+            // Frequency is vector2 — each axis scales independently (MaterialX / Arnold).
+            float freqX = n.p0.x;
+            float freqY = n.p0.y;
+            if (!srIsFinite(freqX)) freqX = 1.0f;
+            if (!srIsFinite(freqY)) freqY = freqX;
+            float ox = srIsFinite(n.p1.x) ? n.p1.x : 0.0f;
+            float oy = srIsFinite(n.p1.y) ? n.p1.y : 0.0f;
+            float x = tc.x * freqX + ox;
+            float y = tc.y * freqY + oy;
+            const float jitter = clampf(srIsFinite(n.p1.w) ? n.p1.w : 1.0f, 0.0f, 1.0f);
+            // MaterialX applies a huge rotation when jitter != 1 for non-Worley types.
+            if (fabsf(jitter - 1.0f) > 1.0e-4f) {
+                const float amount = (jitter - 1.0f) * 90000.0f * 0.017453292519943295f;
+                const float ca = cosf(amount);
+                const float sa = sinf(amount);
+                const float rx = x * ca - y * sa;
+                const float ry = x * sa + y * ca;
+                x = rx;
+                y = ry;
+            }
             const int type = int(floorf(n.p2.z + 0.5f));
+            const int style = int(floorf(n.p2.w + 0.5f));
             const int octaves = int(floorf(n.s0 + 0.5f));
+            float lac = n.s1;
+            float dim = n.s2;
+            if (!srIsFinite(lac) || lac < 1.0e-3f) lac = 2.0f;
+            if (!srIsFinite(dim)) dim = 0.5f;
             float noise = 0.0f;
+            // 0 Perlin, 1 Cell, 2 Worley, 3 Fractal — octaves apply to Fractal (and
+            // Arnold-like detail when Perlin asks for more than one octave).
             if (type == 1)
                 noise = procCell2(x, y);
             else if (type == 2)
-                noise = procCell2(x, y);  // worley stand-in
-            else if (type == 3)
-                noise = procFractal3(x, y, 0.0f, octaves, n.s1, n.s2);
+                noise = procWorley2(x, y, jitter, style);
+            else if (type == 3 || (type == 0 && octaves > 1))
+                noise = procFractal3(x, y, 0.0f, octaves, lac, dim);
             else
                 noise = procPerlin2(x, y);
-            // Map signed noise into [outmin, outmax].
-            float t = noise * 0.5f + 0.5f;
-            float out = n.p2.x * (1.0f - t) + n.p2.y * t;
-            if (n.s3 > 0.5f) out = clampf(out, n.p2.x, n.p2.y);
+            // Cell/Worley are already [0,1]; Perlin/Fractal are signed ≈[-1,1].
+            float t = (type == 1 || type == 2) ? noise : (noise * 0.5f + 0.5f);
+            if (!srIsFinite(t)) t = 0.0f;
+            float outMin = srIsFinite(n.p2.x) ? n.p2.x : 0.0f;
+            float outMax = srIsFinite(n.p2.y) ? n.p2.y : 1.0f;
+            float out = outMin * (1.0f - t) + outMax * t;
+            if (n.s3 > 0.5f) out = clampf(out, outMin < outMax ? outMin : outMax, outMin < outMax ? outMax : outMin);
             result = procSplat(out);
             break;
         }
@@ -342,26 +461,58 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             if (n.in0 >= 0) {
                 const Vec4 p = evalProceduralChild(scene, n.in0, ctx, depth, Vec4(pos.x, pos.y, pos.z, 1.0f));
                 pos = Vec3(p.x, p.y, p.z);
+            } else if (lengthSquared(pos) < 1e-20f) {
+                pos = Vec3(ctx.uv.x, ctx.uv.y, 0.0f);
             }
-            const Vec3 freq(n.p0.x, n.p0.y, n.p0.z);
-            const Vec3 offset(n.p1.x, n.p1.y, n.p1.z);
-            const float x = pos.x * freq.x + offset.x;
-            const float y = pos.y * freq.y + offset.y;
-            const float z = pos.z * freq.z + offset.z;
+            if (!srIsFinite(pos.x) || !srIsFinite(pos.y) || !srIsFinite(pos.z))
+                pos = Vec3(ctx.uv.x, ctx.uv.y, 0.0f);
+            float freqX = n.p0.x;
+            float freqY = n.p0.y;
+            float freqZ = n.p0.z;
+            if (!srIsFinite(freqX)) freqX = 1.0f;
+            if (!srIsFinite(freqY)) freqY = freqX;
+            if (!srIsFinite(freqZ)) freqZ = freqX;
+            float ox = srIsFinite(n.p1.x) ? n.p1.x : 0.0f;
+            float oy = srIsFinite(n.p1.y) ? n.p1.y : 0.0f;
+            float oz = srIsFinite(n.p1.z) ? n.p1.z : 0.0f;
+            float x = pos.x * freqX + ox;
+            float y = pos.y * freqY + oy;
+            float z = pos.z * freqZ + oz;
+            const float jitter = clampf(srIsFinite(n.p1.w) ? n.p1.w : 1.0f, 0.0f, 1.0f);
+            if (fabsf(jitter - 1.0f) > 1.0e-4f) {
+                // Approximate MaterialX rotate3d about (0.1,1,0).
+                const float amount = (jitter - 1.0f) * 90000.0f * 0.017453292519943295f;
+                const float ca = cosf(amount);
+                const float sa = sinf(amount);
+                // Rotate around Y-ish axis.
+                const float rx = x * ca + z * sa;
+                const float rz = -x * sa + z * ca;
+                x = rx;
+                z = rz;
+            }
             const int type = int(floorf(n.p2.z + 0.5f));
+            const int style = int(floorf(n.p2.w + 0.5f));
             const int octaves = int(floorf(n.s0 + 0.5f));
+            float lac = n.s1;
+            float dim = n.s2;
+            if (!srIsFinite(lac) || lac < 1.0e-3f) lac = 2.0f;
+            if (!srIsFinite(dim)) dim = 0.5f;
             float noise = 0.0f;
             if (type == 1)
                 noise = procCell3(x, y, z);
             else if (type == 2)
-                noise = procCell3(x, y, z);
-            else if (type == 3)
-                noise = procFractal3(x, y, z, octaves, n.s1, n.s2);
+                noise = procWorley3(x, y, z, jitter, style);
+            else if (type == 3 || (type == 0 && octaves > 1))
+                noise = procFractal3(x, y, z, octaves, lac, dim);
             else
                 noise = procPerlin3(x, y, z);
-            float t = noise * 0.5f + 0.5f;
-            float out = n.p2.x * (1.0f - t) + n.p2.y * t;
-            if (n.s3 > 0.5f) out = clampf(out, n.p2.x, n.p2.y);
+            float t = (type == 1 || type == 2) ? noise : (noise * 0.5f + 0.5f);
+            if (!srIsFinite(t)) t = 0.0f;
+            float outMin = srIsFinite(n.p2.x) ? n.p2.x : 0.0f;
+            float outMax = srIsFinite(n.p2.y) ? n.p2.y : 1.0f;
+            float out = outMin * (1.0f - t) + outMax * t;
+            if (n.s3 > 0.5f) out = clampf(out, outMin < outMax ? outMin : outMax, outMin < outMax ? outMax : outMin);
+            if (!srIsFinite(out)) out = outMin;
             result = procSplat(out);
             break;
         }

@@ -9,6 +9,7 @@
 
 #include "core/log.h"
 #include "core/thread_pool.h"
+#include "render/blue_noise.h"
 #include "render/integrator.h"
 #include "render/render_device.h"
 #include "solstice_config.h"
@@ -201,8 +202,8 @@ public:
         auto shadePixel = [&](int x, int y, int threadId) {
             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
             Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
-            const float jx = sampleIndex == 0 ? 0.5f : rng.nextFloat();
-            const float jy = sampleIndex == 0 ? 0.5f : rng.nextFloat();
+            float jx = 0.5f, jy = 0.5f;
+            blueNoisePixelJitter(x, y, sampleIndex, jx, jy);
             Vec3 origin, direction;
             generateCameraRay(scene, float(x) + jx, float(y) + jy, rng.nextFloat(), rng.nextFloat(), origin,
                               direction);

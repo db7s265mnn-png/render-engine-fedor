@@ -9,6 +9,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QToolTip>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
@@ -567,6 +568,25 @@ void NodeGraphView::mouseMoveEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
+
+    // Hover tip on ports: show the input label / "output" as the port data name.
+    if (NodeItem* item = nodeItemAt(event->pos())) {
+        const QPointF local = item->mapFromScene(mapToScene(event->pos()));
+        QString tip;
+        if (item->outputPortNear(local)) {
+            tip = QStringLiteral("output");
+        } else {
+            const int index = item->nearestInputPort(local);
+            if (index >= 0 && item->node()) tip = item->node()->inputLabel(index);
+        }
+        if (!tip.isEmpty())
+            QToolTip::showText(event->globalPosition().toPoint(), tip, this);
+        else
+            QToolTip::hideText();
+    } else {
+        QToolTip::hideText();
+    }
+
     QGraphicsView::mouseMoveEvent(event);
 }
 

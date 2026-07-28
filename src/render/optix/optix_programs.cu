@@ -2,6 +2,7 @@
 // integrator header, so the GPU and CPU backends stay in lockstep.
 #include <optix.h>
 
+#include "render/blue_noise.h"
 #include "render/integrator.h"
 #include "render/optix/launch_params.h"
 
@@ -70,8 +71,8 @@ extern "C" __global__ void __raygen__path() {
     Rng rng(hashCombine(pixelIndex, params.frameSeed),
             hashUint(pixelIndex ^ (params.frameSeed * 2654435761u)));
 
-    const float jitterX = params.sampleIndex == 0 ? 0.5f : rng.nextFloat();
-    const float jitterY = params.sampleIndex == 0 ? 0.5f : rng.nextFloat();
+    float jitterX = 0.5f, jitterY = 0.5f;
+    blueNoisePixelJitter(x, y, params.sampleIndex, jitterX, jitterY);
 
     Vec3 origin, direction;
     generateCameraRay(params.scene, float(x) + jitterX, float(y) + jitterY, rng.nextFloat(), rng.nextFloat(),

@@ -24,6 +24,7 @@
 #include <QSignalBlocker>
 #include <QStyleOptionGraphicsItem>
 #include <QToolButton>
+#include <QToolTip>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
@@ -1424,6 +1425,22 @@ void MaterialNetworkGraphView::mouseMoveEvent(QMouseEvent* event) {
         event->accept();
         return;
     }
+
+    // Hover tip: show the MaterialX data type name on the port under the cursor.
+    const QPointF scenePos = mapToScene(event->pos());
+    QString tip;
+    if (MaterialNetworkNodeItem* source = outputPortAt(graphScene_, scenePos, kPortHitRadius)) {
+        tip = source->typeName().isEmpty() ? QStringLiteral("output") : source->typeName();
+    } else if (const InputHit hit = inputPortAt(graphScene_, scenePos, kPortHitRadius); hit.item) {
+        tip = hit.item->inputPortType(hit.inputIndex);
+        if (tip.isEmpty()) tip = hit.item->inputPortName(hit.inputIndex);
+    }
+    if (!tip.isEmpty()) {
+        QToolTip::showText(event->globalPosition().toPoint(), tip, this);
+    } else {
+        QToolTip::hideText();
+    }
+
     QGraphicsView::mouseMoveEvent(event);
 }
 

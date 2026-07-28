@@ -283,7 +283,7 @@ void MainWindow::createMenus() {
 void MainWindow::createToolBar() {
     QToolBar* toolBar = addToolBar("Render");
     toolBar->setMovable(false);
-    // T/R/S live centered on the viewport itself; this bar is render controls.
+    // T/R/S live on the viewport chrome bar above the framebuffer.
     toolBar->addAction(renderAction_);
     toolBar->addAction(stopAction_);
     toolBar->addSeparator();

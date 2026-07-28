@@ -206,14 +206,22 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     pal.setColor(QPalette::Window, theme::gridDark());
     setPalette(pal);
 
-    // Centered Select / T / R / S tool strip above the framebuffer (viewport chrome).
-    toolStrip_ = new QWidget(this);
+    // Chrome strip above the framebuffer — keeps camera / T/R/S off the 3D image.
+    chromeBar_ = new QWidget(this);
+    chromeBar_->setObjectName("viewportChromeBar");
+    chromeBar_->setFixedHeight(kChromeHeight);
+    chromeBar_->setStyleSheet(
+        "QWidget#viewportChromeBar {"
+        "  background: #3a3e44;"
+        "  border-bottom: 1px solid #2a2d32;"
+        "}");
+
+    toolStrip_ = new QWidget(chromeBar_);
     toolStrip_->setObjectName("viewportTransformStrip");
     toolStrip_->setStyleSheet(
         "QWidget#viewportTransformStrip {"
-        "  background: rgba(20, 22, 26, 180);"
-        "  border: 1px solid rgba(255,255,255,28);"
-        "  border-radius: 6px;"
+        "  background: transparent;"
+        "  border: none;"
         "}"
         "QToolButton {"
         "  color: #e8eaed;"
@@ -395,11 +403,14 @@ void RenderView::setFocusPickActive(bool active) {
 }
 
 void RenderView::layoutToolStrip() {
-    if (!toolStrip_) return;
+    if (!chromeBar_ || !toolStrip_) return;
+    chromeBar_->setGeometry(0, 0, width(), kChromeHeight);
     toolStrip_->adjustSize();
-    const int x = std::max(8, (width() - toolStrip_->width()) / 2);
-    toolStrip_->move(x, 8);
+    const int x = std::max(8, (chromeBar_->width() - toolStrip_->width()) / 2);
+    const int y = std::max(0, (kChromeHeight - toolStrip_->height()) / 2);
+    toolStrip_->move(x, y);
     toolStrip_->raise();
+    chromeBar_->raise();
 }
 
 void RenderView::setCameraMenu(const QStringList& cameraNames, const QString& activeName) {
@@ -449,14 +460,16 @@ void RenderView::setTransformTarget(Node* node) {
 }
 
 QRect RenderView::imageRect() const {
+    const int top = kChromeHeight + 8;
     const double aspect = double(resolutionX_) / double(std::max(1, resolutionY_));
     int w = width() - 16;
     int h = int(w / aspect);
-    if (h > height() - 16) {
-        h = height() - 16;
+    if (h > height() - top - 8) {
+        h = height() - top - 8;
         w = int(h * aspect);
     }
-    return QRect((width() - w) / 2, (height() - h) / 2, std::max(1, w), std::max(1, h));
+    return QRect((width() - w) / 2, top + std::max(0, (height() - top - 8 - h) / 2), std::max(1, w),
+                 std::max(1, h));
 }
 
 bool RenderView::pickUnderMouse(const QPoint& pos, Vec3& hitPoint) const {

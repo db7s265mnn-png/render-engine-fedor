@@ -19,11 +19,29 @@ namespace mx = MaterialX;
 namespace {
 
 bool parseFloats(const std::string& value, float* out, int count) {
+    // Prefer the parse that recovers the most components. Never fall through from a
+    // successful comma parse ("1, 2, 3") into a space parse — that used to collapse
+    // vector freq/offset/scale to only the first component.
     if (!out || count <= 0) return false;
-    float a = 0, b = 0, c = 0, d = 0;
+    float aC = 0, bC = 0, cC = 0, dC = 0;
+    float aS = 0, bS = 0, cS = 0, dS = 0;
+    const int nComma = std::sscanf(value.c_str(), "%f,%f,%f,%f", &aC, &bC, &cC, &dC);
+    const int nSpace = std::sscanf(value.c_str(), "%f %f %f %f", &aS, &bS, &cS, &dS);
     int n = 0;
-    if (count >= 4) n = std::sscanf(value.c_str(), "%f,%f,%f,%f", &a, &b, &c, &d);
-    if (n < count) n = std::sscanf(value.c_str(), "%f %f %f %f", &a, &b, &c, &d);
+    float a = 0, b = 0, c = 0, d = 0;
+    if (nComma >= nSpace) {
+        n = nComma;
+        a = aC;
+        b = bC;
+        c = cC;
+        d = dC;
+    } else {
+        n = nSpace;
+        a = aS;
+        b = bS;
+        c = cS;
+        d = dS;
+    }
     if (n < 1) n = std::sscanf(value.c_str(), "%f", &a);
     if (n < 1) return false;
     out[0] = a;
@@ -197,18 +215,39 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
         n.in0 = compileConnected(node, "position", state, depth);
         if (n.in0 < 0) n.in0 = compileConnected(node, "texcoord", state, depth);
         result = pushNode(state, n);
-    } else if (cat == "cellnoise2d" || cat == "worleynoise2d") {
+    } else if (cat == "cellnoise2d") {
         n.op = kProcCell2d;
+        n.s0 = 1.0f;
+        n.s1 = 0.0f;
+        n.s2 = 0.0f;  // not Worley
         n.in0 = compileConnected(node, "texcoord", state, depth);
         result = pushNode(state, n);
-    } else if (cat == "cellnoise3d" || cat == "worleynoise3d") {
+    } else if (cat == "worleynoise2d") {
+        n.op = kProcCell2d;
+        n.s0 = readFloat(node, "jitter", 1.0f);
+        n.s1 = readFloat(node, "style", 0.0f);
+        n.s2 = 1.0f;  // Worley
+        n.in0 = compileConnected(node, "texcoord", state, depth);
+        result = pushNode(state, n);
+    } else if (cat == "cellnoise3d") {
         n.op = kProcCell3d;
+        n.s0 = 1.0f;
+        n.s1 = 0.0f;
+        n.s2 = 0.0f;
+        n.in0 = compileConnected(node, "position", state, depth);
+        result = pushNode(state, n);
+    } else if (cat == "worleynoise3d") {
+        n.op = kProcCell3d;
+        n.s0 = readFloat(node, "jitter", 1.0f);
+        n.s1 = readFloat(node, "style", 0.0f);
+        n.s2 = 1.0f;
         n.in0 = compileConnected(node, "position", state, depth);
         result = pushNode(state, n);
     } else if (cat == "unifiednoise2d") {
         n.op = kProcUnified2d;
         n.p0 = readVec4(node, "freq", Vec4(1.0f, 1.0f, 1.0f, 1.0f));
         n.p1 = readVec4(node, "offset", Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+        n.p1.w = readFloat(node, "jitter", 1.0f);
         n.p2.x = readFloat(node, "outmin", 0.0f);
         n.p2.y = readFloat(node, "outmax", 1.0f);
         n.p2.z = readFloat(node, "type", 0.0f);
@@ -223,6 +262,7 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
         n.op = kProcUnified3d;
         n.p0 = readVec4(node, "freq", Vec4(1.0f, 1.0f, 1.0f, 1.0f));
         n.p1 = readVec4(node, "offset", Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+        n.p1.w = readFloat(node, "jitter", 1.0f);
         n.p2.x = readFloat(node, "outmin", 0.0f);
         n.p2.y = readFloat(node, "outmax", 1.0f);
         n.p2.z = readFloat(node, "type", 0.0f);
