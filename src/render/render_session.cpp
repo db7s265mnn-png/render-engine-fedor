@@ -121,6 +121,10 @@ bool RenderSession::prepareDevice(std::string& error) {
     if (!device_ || backend != deviceBackend_ || threads != deviceThreads_) {
         device_.reset();
         if (backend == kBackendGpuOptix) {
+            if (!optixBackendCompiledIn()) {
+                logWarning("GPU (OptiX) selected, but this build has no OptiX backend "
+                           "(configure with -DSOLSTICE_ENABLE_OPTIX=ON). Falling back to Embree.");
+            }
             device_ = createOptixDevice();
             if (!device_) {
                 logWarning("OptiX backend is unavailable, falling back to Embree");

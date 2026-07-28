@@ -14,6 +14,7 @@
 #include "io/materialx_graph.h"
 #include "io/usd_loader.h"
 #include "nodes/node_registry.h"
+#include "render/render_device.h"
 
 namespace sol {
 namespace {
@@ -630,8 +631,19 @@ public:
         addParameter(Parameter::makeInt("resx", "Resolution X", 960, 16, 8192, false).withGroup("Image"));
         addParameter(Parameter::makeInt("resy", "Resolution Y", 540, 16, 8192, false).withGroup("Image"));
         addParameter(Parameter::makeInt("samples", "Samples Per Pixel", 128, 1, 100000, false).withGroup("Image"));
-        addParameter(Parameter::makeMenu("backend", "Render Backend", {"CPU (Embree)", "GPU (OptiX)"}, 0)
-                         .withGroup("Engine"));
+        // OptiX is optional at compile time — label the menu so artists know when
+        // this binary has no GPU backend (Windows CI historically shipped Embree-only).
+        const QStringList backends =
+            optixBackendCompiledIn()
+                ? QStringList{"CPU (Embree)", "GPU (OptiX)"}
+                : QStringList{"CPU (Embree)", "GPU (OptiX) — not in this build"};
+        addParameter(Parameter::makeMenu("backend", "Render Backend", backends, 0)
+                         .withGroup("Engine")
+                         .withTooltip(optixBackendCompiledIn()
+                                          ? QStringLiteral("CPU uses Embree. GPU requires an NVIDIA GPU "
+                                                           "and a build with OptiX enabled.")
+                                          : QStringLiteral("This executable was built without OptiX/CUDA. "
+                                                          "GPU (OptiX) will fall back to Embree.")));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "Direct Lighting", "Ambient Occlusion"}, 0)
                          .withGroup("Engine"));

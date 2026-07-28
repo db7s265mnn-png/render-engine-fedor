@@ -112,11 +112,16 @@ jobs:
 
       - name: Configure and build with the GPU backend
         run: |
+          # OpenPGL is CPU-only — keep it off so this job finishes before the runner kills it.
           cmake -S . -B build-optix -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DSOLSTICE_ENABLE_ALEMBIC=OFF \
-            -DSOLSTICE_ENABLE_OPTIX=ON -DOptiX_ROOT=/tmp/optix-dev \
-            -DSOLSTICE_ENABLE_OPENPGL=ON
+            -DSOLSTICE_ENABLE_OPENPGL=OFF \
+            -DSOLSTICE_ENABLE_OPTIX=ON -DOptiX_ROOT=/tmp/optix-dev
           cmake --build build-optix -j$(nproc)
+          # Prove the OptiX device IR was embedded into this build.
+          test -f build-optix/generated/solstice_optix_ir.cpp
+          grep -q 'solsticeOptixIr' build-optix/generated/solstice_optix_ir.cpp
+          grep -E 'SOLSTICE_HAVE_OPTIX 1' build-optix/generated/solstice_config.h
 
   windows:
     name: Windows (standalone exe)
@@ -136,6 +141,14 @@ jobs:
           version: "6.7.2"
           arch: win64_msvc2019_64
           cache: true
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.23
+        with:
+          cuda: "12.6.3"
+          method: network
+          sub-packages: '["nvcc","cudart","visual_studio_integration"]'
+          use-github-cache: true
 
       - name: Cache the third party dependencies
         id: deps-cache
@@ -196,11 +209,19 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:DEPS_PREFIX/libraries" | Out-Null
           Copy-Item -Recurse materialx-src/libraries/* "$env:DEPS_PREFIX/libraries/"
 
+      - name: Fetch the OptiX headers
+        run: |
+          if (-not (Test-Path "$env:DEPS_PREFIX/optix-dev/include/optix.h")) {
+            git clone --depth 1 https://github.com/NVIDIA/optix-dev.git "$env:DEPS_PREFIX/optix-dev"
+          }
+
       - name: Configure
         run: >
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64
           -DCMAKE_PREFIX_PATH="${{ env.DEPS_PREFIX }};${{ env.DEPS_PREFIX }}/embree"
           -DSOLSTICE_MATERIALX_LIBRARIES="${{ env.DEPS_PREFIX }}/libraries"
+          -DSOLSTICE_ENABLE_OPTIX=ON
+          -DOptiX_ROOT="${{ env.DEPS_PREFIX }}/optix-dev"
 
       - name: Build
         run: cmake --build build --config Release --parallel
@@ -216,6 +237,14 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item build/bin/Release/* dist/ -Recurse -Force
           Copy-Item "$env:DEPS_PREFIX/embree/bin/*.dll" dist/ -Force
+          # CUDA runtime for the OptiX backend (cudart / cuda driver stub).
+          $cudaBin = $env:CUDA_PATH
+          if ($cudaBin) {
+            Get-ChildItem -Path "$cudaBin/bin" -Filter "cudart64_*.dll" -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item $_.FullName dist/ -Force }
+            Get-ChildItem -Path "$cudaBin/bin" -Filter "cuda-*.dll" -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item $_.FullName dist/ -Force }
+          }
           # oneTBB / OpenPGL runtime (FetchContent build trees)
           Get-ChildItem -Path build -Recurse -Filter "tbb*.dll" -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName dist/ -Force }
