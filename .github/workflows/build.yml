@@ -112,10 +112,11 @@ jobs:
 
       - name: Configure and build with the GPU backend
         run: |
-          # OpenPGL is CPU-only — keep it off so this job finishes before the runner kills it.
+          # Keep this job lean: only need OptiX PTX + host backend to compile.
           cmake -S . -B build-optix -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DSOLSTICE_ENABLE_ALEMBIC=OFF \
             -DSOLSTICE_ENABLE_OPENPGL=OFF \
+            -DSOLSTICE_ENABLE_MATERIALX=OFF \
             -DSOLSTICE_ENABLE_OPTIX=ON -DOptiX_ROOT=/tmp/optix-dev
           cmake --build build-optix -j$(nproc)
           # Prove the OptiX device IR was embedded into this build.
