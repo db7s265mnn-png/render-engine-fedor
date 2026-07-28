@@ -583,7 +583,8 @@ public:
                          .withTooltip("Horizontal aperture in millimetres"));
         addParameter(Parameter::makeFloat("fstop", "F-Stop", 0.0, 0.0, 64.0)
                          .withGroup("Lens")
-                         .withTooltip("0 disables depth of field. Use the preset menu for common stops"));
+                         .withTooltip("Aperture. 0 = wide open (max bokeh for Polynomial Optics; "
+                                      "disables DOF for Thin Lens). Lower values = stronger bokeh."));
         addParameter(Parameter::makeFloat("focusdistance", "Focus Distance", 5.0, 0.01, 1000.0, false)
                          .withGroup("Lens")
                          .withTooltip(units::focusDistanceTooltip()));
