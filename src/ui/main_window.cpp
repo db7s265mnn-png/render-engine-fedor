@@ -11,6 +11,7 @@
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTimer>
@@ -37,23 +38,48 @@
 namespace sol {
 namespace {
 
-QWidget* makeDockTitleBar(QDockWidget* dock, const QString& title) {
-    auto* bar = new QWidget(dock);
-    bar->setObjectName("dockTitleBar");
-    bar->setFixedHeight(theme::chromeBarHeight());
-    bar->setStyleSheet(
-        "QWidget#dockTitleBar {"
-        "  background: #2e3136;"
-        "  border-bottom: 1px solid #22242a;"
-        "}");
-    auto* layout = new QHBoxLayout(bar);
-    layout->setContentsMargins(10, 0, 10, 0);
-    layout->setSpacing(0);
-    auto* label = new QLabel(title, bar);
-    label->setStyleSheet("color: #dcdee2; font-weight: 700; background: transparent; border: none;");
-    layout->addWidget(label, 1);
-    return bar;
-}
+class DockTitleBar : public QWidget {
+public:
+    explicit DockTitleBar(const QString& title, QWidget* parent = nullptr) : QWidget(parent) {
+        setObjectName("dockTitleBar");
+        setStyleSheet(
+            "QWidget#dockTitleBar {"
+            "  background: #2e3136;"
+            "  border-bottom: 1px solid #22242a;"
+            "}"
+            "QLabel {"
+            "  color: #dcdee2;"
+            "  font-weight: 700;"
+            "  background: transparent;"
+            "  border: none;"
+            "}");
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(10, 0, 10, 0);
+        layout->setSpacing(0);
+        auto* label = new QLabel(title, this);
+        layout->addWidget(label, 1);
+    }
+
+    QSize sizeHint() const override {
+        return {120, theme::chromeBarHeight()};
+    }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+protected:
+    // Let the dock handle drag / double-click float (Qt requirement for custom titles).
+    void mousePressEvent(QMouseEvent* event) override {
+        event->ignore();
+    }
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        event->ignore();
+    }
+    void mouseMoveEvent(QMouseEvent* event) override {
+        event->ignore();
+    }
+    void mouseDoubleClickEvent(QMouseEvent* event) override {
+        event->ignore();
+    }
+};
 
 QImage toQImage(const Image& image) {
     if (image.empty()) return {};
@@ -336,7 +362,7 @@ void MainWindow::createDocks() {
 
     auto* parameterDock = new QDockWidget("Parameters", this);
     parameterDock->setObjectName("parameterDock");
-    parameterDock->setTitleBarWidget(makeDockTitleBar(parameterDock, "Parameters"));
+    parameterDock->setTitleBarWidget(new DockTitleBar("Parameters", parameterDock));
     parameterPanel_ = new ParameterPanel(parameterDock);
     parameterDock->setWidget(parameterPanel_);
     parameterDock->setMinimumWidth(300);
@@ -344,7 +370,7 @@ void MainWindow::createDocks() {
 
     auto* sceneDock = new QDockWidget("Scene Graph", this);
     sceneDock->setObjectName("sceneDock");
-    sceneDock->setTitleBarWidget(makeDockTitleBar(sceneDock, "Scene Graph"));
+    sceneDock->setTitleBarWidget(new DockTitleBar("Scene Graph", sceneDock));
     sceneGraphPanel_ = new SceneGraphPanel(sceneDock);
     sceneDock->setWidget(sceneGraphPanel_);
     sceneDock->setMinimumWidth(300);
