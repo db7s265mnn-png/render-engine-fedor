@@ -448,6 +448,14 @@ void MainWindow::createDocks() {
     connect(parameterPanel_, &ParameterPanel::materialXInputEdited, this,
             [this](Node*, const QString&, const QString& inputName, const QString& value) {
                 materialNetworkView_->setSelectedMaterialXInput(inputName, value);
+                // Defer: rebuilding Parameters inside QCheckBox::toggled / browse clicked crashes.
+                if (inputName == QLatin1String("input_per_axis")) {
+                    QTimer::singleShot(0, this, [this] {
+                        MaterialXSelection mtlx;
+                        if (materialNetworkView_->selectedMaterialX(mtlx))
+                            parameterPanel_->setMaterialXSelection(mtlx);
+                    });
+                }
             });
     connect(parameterPanel_, &ParameterPanel::materialXTypeEdited, this,
             [this](Node*, const QString&, const QString& type) {

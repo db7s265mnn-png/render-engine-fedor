@@ -197,7 +197,8 @@ bool isKnownMaterialXCategory(const QString& category) {
     // Keep previously hardcoded essentials even if libraries failed to load.
     return category == "standard_surface" || category == "surfacematerial" || category == "image" ||
            category == "constant" || category == "multiply" || category == "mix" || category == "normalmap" ||
-           category == "tiledimage" || category == "add" || category == "texcoord";
+           category == "tiledimage" || category == "add" || category == "texcoord" ||
+           category == "triplanarprojection";
 }
 
 QColor colorForCategory(const QString& category) {
@@ -1799,6 +1800,7 @@ bool MaterialNetworkGraphView::setInputValue(const QString& nodeName, const QStr
         input.nodename.clear();
 
         // Arnold Triplanar: shared Input copies to all axes unless Input Per Axis is on.
+        bool refreshParamsOnly = false;
         if (node->category == "triplanarprojection") {
             auto findIn = [&](const QString& n) -> MtlxInput* {
                 for (MtlxInput& in : node->inputs) {
@@ -1815,43 +1817,52 @@ bool MaterialNetworkGraphView::setInputValue(const QString& nodeName, const QStr
                         axisIn->nodename.clear();
                     }
                 }
-            } else if (inputName == "input_per_axis" && separate) {
-                // Enabling per-axis: seed empty axis slots from shared file.
-                QString seed;
-                if (MtlxInput* file = findIn("file")) seed = file->value;
-                if (seed.isEmpty()) {
-                    if (MtlxInput* fx = findIn("filex")) seed = fx->value;
-                }
-                if (!seed.isEmpty()) {
-                    for (const char* axis : {"filex", "filey", "filez"}) {
-                        if (MtlxInput* axisIn = findIn(QLatin1String(axis))) {
-                            if (axisIn->value.isEmpty()) axisIn->value = seed;
+            } else if (inputName == "input_per_axis") {
+                refreshParamsOnly = true;
+                if (separate) {
+                    // Enabling per-axis: seed empty axis slots from shared file.
+                    QString seed;
+                    if (MtlxInput* file = findIn("file")) seed = file->value;
+                    if (seed.isEmpty()) {
+                        if (MtlxInput* fx = findIn("filex")) seed = fx->value;
+                    }
+                    if (!seed.isEmpty()) {
+                        for (const char* axis : {"filex", "filey", "filez"}) {
+                            if (MtlxInput* axisIn = findIn(QLatin1String(axis))) {
+                                if (axisIn->value.isEmpty()) axisIn->value = seed;
+                            }
                         }
                     }
-                }
-            } else if (inputName == "input_per_axis" && !separate) {
-                // Disabling: collapse back to shared file (prefer file, else filex).
-                QString seed;
-                if (MtlxInput* file = findIn("file")) seed = file->value;
-                if (seed.isEmpty()) {
-                    if (MtlxInput* fx = findIn("filex")) seed = fx->value;
-                }
-                if (!seed.isEmpty()) {
-                    if (MtlxInput* file = findIn("file")) file->value = seed;
-                    for (const char* axis : {"filex", "filey", "filez"}) {
-                        if (MtlxInput* axisIn = findIn(QLatin1String(axis))) axisIn->value = seed;
+                } else {
+                    // Disabling: collapse back to shared file (prefer file, else filex).
+                    QString seed;
+                    if (MtlxInput* file = findIn("file")) seed = file->value;
+                    if (seed.isEmpty()) {
+                        if (MtlxInput* fx = findIn("filex")) seed = fx->value;
+                    }
+                    if (!seed.isEmpty()) {
+                        if (MtlxInput* file = findIn("file")) file->value = seed;
+                        for (const char* axis : {"filex", "filey", "filez"}) {
+                            if (MtlxInput* axisIn = findIn(QLatin1String(axis))) axisIn->value = seed;
+                        }
                     }
                 }
             }
         }
 
         writeModel(true);
-        // Rebuild when wires / file subtitle / triplanar axis visibility change.
-        if (wasConnected || input.type == "filename" || inputName == "input_per_axis" ||
-            inputName == "file") {
+        // Avoid graph rebuild while Parameters editors are still in their signal stack
+        // (browse/editFinished) — that was crashing triplanar file picks.
+        // Rebuild only when wires or image-node subtitles change.
+        const bool imageSubtitle =
+            (node->category == "image" || node->category == "tiledimage") && input.type == "filename";
+        if (wasConnected || imageSubtitle) {
             preservedSelection_ = nodeName;
             rebuild();
         }
+        // input_per_axis visibility refresh is deferred by MainWindow (QTimer),
+        // not here — rebuilding Parameters inside QCheckBox::toggled crashes.
+        Q_UNUSED(refreshParamsOnly);
         return true;
     }
     return false;

@@ -690,12 +690,31 @@ void testMaterialXNoiseAndTriplanar() {
         ScenePtr scene = stage.toScene();
         scene->finalize();
         SceneView view = scene->view();
+        // Remapped texture indices must be in-range (dense texBase+i was a crash).
+        const ProceduralNode& remapped = view.procedurals[size_t(view.materials[0].baseColorProc)];
+        check(remapped.in0 >= 0 && remapped.in0 < view.textureCount, "remapped tex in range");
+        check(view.textures[remapped.in0].valid(), "remapped texture view valid");
         Vec3 ns(0, 1, 0);
         Material a = evaluateTexturedMaterial(view, view.materials[0], Vec2(0, 0), ns, Vec3(0.1f, 0.0f, 0.2f),
                                               Vec3(0, 1, 0), 0.01f);
         Material b = evaluateTexturedMaterial(view, view.materials[0], Vec2(0, 0), ns, Vec3(0.1f, 0.0f, 1.2f),
                                               Vec3(0, 1, 0), 0.01f);
         check(srIsFinite(a.baseColor.x) && srIsFinite(b.baseColor.x), "wrapped triplanar samples finite");
+        // Extreme P / N / scale-like stress (NaN guards).
+        bool stressOk = true;
+        for (int i = 0; i < 2000; ++i) {
+            const float t = float(i) * 0.173f;
+            Vec3 p(std::sin(t) * 50.f, std::cos(t * 1.3f) * 50.f, std::sin(t * 0.7f) * 50.f);
+            Vec3 n(std::sin(t), std::cos(t), 0.25f);
+            const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+            n = n * (1.f / std::max(1e-6f, len));
+            Material m = evaluateTexturedMaterial(view, view.materials[0], Vec2(0, 0), ns, p, n, 0.01f);
+            if (!srIsFinite(m.baseColor.x) || !srIsFinite(m.baseColor.y) || !srIsFinite(m.baseColor.z)) {
+                stressOk = false;
+                break;
+            }
+        }
+        check(stressOk, "triplanar shade stress stays finite");
         std::printf("  triplanar shared axes=%d/%d/%d scale=%.2f\n", tri.in0, tri.in1, tri.in2, tri.p1.x);
     }
 

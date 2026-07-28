@@ -173,26 +173,33 @@ SR_INL SR_HD Vec4 remapSignedColor(Vec4 c) {
 
 // Local bilinear sample so this header does not depend on shading.h.
 // Periodic wrap on both U and V (Arnold/Maya texture repeat) — needed for triplanar.
+// No lambdas: this header is compiled into OptiX/CUDA device code.
+SR_INL SR_HD Vec4 procFetchTexel(const TextureView& tex, int ix, int iy) {
+    if (!tex.valid()) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    ix = ((ix % tex.width) + tex.width) % tex.width;
+    iy = ((iy % tex.height) + tex.height) % tex.height;
+    const size_t idx = (size_t(iy) * size_t(tex.width) + size_t(ix)) * 4;
+    return Vec4(tex.pixels[idx + 0], tex.pixels[idx + 1], tex.pixels[idx + 2], tex.pixels[idx + 3]);
+}
+
 SR_INL SR_HD Vec4 procSampleTexture(const TextureView& tex, Vec2 uv) {
     if (!tex.valid()) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    // Guard non-finite UVs from bad scale/offset (can crash floor/% on some platforms).
+    if (!srIsFinite(uv.x) || !srIsFinite(uv.y)) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
     float u = uv.x - floorf(uv.x);
     float v = uv.y - floorf(uv.y);
+    if (!srIsFinite(u)) u = 0.0f;
+    if (!srIsFinite(v)) v = 0.0f;
     const float x = u * float(tex.width) - 0.5f;
     const float y = v * float(tex.height) - 0.5f;
     const int x0 = int(floorf(x));
     const int y0 = int(floorf(y));
     const float fx = x - float(x0);
     const float fy = y - float(y0);
-    auto fetch = [&](int ix, int iy) -> Vec4 {
-        ix = ((ix % tex.width) + tex.width) % tex.width;
-        iy = ((iy % tex.height) + tex.height) % tex.height;
-        const size_t idx = (size_t(iy) * size_t(tex.width) + size_t(ix)) * 4;
-        return Vec4(tex.pixels[idx + 0], tex.pixels[idx + 1], tex.pixels[idx + 2], tex.pixels[idx + 3]);
-    };
-    const Vec4 c00 = fetch(x0, y0);
-    const Vec4 c10 = fetch(x0 + 1, y0);
-    const Vec4 c01 = fetch(x0, y0 + 1);
-    const Vec4 c11 = fetch(x0 + 1, y0 + 1);
+    const Vec4 c00 = procFetchTexel(tex, x0, y0);
+    const Vec4 c10 = procFetchTexel(tex, x0 + 1, y0);
+    const Vec4 c01 = procFetchTexel(tex, x0, y0 + 1);
+    const Vec4 c11 = procFetchTexel(tex, x0 + 1, y0 + 1);
     const Vec4 c0 = Vec4(c00.x * (1.0f - fx) + c10.x * fx, c00.y * (1.0f - fx) + c10.y * fx,
                           c00.z * (1.0f - fx) + c10.z * fx, c00.w * (1.0f - fx) + c10.w * fx);
     const Vec4 c1 = Vec4(c01.x * (1.0f - fx) + c11.x * fx, c01.y * (1.0f - fx) + c11.y * fx,
@@ -374,35 +381,70 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
         case kProcTriplanar: {
             // Arnold-style object-space triplanar: UV = (P + offset) / scale, optional rotate.
             // p0=default, p1=scale, p2=offset, s0=blend, s1=rotate degrees.
-            Vec3 nAbs(fabsf(ctx.nObject.x), fabsf(ctx.nObject.y), fabsf(ctx.nObject.z));
-            const float blend = srMax(0.01f, n.s0);
-            nAbs = Vec3(powf(nAbs.x, blend), powf(nAbs.y, blend), powf(nAbs.z, blend));
-            const float sum = nAbs.x + nAbs.y + nAbs.z;
-            if (sum > 0.0f) nAbs = nAbs * (1.0f / sum);
-            else nAbs = Vec3(0.0f, 1.0f, 0.0f);
-            const float sx = srMax(1.0e-5f, fabsf(n.p1.x) > 0.0f ? n.p1.x : 1.0f);
-            const float sy = srMax(1.0e-5f, fabsf(n.p1.y) > 0.0f ? n.p1.y : sx);
-            const float sz = srMax(1.0e-5f, fabsf(n.p1.z) > 0.0f ? n.p1.z : sx);
-            const Vec3 p((ctx.pObject.x + n.p2.x) / sx, (ctx.pObject.y + n.p2.y) / sy,
-                         (ctx.pObject.z + n.p2.z) / sz);
-            const float rotRad = n.s1 * 0.017453292519943295f;
+            // No lambdas — OptiX/CUDA device compile.
+            float nx = fabsf(ctx.nObject.x);
+            float ny = fabsf(ctx.nObject.y);
+            float nz = fabsf(ctx.nObject.z);
+            if (!srIsFinite(nx)) nx = 0.0f;
+            if (!srIsFinite(ny)) ny = 0.0f;
+            if (!srIsFinite(nz)) nz = 0.0f;
+            float blend = n.s0;
+            if (!srIsFinite(blend) || blend < 0.01f) blend = 0.01f;
+            if (blend > 64.0f) blend = 64.0f;
+            nx = powf(nx, blend);
+            ny = powf(ny, blend);
+            nz = powf(nz, blend);
+            const float sum = nx + ny + nz;
+            if (sum > 0.0f) {
+                const float inv = 1.0f / sum;
+                nx *= inv;
+                ny *= inv;
+                nz *= inv;
+            } else {
+                nx = 0.0f;
+                ny = 1.0f;
+                nz = 0.0f;
+            }
+            float sx = n.p1.x;
+            float sy = n.p1.y;
+            float sz = n.p1.z;
+            if (!srIsFinite(sx) || fabsf(sx) < 1.0e-5f) sx = 1.0f;
+            if (!srIsFinite(sy) || fabsf(sy) < 1.0e-5f) sy = sx;
+            if (!srIsFinite(sz) || fabsf(sz) < 1.0e-5f) sz = sx;
+            sx = fabsf(sx);
+            sy = fabsf(sy);
+            sz = fabsf(sz);
+            float ox = srIsFinite(n.p2.x) ? n.p2.x : 0.0f;
+            float oy = srIsFinite(n.p2.y) ? n.p2.y : 0.0f;
+            float oz = srIsFinite(n.p2.z) ? n.p2.z : 0.0f;
+            const float px = (ctx.pObject.x + ox) / sx;
+            const float py = (ctx.pObject.y + oy) / sy;
+            const float pz = (ctx.pObject.z + oz) / sz;
+            float rotDeg = n.s1;
+            if (!srIsFinite(rotDeg)) rotDeg = 0.0f;
+            // Keep rotation in a sane range so sin/cos stay finite.
+            rotDeg = fmodf(rotDeg, 360.0f);
+            const float rotRad = rotDeg * 0.017453292519943295f;
             const float cr = cosf(rotRad);
             const float sn = sinf(rotRad);
-            auto rotUv = [&](float u, float v) -> Vec2 {
-                return Vec2(u * cr - v * sn, u * sn + v * cr);
-            };
+            const float ux = pz * cr - py * sn;
+            const float vx = pz * sn + py * cr;
+            const float uy = px * cr - pz * sn;
+            const float vy = px * sn + pz * cr;
+            const float uz = px * cr - py * sn;
+            const float vz = px * sn + py * cr;
             Vec4 cx = n.p0;
             Vec4 cy = n.p0;
             Vec4 cz = n.p0;
             if (n.in0 >= 0 && n.in0 < scene.textureCount && scene.textures)
-                cx = procSampleTexture(scene.textures[n.in0], rotUv(p.z, p.y));
+                cx = procSampleTexture(scene.textures[n.in0], Vec2(ux, vx));
             if (n.in1 >= 0 && n.in1 < scene.textureCount && scene.textures)
-                cy = procSampleTexture(scene.textures[n.in1], rotUv(p.x, p.z));
+                cy = procSampleTexture(scene.textures[n.in1], Vec2(uy, vy));
             if (n.in2 >= 0 && n.in2 < scene.textureCount && scene.textures)
-                cz = procSampleTexture(scene.textures[n.in2], rotUv(p.x, p.y));
-            result = Vec4(cx.x * nAbs.x + cy.x * nAbs.y + cz.x * nAbs.z,
-                          cx.y * nAbs.x + cy.y * nAbs.y + cz.y * nAbs.z,
-                          cx.z * nAbs.x + cy.z * nAbs.y + cz.z * nAbs.z, 1.0f);
+                cz = procSampleTexture(scene.textures[n.in2], Vec2(uz, vz));
+            result = Vec4(cx.x * nx + cy.x * ny + cz.x * nz, cx.y * nx + cy.y * ny + cz.y * nz,
+                          cx.z * nx + cy.z * ny + cz.z * nz, 1.0f);
+            if (!srIsFinite(result.x) || !srIsFinite(result.y) || !srIsFinite(result.z)) result = n.p0;
             break;
         }
         case kProcMul: {

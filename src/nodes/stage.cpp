@@ -2,6 +2,7 @@
 
 #include <QStringList>
 #include <map>
+#include <vector>
 
 namespace sol {
 
@@ -109,15 +110,22 @@ ScenePtr Stage::toScene() const {
 
                 // Append shade-time procedurals; remap local child / texture indices.
                 if (!prim.procedurals.empty()) {
-                    const int texBase = int(scene->textures.size());
-                    for (const std::shared_ptr<Image>& image : prim.proceduralImages)
-                        scene->addTexture(image);
+                    // Map each proceduralImages[i] → absolute scene texture index
+                    // (addTexture may skip empty images — never assume dense texBase+i).
+                    std::vector<int> localTexToScene(prim.proceduralImages.size(), -1);
+                    for (size_t i = 0; i < prim.proceduralImages.size(); ++i)
+                        localTexToScene[i] = scene->addTexture(prim.proceduralImages[i]);
                     const int procBase = int(scene->procedurals.size());
                     auto remapProc = [&](int& idx) {
                         if (idx >= 0) idx += procBase;
                     };
                     auto remapTex = [&](int& idx) {
-                        if (idx >= 0) idx += texBase;
+                        if (idx < 0) return;
+                        if (idx >= int(localTexToScene.size())) {
+                            idx = -1;
+                            return;
+                        }
+                        idx = localTexToScene[size_t(idx)];
                     };
                     auto remapRoot = [&](int& idx) {
                         if (idx >= 0) idx += procBase;
