@@ -1,8 +1,11 @@
 #include "nodes/node_graph.h"
 
 #include <QJsonArray>
+#include <QHash>
 #include <QRegularExpression>
+#include <QSet>
 #include <algorithm>
+#include <cmath>
 
 #include "core/log.h"
 #include "nodes/node_registry.h"
@@ -318,6 +321,132 @@ bool NodeGraph::fromJson(const QJsonObject& json, QString& error) {
     emit connectionsChanged();
     emit graphChanged();
     return true;
+}
+
+QJsonObject NodeGraph::nodesToClipboardJson(const QList<Node*>& nodes) const {
+    QJsonObject root;
+    root["application"] = SOLSTICE_APP_NAME;
+    root["format"] = QStringLiteral("bob-render-nodes");
+    root["version"] = 1;
+
+    QSet<Node*> selected;
+    for (Node* node : nodes) {
+        if (node) selected.insert(node);
+    }
+    if (selected.isEmpty()) return root;
+
+    QJsonArray nodesArray;
+    for (Node* node : nodes) {
+        if (!node || !selected.contains(node)) continue;
+        QJsonObject nodeJson;
+        nodeJson["type"] = node->typeName();
+        nodeJson["name"] = node->name();
+        nodeJson["x"] = node->position().x();
+        nodeJson["y"] = node->position().y();
+        nodeJson["bypassed"] = node->isBypassed();
+
+        QJsonArray parametersArray;
+        for (const Parameter& parameter : node->parameters()) parametersArray.append(parameter.toJson());
+        nodeJson["parameters"] = parametersArray;
+
+        QJsonArray inputsArray;
+        for (Node* input : node->inputs()) {
+            // Keep only wires fully inside the selection.
+            inputsArray.append(input && selected.contains(input) ? input->name() : QString());
+        }
+        nodeJson["inputs"] = inputsArray;
+
+        const QJsonObject extra = node->extraStateToJson();
+        if (!extra.isEmpty()) nodeJson["state"] = extra;
+
+        nodesArray.append(nodeJson);
+    }
+    root["nodes"] = nodesArray;
+    return root;
+}
+
+QList<Node*> NodeGraph::pasteNodesFromClipboardJson(const QJsonObject& json, QPointF pasteOrigin,
+                                                    QString& error) {
+    QList<Node*> created;
+    if (json.value("format").toString() != QLatin1String("bob-render-nodes") &&
+        !json.contains("nodes")) {
+        error = "clipboard does not contain nodes";
+        return created;
+    }
+
+    const QJsonArray nodesArray = json.value("nodes").toArray();
+    if (nodesArray.isEmpty()) {
+        error = "clipboard has no nodes";
+        return created;
+    }
+
+    QHash<QString, QString> nameMap;
+    QList<QPointF> positions;
+    positions.reserve(nodesArray.size());
+
+    // First pass: create nodes with unique names and collect layout.
+    for (const QJsonValue& value : nodesArray) {
+        const QJsonObject nodeJson = value.toObject();
+        const QString type = nodeJson.value("type").toString();
+        const QString oldName = nodeJson.value("name").toString();
+        if (type.isEmpty()) continue;
+
+        Node* node = createNode(type, uniqueNodeName(oldName.isEmpty() ? type : oldName),
+                                QPointF(nodeJson.value("x").toDouble(), nodeJson.value("y").toDouble()));
+        if (!node) {
+            error = "unknown node type: " + type;
+            continue;
+        }
+        nameMap.insert(oldName, node->name());
+        node->setBypassed(nodeJson.value("bypassed").toBool());
+
+        const QJsonArray parametersArray = nodeJson.value("parameters").toArray();
+        for (const QJsonValue& parameterValue : parametersArray) {
+            const QJsonObject parameterJson = parameterValue.toObject();
+            Parameter* parameter = node->findParameter(parameterJson.value("name").toString());
+            if (parameter) parameter->fromJson(parameterJson);
+        }
+        node->extraStateFromJson(nodeJson.value("state").toObject());
+        positions.append(node->position());
+        created.append(node);
+    }
+
+    if (created.isEmpty()) return created;
+
+    // Offset so the selection center lands on pasteOrigin.
+    QPointF minPos = positions.first();
+    QPointF maxPos = positions.first();
+    for (const QPointF& p : positions) {
+        minPos.setX(std::min(minPos.x(), p.x()));
+        minPos.setY(std::min(minPos.y(), p.y()));
+        maxPos.setX(std::max(maxPos.x(), p.x()));
+        maxPos.setY(std::max(maxPos.y(), p.y()));
+    }
+    const QPointF center((minPos.x() + maxPos.x()) * 0.5, (minPos.y() + maxPos.y()) * 0.5);
+    const QPointF delta = pasteOrigin - center;
+    for (Node* node : created) node->setPosition(node->position() + delta);
+
+    // Second pass: restore internal connections with remapped names.
+    int index = 0;
+    for (const QJsonValue& value : nodesArray) {
+        if (index >= created.size()) break;
+        const QJsonObject nodeJson = value.toObject();
+        Node* node = created[index];
+        const QJsonArray inputsArray = nodeJson.value("inputs").toArray();
+        for (int i = 0; i < inputsArray.size() && i < node->inputCount(); ++i) {
+            const QString oldInputName = inputsArray[i].toString();
+            if (oldInputName.isEmpty()) continue;
+            const QString newInputName = nameMap.value(oldInputName);
+            if (newInputName.isEmpty()) continue;
+            if (Node* source = findNode(newInputName)) connectNodes(source, node, i);
+        }
+        ++index;
+    }
+
+    setModified(true);
+    emit connectionsChanged();
+    emit graphChanged();
+    return created;
 }
 
 }  // namespace sol

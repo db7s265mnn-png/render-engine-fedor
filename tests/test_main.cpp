@@ -210,7 +210,7 @@ void testGraphCook() {
     StagePtr stage = graph.cookDisplay(context);
     check(stage != nullptr, "cook produces a stage");
     check(context.errors.isEmpty(), "cook has no errors");
-    check(stage->countOfType(PrimType::Mesh) == 2, "two meshes in the default stage");
+    check(stage->countOfType(PrimType::Mesh) == 10, "ten meshes in the default stage");
     check(stage->countOfType(PrimType::Light) == 3, "three lights in the default stage");
     check(stage->countOfType(PrimType::Camera) == 1, "one camera in the default stage");
     check(stage->settingsAuthored, "render settings authored");

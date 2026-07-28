@@ -202,6 +202,8 @@ private:
     void connectNodes(const QString& sourceName, const QString& targetName, int inputIndex);
     void disconnectInput(const QString& targetName, const QString& inputName);
     void deleteSelectedNodes();
+    void copySelectedNodes();
+    void pasteNodes();
     bool openTextureDialogAt(const QPoint& viewPosition);
     void chooseTexture(const QString& nodeName);
     // MaterialX UDIM: convert concrete tile / pattern → unresolved <UDIM> + udimset.

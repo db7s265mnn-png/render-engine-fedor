@@ -1,12 +1,17 @@
 #include "ui/node_graph_view.h"
 
 #include <QAction>
+#include <QApplication>
+#include <QClipboard>
 #include <QContextMenuEvent>
 #include <QGraphicsPathItem>
+#include <QJsonDocument>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QToolTip>
@@ -330,6 +335,78 @@ void NodeGraphView::deleteSelectedNodes() {
     for (Node* node : toRemove) graph_->removeNode(node);
     graphScene_->rebuild();
     emit nodeSelected(selectedNode());
+}
+
+namespace {
+constexpr const char* kNodeClipboardMime = "application/x-bob-render-nodes";
+}
+
+void NodeGraphView::copySelectedNodes() {
+    if (!graph_) return;
+    QList<Node*> selected;
+    for (QGraphicsItem* item : graphScene_->selectedItems()) {
+        if (auto* nodeItem = qgraphicsitem_cast<NodeItem*>(item)) selected << nodeItem->node();
+    }
+    if (selected.isEmpty()) {
+        emit statusMessage("Nothing to copy");
+        return;
+    }
+
+    const QJsonObject json = graph_->nodesToClipboardJson(selected);
+    const QByteArray bytes = QJsonDocument(json).toJson(QJsonDocument::Compact);
+    auto* mime = new QMimeData;
+    mime->setData(kNodeClipboardMime, bytes);
+    mime->setText(QString::fromUtf8(bytes));
+    QApplication::clipboard()->setMimeData(mime);
+    emit statusMessage(QString("Copied %1 node%2")
+                           .arg(selected.size())
+                           .arg(selected.size() == 1 ? "" : "s"));
+}
+
+void NodeGraphView::pasteNodes() {
+    if (!graph_) return;
+    const QMimeData* mime = QApplication::clipboard()->mimeData();
+    if (!mime) return;
+
+    QByteArray bytes;
+    if (mime->hasFormat(kNodeClipboardMime))
+        bytes = mime->data(kNodeClipboardMime);
+    else if (mime->hasText())
+        bytes = mime->text().toUtf8();
+    if (bytes.isEmpty()) {
+        emit statusMessage("Clipboard has no nodes");
+        return;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(bytes, &parseError);
+    if (!doc.isObject()) {
+        emit statusMessage("Clipboard is not node data");
+        return;
+    }
+
+    QPointF origin = lastScenePosition_;
+    const QPoint viewPos = mapFromGlobal(QCursor::pos());
+    if (viewport()->rect().contains(viewPos)) origin = mapToScene(viewPos);
+
+    QString error;
+    const QList<Node*> created = graph_->pasteNodesFromClipboardJson(doc.object(), origin, error);
+    if (created.isEmpty()) {
+        emit statusMessage(error.isEmpty() ? "Paste failed" : error);
+        return;
+    }
+
+    graphScene_->rebuild();
+    graphScene_->clearSelection();
+    for (Node* node : created) {
+        if (NodeItem* item = graphScene_->itemForNode(node)) item->setSelected(true);
+    }
+    if (!created.isEmpty()) {
+        emit nodeSelected(created.first());
+        emit statusMessage(QString("Pasted %1 node%2")
+                               .arg(created.size())
+                               .arg(created.size() == 1 ? "" : "s"));
+    }
 }
 
 void NodeGraphView::toggleDisplayFlagOnSelection() {
@@ -656,6 +733,16 @@ void NodeGraphView::mouseReleaseEvent(QMouseEvent* event) {
 }
 
 void NodeGraphView::keyPressEvent(QKeyEvent* event) {
+    if (event->matches(QKeySequence::Copy)) {
+        copySelectedNodes();
+        event->accept();
+        return;
+    }
+    if (event->matches(QKeySequence::Paste)) {
+        pasteNodes();
+        event->accept();
+        return;
+    }
     switch (event->key()) {
         case Qt::Key_Space:
             spaceHeld_ = true;
@@ -738,6 +825,7 @@ void NodeGraphView::contextMenuEvent(QContextMenuEvent* event) {
             node->setBypassed(checked);
             graphScene_->refreshAllNodeItems();
         });
+        menu.addAction("Copy", QKeySequence::Copy, this, &NodeGraphView::copySelectedNodes);
         menu.addAction("Delete", this, [this, node] {
             if (graph_) graph_->removeNode(node);
             graphScene_->rebuild();
@@ -745,6 +833,7 @@ void NodeGraphView::contextMenuEvent(QContextMenuEvent* event) {
         menu.addSeparator();
     }
 
+    menu.addAction("Paste", QKeySequence::Paste, this, &NodeGraphView::pasteNodes);
     QMenu* addMenu = menu.addMenu("Add Node");
     for (const QString& category : NodeRegistry::instance().categories()) {
         QMenu* categoryMenu = addMenu->addMenu(category);
@@ -767,8 +856,8 @@ void NodeGraphView::drawForeground(QPainter* painter, const QRectF& rect) {
     painter->setFont(font);
     painter->setPen(theme::textDim());
     painter->drawText(QRect(8, height() - 22, width() - 16, 18), Qt::AlignLeft,
-                      "Tab: add   F: frame   MMB/Alt+LMB/Space+LMB: pan   Wheel: zoom   D: display   B: bypass   "
-                      "Del: delete");
+                      "Tab: add   F: frame   Ctrl+C/V: copy/paste   MMB/Alt+LMB/Space+LMB: pan   "
+                      "Wheel: zoom   D: display   B: bypass   Del: delete");
 }
 
 }  // namespace sol

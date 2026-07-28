@@ -2,6 +2,7 @@
 #pragma once
 
 #include <QJsonObject>
+#include <QList>
 #include <QObject>
 #include <QString>
 #include <memory>
@@ -43,6 +44,12 @@ public:
 
     QJsonObject toJson() const;
     bool fromJson(const QJsonObject& json, QString& error);
+
+    // Clipboard subset: selected nodes + wires between them (external inputs dropped).
+    QJsonObject nodesToClipboardJson(const QList<Node*>& nodes) const;
+    // Pastes clipboard JSON near pasteOrigin (centers the selection on that point).
+    // Returns newly created nodes; names are uniquified and remapped.
+    QList<Node*> pasteNodesFromClipboardJson(const QJsonObject& json, QPointF pasteOrigin, QString& error);
 
     const QString& filePath() const { return filePath_; }
     void setFilePath(const QString& path) { filePath_ = path; }

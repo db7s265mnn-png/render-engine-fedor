@@ -85,6 +85,8 @@ signals:
 public slots:
     void createNodeOfType(const QString& typeName);
     void deleteSelectedNodes();
+    void copySelectedNodes();
+    void pasteNodes();
     void toggleDisplayFlagOnSelection();
     void toggleBypassOnSelection();
     void layoutSelectionVertically();

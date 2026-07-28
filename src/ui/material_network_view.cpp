@@ -1,5 +1,7 @@
 #include "ui/material_network_view.h"
 
+#include <QApplication>
+#include <QClipboard>
 #include <QContextMenuEvent>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -8,18 +10,24 @@
 #include <QGraphicsScene>
 #include <QHash>
 #include <QHBoxLayout>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLineF>
 #include <QListWidget>
 #include <QMap>
 #include <QMenu>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QRegularExpression>
 #include <QResizeEvent>
+#include <QSet>
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStyleOptionGraphicsItem>
@@ -1140,6 +1148,16 @@ void MaterialNetworkGraphView::wheelEvent(QWheelEvent* event) {
 }
 
 void MaterialNetworkGraphView::keyPressEvent(QKeyEvent* event) {
+    if (event->matches(QKeySequence::Copy)) {
+        copySelectedNodes();
+        event->accept();
+        return;
+    }
+    if (event->matches(QKeySequence::Paste)) {
+        pasteNodes();
+        event->accept();
+        return;
+    }
     switch (event->key()) {
         case Qt::Key_Space:
             if (!event->isAutoRepeat()) {
@@ -1300,6 +1318,164 @@ void MaterialNetworkGraphView::deleteSelectedNodes() {
     writeModel(true);
     rebuild();
     emit statusMessage("Deleted " + toDelete.join(", "));
+}
+
+namespace {
+constexpr const char* kMtlxClipboardMime = "application/x-bob-render-mtlx-nodes";
+}
+
+void MaterialNetworkGraphView::copySelectedNodes() {
+    if (!materialNode_) return;
+    QStringList names;
+    for (QGraphicsItem* item : graphScene_->selectedItems()) {
+        if (auto* nodeItem = qgraphicsitem_cast<MaterialNetworkNodeItem*>(item)) names << nodeItem->nodeName();
+    }
+    names.removeDuplicates();
+    if (names.isEmpty()) {
+        emit statusMessage("Nothing to copy");
+        return;
+    }
+
+    QJsonArray nodesArray;
+    const QSet<QString> selected(names.begin(), names.end());
+    for (const QString& name : names) {
+        const MtlxNode* node = findModelNode(name);
+        if (!node) continue;
+        QJsonObject nodeJson;
+        nodeJson["name"] = node->name;
+        nodeJson["category"] = node->category;
+        nodeJson["type"] = node->type;
+        nodeJson["x"] = node->layout.x();
+        nodeJson["y"] = node->layout.y();
+        QJsonArray inputsArray;
+        for (const MtlxInput& input : node->inputs) {
+            QJsonObject inputJson;
+            inputJson["name"] = input.name;
+            inputJson["type"] = input.type;
+            inputJson["value"] = input.value;
+            // Keep only connections fully inside the selection.
+            inputJson["nodename"] = selected.contains(input.nodename) ? input.nodename : QString();
+            inputsArray.append(inputJson);
+        }
+        nodeJson["inputs"] = inputsArray;
+        nodesArray.append(nodeJson);
+    }
+
+    QJsonObject root;
+    root["format"] = QStringLiteral("bob-render-mtlx-nodes");
+    root["version"] = 1;
+    root["nodes"] = nodesArray;
+    const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Compact);
+    auto* mime = new QMimeData;
+    mime->setData(kMtlxClipboardMime, bytes);
+    mime->setText(QString::fromUtf8(bytes));
+    QApplication::clipboard()->setMimeData(mime);
+    emit statusMessage(QString("Copied %1 MaterialX node%2")
+                           .arg(nodesArray.size())
+                           .arg(nodesArray.size() == 1 ? "" : "s"));
+}
+
+void MaterialNetworkGraphView::pasteNodes() {
+    if (!materialNode_) return;
+    const QMimeData* mime = QApplication::clipboard()->mimeData();
+    if (!mime) return;
+
+    QByteArray bytes;
+    if (mime->hasFormat(kMtlxClipboardMime))
+        bytes = mime->data(kMtlxClipboardMime);
+    else if (mime->hasText())
+        bytes = mime->text().toUtf8();
+    if (bytes.isEmpty()) {
+        emit statusMessage("Clipboard has no MaterialX nodes");
+        return;
+    }
+
+    const QJsonDocument doc = QJsonDocument::fromJson(bytes);
+    if (!doc.isObject()) {
+        emit statusMessage("Clipboard is not MaterialX node data");
+        return;
+    }
+    const QJsonObject root = doc.object();
+    if (root.value("format").toString() != QLatin1String("bob-render-mtlx-nodes")) {
+        emit statusMessage("Clipboard is not MaterialX node data");
+        return;
+    }
+    const QJsonArray nodesArray = root.value("nodes").toArray();
+    if (nodesArray.isEmpty()) {
+        emit statusMessage("Clipboard has no MaterialX nodes");
+        return;
+    }
+
+    QPointF cursorLayout = lastMousePoint_;
+    const QPoint viewPos = mapFromGlobal(QCursor::pos());
+    if (viewport()->rect().contains(viewPos)) cursorLayout = mapToScene(viewPos);
+    cursorLayout /= kLayoutScale;
+
+    QPointF minLayout(nodesArray[0].toObject().value("x").toDouble(),
+                      nodesArray[0].toObject().value("y").toDouble());
+    QPointF maxLayout = minLayout;
+    for (const QJsonValue& value : nodesArray) {
+        const QJsonObject o = value.toObject();
+        const QPointF p(o.value("x").toDouble(), o.value("y").toDouble());
+        minLayout.setX(std::min(minLayout.x(), p.x()));
+        minLayout.setY(std::min(minLayout.y(), p.y()));
+        maxLayout.setX(std::max(maxLayout.x(), p.x()));
+        maxLayout.setY(std::max(maxLayout.y(), p.y()));
+    }
+    const QPointF center((minLayout.x() + maxLayout.x()) * 0.5, (minLayout.y() + maxLayout.y()) * 0.5);
+    const QPointF delta = cursorLayout - center;
+
+    QHash<QString, QString> nameMap;
+    QStringList createdNames;
+    for (const QJsonValue& value : nodesArray) {
+        const QJsonObject nodeJson = value.toObject();
+        const QString category = nodeJson.value("category").toString();
+        if (!isKnownMaterialXCategory(category)) continue;
+        // Never paste a second terminal "surface" container as the fixed name.
+        const QString oldName = nodeJson.value("name").toString();
+        QString baseName = oldName;
+        if (category == "surfacematerial" && oldName == "surface") baseName = "surfacematerial";
+        MtlxNode node;
+        node.category = category;
+        node.type = nodeJson.value("type").toString();
+        if (node.type.isEmpty()) node.type = defaultTypeForCategory(category);
+        node.name = uniqueNodeName(baseName.isEmpty() ? category : baseName);
+        node.layout = QPointF(nodeJson.value("x").toDouble(), nodeJson.value("y").toDouble()) + delta;
+        const QJsonArray inputsArray = nodeJson.value("inputs").toArray();
+        for (const QJsonValue& inputValue : inputsArray) {
+            const QJsonObject inputJson = inputValue.toObject();
+            MtlxInput input;
+            input.name = inputJson.value("name").toString();
+            input.type = inputJson.value("type").toString();
+            input.value = inputJson.value("value").toString();
+            input.nodename = inputJson.value("nodename").toString();
+            if (!input.name.isEmpty()) node.inputs.append(input);
+        }
+        if (node.inputs.isEmpty()) node.inputs = defaultInputsForCategory(category, node.type);
+        nameMap.insert(oldName, node.name);
+        createdNames << node.name;
+        graphNodes_.push_back(node);
+    }
+
+    if (createdNames.isEmpty()) {
+        emit statusMessage("Paste failed");
+        return;
+    }
+
+    for (MtlxNode& node : graphNodes_) {
+        if (!createdNames.contains(node.name)) continue;
+        for (MtlxInput& input : node.inputs) {
+            if (input.nodename.isEmpty()) continue;
+            input.nodename = nameMap.value(input.nodename);
+        }
+    }
+
+    writeModel(true);
+    rebuild();
+    preservedSelection_ = createdNames.isEmpty() ? QString() : createdNames.first();
+    emit statusMessage(QString("Pasted %1 MaterialX node%2")
+                           .arg(createdNames.size())
+                           .arg(createdNames.size() == 1 ? "" : "s"));
 }
 
 void MaterialNetworkGraphView::mousePressEvent(QMouseEvent* event) {

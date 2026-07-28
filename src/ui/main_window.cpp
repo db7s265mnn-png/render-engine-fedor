@@ -256,6 +256,11 @@ void MainWindow::createMenus() {
     fileMenu->addAction("E&xit", QKeySequence::Quit, this, &QWidget::close);
 
     QMenu* editMenu = menuBar()->addMenu("&Edit");
+    // Shortcuts live on the Scene Network view so Ctrl+C still copies prim paths
+    // in the Scene Graph when that panel has focus.
+    editMenu->addAction("Copy Nodes", this, [this] { networkView_->copySelectedNodes(); });
+    editMenu->addAction("Paste Nodes", this, [this] { networkView_->pasteNodes(); });
+    editMenu->addSeparator();
     editMenu->addAction("Delete Selected Nodes", QKeySequence::Delete, this,
                         [this] { networkView_->deleteSelectedNodes(); });
     editMenu->addAction("Set Display Flag", QKeySequence("Ctrl+D"), this,
@@ -971,6 +976,7 @@ void MainWindow::onShowShortcuts() {
     QMessageBox::information(this, "Keyboard shortcuts",
                              "Scene Network\n"
                              "  Tab           add node (search)\n"
+                             "  Ctrl+C / Ctrl+V   copy / paste nodes\n"
                              "  D             set display flag\n"
                              "  B             bypass\n"
                              "  F             frame all\n"
@@ -980,6 +986,7 @@ void MainWindow::onShowShortcuts() {
                              "  Wheel         zoom to cursor\n\n"
                              "Material Network\n"
                              "  Tab           add MaterialX node (search)\n"
+                             "  Ctrl+C / Ctrl+V   copy / paste nodes\n"
                              "  F             frame all\n"
                              "  Del           delete selection\n"
                              "  ↑             return to materials level\n"
