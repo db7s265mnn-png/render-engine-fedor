@@ -164,6 +164,11 @@ QString prettyMaterialXLabel(const QString& name) {
         {QStringLiteral("coat_IOR"), QStringLiteral("Coat IOR")},
         {QStringLiteral("thin_film_IOR"), QStringLiteral("Thin Film IOR")},
         {QStringLiteral("subsurface_scale"), QStringLiteral("Subsurface Scale")},
+        {QStringLiteral("input_per_axis"), QStringLiteral("Input Per Axis")},
+        {QStringLiteral("file"), QStringLiteral("Input")},
+        {QStringLiteral("filex"), QStringLiteral("Input X")},
+        {QStringLiteral("filey"), QStringLiteral("Input Y")},
+        {QStringLiteral("filez"), QStringLiteral("Input Z")},
     };
     if (special.contains(name)) return special.value(name);
 
@@ -194,6 +199,16 @@ void materialXFloatRange(const QString& name, double& lo, double& hi) {
         // Arnold Scale in scene units (metres): MFP = Scale * Radius. Soft slider 0..10.
         lo = 0.0;
         hi = 10.0;
+        return;
+    }
+    if (n == QLatin1String("blend")) {
+        lo = 0.0;
+        hi = 1.0;
+        return;
+    }
+    if (n == QLatin1String("rotate")) {
+        lo = 0.0;
+        hi = 360.0;
         return;
     }
     if (n == QLatin1String("scale")) {

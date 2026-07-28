@@ -689,6 +689,58 @@ void MaterialNetworkGraphView::ensureInput(QVector<MtlxInput>& inputs, const QSt
     inputs.push_back({name, type, value, {}});
 }
 
+// Stable UI / wire port order — independent of MaterialX nodedef or XML authorship order.
+QStringList MaterialNetworkGraphView::canonicalInputOrder(const QString& category) {
+    if (category == "standard_surface") {
+        return {QStringLiteral("base_color"),
+                QStringLiteral("base"),
+                QStringLiteral("specular_roughness"),
+                QStringLiteral("metalness"),
+                QStringLiteral("specular"),
+                QStringLiteral("specular_IOR"),
+                QStringLiteral("transmission"),
+                QStringLiteral("opacity"),
+                QStringLiteral("emission"),
+                QStringLiteral("emission_color"),
+                QStringLiteral("normal"),
+                QStringLiteral("subsurface"),
+                QStringLiteral("subsurface_color"),
+                QStringLiteral("subsurface_radius"),
+                QStringLiteral("subsurface_scale")};
+    }
+    if (category == "triplanarprojection") {
+        // Arnold Triplanar: Input → Input Per Axis → axis files → Transform → Blend.
+        return {QStringLiteral("file"),
+                QStringLiteral("input_per_axis"),
+                QStringLiteral("filex"),
+                QStringLiteral("filey"),
+                QStringLiteral("filez"),
+                QStringLiteral("scale"),
+                QStringLiteral("rotate"),
+                QStringLiteral("offset"),
+                QStringLiteral("blend"),
+                QStringLiteral("default")};
+    }
+    return {};
+}
+
+void MaterialNetworkGraphView::normalizeInputOrder(QVector<MtlxInput>& inputs, const QString& category) {
+    const QStringList order = canonicalInputOrder(category);
+    if (order.isEmpty() || inputs.isEmpty()) return;
+    QHash<QString, MtlxInput> byName;
+    byName.reserve(inputs.size());
+    for (const MtlxInput& input : inputs) {
+        if (!input.name.isEmpty()) byName.insert(input.name, input);
+    }
+    QVector<MtlxInput> out;
+    out.reserve(order.size());
+    for (const QString& name : order) {
+        const auto it = byName.constFind(name);
+        if (it != byName.constEnd()) out.push_back(*it);
+    }
+    inputs = out;
+}
+
 QString MaterialNetworkGraphView::defaultTypeForCategory(const QString& category) {
     if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) return entry->type;
     if (category == "standard_surface") return "surfaceshader";
@@ -701,18 +753,81 @@ QString MaterialNetworkGraphView::defaultTypeForCategory(const QString& category
 QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultInputsForCategory(const QString& category,
                                                                                       const QString& type) {
     QVector<MtlxInput> inputs;
+    if (category == "standard_surface") {
+        // Always emit Arnold Diffuse Color first — never follow nodedef/XML order.
+        static const QVector<MtlxInput> kDefaults = {
+            {"base_color", "color3", "0.8, 0.8, 0.8", {}},
+            {"base", "float", "0.8", {}},
+            {"specular_roughness", "float", "0.35", {}},
+            {"metalness", "float", "0", {}},
+            {"specular", "float", "0.5", {}},
+            {"specular_IOR", "float", "1.5", {}},
+            {"transmission", "float", "0", {}},
+            {"opacity", "color3", "1, 1, 1", {}},
+            {"emission", "float", "0", {}},
+            {"emission_color", "color3", "1, 1, 1", {}},
+            {"normal", "vector3", {}, {}},
+            {"subsurface", "float", "0", {}},
+            {"subsurface_color", "color3", "1, 0.75, 0.55", {}},
+            {"subsurface_radius", "color3", "1, 0.35, 0.2", {}},
+            {"subsurface_scale", "float", "1", {}},
+        };
+        if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
+            const QString signature = type.isEmpty() ? entry->type : type;
+            QHash<QString, MaterialXNodeInputDef> byName;
+            for (const MaterialXNodeInputDef& def : entry->inputsFor(signature)) byName.insert(def.name, def);
+            for (const MtlxInput& fallback : kDefaults) {
+                const auto it = byName.constFind(fallback.name);
+                if (it != byName.constEnd())
+                    inputs.push_back({it->name, it->type, it->value.isEmpty() ? fallback.value : it->value, {}});
+                else
+                    inputs.push_back(fallback);
+            }
+        } else {
+            inputs = kDefaults;
+        }
+        return inputs;
+    }
+
+    if (category == "triplanarprojection") {
+        // Arnold Triplanar: shared Input by default; per-axis unlocked by checkbox.
+        QVector<MtlxInput> out = {
+            {"file", "filename", {}, {}},
+            {"input_per_axis", "boolean", "false", {}},
+            {"filex", "filename", {}, {}},
+            {"filey", "filename", {}, {}},
+            {"filez", "filename", {}, {}},
+            {"scale", "vector3", "1, 1, 1", {}},
+            {"rotate", "float", "0", {}},
+            {"offset", "vector3", "0, 0, 0", {}},
+            {"blend", "float", "0.1", {}},
+            {"default", "color3", "0.2, 0.5, 0.8", {}},
+        };
+        if (!type.isEmpty() && type != "color3") {
+            for (MtlxInput& input : out) {
+                if (input.name == "default") {
+                    input.type = type;
+                    input.value = type.startsWith("color") ? QString("0.2, 0.5, 0.8") : QString("0, 0, 0");
+                }
+            }
+        }
+        if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
+            const QString signature = type.isEmpty() ? entry->type : type;
+            QHash<QString, MaterialXNodeInputDef> byName;
+            for (const MaterialXNodeInputDef& def : entry->inputsFor(signature)) byName.insert(def.name, def);
+            for (MtlxInput& input : out) {
+                const auto it = byName.constFind(input.name);
+                if (it == byName.constEnd()) continue;
+                input.type = it->type.isEmpty() ? input.type : it->type;
+                if (input.value.isEmpty() && !it->value.isEmpty()) input.value = it->value;
+            }
+        }
+        return out;
+    }
+
     if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
         const QString signature = type.isEmpty() ? entry->type : type;
         for (const MaterialXNodeInputDef& def : entry->inputsFor(signature)) {
-            // Keep standard_surface UI focused on the common shading ports; full nodedef is huge.
-            if (category == "standard_surface") {
-                // Arnold Standard Surface: Diffuse group leads with color, then weight.
-                static const QStringList keep = {"base_color", "base", "specular_roughness", "metalness", "specular",
-                                                 "specular_IOR", "transmission", "opacity", "emission",
-                                                 "emission_color", "normal", "subsurface", "subsurface_color",
-                                                 "subsurface_radius", "subsurface_scale"};
-                if (!keep.contains(def.name)) continue;
-            }
             inputs.push_back({def.name, def.type, def.value, {}});
         }
         if (!inputs.isEmpty()) return inputs;
@@ -734,22 +849,6 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
     } else if (category == "normalmap") {
         inputs.push_back({"in", "vector3", {}, {}});
         inputs.push_back({"scale", "float", "1", {}});
-    } else if (category == "standard_surface") {
-        inputs.push_back({"base_color", "color3", "0.8, 0.8, 0.8", {}});
-        inputs.push_back({"base", "float", "0.8", {}});
-        inputs.push_back({"specular_roughness", "float", "0.35", {}});
-        inputs.push_back({"metalness", "float", "0", {}});
-        inputs.push_back({"specular", "float", "0.5", {}});
-        inputs.push_back({"specular_IOR", "float", "1.5", {}});
-        inputs.push_back({"transmission", "float", "0", {}});
-        inputs.push_back({"opacity", "color3", "1, 1, 1", {}});
-        inputs.push_back({"emission", "float", "0", {}});
-        inputs.push_back({"emission_color", "color3", "1, 1, 1", {}});
-        inputs.push_back({"subsurface", "float", "0", {}});
-        inputs.push_back({"subsurface_color", "color3", "1, 0.75, 0.55", {}});
-        inputs.push_back({"subsurface_radius", "color3", "1, 0.35, 0.2", {}});
-        inputs.push_back({"subsurface_scale", "float", "1", {}});
-        inputs.push_back({"normal", "vector3", {}, {}});
     } else if (category == "surfacematerial") {
         inputs.push_back({"surfaceshader", "surfaceshader", {}, {}});
     }
@@ -805,6 +904,7 @@ void MaterialNetworkGraphView::rebuildFromXml(const QString& xml, bool rewriteRe
             }
             for (const MtlxInput& input : defaultInputsForCategory(node.category, node.type))
                 ensureInput(node.inputs, input.name, input.type, input.value);
+            normalizeInputOrder(node.inputs, node.category);
             graphNodes_.push_back(node);
             ++ordinal;
         }
@@ -1692,13 +1792,63 @@ bool MaterialNetworkGraphView::setInputValue(const QString& nodeName, const QStr
         if (input.name != inputName) continue;
         const bool wasConnected = !input.nodename.isEmpty();
         QString stored = value;
-        if (input.type == "filename" || inputName == "file") stored = applyUdimFilename(value);
+        if (input.type == "filename" || inputName == "file" || inputName.startsWith("file"))
+            stored = applyUdimFilename(value);
         if (input.value == stored && !wasConnected) return true;
         input.value = stored;
         input.nodename.clear();
+
+        // Arnold Triplanar: shared Input copies to all axes unless Input Per Axis is on.
+        if (node->category == "triplanarprojection") {
+            auto findIn = [&](const QString& n) -> MtlxInput* {
+                for (MtlxInput& in : node->inputs) {
+                    if (in.name == n) return &in;
+                }
+                return nullptr;
+            };
+            MtlxInput* perAxis = findIn("input_per_axis");
+            const bool separate = perAxis && (perAxis->value == "true" || perAxis->value == "1");
+            if (inputName == "file" && !separate) {
+                for (const char* axis : {"filex", "filey", "filez"}) {
+                    if (MtlxInput* axisIn = findIn(QLatin1String(axis))) {
+                        axisIn->value = stored;
+                        axisIn->nodename.clear();
+                    }
+                }
+            } else if (inputName == "input_per_axis" && separate) {
+                // Enabling per-axis: seed empty axis slots from shared file.
+                QString seed;
+                if (MtlxInput* file = findIn("file")) seed = file->value;
+                if (seed.isEmpty()) {
+                    if (MtlxInput* fx = findIn("filex")) seed = fx->value;
+                }
+                if (!seed.isEmpty()) {
+                    for (const char* axis : {"filex", "filey", "filez"}) {
+                        if (MtlxInput* axisIn = findIn(QLatin1String(axis))) {
+                            if (axisIn->value.isEmpty()) axisIn->value = seed;
+                        }
+                    }
+                }
+            } else if (inputName == "input_per_axis" && !separate) {
+                // Disabling: collapse back to shared file (prefer file, else filex).
+                QString seed;
+                if (MtlxInput* file = findIn("file")) seed = file->value;
+                if (seed.isEmpty()) {
+                    if (MtlxInput* fx = findIn("filex")) seed = fx->value;
+                }
+                if (!seed.isEmpty()) {
+                    if (MtlxInput* file = findIn("file")) file->value = seed;
+                    for (const char* axis : {"filex", "filey", "filez"}) {
+                        if (MtlxInput* axisIn = findIn(QLatin1String(axis))) axisIn->value = seed;
+                    }
+                }
+            }
+        }
+
         writeModel(true);
-        // Rebuild only when the graph appearance changes (wires / file subtitle).
-        if (wasConnected || input.type == "filename") {
+        // Rebuild when wires / file subtitle / triplanar axis visibility change.
+        if (wasConnected || input.type == "filename" || inputName == "input_per_axis" ||
+            inputName == "file") {
             preservedSelection_ = nodeName;
             rebuild();
         }
@@ -2184,7 +2334,21 @@ bool MaterialNetworkView::selectedMaterialX(MaterialXSelection& out) const {
         out.typeVariants << node->type;
     }
     out.inputs.reserve(node->inputs.size());
+    bool triplanarPerAxis = false;
+    if (node->category == "triplanarprojection") {
+        for (const MaterialNetworkGraphView::MtlxInput& input : node->inputs) {
+            if (input.name == "input_per_axis") {
+                triplanarPerAxis = (input.value == "true" || input.value == "1");
+                break;
+            }
+        }
+    }
     for (const MaterialNetworkGraphView::MtlxInput& input : node->inputs) {
+        // Arnold: hide per-axis file slots until Input Per Axis is enabled.
+        if (node->category == "triplanarprojection" && !triplanarPerAxis &&
+            (input.name == "filex" || input.name == "filey" || input.name == "filez")) {
+            continue;
+        }
         MaterialXInputParam param;
         param.name = input.name;
         param.type = input.type;

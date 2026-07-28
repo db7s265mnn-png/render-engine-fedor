@@ -615,11 +615,16 @@ void testMaterialXNoiseAndTriplanar() {
         "<?xml version=\"1.0\"?>\n"
         "<materialx version=\"1.39\">\n"
         "  <triplanarprojection name=\"tri1\" type=\"color3\">\n"
+        "    <input name=\"file\" type=\"filename\" value=\"\"/>\n"
+        "    <input name=\"input_per_axis\" type=\"boolean\" value=\"false\"/>\n"
         "    <input name=\"filex\" type=\"filename\" value=\"\"/>\n"
         "    <input name=\"filey\" type=\"filename\" value=\"\"/>\n"
         "    <input name=\"filez\" type=\"filename\" value=\"\"/>\n"
+        "    <input name=\"scale\" type=\"vector3\" value=\"1, 1, 1\"/>\n"
+        "    <input name=\"rotate\" type=\"float\" value=\"0\"/>\n"
+        "    <input name=\"offset\" type=\"vector3\" value=\"0, 0, 0\"/>\n"
         "    <input name=\"default\" type=\"color3\" value=\"0.2, 0.5, 0.8\"/>\n"
-        "    <input name=\"blend\" type=\"float\" value=\"1\"/>\n"
+        "    <input name=\"blend\" type=\"float\" value=\"0.1\"/>\n"
         "  </triplanarprojection>\n"
         "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\">\n"
         "    <input name=\"base_color\" type=\"color3\" nodename=\"tri1\"/>\n"
@@ -631,8 +636,68 @@ void testMaterialXNoiseAndTriplanar() {
     eval = evaluateMaterialXDocument(triXml, QString());
     check(eval.ok, "evaluate empty triplanar ok (no crash)");
     check(eval.material.baseColorProc >= 0, "triplanar compiles to shade-time procedural");
+    if (eval.material.baseColorProc >= 0 && size_t(eval.material.baseColorProc) < eval.procedurals.size()) {
+        const ProceduralNode& tri = eval.procedurals[size_t(eval.material.baseColorProc)];
+        check(tri.op == kProcTriplanar, "root op is triplanar");
+        check(std::fabs(tri.p1.x - 1.0f) < 1e-4f && std::fabs(tri.p1.y - 1.0f) < 1e-4f, "default scale 1,1,1");
+        check(std::fabs(tri.s0 - 0.1f) < 1e-4f, "default blend 0.1");
+    }
     std::printf("  triplanar ok=%d err=%s proc=%d\n", int(eval.ok), eval.error.toStdString().c_str(),
                 eval.material.baseColorProc);
+
+    // Shared Input (no per-axis): one file seeds all three projection axes.
+    {
+        QTemporaryDir tmp;
+        check(tmp.isValid(), "temp dir for triplanar shared file");
+        const QString texPath = tmp.filePath("tile.png");
+        QImage img(8, 8, QImage::Format_RGB32);
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x) img.setPixel(x, y, qRgb((x * 30) & 255, (y * 30) & 255, 128));
+        check(img.save(texPath), "write triplanar tile");
+        const QString sharedXml = QStringLiteral(
+                                      "<?xml version=\"1.0\"?><materialx version=\"1.38\">"
+                                      "<triplanarprojection name=\"tri1\" type=\"color3\">"
+                                      "<input name=\"file\" type=\"filename\" value=\"%1\"/>"
+                                      "<input name=\"input_per_axis\" type=\"boolean\" value=\"false\"/>"
+                                      "<input name=\"scale\" type=\"vector3\" value=\"0.5, 0.5, 0.5\"/>"
+                                      "<input name=\"blend\" type=\"float\" value=\"0.2\"/>"
+                                      "</triplanarprojection>"
+                                      "<standard_surface name=\"ss\" type=\"surfaceshader\">"
+                                      "<input name=\"base_color\" type=\"color3\" nodename=\"tri1\"/>"
+                                      "</standard_surface>"
+                                      "<surfacematerial name=\"surface\" type=\"material\">"
+                                      "<input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>"
+                                      "</surfacematerial></materialx>")
+                                      .arg(texPath);
+        eval = evaluateMaterialXDocument(sharedXml, tmp.path());
+        check(eval.ok && eval.material.baseColorProc >= 0, "shared-file triplanar compiles");
+        check(!eval.proceduralImages.empty(), "shared file loaded once into images");
+        const ProceduralNode& tri = eval.procedurals[size_t(eval.material.baseColorProc)];
+        check(tri.in0 >= 0 && tri.in1 >= 0 && tri.in2 >= 0, "all three axes get a texture");
+        check(tri.in0 == tri.in1 && tri.in1 == tri.in2, "shared mode uses one texture index");
+        check(std::fabs(tri.p1.x - 0.5f) < 1e-4f, "scale authored");
+        // Shade samples must wrap in V (was clamped — only horizontal tiling).
+        Stage stage;
+        StagePrim prim;
+        prim.type = PrimType::Mesh;
+        prim.path = "/geo/box";
+        prim.mesh = makeSphereMesh(1.0f, 12, 8);
+        prim.material = eval.material;
+        prim.materialAssigned = true;
+        prim.procedurals = eval.procedurals;
+        prim.proceduralImages = eval.proceduralImages;
+        stage.prims.push_back(prim);
+        ScenePtr scene = stage.toScene();
+        scene->finalize();
+        SceneView view = scene->view();
+        Vec3 ns(0, 1, 0);
+        Material a = evaluateTexturedMaterial(view, view.materials[0], Vec2(0, 0), ns, Vec3(0.1f, 0.0f, 0.2f),
+                                              Vec3(0, 1, 0), 0.01f);
+        Material b = evaluateTexturedMaterial(view, view.materials[0], Vec2(0, 0), ns, Vec3(0.1f, 0.0f, 1.2f),
+                                              Vec3(0, 1, 0), 0.01f);
+        check(srIsFinite(a.baseColor.x) && srIsFinite(b.baseColor.x), "wrapped triplanar samples finite");
+        std::printf("  triplanar shared axes=%d/%d/%d scale=%.2f\n", tri.in0, tri.in1, tri.in2, tri.p1.x);
+    }
 
     // float noise → color3 (type mismatch users often make)
     const QString floatNoise = QStringLiteral(

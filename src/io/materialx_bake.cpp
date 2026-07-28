@@ -403,21 +403,53 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
         else
             result = asColor(splat4(cellNoise3(u * 8.0f, v * 8.0f, 0.0f)), type);
     } else if (cat == "triplanarprojection") {
+        const bool perAxis = [&]() {
+            const std::string raw = inputValueString(node, "input_per_axis");
+            return raw == "true" || raw == "1" || raw == "True";
+        }();
+        const std::string shared = inputValueString(node, "file");
+        auto resolveAxis = [&](const char* axisName) -> std::string {
+            std::string axis = inputValueString(node, axisName);
+            if (!perAxis) {
+                if (!shared.empty()) return shared;
+                if (!axis.empty()) return axis;
+                // Fall back across axes so a lone filey still paints all projections.
+                for (const char* name : {"filex", "filey", "filez"}) {
+                    const std::string cand = inputValueString(node, name);
+                    if (!cand.empty()) return cand;
+                }
+                return {};
+            }
+            if (!axis.empty()) return axis;
+            return shared;
+        };
         auto sampleAxis = [&](const char* fileInput) -> Vec4 {
-            const std::string file = inputValueString(node, fileInput);
+            const std::string file = resolveAxis(fileInput);
             if (file.empty()) return evalInput(node, "default", u, v, state, splat4(0.0f));
-            // Build a transient image node-like load via cache key on filename.
             std::string error;
             auto image = loadImageOrUdim(QString::fromStdString(file), state.searchDirectory, error, state.udimSet);
             if (!image) return evalInput(node, "default", u, v, state, splat4(0.0f));
-            return sampleImageUV(*image, u, v);
+            // Bake path has no object P — approximate tiling with UV / scale (wrap both axes).
+            float scale = 1.0f;
+            {
+                const std::string raw = inputValueString(node, "scale");
+                float vals[4] = {1, 1, 1, 1};
+                if (!raw.empty()) {
+                    std::sscanf(raw.c_str(), "%f,%f,%f", &vals[0], &vals[1], &vals[2]);
+                    scale = std::max(1.0e-5f, vals[0]);
+                }
+            }
+            float su = (u / scale) - std::floor(u / scale);
+            float sv = (v / scale) - std::floor(v / scale);
+            const Vec3 c = image->sampleBilinear(su, sv);
+            return Vec4(c.x, c.y, c.z, 1.0f);
         };
         const Vec4 cx = sampleAxis("filex");
         const Vec4 cy = sampleAxis("filey");
         const Vec4 cz = sampleAxis("filez");
         // UV-space bake has no mesh normal — use a mild Y-weighted blend so all
         // three maps contribute and the node is visibly "working".
-        const float blend = std::max(0.01f, evalFloat(node, "blend", u, v, state, 1.0f));
+        const float blend = std::max(0.01f, evalFloat(node, "blend", u, v, state, 0.1f));
         Vec3 w(0.25f, 0.5f, 0.25f);
         w = Vec3(std::pow(w.x, blend), std::pow(w.y, blend), std::pow(w.z, blend));
         const float s = w.x + w.y + w.z;

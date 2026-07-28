@@ -172,10 +172,11 @@ SR_INL SR_HD Vec4 remapSignedColor(Vec4 c) {
 }
 
 // Local bilinear sample so this header does not depend on shading.h.
+// Periodic wrap on both U and V (Arnold/Maya texture repeat) — needed for triplanar.
 SR_INL SR_HD Vec4 procSampleTexture(const TextureView& tex, Vec2 uv) {
     if (!tex.valid()) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
     float u = uv.x - floorf(uv.x);
-    float v = clampf(uv.y, 0.0f, 1.0f);
+    float v = uv.y - floorf(uv.y);
     const float x = u * float(tex.width) - 0.5f;
     const float y = v * float(tex.height) - 0.5f;
     const int x0 = int(floorf(x));
@@ -184,7 +185,7 @@ SR_INL SR_HD Vec4 procSampleTexture(const TextureView& tex, Vec2 uv) {
     const float fy = y - float(y0);
     auto fetch = [&](int ix, int iy) -> Vec4 {
         ix = ((ix % tex.width) + tex.width) % tex.width;
-        iy = iy < 0 ? 0 : (iy >= tex.height ? tex.height - 1 : iy);
+        iy = ((iy % tex.height) + tex.height) % tex.height;
         const size_t idx = (size_t(iy) * size_t(tex.width) + size_t(ix)) * 4;
         return Vec4(tex.pixels[idx + 0], tex.pixels[idx + 1], tex.pixels[idx + 2], tex.pixels[idx + 3]);
     };
@@ -371,22 +372,34 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             break;
         }
         case kProcTriplanar: {
-            // Object-space blend by |N|, sample each axis with projected P.
+            // Arnold-style object-space triplanar: UV = (P + offset) / scale, optional rotate.
+            // p0=default, p1=scale, p2=offset, s0=blend, s1=rotate degrees.
             Vec3 nAbs(fabsf(ctx.nObject.x), fabsf(ctx.nObject.y), fabsf(ctx.nObject.z));
             const float blend = srMax(0.01f, n.s0);
             nAbs = Vec3(powf(nAbs.x, blend), powf(nAbs.y, blend), powf(nAbs.z, blend));
             const float sum = nAbs.x + nAbs.y + nAbs.z;
             if (sum > 0.0f) nAbs = nAbs * (1.0f / sum);
             else nAbs = Vec3(0.0f, 1.0f, 0.0f);
+            const float sx = srMax(1.0e-5f, fabsf(n.p1.x) > 0.0f ? n.p1.x : 1.0f);
+            const float sy = srMax(1.0e-5f, fabsf(n.p1.y) > 0.0f ? n.p1.y : sx);
+            const float sz = srMax(1.0e-5f, fabsf(n.p1.z) > 0.0f ? n.p1.z : sx);
+            const Vec3 p((ctx.pObject.x + n.p2.x) / sx, (ctx.pObject.y + n.p2.y) / sy,
+                         (ctx.pObject.z + n.p2.z) / sz);
+            const float rotRad = n.s1 * 0.017453292519943295f;
+            const float cr = cosf(rotRad);
+            const float sn = sinf(rotRad);
+            auto rotUv = [&](float u, float v) -> Vec2 {
+                return Vec2(u * cr - v * sn, u * sn + v * cr);
+            };
             Vec4 cx = n.p0;
             Vec4 cy = n.p0;
             Vec4 cz = n.p0;
             if (n.in0 >= 0 && n.in0 < scene.textureCount && scene.textures)
-                cx = procSampleTexture(scene.textures[n.in0], Vec2(ctx.pObject.z, ctx.pObject.y));
+                cx = procSampleTexture(scene.textures[n.in0], rotUv(p.z, p.y));
             if (n.in1 >= 0 && n.in1 < scene.textureCount && scene.textures)
-                cy = procSampleTexture(scene.textures[n.in1], Vec2(ctx.pObject.x, ctx.pObject.z));
+                cy = procSampleTexture(scene.textures[n.in1], rotUv(p.x, p.z));
             if (n.in2 >= 0 && n.in2 < scene.textureCount && scene.textures)
-                cz = procSampleTexture(scene.textures[n.in2], Vec2(ctx.pObject.x, ctx.pObject.y));
+                cz = procSampleTexture(scene.textures[n.in2], rotUv(p.x, p.y));
             result = Vec4(cx.x * nAbs.x + cy.x * nAbs.y + cz.x * nAbs.z,
                           cx.y * nAbs.x + cy.y * nAbs.y + cz.y * nAbs.z,
                           cx.z * nAbs.x + cy.z * nAbs.y + cz.z * nAbs.z, 1.0f);

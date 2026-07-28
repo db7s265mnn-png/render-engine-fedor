@@ -220,6 +220,8 @@ private:
     QString uniqueNodeName(const QString& baseName) const;
     static void ensureInput(QVector<MtlxInput>& inputs, const QString& name, const QString& type,
                             const QString& value = QString());
+    static QStringList canonicalInputOrder(const QString& category);
+    static void normalizeInputOrder(QVector<MtlxInput>& inputs, const QString& category);
     static QVector<MtlxInput> defaultInputsForCategory(const QString& category, const QString& type = QString());
     static QString defaultTypeForCategory(const QString& category);
     MtlxNode* findModelNode(const QString& name);

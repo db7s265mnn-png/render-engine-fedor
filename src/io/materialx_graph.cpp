@@ -464,8 +464,8 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
     add("normalmap", "vector3", "Texture", {{"in", "vector3", {}}, {"scale", "float", "1"}});
     add("texcoord", "vector2", "Geometric", {{"index", "integer", "0"}});
     add("standard_surface", "surfaceshader", "PBR / Shading",
-        {{"base", "float", "0.8"},
-         {"base_color", "color3", "0.8, 0.8, 0.8"},
+        {{"base_color", "color3", "0.8, 0.8, 0.8"},
+         {"base", "float", "0.8"},
          {"specular_roughness", "float", "0.35"},
          {"metalness", "float", "0"},
          {"specular", "float", "0.5"},
@@ -474,11 +474,22 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"opacity", "color3", "1, 1, 1"},
          {"emission", "float", "0"},
          {"emission_color", "color3", "1, 1, 1"},
+         {"normal", "vector3", {}},
          {"subsurface", "float", "0"},
          {"subsurface_color", "color3", "1, 0.75, 0.55"},
          {"subsurface_radius", "color3", "1, 0.35, 0.2"},
-         {"subsurface_scale", "float", "1"},
-         {"normal", "vector3", {}}});
+         {"subsurface_scale", "float", "1"}});
+    add("triplanarprojection", "color3", "Texture",
+        {{"file", "filename", {}},
+         {"input_per_axis", "boolean", "false"},
+         {"filex", "filename", {}},
+         {"filey", "filename", {}},
+         {"filez", "filename", {}},
+         {"scale", "vector3", "1, 1, 1"},
+         {"rotate", "float", "0"},
+         {"offset", "vector3", "0, 0, 0"},
+         {"blend", "float", "0.1"},
+         {"default", "color3", "0.2, 0.5, 0.8"}});
     add("surfacematerial", "material", "PBR / Shading", {{"surfaceshader", "surfaceshader", {}}});
 
     QVector<MaterialXNodeCatalogEntry> out;
@@ -572,8 +583,9 @@ QString createDefaultMaterialXDocument() {
         return {};
     }
     mx::NodePtr ss = doc->addNode("standard_surface", "standard_surface1", "surfaceshader");
-    ss->setInputValue("base", 0.8f);
+    // Author Diffuse Color before weight so XML/UI port order stays stable.
     ss->setInputValue("base_color", mx::Color3(0.8f, 0.8f, 0.8f));
+    ss->setInputValue("base", 0.8f);
     ss->setInputValue("specular_roughness", 0.35f);
     ss->setInputValue("metalness", 0.0f);
     ss->setInputValue("specular", 0.5f);

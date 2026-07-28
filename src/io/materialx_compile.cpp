@@ -234,12 +234,36 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
         n.in0 = compileConnected(node, "position", state, depth);
         result = pushNode(state, n);
     } else if (cat == "triplanarprojection") {
+        // Arnold-style: shared `file` by default; `input_per_axis` unlocks filex/y/z.
         n.op = kProcTriplanar;
-        n.in0 = loadImageIndex(state, inputValueString(node, "filex"));
-        n.in1 = loadImageIndex(state, inputValueString(node, "filey"));
-        n.in2 = loadImageIndex(state, inputValueString(node, "filez"));
+        const bool perAxis = readBool(node, "input_per_axis", false);
+        const std::string shared = inputValueString(node, "file");
+        std::string fx = inputValueString(node, "filex");
+        std::string fy = inputValueString(node, "filey");
+        std::string fz = inputValueString(node, "filez");
+        auto firstNonEmpty = [](const std::string& a, const std::string& b, const std::string& c,
+                                const std::string& d) -> std::string {
+            if (!a.empty()) return a;
+            if (!b.empty()) return b;
+            if (!c.empty()) return c;
+            return d;
+        };
+        if (!perAxis) {
+            const std::string src = firstNonEmpty(shared, fx, fy, fz);
+            fx = fy = fz = src;
+        } else {
+            if (fx.empty()) fx = shared;
+            if (fy.empty()) fy = !shared.empty() ? shared : fx;
+            if (fz.empty()) fz = !shared.empty() ? shared : fx;
+        }
+        n.in0 = loadImageIndex(state, fx);
+        n.in1 = loadImageIndex(state, fy);
+        n.in2 = loadImageIndex(state, fz);
         n.p0 = readVec4(node, "default", Vec4(0.2f, 0.5f, 0.8f, 1.0f));
-        n.s0 = readFloat(node, "blend", 1.0f);
+        n.p1 = readVec4(node, "scale", Vec4(1.0f, 1.0f, 1.0f, 1.0f));
+        n.p2 = readVec4(node, "offset", Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+        n.s0 = readFloat(node, "blend", 0.1f);
+        n.s1 = readFloat(node, "rotate", 0.0f);
         result = pushNode(state, n);
     } else if (cat == "multiply") {
         n.op = kProcMul;
