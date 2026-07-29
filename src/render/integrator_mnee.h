@@ -552,6 +552,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         if (!didHit) {
             if (scene.domeLightIndex >= 0) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
+                // Per-light caustics off: skip env after a diffuse→specular suffix.
+                if (!(mneeFamily && !lightContributesCaustics(dome))) {
                 const bool primary = depth == 0 && passThrough == 0;
                 if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
                     Vec3 envL = domeRadiance(scene, dome, direction);
@@ -572,6 +574,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                             guiding->recordBackground(origin, direction, envL, weight);
 #endif
                     }
+                }
                 }
             }
             break;
@@ -598,7 +601,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             const bool finiteLight = light.type == kLightRect || light.type == kLightDisk ||
                                      light.type == kLightSphere || light.type == kLightPoint;
             float misScale = 1.0f;
-            if (mneeFamily && finiteLight && settings.caustics != 0) {
+            if (mneeFamily && finiteLight && settings.caustics != 0 && lightContributesCaustics(light)) {
                 Vec3 seg = si.p - anchorP;
                 const float segLen = length(seg);
                 if (segLen > 1e-5f) {
@@ -638,7 +641,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     }
                 }
             }
-            if (mneeFamily && finiteLight && settings.caustics == 0) break;
+            if (mneeFamily && finiteLight &&
+                (settings.caustics == 0 || !lightContributesCaustics(light)))
+                break;
 
             const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
             Vec3 emitted = areaLightEmission(scene, light, direction, lightN);
@@ -765,7 +770,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         if (buildSurfaceInteraction(scene, sh, o, wi, bsi)) {
                             if (bsi.lightIndex == li) {
                                 clearPath = true;
-                            } else if (bsi.lightIndex < 0 && settings.caustics != 0) {
+                            } else if (bsi.lightIndex < 0 && settings.caustics != 0 &&
+                                       lightContributesCaustics(l)) {
                                 Material bmat = bsi.materialIndex >= 0 && bsi.materialIndex < scene.materialCount
                                                     ? scene.materials[bsi.materialIndex]
                                                     : defaultMaterial();

@@ -552,11 +552,15 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (v.type != VType::Surface || !v.connectable) continue;
             // Caustics off: light→specular-chain→diffuse splats are the caustic
             // family; drop them to match the dark-shadow look.
+            bool lightPrefixDelta = false;
+            for (int i = 1; i < s - 1; ++i)
+                if (light[i].delta) lightPrefixDelta = true;
             if (!causticsOn) {
-                bool specSeen = false;
-                for (int i = 1; i < s - 1; ++i)
-                    if (light[i].delta) specSeen = true;
-                if (specSeen) continue;
+                if (lightPrefixDelta) continue;
+            } else if (lightPrefixDelta && light[0].lightIndex >= 0 &&
+                       !lightContributesCaustics(scene.lights[light[0].lightIndex])) {
+                // Per-light Contribute to Caustics off.
+                continue;
             }
             float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
             if (!projectToPixel(camProj, v.p, px, py, cosTheta, dist2)) continue;
@@ -573,9 +577,6 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             // MIS against the t >= 2 strategies for the same path. When the prefix
             // from the light runs through a delta chain, the s'=0 twin has been
             // handed to this strategy (family partition) — weight it fully.
-            bool lightPrefixDelta = false;
-            for (int i = 1; i < s - 1; ++i)
-                if (light[i].delta) lightPrefixDelta = true;
             MisOverride ov;
             ov.splatStrategy = true;
             ov.s0Sampled = !(causticsOn && lightPrefixDelta);
@@ -623,6 +624,17 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         if (v.type != VType::Light || v.lightIndex < 0) continue;
         const LightData& l = scene.lights[v.lightIndex];
 
+        // Per-light / global: drop diffuse→specular→light (caustic) hits.
+        if (t >= 4) {
+            bool sawDiffuseThenSpec = false;
+            bool diffuseSeen = false;
+            for (int i = 1; i < t - 1; ++i) {
+                if (!eye[i].delta) diffuseSeen = true;
+                else if (diffuseSeen) sawDiffuseThenSpec = true;
+            }
+            if (sawDiffuseThenSpec && (!causticsOn || !lightContributesCaustics(l))) break;
+        }
+
         if (l.type == kLightDome) {
             // Environment: MIS against s=1 env NEE (PT-style power heuristic).
             const bool primary = t == 2;
@@ -653,16 +665,6 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         const Vec3 wi = -v.wo;  // direction of travel into the light
         Vec3 Le = areaLightEmission(scene, l, wi, lightN);
         if (isBlack(Le)) break;
-        // Caustics off: kill specular-chain→light after a diffuse vertex.
-        if (!causticsOn && t >= 4) {
-            bool sawDiffuseThenSpec = false;
-            bool diffuseSeen = false;
-            for (int i = 1; i < t - 1; ++i) {
-                if (!eye[i].delta) diffuseSeen = true;
-                else if (diffuseSeen) sawDiffuseThenSpec = true;
-            }
-            if (sawDiffuseThenSpec) break;
-        }
         // Caustic family partition: diffuse → delta chain → area light cannot be
         // weighted by formal Veach MIS (the delta-chain lens Jacobian is not in
         // the pdf bookkeeping), so hitting a tiny light through glass stays a
@@ -838,6 +840,9 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             const Vert& Lv = light[s - 1];
             if (Lv.type != VType::Surface || !Lv.connectable) continue;
 
+            bool lightPrefixDelta = false;
+            for (int i = 1; i < s - 1; ++i)
+                if (light[i].delta) lightPrefixDelta = true;
             // Caustics off: skip connections whose eye side has diffuse→specular chains.
             if (!causticsOn) {
                 bool diffuseSeen = false, chainAfterDiffuse = false;
@@ -846,6 +851,9 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                     else if (diffuseSeen) chainAfterDiffuse = true;
                 }
                 if (chainAfterDiffuse) continue;
+            } else if (lightPrefixDelta && light[0].lightIndex >= 0 &&
+                       !lightContributesCaustics(scene.lights[light[0].lightIndex])) {
+                continue;
             }
 
             Vec3 d = Lv.p - E.p;
@@ -861,9 +869,6 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (G <= 0.0f) continue;
             if (!connectionVisible(scene, tracer, E.p, E.ng, Lv.p, -1)) continue;
 
-            bool lightPrefixDelta = false;
-            for (int i = 1; i < s - 1; ++i)
-                if (light[i].delta) lightPrefixDelta = true;
             MisOverride ov;
             ov.splatStrategy = doSplats;
             ov.s0Sampled = !(causticsOn && doSplats && lightPrefixDelta);

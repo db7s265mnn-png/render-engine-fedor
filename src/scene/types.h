@@ -239,7 +239,10 @@ struct LightData {
     // When 0, the light's proxy geometry is skipped by shadow rays (no self-shadow).
     int selfShadowEnable = 0;
     int samples = 1;
-    int pad1 = 0;
+    // Arnold-style: when 0 this light still does direct lighting but does not
+    // participate in caustic transport (MNEE / BDPT light-tracing delta chains /
+    // BSDF specular→light after a diffuse bounce).
+    int contributeCaustics = 1;
 
     SR_HD Vec3 emittedRadiance() const { return color * (intensity * exp2f(exposure)); }
 };

@@ -19,6 +19,8 @@ struct LightSample {
     bool delta = false;
 };
 
+SR_INL SR_HD bool lightContributesCaustics(const LightData& l) { return l.contributeCaustics != 0; }
+
 // ---------------------------------------------------------------------------
 // Environment map helpers
 // ---------------------------------------------------------------------------

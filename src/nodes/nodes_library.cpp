@@ -446,6 +446,11 @@ public:
                          .withGroup("Light")
                          .withTooltip("When off, this light ignores occluders (no shadows). "
                                       "For HDRI/dome lights, off removes hard environment shadows"));
+        addParameter(Parameter::makeBool("caustics", "Contribute to Caustics", true)
+                         .withGroup("Light")
+                         .withTooltip("When off, this light still illuminates surfaces directly but "
+                                      "does not cast caustics through glass (MNEE / BDPT / "
+                                      "specular→light paths). Works for area, sun, and dome lights."));
 
         switch (type_) {
             case kLightRect:
@@ -512,6 +517,7 @@ public:
         light.exposure = float(floatValue("exposure", 0.0));
         light.shadowEnable = boolValue("shadows", true) ? 1 : 0;
         light.selfShadowEnable = boolValue("selfshadows", false) ? 1 : 0;
+        light.contributeCaustics = boolValue("caustics", true) ? 1 : 0;
         light.normalize = boolValue("normalize", type_ != kLightDistant) ? 1 : 0;
         light.twoSided = boolValue("twosided", false) ? 1 : 0;
         light.visibleCamera = boolValue("visiblecamera", true) ? 1 : 0;

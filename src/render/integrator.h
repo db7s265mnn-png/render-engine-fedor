@@ -318,6 +318,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     // produced by opaque shadow rays through glass).
     bool suppressCausticLight = false;
     bool sawNonSpecular = false;
+    // Specular suffix after a non-specular bounce — per-light Contribute to Caustics.
+    bool causticSuffix = false;
     int depth = 0;
     int passThrough = 0;
     const RenderSettingsData& settings = scene.settings;
@@ -331,6 +333,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             if (scene.domeLightIndex >= 0) {
                 if (!suppressCausticLight) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
+                if (!(causticSuffix && !lightContributesCaustics(dome))) {
                 const bool primary = depth == 0 && passThrough == 0;
                 if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
                     Vec3 envL = domeRadiance(scene, dome, direction);
@@ -355,6 +358,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     }
                 }
                 }
+                }
             }
             break;
         }
@@ -377,6 +381,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             // Caustics off: no light transport through specular chains after a
             // diffuse vertex (matches the opaque shadow rays through glass).
             if (suppressCausticLight) break;
+            const LightData& hitLight = scene.lights[si.lightIndex];
+            if (causticSuffix && !lightContributesCaustics(hitLight)) break;
             const LightData& light = scene.lights[si.lightIndex];
             const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
             Vec3 emitted = areaLightEmission(scene, light, direction, lightN);
@@ -781,7 +787,11 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         bsdfPdf = bs.pdf;
         specularBounce = bs.specular;
         if (settings.caustics == 0 && bs.specular && sawNonSpecular) suppressCausticLight = true;
-        if (!bs.specular) sawNonSpecular = true;
+        if (bs.specular && sawNonSpecular) causticSuffix = true;
+        if (!bs.specular) {
+            sawNonSpecular = true;
+            causticSuffix = false;
+        }
         ++depth;
 
         // Russian roulette.
