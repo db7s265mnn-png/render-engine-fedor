@@ -12,6 +12,7 @@ void applyDarkTheme(QApplication& application);
 namespace theme {
 inline QColor background() { return QColor(37, 39, 43); }
 inline QColor panel() { return QColor(46, 49, 54); }
+inline QColor panelDark() { return QColor(38, 40, 44); }
 inline QColor panelLight() { return QColor(58, 62, 68); }
 inline QColor gridDark() { return QColor(32, 34, 38); }
 inline QColor gridLine() { return QColor(48, 51, 56); }

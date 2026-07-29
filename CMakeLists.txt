@@ -405,6 +405,7 @@ set(SOLSTICE_APP_SOURCES
     src/ui/scene_graph_panel.cpp
     src/ui/log_panel.cpp
     src/ui/theme.cpp
+    src/ui/timeline_bar.cpp
 )
 
 set(SOLSTICE_APP_HEADERS
@@ -420,6 +421,7 @@ set(SOLSTICE_APP_HEADERS
     src/ui/scene_graph_panel.h
     src/ui/log_panel.h
     src/ui/theme.h
+    src/ui/timeline_bar.h
 )
 
 if(SOLSTICE_BUILD_APP)

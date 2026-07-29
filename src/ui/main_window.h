@@ -22,6 +22,7 @@ class MaterialNetworkView;
 class ParameterPanel;
 class SceneGraphPanel;
 class LogPanel;
+class TimelineBar;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -55,11 +56,13 @@ private slots:
     void onCopyViewToCameraNode();
     void onShowAbout();
     void onShowShortcuts();
+    void onTimelineFrameChanged(int frame);
 
 private:
     void createActions();
     void createMenus();
     void createToolBar();
+    void createTimeline();
     void createDocks();
     void scheduleCook(int delayMilliseconds = 120);
     void cookNow();
@@ -88,6 +91,7 @@ private:
     SceneGraphPanel* sceneGraphPanel_ = nullptr;
     LogPanel* logPanel_ = nullptr;
     RenderView* renderView_ = nullptr;
+    TimelineBar* timelineBar_ = nullptr;
 
     QTimer* cookTimer_ = nullptr;
     QTimer* refreshTimer_ = nullptr;

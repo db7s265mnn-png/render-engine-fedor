@@ -57,8 +57,9 @@ public:
                          .withTooltip("Scene graph location the imported prims are placed under"));
         addParameter(Parameter::makeString("pathfilter", "Path Filter", "")
                          .withTooltip("Only import Alembic objects whose path matches this glob"));
-        addParameter(Parameter::makeFloat("time", "Time", 0.0, 0.0, 100.0, false)
-                         .withTooltip("Sample time in seconds; the nearest stored sample is used"));
+        addParameter(Parameter::makeFloat("time", "Time Offset", 0.0, -10000.0, 10000.0, false)
+                         .withTooltip("Seconds added to the global timeline time when sampling "
+                                      "the Alembic archive"));
         addParameter(Parameter::makeFloat("importscale", "Import Scale", 1.0, 0.001, 100.0, false)
                          .withTooltip(units::importScaleTooltip()));
         addParameter(Parameter::makeBool("importnormals", "Import Normals", true));
@@ -82,13 +83,13 @@ public:
         }
 
         AlembicLoadOptions options;
-        options.time = floatValue("time");
+        options.time = context.time + floatValue("time");
         options.scale = float(floatValue("importscale", 1.0));
         options.importNormals = boolValue("importnormals", true);
         options.importUvs = boolValue("importuvs", true);
         options.pathFilter = stringValue("pathfilter").toStdString();
 
-        const QString cacheKey = file + "|" + QString::number(options.time) + "|" +
+        const QString cacheKey = file + "|" + QString::number(options.time, 'g', 12) + "|" +
                                  QString::number(double(options.scale)) + "|" +
                                  QString::fromStdString(options.pathFilter) + "|" +
                                  (options.importNormals ? "n" : "-") + (options.importUvs ? "u" : "-");
@@ -102,6 +103,7 @@ public:
             cache_ = std::move(contents);
             cacheKey_ = cacheKey;
         }
+        if (cache_.animated) context.suggestPlaybackRange(cache_.startTime, cache_.endTime);
 
         const Mat4 nodeTransform = transformFromParameters(*this);
         const QString root = stringValue("primpath", "/geo");
@@ -135,6 +137,9 @@ public:
                          .withTooltip("Scene graph location the imported prims are placed under"));
         addParameter(Parameter::makeString("pathfilter", "Path Filter", "")
                          .withTooltip("Only import prims whose path matches this glob"));
+        addParameter(Parameter::makeFloat("time", "Time Offset", 0.0, -10000.0, 10000.0, false)
+                         .withTooltip("Seconds added to the global timeline time when sampling "
+                                      "animated USD (timeSamples)"));
         addParameter(Parameter::makeFloat("importscale", "Import Scale", 1.0, 0.001, 100.0, false)
                          .withTooltip(units::importScaleTooltip()));
         addParameter(Parameter::makeBool("importnormals", "Import Normals", true));
@@ -158,12 +163,14 @@ public:
         }
 
         UsdLoadOptions options;
+        options.time = context.time + floatValue("time");
         options.scale = float(floatValue("importscale", 1.0));
         options.importNormals = boolValue("importnormals", true);
         options.importUvs = boolValue("importuvs", true);
         options.pathFilter = stringValue("pathfilter").toStdString();
 
-        const QString cacheKey = file + "|" + QString::number(double(options.scale)) + "|" +
+        const QString cacheKey = file + "|" + QString::number(options.time, 'g', 12) + "|" +
+                                 QString::number(double(options.scale)) + "|" +
                                  QString::fromStdString(options.pathFilter);
         if (cacheKey != cacheKey_ || cache_.prims.empty()) {
             UsdContents contents;

@@ -22,6 +22,19 @@ QColor displayFlagColor(bool active) {
     return active ? theme::displayFlag() : QColor(42, 58, 72);
 }
 
+// Flag strips sit fully inside the border stroke so corners align with the outline.
+QPainterPath flagStripPath(const QRectF& body, qreal cornerRadius, bool leftSide) {
+    const qreal inset = NodeItem::kBorderWidth * 0.5;
+    const qreal x = leftSide ? body.left() + inset : body.right() - NodeItem::kFlagWidth;
+    const qreal w = NodeItem::kFlagWidth - inset;
+    QPainterPath strip;
+    strip.addRect(QRectF(x, body.top() + inset, w, body.height() - 2.0 * inset));
+    QPainterPath rounded;
+    rounded.addRoundedRect(body.adjusted(inset, inset, -inset, -inset),
+                           std::max(0.0, cornerRadius - inset), std::max(0.0, cornerRadius - inset));
+    return strip.intersected(rounded);
+}
+
 }  // namespace
 
 NodeItem::NodeItem(Node* node, NodeGraphScene* scene) : node_(node), graphScene_(scene) {
@@ -40,7 +53,7 @@ QColor NodeItem::headerColor() const {
 }
 
 QRectF NodeItem::boundingRect() const {
-    QRectF bounds = bodyRect().adjusted(-10.0, -10.0, 11.0, 12.0);
+    QRectF bounds = bodyRect().adjusted(-12.0, -12.0, 13.0, 14.0);
     bounds = bounds.united(labelRect().adjusted(0.0, -3.0, 4.0, 3.0));
     for (int i = 0; i < node_->inputCount(); ++i) {
         const QPointF port = inputPortPosition(i) - pos();
@@ -90,19 +103,11 @@ QPainterPath NodeItem::bodyPath() const {
 }
 
 QPainterPath NodeItem::bypassFlagPath() const {
-    // Left filled vertical edge — bypass flag.
-    const QRectF body = bodyRect();
-    QPainterPath path;
-    path.addRect(QRectF(body.left(), body.top(), kFlagWidth, body.height()));
-    return path.intersected(bodyPath());
+    return flagStripPath(bodyRect(), kCornerRadius, true);
 }
 
 QPainterPath NodeItem::displayFlagPath() const {
-    // Right filled vertical edge — display / cook flag.
-    const QRectF body = bodyRect();
-    QPainterPath path;
-    path.addRect(QRectF(body.right() - kFlagWidth, body.top(), kFlagWidth, body.height()));
-    return path.intersected(bodyPath());
+    return flagStripPath(bodyRect(), kCornerRadius, false);
 }
 
 QPointF NodeItem::outputPortPosition() const { return pos() + QPointF(0.0, kHeight * 0.5 + 2.0); }
@@ -168,22 +173,23 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     const bool isBypassed = node_->isBypassed();
     const QPainterPath clip = bodyPath();
 
-    // Display halo: rounded-rect contour with uniform stroke thickness.
+    // Soft rectangular display glow — layered rounded rects, not an oval.
     if (isDisplay) {
         const QColor flag = theme::displayFlag();
-        constexpr qreal kHaloPad = 5.0;
-        constexpr qreal kHaloStroke = 2.5;
-        const QRectF halo = body.adjusted(-kHaloPad, -kHaloPad, kHaloPad, kHaloPad);
-        const qreal radius = kCornerRadius + 2.0;
         painter->setPen(Qt::NoPen);
-        painter->setBrush(QColor(flag.red(), flag.green(), flag.blue(), 32));
-        painter->drawRoundedRect(halo, radius, radius);
-        QPen haloPen(QColor(flag.red(), flag.green(), flag.blue(), 200), kHaloStroke);
-        haloPen.setJoinStyle(Qt::MiterJoin);
-        haloPen.setCosmetic(false);
+        for (int i = 4; i >= 1; --i) {
+            const qreal pad = 1.2 + qreal(i) * 1.55;
+            const int alpha = 8 + i * 9;
+            painter->setBrush(QColor(flag.red(), flag.green(), flag.blue(), alpha));
+            painter->drawRoundedRect(body.adjusted(-pad, -pad, pad, pad), kCornerRadius + pad * 0.25,
+                                     kCornerRadius + pad * 0.25);
+        }
+        QPen softEdge(QColor(flag.red(), flag.green(), flag.blue(), 110), 2.2);
+        softEdge.setJoinStyle(Qt::RoundJoin);
         painter->setBrush(Qt::NoBrush);
-        painter->setPen(haloPen);
-        painter->drawRoundedRect(halo, radius, radius);
+        painter->setPen(softEdge);
+        painter->drawRoundedRect(body.adjusted(-1.2, -1.2, 1.2, 1.2), kCornerRadius + 0.8,
+                                 kCornerRadius + 0.8);
     }
 
     // Drop shadow.
@@ -197,7 +203,6 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     const QColor bodyColor = nodeBodyColor(iconKind, color_);
 
     if (iconKind != NodeIconKind::None) {
-        // Houdini SOP/OBJ style: solid category-colored body with a center icon.
         QLinearGradient gradient(body.topLeft(), body.bottomLeft());
         gradient.setColorAt(0.0, bodyColor.lighter(112));
         gradient.setColorAt(1.0, bodyColor.darker(118));
@@ -209,9 +214,8 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
         painter->setBrush(gradient);
     }
 
-    QPen border(node_->errorText().isEmpty() ? QColor(20, 21, 24) : theme::error(), 1.4);
-    if (isSelected()) border = QPen(theme::selection(), 2.0);
-    painter->setPen(border);
+    // Body fill first (no stroke) so flags and border can share one outline.
+    painter->setPen(Qt::NoPen);
     painter->drawPath(clip);
 
     painter->save();
@@ -219,28 +223,26 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     painter->setPen(Qt::NoPen);
 
     if (iconKind == NodeIconKind::None) {
-        // Utility / material nodes keep a thin type-color header strip.
         painter->setBrush(color_);
         painter->drawRect(QRectF(body.left() + kFlagWidth + 1.0, body.top(),
-                                 body.width() - 2.0 * kFlagWidth - 2.0, 11.0));
+                                 body.width() - 2.0 * kFlagWidth - 2.0, 10.0));
     }
 
-    // Filled Houdini-style flag edges (straight).
+    // Flags inset to the inner edge of the border stroke.
     painter->setBrush(bypassFlagColor(isBypassed));
     painter->drawPath(bypassFlagPath());
     painter->setBrush(displayFlagColor(isDisplay));
     painter->drawPath(displayFlagPath());
 
-    // Subtle separators between flags and body.
+    const qreal inset = kBorderWidth * 0.5;
     painter->setPen(QPen(QColor(0, 0, 0, 90), 1.0));
-    painter->drawLine(QPointF(body.left() + kFlagWidth, body.top() + 1.0),
-                      QPointF(body.left() + kFlagWidth, body.bottom() - 1.0));
-    painter->drawLine(QPointF(body.right() - kFlagWidth, body.top() + 1.0),
-                      QPointF(body.right() - kFlagWidth, body.bottom() - 1.0));
+    painter->drawLine(QPointF(body.left() + kFlagWidth, body.top() + inset + 0.5),
+                      QPointF(body.left() + kFlagWidth, body.bottom() - inset - 0.5));
+    painter->drawLine(QPointF(body.right() - kFlagWidth, body.top() + inset + 0.5),
+                      QPointF(body.right() - kFlagWidth, body.bottom() - inset - 0.5));
 
     if (iconKind != NodeIconKind::None) paintNodeIcon(*painter, iconKind, iconArea());
 
-    // Dim the center when bypassed.
     if (isBypassed) {
         painter->setPen(Qt::NoPen);
         painter->setBrush(QColor(0, 0, 0, 55));
@@ -248,7 +250,16 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     }
     painter->restore();
 
-    // Name and type live outside the tile, matching Houdini's network editor.
+    // Border drawn last — one clean contour over body + flags.
+    const qreal borderW = isSelected() ? 2.0 : kBorderWidth;
+    QPen border(node_->errorText().isEmpty() ? QColor(20, 21, 24) : theme::error(), borderW);
+    if (isSelected()) border = QPen(theme::selection(), borderW);
+    border.setJoinStyle(Qt::RoundJoin);
+    painter->setBrush(Qt::NoBrush);
+    painter->setPen(border);
+    painter->drawPath(clip);
+
+    // Name and type live outside the tile.
     const QRectF label = labelRect();
     QFont nameFont = painter->font();
     nameFont.setPointSizeF(8.5);
@@ -268,7 +279,6 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     painter->drawText(typeRect, Qt::AlignLeft | Qt::AlignVCenter,
                       QFontMetrics(typeFont).elidedText(node_->typeName(), Qt::ElideRight, int(typeRect.width())));
 
-    // Ports.
     for (int i = 0; i < node_->inputCount(); ++i) {
         const QPointF port = inputPortPosition(i) - pos();
         painter->setPen(Qt::NoPen);

@@ -19,12 +19,29 @@ class Node;
 struct CookContext {
     double time = 0.0;
     int frame = 1;
+    double fps = 24.0;
     QString sceneDirectory;  // used to resolve relative file paths
     QStringList warnings;
     QStringList errors;
 
+    // Geometry sources may suggest a playback range after loading an archive.
+    bool hasSuggestedRange = false;
+    double suggestedStartTime = 0.0;
+    double suggestedEndTime = 0.0;
+
     void reportError(const Node* node, const QString& message);
     void reportWarning(const Node* node, const QString& message);
+    void suggestPlaybackRange(double startSeconds, double endSeconds) {
+        if (!(endSeconds > startSeconds)) return;
+        if (!hasSuggestedRange) {
+            suggestedStartTime = startSeconds;
+            suggestedEndTime = endSeconds;
+            hasSuggestedRange = true;
+            return;
+        }
+        if (startSeconds < suggestedStartTime) suggestedStartTime = startSeconds;
+        if (endSeconds > suggestedEndTime) suggestedEndTime = endSeconds;
+    }
 };
 
 class Node : public QObject {

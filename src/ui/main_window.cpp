@@ -36,6 +36,7 @@
 #include "ui/parameter_panel.h"
 #include "ui/scene_graph_panel.h"
 #include "ui/theme.h"
+#include "ui/timeline_bar.h"
 
 namespace sol {
 namespace {
@@ -127,6 +128,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     createDocks();
     createMenus();
     createToolBar();
+    createTimeline();
 
     cookTimer_ = new QTimer(this);
     cookTimer_->setSingleShot(true);
@@ -345,6 +347,24 @@ void MainWindow::createToolBar() {
     toolBar->addAction(stopAction_);
     toolBar->addSeparator();
     toolBar->addAction(iprAction_);
+}
+
+void MainWindow::createTimeline() {
+    timelineBar_ = new TimelineBar(this);
+    auto* timelineDock = new QToolBar("Timeline", this);
+    timelineDock->setObjectName("timelineToolBar");
+    timelineDock->setMovable(false);
+    timelineDock->setFloatable(false);
+    timelineDock->addWidget(timelineBar_);
+    addToolBar(Qt::BottomToolBarArea, timelineDock);
+
+    connect(timelineBar_, &TimelineBar::frameChanged, this, &MainWindow::onTimelineFrameChanged);
+}
+
+void MainWindow::onTimelineFrameChanged(int) {
+    graph_.markAllDirty();
+    // Playback needs immediate cooks; scrubbing still benefits from a short debounce.
+    scheduleCook(timelineBar_ && timelineBar_->isPlaying() ? 0 : 30);
 }
 
 void MainWindow::createDocks() {
@@ -701,8 +721,16 @@ void MainWindow::onCookTimeout() { cookNow(); }
 void MainWindow::cookNow() {
     CookContext context;
     if (!graph_.filePath().isEmpty()) context.sceneDirectory = QFileInfo(graph_.filePath()).absolutePath();
+    if (timelineBar_) {
+        context.frame = timelineBar_->currentFrame();
+        context.fps = timelineBar_->fps();
+        context.time = timelineBar_->timeSeconds();
+    }
 
     stage_ = graph_.cookDisplay(context);
+    if (timelineBar_ && context.hasSuggestedRange)
+        timelineBar_->suggestTimeRange(context.suggestedStartTime, context.suggestedEndTime);
+
     QStringList materialContainers;
     for (const NodePtr& node : graph_.nodes()) {
         if (node && node->typeName() == "material") materialContainers << node->name();
@@ -1064,6 +1092,11 @@ void MainWindow::onShowShortcuts() {
                              "Units\n"
                              "  1 scene unit = 1 metre (Houdini MKS)\n"
                              "  angles in degrees, focal length in millimetres\n\n"
+                             "Timeline\n"
+                             "  Start / End   playback range (frames)\n"
+                             "  FPS           converts frame → sample time\n"
+                             "  ▶ / ❚❚ / ■    play, pause, stop\n"
+                             "  Scrub / frame drives Alembic & USD sample time\n\n"
                              "General\n"
                              "  F5            render\n"
                              "  Esc           stop\n"
