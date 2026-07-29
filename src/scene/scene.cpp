@@ -89,6 +89,10 @@ MeshView Mesh::view() const {
     v.indices = indices.data();
     v.triangleCount = static_cast<uint32_t>(indices.size() / 3);
     v.vertexCount = static_cast<uint32_t>(positions.size());
+    if (bounds.valid()) {
+        v.boundsLo = bounds.lo;
+        v.boundsHi = bounds.hi;
+    }
     return v;
 }
 

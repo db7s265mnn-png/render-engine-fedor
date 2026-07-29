@@ -451,6 +451,36 @@ void testCausticsGlassSphere() {
     const double ratio = sumPt > 0.0 ? sumBdpt / sumPt : 0.0;
     check(ratio > 0.85 && ratio < 1.18, "BDPT and PT+MNEE energies agree");
     std::printf("  sumPT=%.1f sumBDPT=%.1f sumOFF=%.1f ratio=%.3f\n", sumPt, sumBdpt, sumOff, ratio);
+
+    // Point light: BSDF sampling can never hit a delta light, so refractive
+    // caustics from small sources exist ONLY through the manifold connections.
+    auto renderPoint = [&](int caustics, bool& finiteOut) -> double {
+        auto scene = buildScene(kIntegratorPathTracer, caustics);
+        scene->lights[0].type = kLightPoint;
+        scene->lights[0].intensity = 30.0f;
+        scene->lights[0].normalize = 0;
+        scene->finalize();
+        RenderSession session;
+        session.setScene(scene);
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        return sum;
+    };
+    bool finPointOn = true, finPointOff = true;
+    const double sumPointOn = renderPoint(1, finPointOn);
+    const double sumPointOff = renderPoint(0, finPointOff);
+    check(finPointOn && finPointOff, "point-light caustics renders are finite");
+    check(sumPointOn > sumPointOff * 1.1, "MNEE delivers point-light caustics through glass");
+    std::printf("  pointOn=%.1f pointOff=%.1f\n", sumPointOn, sumPointOff);
 }
 
 // Renders an emissive sphere that is only in frame when instance transforms

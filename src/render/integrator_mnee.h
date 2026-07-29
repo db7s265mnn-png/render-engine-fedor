@@ -32,6 +32,12 @@ namespace mnee {
 constexpr int kMaxChain = 6;      // max specular interfaces (glass sphere = 2)
 constexpr int kNewtonIters = 24;
 constexpr int kBacktrackSteps = 5;
+// Multi-branch seeding (SMS-inspired, Zeltner et al. 2020, made deterministic):
+// the straight-line seed plus a fixed ring of seeds inside the caster cone.
+// Both the NEE estimator and the BSDF-suppression check run the SAME seed set,
+// so every branch is counted exactly once regardless of how many seeds converge.
+constexpr int kSeedRing = 4;                    // ring seeds beside the straight one
+constexpr float kSeedRingRadius = 0.75f;        // fraction of the cone angle
 
 
 SR_INL bool isCausticCaster(const Material& m) {
@@ -160,10 +166,11 @@ struct ManifoldSolution {
     bool solved = false;
 };
 
-// Newton solve for the launch direction connecting p → (specular chain) → y.
+// Newton solve for the launch direction connecting p → (specular chain) → y,
+// starting from `omegaInit` (SMS-style random seeds discover distinct branches).
 template <typename Tracer>
 SR_INL ManifoldSolution solveManifold(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n,
-                                      int lightIndex, Vec3 y) {
+                                      int lightIndex, Vec3 y, Vec3 omegaInit) {
     ManifoldSolution sol;
     Vec3 dir = y - p;
     const float distPy = length(dir);
@@ -175,7 +182,7 @@ SR_INL ManifoldSolution solveManifold(const SceneView& scene, const Tracer& trac
     const Vec3 b1 = errFrame.t;
     const Vec3 b2 = errFrame.b;
 
-    Vec3 omega = dir;
+    Vec3 omega = normalize(omegaInit);
     const float tol = srMax(1e-5f, 1e-4f * distPy);
     float e1 = 0.0f, e2 = 0.0f;
     ChainState chain;
@@ -269,34 +276,32 @@ SR_INL ManifoldSolution solveManifold(const SceneView& scene, const Tracer& trac
     return sol;
 }
 
-// Solve the manifold connection p → (chain) → y. Returns the full NEE-style
-// contribution (BSDF at p included, light radiance included, pdfs divided out).
+// Contribution of a converged manifold solution (BSDF at p included, light
+// radiance included, pdfs divided out). Zero when occluded / non-emitting.
 template <typename Tracer>
-SR_INL MneeResult manifoldConnect(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 wo,
-                                  const Material& shadeMat, int lightIndex, Vec3 y, Vec3 yN, Vec3 Le,
-                                  float pdfArea, float selectPdf) {
-    MneeResult res;
-    const ManifoldSolution sol = solveManifold(scene, tracer, p, n, lightIndex, y);
-    if (!sol.solved) return res;
+SR_INL Vec3 solutionContribution(const SceneView& scene, const Tracer& tracer, const ManifoldSolution& sol,
+                                 Vec3 p, Vec3 n, Vec3 wo, const Material& shadeMat, int lightIndex, Vec3 y,
+                                 Vec3 yN, Vec3 Le, float pdfArea, float selectPdf) {
     const ChainState& chain = sol.chain;
 
     // Verify the final segment reaches y unoccluded.
     {
         const Vec3 toY = y - chain.exitP;
         const float d = length(toY);
-        if (d < 1e-5f) return res;
+        if (d < 1e-5f) return Vec3(0.0f);
         const Vec3 wd = toY / d;
         const Vec3 o = offsetRayOrigin(chain.exitP, chain.exitN, wd);
         RayHit hit;
         if (tracer.intersect(o, wd, d * (1.0f - 1e-3f), hit)) {
             SurfaceInteraction si;
-            if (!buildSurfaceInteraction(scene, hit, o, wd, si) || si.lightIndex != lightIndex) return res;
+            if (!buildSurfaceInteraction(scene, hit, o, wd, si) || si.lightIndex != lightIndex)
+                return Vec3(0.0f);
         }
     }
 
     const Frame frame(n);
     const BsdfEval be = bsdfEvalLocal(shadeMat, frame.toLocal(wo), frame.toLocal(sol.omega));
-    if (be.pdf <= 0.0f || isBlack(be.f)) return res;
+    if (be.pdf <= 0.0f || isBlack(be.f)) return Vec3(0.0f);
     const float cosP = fabsf(dot(n, sol.omega));
 
     // Plane → light-surface area conversion (the error plane has normal planeN).
@@ -306,18 +311,132 @@ SR_INL MneeResult manifoldConnect(const SceneView& scene, const Tracer& tracer, 
     if (l.type != kLightPoint) {
         const float cEmit = dot(yN, -chain.exitDir);
         const float emitOk = (l.type != kLightSphere && l.twoSided) ? fabsf(cEmit) : srMax(0.0f, cEmit);
-        if (emitOk <= 1e-6f) return res;  // light does not emit toward the chain exit
+        if (emitOk <= 1e-6f) return Vec3(0.0f);  // light does not emit toward the chain exit
         planeToLight = fabsf(dot(yN, sol.planeN));
-        if (planeToLight <= 1e-6f) return res;
+        if (planeToLight <= 1e-6f) return Vec3(0.0f);
     }
 
     // dω/dA_y = |dot(yN, planeN)| / |det J|  (straight line: |det J| = dist² → 1/r²).
     const float geom = planeToLight / sol.detJ;
-    Vec3 c = be.f * cosP * chain.throughput * Le * geom / srMax(1e-12f, pdfArea * selectPdf);
-    if (!isFinite(c)) return res;
-    res.solved = true;
-    res.contribution = vmax(Vec3(0.0f), c);
+    const Vec3 c = be.f * cosP * chain.throughput * Le * geom / srMax(1e-12f, pdfArea * selectPdf);
+    if (!isFinite(c)) return Vec3(0.0f);
+    return vmax(Vec3(0.0f), c);
+}
+
+// Seed cone that covers the caustic caster instance as seen from p. Falls back
+// to a narrow cone around the straight line when bounds are unavailable.
+SR_INL void seedCone(const SceneView& scene, Vec3 p, Vec3 straightDir, int casterInstance, Vec3& axis,
+                     float& cosThetaMax) {
+    axis = straightDir;
+    cosThetaMax = 0.9962f;  // ~5° fallback
+    if (casterInstance < 0 || casterInstance >= scene.instanceCount) return;
+    const InstanceData& inst = scene.instances[casterInstance];
+    if (inst.meshIndex < 0 || inst.meshIndex >= scene.meshCount) return;
+    const MeshView& mesh = scene.meshes[inst.meshIndex];
+    const Vec3 lo = mesh.boundsLo;
+    const Vec3 hi = mesh.boundsHi;
+    if (!(hi.x >= lo.x && hi.y >= lo.y && hi.z >= lo.z)) return;
+    Bounds3 world;
+    for (int i = 0; i < 8; ++i) {
+        const Vec3 corner(i & 1 ? hi.x : lo.x, i & 2 ? hi.y : lo.y, i & 4 ? hi.z : lo.z);
+        world.extend(transformPoint(inst.xform, corner));
+    }
+    const Vec3 center = world.center();
+    const float radius = 0.5f * length(world.extent());
+    const Vec3 toC = center - p;
+    const float dist = length(toC);
+    if (dist <= radius * 1.05f || dist < 1e-5f) {
+        // Shading point effectively inside the caster bounds — sample widely.
+        cosThetaMax = 0.0f;  // hemisphere around the straight direction
+        return;
+    }
+    axis = toC / dist;
+    const float sinT = clampf(radius / dist, 0.0f, 0.9999f);
+    cosThetaMax = sqrtf(srMax(0.0f, 1.0f - sinT * sinT));
+}
+
+// Deterministic multi-branch seed set: the straight line to y plus a ring of
+// directions inside the caster cone (catches rim chains and secondary images).
+struct SeedSet {
+    Vec3 dirs[1 + kSeedRing];
+    int count = 0;
+};
+
+SR_INL SeedSet buildSeedSet(const SceneView& scene, Vec3 p, Vec3 straightDir, int casterInstance) {
+    SeedSet s;
+    s.dirs[s.count++] = straightDir;
+    Vec3 axis;
+    float cosThetaMax = 1.0f;
+    seedCone(scene, p, straightDir, casterInstance, axis, cosThetaMax);
+    const float thetaMax = acosf(clampf(cosThetaMax, -1.0f, 1.0f));
+    if (thetaMax < 1e-3f) return s;  // cone degenerate — straight seed only
+    const float theta = thetaMax * kSeedRingRadius;
+    const float st = sinf(theta);
+    const float ct = cosf(theta);
+    const Frame frame(axis);
+    for (int i = 0; i < kSeedRing; ++i) {
+        const float phi = (float(i) + 0.5f) * (kTwoPi / float(kSeedRing));
+        const Vec3 local(st * cosf(phi), st * sinf(phi), ct);
+        s.dirs[s.count++] = normalize(frame.toWorld(local));
+    }
+    return s;
+}
+
+SR_INL bool sameBranch(Vec3 a, Vec3 b) { return dot(a, b) > 0.99996f; }  // ≈0.5°
+
+// Multi-branch MNEE: run the deterministic seed set, deduplicate the converged
+// branches and sum each unique contribution once. The BSDF-suppression check in
+// the path loop replays the same seed set, so a BSDF-found chain is suppressed
+// exactly when this estimator counts its branch — totals stay unbiased no matter
+// how many branches the solver finds.
+template <typename Tracer>
+SR_INL MneeResult manifoldConnect(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 wo,
+                                  const Material& shadeMat, int lightIndex, Vec3 y, Vec3 yN, Vec3 Le,
+                                  float pdfArea, float selectPdf, int casterInstance) {
+    MneeResult res;
+    Vec3 dir = y - p;
+    const float distPy = length(dir);
+    if (distPy < 1e-5f) return res;
+    dir = dir / distPy;
+
+    const SeedSet seeds = buildSeedSet(scene, p, dir, casterInstance);
+    Vec3 found[1 + kSeedRing];
+    int foundCount = 0;
+    Vec3 total(0.0f);
+    for (int i = 0; i < seeds.count; ++i) {
+        const ManifoldSolution sol = solveManifold(scene, tracer, p, n, lightIndex, y, seeds.dirs[i]);
+        if (!sol.solved) continue;
+        bool duplicate = false;
+        for (int k = 0; k < foundCount; ++k)
+            if (sameBranch(sol.omega, found[k])) {
+                duplicate = true;
+                break;
+            }
+        if (duplicate) continue;
+        found[foundCount++] = sol.omega;
+        res.solved = true;
+        total += solutionContribution(scene, tracer, sol, p, n, wo, shadeMat, lightIndex, y, yN, Le, pdfArea,
+                                      selectPdf);
+    }
+    res.contribution = total;
     return res;
+}
+
+// True when the seed set converges to the branch a BSDF path actually took —
+// i.e. the MNEE estimator above covers this exact chain.
+template <typename Tracer>
+SR_INL bool branchCovered(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, int lightIndex,
+                          Vec3 y, int casterInstance, Vec3 pathDir) {
+    Vec3 dir = y - p;
+    const float distPy = length(dir);
+    if (distPy < 1e-5f) return false;
+    dir = dir / distPy;
+    const SeedSet seeds = buildSeedSet(scene, p, dir, casterInstance);
+    for (int i = 0; i < seeds.count; ++i) {
+        const ManifoldSolution sol = solveManifold(scene, tracer, p, n, lightIndex, y, seeds.dirs[i]);
+        if (sol.solved && sameBranch(sol.omega, pathDir)) return true;
+    }
+    return false;
 }
 
 // Sample a point on a finite light in area measure.
@@ -383,6 +502,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
     // delta-transmissive chain — the family MNEE covers for finite lights.
     bool sawNonSpecular = false;
     bool mneeFamily = false;
+    int familyChainLen = 0;
     Vec3 anchorP(0.0f);  // last non-specular surface vertex (MNEE launch point)
     Vec3 anchorN(0.0f, 1.0f, 0.0f);
     Vec3 anchorDir(0.0f, 1.0f, 0.0f);  // direction the path left the anchor with
@@ -435,22 +555,36 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         }
 
         if (si.lightIndex >= 0) {
-            // MNEE covers diffuse→transmissive-chain→finite-light paths — but only
-            // those its Newton solver can actually find. Suppress a BSDF-found path
-            // ONLY when the solver converges for the same anchor→light-point pair;
-            // everything the solver misses stays with unbiased BSDF sampling, so
-            // total energy is preserved regardless of the solver's success rate.
+            // Suppress a BSDF-found caustic chain exactly when the multi-seed MNEE
+            // estimator covers its branch: the straight anchor→light segment must
+            // hit a caustic caster (the NEE trigger) AND replaying the same seed
+            // set must converge onto the direction this path actually took. Chains
+            // the seeds miss stay with unbiased BSDF sampling — totals preserved.
             const LightData& light = scene.lights[si.lightIndex];
             const bool finiteLight = light.type == kLightRect || light.type == kLightDisk ||
                                      light.type == kLightSphere || light.type == kLightPoint;
             if (mneeFamily && finiteLight && settings.caustics != 0) {
-                const mnee::ManifoldSolution sol =
-                    mnee::solveManifold(scene, tracer, anchorP, anchorN, si.lightIndex, si.p);
-                // Glass objects have multiple manifold branches (direct, rim, TIR…).
-                // Suppress only when the solver landed on THIS branch — i.e. its
-                // launch direction matches the direction the path actually took.
-                if (sol.solved && dot(sol.omega, anchorDir) > 0.99996f /* ≈0.5° */)
-                    break;  // MNEE-covered — suppress the noisy BSDF copy
+                Vec3 seg = si.p - anchorP;
+                const float segLen = length(seg);
+                if (segLen > 1e-5f) {
+                    seg = seg / segLen;
+                    const Vec3 o = offsetRayOrigin(anchorP, anchorN, seg);
+                    RayHit sh;
+                    if (tracer.intersect(o, seg, segLen * (1.0f - 1e-3f), sh)) {
+                        SurfaceInteraction ssi;
+                        if (buildSurfaceInteraction(scene, sh, o, seg, ssi) && ssi.lightIndex < 0) {
+                            Material smat = ssi.materialIndex >= 0 && ssi.materialIndex < scene.materialCount
+                                                ? scene.materials[ssi.materialIndex]
+                                                : defaultMaterial();
+                            smat = evaluateTexturedMaterial(scene, smat, ssi.uv, ssi.ns, ssi.pObject,
+                                                            ssi.nObject, ssi.uvFilterWidth);
+                            if (mnee::isCausticCaster(smat) &&
+                                mnee::branchCovered(scene, tracer, anchorP, anchorN, si.lightIndex, si.p,
+                                                    ssi.instanceIndex, anchorDir))
+                                break;  // MNEE-covered — suppress the noisy BSDF copy
+                        }
+                    }
+                }
             }
             if (mneeFamily && finiteLight && settings.caustics == 0) break;
 
@@ -568,6 +702,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 // Peek along the shadow segment: clear, glass, or blocked?
                 bool clearPath = true;
                 bool glassPath = false;
+                int blockerInstance = -1;
                 if (l.shadowEnable) {
                     const Vec3 o = offsetRayOrigin(si.p, si.ng, wi);
                     RayHit sh;
@@ -584,6 +719,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                                 bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject,
                                                                 bsi.nObject, bsi.uvFilterWidth);
                                 glassPath = mnee::isCausticCaster(bmat);
+                                blockerInstance = bsi.instanceIndex;
                             }
                         }
                     }
@@ -619,10 +755,11 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         neeSum += Le * be.f * (fabsf(wiLocal.z) * w / lightPdf);
                     }
                 } else if (glassPath) {
-                    // MNEE: manifold connection through the refraction chain (weight 1 —
-                    // the matching BSDF-sampled path family is suppressed at light hits).
-                    const mnee::MneeResult mr = mnee::manifoldConnect(
-                        scene, tracer, si.p, si.ns, wo, mat, li, y, yN, Le, pdfArea, selectPdf);
+                    // Multi-seed MNEE: manifold connections through the refraction
+                    // chain (matching BSDF path copies are suppressed at light hits).
+                    const mnee::MneeResult mr =
+                        mnee::manifoldConnect(scene, tracer, si.p, si.ns, wo, mat, li, y, yN, Le, pdfArea,
+                                              selectPdf, blockerInstance);
                     if (mr.solved && !isBlack(mr.contribution)) {
                         Vec3 c = mr.contribution;
                         c = clampContribution(c, settings.clampIndirect > 0.0f
@@ -693,14 +830,19 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         if (!bs.specular) {
             sawNonSpecular = true;
             mneeFamily = false;
+            familyChainLen = 0;
             anchorP = si.p;
             anchorN = si.ns;
             anchorDir = normalize(frame.toWorld(bs.wi));
         } else if (sawNonSpecular && settings.caustics != 0) {
             if (deltaTransmit) {
-                mneeFamily = true;
-            } else if (!deltaReflectInsideChain) {
-                mneeFamily = false;  // reflective / rough specular → not covered by MNEE
+                ++familyChainLen;
+                // The solver walks pure refraction chains up to kMaxChain interfaces;
+                // longer chains and any reflection (incl. TIR) stay with BSDF sampling.
+                mneeFamily = familyChainLen <= mnee::kMaxChain;
+            } else {
+                mneeFamily = false;
+                familyChainLen = 0;
             }
         }
         // Caustics disabled: suppress all diffuse→specular→light transport.

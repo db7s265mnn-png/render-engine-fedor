@@ -152,6 +152,9 @@ struct MeshView {
     const uint32_t* indices = nullptr;  // 3 per triangle
     uint32_t triangleCount = 0;
     uint32_t vertexCount = 0;
+    // Object-space AABB (for SMS seed cones around caustic casters).
+    Vec3 boundsLo{0.0f, 0.0f, 0.0f};
+    Vec3 boundsHi{0.0f, 0.0f, 0.0f};
 };
 
 // Visibility bits for primary vs shadow rays (Embree mask / OptiX visibilityMask).
