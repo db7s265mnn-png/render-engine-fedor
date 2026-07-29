@@ -2328,11 +2328,11 @@ void testMaterialXRaySwitchCaustics() {
     // Eye-path hybrid: reflection uses camera roughness, refraction uses caustics.
     const Vec3 wo(0.0f, 0.0f, 1.0f);
     int gotTransmit = 0;
-    Rng rng(42);
+    Rng hybridRng(1ull, 42ull);
     for (int i = 0; i < 64; ++i) {
-        const BsdfSample s =
-            bsdfSampleCameraCaustics(cam, cau, wo, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
-                                     rng.nextFloat(), true);
+        const BsdfSample s = bsdfSampleCameraCaustics(
+            cam, cau, wo, hybridRng.nextFloat(), hybridRng.nextFloat(), hybridRng.nextFloat(),
+            hybridRng.nextFloat(), true);
         if (s.pdf > 0.0f && s.transmitted && s.specular) ++gotTransmit;
     }
     check(gotTransmit > 0, "hybrid eye sample can delta-refract via caustics branch");
