@@ -117,6 +117,7 @@ jobs:
             -DSOLSTICE_ENABLE_ALEMBIC=OFF \
             -DSOLSTICE_ENABLE_OPENPGL=OFF \
             -DSOLSTICE_ENABLE_MATERIALX=OFF \
+            -DSOLSTICE_ENABLE_TINYUSDZ=OFF \
             -DSOLSTICE_ENABLE_OPTIX=ON -DOptiX_ROOT=/tmp/optix-dev
           cmake --build build-optix -j$(nproc)
           # Prove the OptiX device IR was embedded into this build.
