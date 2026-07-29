@@ -273,12 +273,12 @@ void testRender() {
     check(nonBlack > image.width() * image.height() / 2, "most pixels receive light");
     check(sum > 0.0 && maxValue < 1e4, "render output is in a sane range");
 
-    // Caustics solvers (CPU Path Tracer): BDPT+Guiding (D+A) and MNEE (C).
-    auto smokeCaustics = [&](int solver, const char* label) {
-        scene->settings.causticsSolver = solver;
-        scene->settings.integrator = kIntegratorPathTracer;
+    // Integrator smoke tests: PT+MNEE caustics and the BDPT integrator.
+    auto smokeIntegrator = [&](int integrator, int caustics, const char* label) {
+        scene->settings.integrator = integrator;
+        scene->settings.caustics = caustics;
         scene->settings.samplesPerPixel = 4;
-        scene->settings.pathGuiding = 0;  // keep the smoke test offline-friendly
+        scene->settings.pathGuiding = 0;  // keep the smoke test deterministic-ish
         RenderSession s2;
         s2.setScene(scene);
         s2.start();
@@ -296,8 +296,17 @@ void testRender() {
         check(ok, std::string(label) + " output is finite");
         check(s > 0.0, std::string(label) + " produces light");
     };
-    smokeCaustics(kCausticsBdptGuided, "BDPT+Guiding (D+A)");
-    smokeCaustics(kCausticsMnee, "MNEE (C)");
+    smokeIntegrator(kIntegratorPathTracer, 1, "PT + MNEE caustics");
+    smokeIntegrator(kIntegratorPathTracer, 0, "PT caustics off");
+    smokeIntegrator(kIntegratorBdpt, 1, "BDPT integrator");
+    // Path guiding smoke: same scene with OpenPGL training enabled (no-op when
+    // the build lacks OpenPGL).
+    scene->settings.pathGuiding = 1;
+    smokeIntegrator(kIntegratorPathTracer, 1, "PT + guiding");
+    smokeIntegrator(kIntegratorBdpt, 1, "BDPT + guiding");
+    scene->settings.pathGuiding = 0;
+    scene->settings.integrator = kIntegratorPathTracer;
+    scene->settings.caustics = 1;
 }
 
 // The equirectangular convention must stay stable: +Y is the top row of the
@@ -335,6 +344,113 @@ void testEnvironment() {
         checkNear(envPdf(view, dir), pdf, std::max(1e-3f, pdf * 0.02f), "envPdf matches envSample");
     }
     check(nearBrightTexel > 3000, "environment sampling concentrates on the bright texel");
+}
+
+// Glass sphere over a floor lit by a small rect light: PT+MNEE and BDPT are
+// independent estimators of the same transport — their total energy must agree,
+// and caustics ON must deliver more light under the glass than caustics OFF.
+void testCausticsGlassSphere() {
+    std::printf("caustics-glass-sphere\n");
+    auto buildScene = [](int integrator, int caustics, bool withSphere = true) {
+        auto scene = std::make_shared<Scene>();
+
+        // Floor: 8x8 quad at y=0.
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+        floor->uvs = {Vec2(0, 0), Vec2(1, 0), Vec2(1, 1), Vec2(0, 1)};
+        floor->validate();
+        const int floorMesh = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.75f, 0.75f, 0.75f);
+        floorMat.roughness = 0.9f;
+        floorMat.specular = 0.0f;
+        const int floorMatIdx = scene->addMaterial(floorMat);
+        InstanceData floorInst;
+        floorInst.meshIndex = floorMesh;
+        floorInst.materialIndex = floorMatIdx;
+        scene->instances.push_back(floorInst);
+
+        // Glass sphere hovering above the floor.
+        if (withSphere) {
+        MeshPtr ball = makeSphereMesh(0.7f, 48, 24);
+        const int ballMesh = scene->addMesh(ball);
+        Material glass;
+        glass.baseColor = Vec3(1.0f, 1.0f, 1.0f);
+        glass.roughness = 0.0f;
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.specular = 1.0f;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData ballInst;
+        ballInst.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+        ballInst.meshIndex = ballMesh;
+        ballInst.materialIndex = glassIdx;
+        scene->instances.push_back(ballInst);
+        }
+
+        // Small rect light high above, pointing down (rect emits along -Z).
+        LightData light;
+        light.type = kLightRect;
+        light.width = 0.8f;
+        light.height = 0.8f;
+        light.intensity = 60.0f;
+        light.normalize = 1;
+        light.visibleCamera = 0;
+        // Rotate -Z to -Y: −90° about X maps (0,0,-1) → (0,-1,0) — light shines down.
+        light.xform = Mat4::translate(Vec3(0.0f, 4.0f, 0.0f)) * Mat4::rotateX(-90.0f);
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 72;
+        scene->settings.resolutionY = 54;
+        scene->settings.samplesPerPixel = 24;
+        scene->settings.maxDepth = 8;
+        scene->settings.integrator = integrator;
+        scene->settings.caustics = caustics;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampIndirect = 0.0f;  // unbiased comparison
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto renderSum = [&](int integrator, int caustics, bool& finiteOut) -> double {
+        RenderSession session;
+        session.setScene(buildScene(integrator, caustics));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        return sum;
+    };
+
+    bool finPt = true, finBdpt = true, finOff = true;
+    const double sumPt = renderSum(kIntegratorPathTracer, 1, finPt);
+    const double sumBdpt = renderSum(kIntegratorBdpt, 1, finBdpt);
+    const double sumOff = renderSum(kIntegratorPathTracer, 0, finOff);
+    check(finPt && finBdpt && finOff, "caustics renders are finite");
+    check(sumPt > 0.0 && sumBdpt > 0.0 && sumOff > 0.0, "caustics renders produce light");
+    // Caustics ON must deliver noticeably more energy than the dark-shadow OFF mode
+    // (the glass transmits ~30% of the scene's light here).
+    check(sumPt > sumOff * 1.15, "MNEE adds caustic energy vs caustics off");
+    check(sumBdpt > sumOff * 1.15, "BDPT adds caustic energy vs caustics off");
+    // Independent estimators must agree on the total transport (tight band: the
+    // MNEE fix for the fold Jacobian brought them within ~1%; allow noise room).
+    const double ratio = sumPt > 0.0 ? sumBdpt / sumPt : 0.0;
+    check(ratio > 0.85 && ratio < 1.18, "BDPT and PT+MNEE energies agree");
+    std::printf("  sumPT=%.1f sumBDPT=%.1f sumOFF=%.1f ratio=%.3f\n", sumPt, sumBdpt, sumOff, ratio);
 }
 
 // Renders an emissive sphere that is only in frame when instance transforms
@@ -1647,6 +1763,7 @@ int main() {
     testPolynomialOpticsCamera();
     testEnvironment();
     testRender();
+    testCausticsGlassSphere();
     testInstanceTransform();
     testUdimMaterialX();
     testTxMipmaps();

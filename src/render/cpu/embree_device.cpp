@@ -196,15 +196,25 @@ public:
         const uint32_t frameSeed = uint32_t(settings.seed) * 9781u + uint32_t(sampleIndex) * 6271u;
 
         const bool pathTracer = settings.integrator == kIntegratorPathTracer;
-        const bool useMnee = pathTracer && settings.causticsSolver == kCausticsMnee;
-        const bool useBdpt = pathTracer && settings.causticsSolver == kCausticsBdptGuided;
+        const bool useBdpt = settings.integrator == kIntegratorBdpt;
+        // Path Tracer: MNEE handles refractive caustics automatically when enabled.
+        const bool useMnee = pathTracer && settings.caustics != 0;
 #if SOLSTICE_HAVE_OPENPGL
-        // OpenPGL trains on the eye path for both BDPT (D+A) and MNEE; most useful with BDPT.
-        const bool useGuiding =
-            settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() && pathTracer;
+        const bool useGuiding = settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() &&
+                                (pathTracer || useBdpt);
 #else
         const bool useGuiding = false;
 #endif
+        if (sampleIndex == 0) {
+            if (useBdpt)
+                logInfo(std::string("Caustics: BDPT (bidirectional connections)") +
+                        (useGuiding ? " + OpenPGL guiding" : ""));
+            else if (useMnee)
+                logInfo(std::string("Caustics: MNEE (manifold next-event, refractive)") +
+                        (useGuiding ? " + OpenPGL guiding" : ""));
+            else if (pathTracer)
+                logInfo("Caustics: off (dark shadows through glass; shadow_opacity fakes)");
+        }
 
         auto shadePixel = [&](int x, int y, int threadId) {
             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
@@ -240,14 +250,14 @@ public:
                 if (useBdpt)
                     radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, &guiding);
                 else if (useMnee)
-                    radiance = traceRadianceMnee(scene, tracer, origin, direction, rng, &guiding);
+                    radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, &guiding);
                 else
                     radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding);
                 guiding.endPath();
             } else if (useBdpt) {
                 radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, nullptr);
             } else if (useMnee) {
-                radiance = traceRadianceMnee(scene, tracer, origin, direction, rng);
+                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng);
             } else {
                 radiance = traceRadiance(scene, tracer, origin, direction, rng);
             }
@@ -257,7 +267,7 @@ public:
             if (useBdpt)
                 radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng);
             else if (useMnee)
-                radiance = traceRadianceMnee(scene, tracer, origin, direction, rng);
+                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng);
             else
                 radiance = traceRadiance(scene, tracer, origin, direction, rng);
 #endif

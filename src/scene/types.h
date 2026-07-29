@@ -25,8 +25,7 @@ struct Material {
     // Mix weight vs diffuse (Standard Surface): base_mix = (1-w)*diffuse + w*SSS.
     float subsurface = 0.0f;
     int doubleSided = 1;
-    // Allow specular→diffuse light transport (reflective caustics).
-    int reflectiveCaustics = 1;
+    int _padCaustics0 = 0;
 
     Vec3 subsurfaceColor{1.0f, 0.75f, 0.55f};
     // Arnold: MFP (scene units / metres) = subsurfaceScale * subsurfaceRadius.
@@ -58,11 +57,11 @@ struct Material {
 
     int normalProc = -1;
     int subsurfaceProc = -1;
-    // Fake-caustics style shadow control (MaterialX): 1 = fully opaque shadow, 0 = none.
-    // Only applies to transmissive surfaces when refractiveCaustics is on.
+    // Fake shadow control for transmissive surfaces when render-settings caustics
+    // are OFF: 1 = fully opaque shadow, 0 = fully open. With caustics ON shadow
+    // rays treat glass as opaque and light arrives via MNEE / BDPT instead.
     float shadowOpacity = 1.0f;
-    // Allow transmission→... light transport / transparent shadows (refractive caustics).
-    int refractiveCaustics = 1;
+    int _padCaustics1 = 0;
 
     // MaterialX normalmap.scale / bump.scale (tangent XY strength).
     float normalScale = 1.0f;
@@ -261,10 +260,13 @@ struct CameraData {
 // ---------------------------------------------------------------------------
 enum ToneMapper : int { kToneNone = 0, kToneReinhard = 1, kToneAces = 2 };
 enum RenderBackendType : int { kBackendCpuEmbree = 0, kBackendGpuOptix = 1 };
-enum IntegratorMode : int { kIntegratorPathTracer = 0, kIntegratorDirectLighting = 1, kIntegratorAmbientOcclusion = 2 };
-// Caustics solver used when Integrator = Path Tracer (CPU / Embree).
-// 0 = BDPT + OpenPGL guiding (D+A), 1 = MNEE / manifold next-event (C).
-enum CausticsSolver : int { kCausticsBdptGuided = 0, kCausticsMnee = 1 };
+// BDPT is CPU / Embree only; OptiX falls back to the unidirectional path tracer.
+enum IntegratorMode : int {
+    kIntegratorPathTracer = 0,
+    kIntegratorDirectLighting = 1,
+    kIntegratorAmbientOcclusion = 2,
+    kIntegratorBdpt = 3,
+};
 
 struct RenderSettingsData {
     int resolutionX = 960;
@@ -288,9 +290,10 @@ struct RenderSettingsData {
     int threads = 0;               // 0 = hardware concurrency
 
     float aoDistance = 1.0f;
-    int pathGuiding = 1;           // OpenPGL on CPU (Embree); recommended with BDPT (D+A)
-    // BDPT+Guiding vs MNEE — see CausticsSolver. OptiX falls back to unidirectional PT.
-    int causticsSolver = kCausticsBdptGuided;
+    int pathGuiding = 0;           // OpenPGL on CPU (Embree); ignored on OptiX
+    // Enable caustic light transport (specular→diffuse). Path Tracer uses MNEE for
+    // refractive caustics; BDPT handles them bidirectionally. Off = dark glass shadows.
+    int caustics = 1;
     float pad3 = 0.0f;
 };
 

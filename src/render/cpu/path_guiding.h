@@ -29,6 +29,9 @@ public:
     // Call once per progressive sample after all tiles finish.
     void commitSample();
 
+    // Number of completed field updates (0 = untrained: guiding stays off).
+    int trainedIterations() const;
+
     class ThreadState {
     public:
         ThreadState();
@@ -67,6 +70,7 @@ public:
         void* currentSegment_ = nullptr;
     };
 
+    // Lock-free after reset(): states are preallocated per pool thread.
     ThreadState& thread(int threadId);
 
 private:

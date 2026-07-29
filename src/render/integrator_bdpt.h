@@ -1,5 +1,13 @@
-// Bidirectional path tracing (Veach) with optional OpenPGL guiding on the eye path.
+// Bidirectional path tracing (Veach 1997) with the full multiple-importance
+// weighting over all (s,t) strategies (PBRT-v3 style pdfFwd/pdfRev remap).
 // CPU / Embree only — included from embree_device.cpp.
+//
+// Strategies: t >= 2 eye vertices (no light-tracing splats), s = 0 (eye path
+// hits an emitter), s = 1 (light resampled toward the eye vertex, NEE-like),
+// s >= 2 (surface↔surface connections). Dome / distant lights contribute via
+// s ∈ {0,1} with the standard power heuristic (no light subpath from them).
+// Optional OpenPGL guiding mixes into eye-path BSDF sampling; the mixture pdf
+// is used as the true forward pdf so MIS stays consistent.
 #pragma once
 
 #include "core/rng.h"
@@ -15,26 +23,34 @@
 namespace sol {
 namespace bdpt {
 
-constexpr int kMaxBdptVerts = 10;
+constexpr int kMaxVerts = 16;
 
-enum class VertKind : uint8_t { Camera = 0, Light = 1, Surface = 2 };
+enum class VType : uint8_t { Camera, Light, Surface };
 
-struct Vertex {
+struct Vert {
     Vec3 p{0.0f};
     Vec3 ng{0.0f, 1.0f, 0.0f};
     Vec3 ns{0.0f, 1.0f, 0.0f};
-    Vec3 beta{1.0f};  // path throughput weight at this vertex
-    Vec3 wo{0.0f};    // direction toward the previous vertex
+    Vec3 beta{1.0f};      // throughput up to (and including arrival at) this vertex
+    Vec3 wo{0.0f};        // unit direction toward the previous vertex
     Material mat{};
-    float pdfFwd = 0.0f;  // area-measure pdf of arriving here from previous
+    float pdfFwd = 0.0f;  // area pdf of generating this vertex from the previous one
+    float pdfRev = 0.0f;  // area pdf of generating it from the next one (filled for MIS)
     int lightIndex = -1;
-    int materialIndex = -1;
-    VertKind kind = VertKind::Surface;
-    bool delta = false;
-    bool specular = false;
-    bool transmitted = false;
-    bool connectable = true;  // false for pure delta (connect via adjacent strategies)
+    VType type = VType::Surface;
+    bool delta = false;       // delta BSDF vertex (or delta light origin)
+    bool connectable = true;  // has a non-delta lobe to connect through
 };
+
+SR_INL float remap0(float f) { return f > 0.0f ? f : 1.0f; }
+
+SR_INL float toAreaPdf(float pdfSa, Vec3 from, Vec3 to, Vec3 nTo) {
+    Vec3 d = to - from;
+    const float dist2 = lengthSquared(d);
+    if (dist2 < 1e-12f || pdfSa <= 0.0f) return 0.0f;
+    d = d * (1.0f / sqrtf(dist2));
+    return pdfSa * fabsf(dot(nTo, d)) / dist2;
+}
 
 SR_INL float geometryTerm(Vec3 a, Vec3 na, Vec3 b, Vec3 nb) {
     Vec3 d = b - a;
@@ -43,485 +59,350 @@ SR_INL float geometryTerm(Vec3 a, Vec3 na, Vec3 b, Vec3 nb) {
     d = d * (1.0f / sqrtf(dist2));
     const float cosA = fabsf(dot(na, d));
     const float cosB = fabsf(dot(nb, -d));
-    if (cosA < 1e-6f || cosB < 1e-6f) return 0.0f;
+    if (cosA < 1e-7f || cosB < 1e-7f) return 0.0f;
     return (cosA * cosB) / dist2;
 }
 
-SR_INL float pdfSolidAngleToArea(float pdfSa, Vec3 from, Vec3 to, Vec3 nTo) {
-    Vec3 d = to - from;
-    const float dist2 = lengthSquared(d);
-    if (dist2 < 1e-12f || pdfSa <= 0.0f) return 0.0f;
-    d = d * (1.0f / sqrtf(dist2));
-    const float cosTo = fabsf(dot(nTo, -d));
-    return pdfSa * cosTo / dist2;
+// Solid-angle BSDF pdf for wo→wi at a surface vertex (both world-space).
+SR_INL float bsdfPdfSa(const Material& mat, Vec3 ns, Vec3 woW, Vec3 wiW) {
+    const Frame frame(ns);
+    const BsdfEval e = bsdfEvalLocal(mat, frame.toLocal(woW), frame.toLocal(wiW));
+    return srIsFinite(e.pdf) ? e.pdf : 0.0f;
 }
 
-SR_INL bool allowsReflectiveCaustics(const Material& m) { return m.reflectiveCaustics != 0; }
-SR_INL bool allowsRefractiveCaustics(const Material& m) { return m.refractiveCaustics != 0; }
-
-SR_INL bool isConnectableMaterial(const Material& m) {
-    const LobeWeights lw = computeLobes(m);
-    return lw.diffuse > 1e-4f || (!lw.delta && (lw.specular > 1e-4f || lw.transmission > 1e-4f));
+SR_INL Vec3 bsdfF(const Material& mat, Vec3 ns, Vec3 woW, Vec3 wiW) {
+    const Frame frame(ns);
+    const BsdfEval e = bsdfEvalLocal(mat, frame.toLocal(woW), frame.toLocal(wiW));
+    return isFinite(e.f) ? e.f : Vec3(0.0f);
 }
 
-// Binary occlusion for BDPT connections (no fake transparent shadows).
-template <typename Tracer>
-SR_INL bool visibleOpaque(const SceneView& scene, const Tracer& tracer, Vec3 a, Vec3 na, Vec3 b, Vec3 nb) {
-    Vec3 d = b - a;
-    const float dist = length(d);
-    if (dist < 1e-5f) return false;
-    d = d / dist;
-    if (dot(na, d) <= 1e-5f && dot(nb, -d) <= 1e-5f) return false;
-    const Vec3 o = offsetRayOrigin(a, na, d);
-    const float tMax = dist * (1.0f - 1e-3f);
-    RayHit hit;
-    if (!tracer.intersect(o, d, tMax, hit)) return true;
-    SurfaceInteraction si;
-    if (!buildSurfaceInteraction(scene, hit, o, d, si)) return false;
-    // Hitting the destination light proxy is fine.
-    if (si.lightIndex >= 0) {
-        const float hitDist = length((o + d * hit.t) - b);
-        return hitDist < 1e-2f * srMax(1.0f, dist);
+SR_INL bool lightIsFinite(const LightData& l) {
+    return l.type == kLightRect || l.type == kLightDisk || l.type == kLightSphere ||
+           l.type == kLightPoint;
+}
+
+SR_INL float lightArea(const LightData& l) {
+    switch (l.type) {
+        case kLightRect: return rectLightArea(l);
+        case kLightDisk: return diskLightArea(l);
+        case kLightSphere: {
+            const float r = sphereLightRadius(l);
+            return 4.0f * kPi * r * r;
+        }
+        default: return 0.0f;
     }
-    return false;
 }
 
-SR_INL bool sampleLightVertex(const SceneView& scene, Rng& rng, Vertex& v, Vec3& emitDir, float& pdfPos,
-                              float& pdfDir) {
+// Area pdf of sampling the emission origin on this light (light selection included).
+SR_INL float pdfLightOrigin(const SceneView& scene, const LightData& l, int lightIndex) {
+    const float select = lightSelectionPdfIndex(scene, lightIndex);
+    if (l.type == kLightPoint) return select;  // delta position — only used in ratios
+    const float area = lightArea(l);
+    return area > 1e-12f ? select / area : 0.0f;
+}
+
+// Solid-angle pdf of the light emitting from `onLight` toward `dir`.
+SR_INL float pdfLightDirSa(const LightData& l, Vec3 lightNormal, Vec3 dir) {
+    switch (l.type) {
+        case kLightRect:
+        case kLightDisk:
+        case kLightSphere: {
+            const float c = dot(lightNormal, dir);
+            const float cosT = l.twoSided ? fabsf(c) : srMax(0.0f, c);
+            return cosT * kInvPi;  // cosine-hemisphere emission
+        }
+        case kLightPoint: return kInv4Pi;
+        default: return 0.0f;
+    }
+}
+
+// --------------------------------------------------------------------------
+// Subpath generation
+// --------------------------------------------------------------------------
+
+// Start a light subpath: position + emission direction on a finite light.
+SR_INL bool startLightPath(const SceneView& scene, Rng& rng, Vert& v0, Vec3& emitDir, float& pdfDirSa) {
     float selectPdf = 0.0f;
     const int li = sampleLightIndex(scene, rng.nextFloat(), selectPdf);
     if (li < 0 || selectPdf <= 0.0f) return false;
     const LightData& l = scene.lights[li];
-    v = Vertex{};
-    v.kind = VertKind::Light;
-    v.lightIndex = li;
-    v.connectable = true;
+    if (!lightIsFinite(l)) return false;  // env / distant handled by s∈{0,1}
 
-    switch (l.type) {
-        case kLightRect:
-        case kLightDisk: {
-            Vec3 pLocal;
-            float area = 0.0f;
-            if (l.type == kLightRect) {
-                pLocal = Vec3((rng.nextFloat() - 0.5f) * l.width, (rng.nextFloat() - 0.5f) * l.height, 0.0f);
-                area = rectLightArea(l);
-            } else {
-                const Vec2 d = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
-                pLocal = Vec3(d.x * l.radius, d.y * l.radius, 0.0f);
-                area = diskLightArea(l);
-            }
-            if (area <= 1e-12f) return false;
-            v.p = transformPoint(l.xform, pLocal);
-            v.ng = v.ns = areaLightNormal(l);
-            pdfPos = selectPdf / area;
-            {
-                const Vec3 local = sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat());
-                const Frame frame(v.ns);
-                emitDir = normalize(frame.toWorld(local));
-                pdfDir = fabsf(dot(v.ns, emitDir)) * kInvPi;
-                if (pdfDir <= 0.0f) return false;
-                v.wo = -emitDir;
-                // beta = Le / pdfA  (direction pdf applied when leaving)
-                v.beta = lightRadiance(l) / srMax(1e-8f, pdfPos);
-                v.pdfFwd = pdfPos;
-            }
-            return true;
-        }
-        case kLightSphere: {
-            const Vec3 center = lightOrigin(l);
-            const float radius = srMax(1e-5f, sphereLightRadius(l));
-            const float area = 4.0f * kPi * radius * radius;
-            const Vec3 dir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
-            v.p = center + dir * radius;
-            v.ng = v.ns = dir;
-            pdfPos = selectPdf / area;
-            const Vec3 local = sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat());
-            const Frame frame(v.ns);
-            emitDir = normalize(frame.toWorld(local));
-            pdfDir = fabsf(dot(v.ns, emitDir)) * kInvPi;
-            if (pdfDir <= 0.0f) return false;
-            v.wo = -emitDir;
-            v.beta = lightRadiance(l) / srMax(1e-8f, pdfPos);
-            v.pdfFwd = pdfPos;
-            return true;
-        }
-        case kLightPoint: {
-            v.p = lightOrigin(l);
-            v.ng = v.ns = Vec3(0.0f, 1.0f, 0.0f);
-            pdfPos = selectPdf;
-            emitDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
-            pdfDir = kInv4Pi;
-            v.wo = -emitDir;
-            v.delta = true;
-            v.connectable = false;  // connect via s=1 using point-light NEE form
-            v.beta = l.emittedRadiance() / srMax(1e-8f, pdfPos);
-            v.pdfFwd = pdfPos;
-            return true;
-        }
-        case kLightDistant: {
-            const Vec3 axis = normalize(lightAxisZ(l));
-            emitDir = axis;
-            v.p = -axis * 1.0e5f;
-            v.ng = v.ns = -axis;
-            pdfPos = selectPdf;
-            pdfDir = 1.0f;
-            v.wo = -emitDir;
-            v.delta = true;
-            v.connectable = true;
-            v.beta = l.emittedRadiance() / srMax(1e-8f, pdfPos);
-            v.pdfFwd = pdfPos;
-            return true;
-        }
-        case kLightDome: {
-            float pdf = 0.0f;
-            Vec3 dirLocal;
-            if (l.envIndex >= 0 && l.envIndex < scene.envMapCount && scene.envMaps[l.envIndex].sampled()) {
-                dirLocal = envSample(scene.envMaps[l.envIndex], rng.nextFloat(), rng.nextFloat(), pdf);
-            } else {
-                dirLocal = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
-                pdf = kInv4Pi;
-            }
-            if (pdf <= 0.0f) return false;
-            emitDir = normalize(transformVector(l.xform, dirLocal));
-            v.p = -emitDir * 1.0e5f;
-            v.ng = v.ns = -emitDir;
-            v.wo = -emitDir;
-            pdfPos = selectPdf;
-            pdfDir = pdf;
-            v.beta = domeRadiance(scene, l, emitDir) / srMax(1e-8f, pdfPos * pdfDir);
-            v.pdfFwd = pdfPos;
-            return true;
-        }
-        default:
-            return false;
+    v0 = Vert{};
+    v0.type = VType::Light;
+    v0.lightIndex = li;
+
+    if (l.type == kLightPoint) {
+        v0.p = lightOrigin(l);
+        v0.ng = v0.ns = Vec3(0.0f, 1.0f, 0.0f);
+        // Origin delta-ness is passed separately into MIS (lightOriginDelta) so the
+        // s'=1 strategy still counts; vertex delta stays false like PBRT light verts.
+        v0.delta = false;
+        v0.connectable = true;
+        v0.pdfFwd = selectPdf;
+        emitDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
+        pdfDirSa = kInv4Pi;
+        v0.beta = l.emittedRadiance() / srMax(1e-12f, v0.pdfFwd);
+        return true;
     }
+
+    float area = 0.0f;
+    if (l.type == kLightRect) {
+        const Vec3 pLocal((rng.nextFloat() - 0.5f) * l.width, (rng.nextFloat() - 0.5f) * l.height, 0.0f);
+        v0.p = transformPoint(l.xform, pLocal);
+        v0.ng = v0.ns = areaLightNormal(l);
+        area = rectLightArea(l);
+    } else if (l.type == kLightDisk) {
+        const Vec2 d = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
+        v0.p = transformPoint(l.xform, Vec3(d.x * l.radius, d.y * l.radius, 0.0f));
+        v0.ng = v0.ns = areaLightNormal(l);
+        area = diskLightArea(l);
+    } else {  // sphere
+        const Vec3 center = lightOrigin(l);
+        const float radius = srMax(1e-5f, sphereLightRadius(l));
+        const Vec3 dir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
+        v0.p = center + dir * radius;
+        v0.ng = v0.ns = dir;
+        area = 4.0f * kPi * radius * radius;
+    }
+    if (area <= 1e-12f) return false;
+    v0.pdfFwd = selectPdf / area;
+
+    // Cosine-hemisphere emission around the light normal.
+    Vec3 nEmit = v0.ns;
+    if (l.twoSided && rng.nextFloat() < 0.5f) nEmit = -nEmit;
+    const Frame frame(nEmit);
+    const Vec3 local = sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat());
+    emitDir = normalize(frame.toWorld(local));
+    pdfDirSa = fabsf(dot(nEmit, emitDir)) * kInvPi * (l.twoSided ? 0.5f : 1.0f);
+    if (pdfDirSa <= 0.0f) return false;
+    v0.beta = lightRadiance(l) * fabsf(dot(v0.ns, emitDir)) / srMax(1e-12f, v0.pdfFwd * pdfDirSa);
+    return true;
 }
 
+struct WalkConfig {
+    bool eyePath = false;
+#if SOLSTICE_HAVE_OPENPGL
+    PathGuiding::ThreadState* guiding = nullptr;
+#endif
+};
+
+// Extend a subpath by BSDF sampling. `path[count-1]` must be a surface vertex
+// (or the walk starts from `origin`/`dir` for the first segment).
 template <typename Tracer>
-SR_INL int extendPath(const SceneView& scene, const Tracer& tracer, Rng& rng, Vertex* path, int count,
-                      int maxDepth, bool eyePath
-#if SOLSTICE_HAVE_OPENPGL
-                      ,
-                      PathGuiding::ThreadState* guiding
-#endif
-) {
-    while (count < kMaxBdptVerts && count <= maxDepth) {
-        Vertex& prev = path[count - 1];
-        if (prev.kind == VertKind::Light && eyePath) break;  // eye path ended on emitter
-        if (prev.kind != VertKind::Surface && prev.kind != VertKind::Camera &&
-            !(prev.kind == VertKind::Light && !eyePath && count == 1))
-            break;
+SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Vert* path, int count,
+                      Vec3 origin, Vec3 dir, float pdfDirSa, int maxVerts, const WalkConfig& cfg) {
+    Vec3 beta = path[count - 1].beta;
+    float pdfSaFwd = pdfDirSa;
+    int passThrough = 0;
 
-        Vec3 wiWorld;
-        float pdfSa = 0.0f;
-        Vec3 weight(1.0f);  // f*|cos|/pdf for surface, or cos/pdfDir for light
-        bool specular = false;
-        bool transmitted = false;
-        bool deltaBounce = false;
-
-        if (prev.kind == VertKind::Camera) {
-            wiWorld = -prev.wo;
-            pdfSa = 1.0f;
-            weight = Vec3(1.0f);
-        } else if (prev.kind == VertKind::Light && count == 1) {
-            wiWorld = -prev.wo;
-            // Leaving light: multiply by |cos| / pdfDir. pdfDir was cosine-hemisphere for area.
-            const float cosT = fabsf(dot(prev.ns, wiWorld));
-            float pdfDir = prev.delta ? (prev.lightIndex >= 0 && scene.lights[prev.lightIndex].type == kLightPoint
-                                             ? kInv4Pi
-                                             : 1.0f)
-                                      : cosT * kInvPi;
-            if (scene.lights[prev.lightIndex].type == kLightDome) {
-                // beta already includes pdfDir for dome
-                pdfDir = 1.0f;
-                weight = Vec3(1.0f);
-            } else {
-                if (pdfDir <= 0.0f) break;
-                weight = Vec3(cosT / pdfDir);
-            }
-            pdfSa = pdfDir;
-        } else {
-            // Surface BSDF sample (+ optional guiding on eye path).
-            const Frame frame(prev.ns);
-            const Vec3 woLocal = frame.toLocal(prev.wo);
-            bool usedGuide = false;
-            BsdfSample bs{};
-#if SOLSTICE_HAVE_OPENPGL
-            if (eyePath && guiding && guiding->active() && prev.connectable && !prev.delta) {
-                if (guiding->prepare(prev.p, prev.ns, rng)) {
-                    const float pg = guiding->guideProbability();
-                    if (rng.nextFloat() < pg) {
-                        float gPdf = 0.0f;
-                        if (guiding->sample(rng.nextFloat(), rng.nextFloat(), wiWorld, gPdf) && gPdf > 0.0f) {
-                            const Vec3 wiLocal = frame.toLocal(wiWorld);
-                            const BsdfEval ev = bsdfEvalLocal(prev.mat, woLocal, wiLocal);
-                            if (ev.pdf > 0.0f && !isBlack(ev.f)) {
-                                const float mixPdf = pg * gPdf + (1.0f - pg) * ev.pdf;
-                                bs.wi = wiLocal;
-                                bs.pdf = mixPdf;
-                                bs.weight = ev.f * (fabsf(wiLocal.z) / mixPdf);
-                                bs.specular = false;
-                                bs.transmitted = wiLocal.z < 0.0f;
-                                usedGuide = true;
-                            }
-                        }
-                    }
-                }
-            }
-#else
-            (void)eyePath;
-#endif
-            if (!usedGuide) {
-                bs = bsdfSampleLocal(prev.mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
-                                     rng.nextFloat());
-                if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
-                wiWorld = normalize(frame.toWorld(bs.wi));
-#if SOLSTICE_HAVE_OPENPGL
-                if (eyePath && guiding && guiding->active() && guiding->prepared() && !bs.specular) {
-                    const float pg = guiding->guideProbability();
-                    const float gPdf = guiding->pdf(wiWorld);
-                    const float mixPdf = pg * gPdf + (1.0f - pg) * bs.pdf;
-                    if (mixPdf > 0.0f) {
-                        bs.weight = bs.weight * (bs.pdf / mixPdf);
-                        bs.pdf = mixPdf;
-                    }
-                }
-#endif
-            }
-            // Artist caustic gates: kill disabled specular chains.
-            if (bs.transmitted && !allowsRefractiveCaustics(prev.mat)) break;
-            if (bs.specular && !bs.transmitted && !allowsReflectiveCaustics(prev.mat) &&
-                computeLobes(prev.mat).diffuse < 1e-4f)
-                break;
-
-            pdfSa = bs.pdf;
-            weight = bs.weight;
-            specular = bs.specular;
-            transmitted = bs.transmitted;
-            deltaBounce = bs.specular && computeLobes(prev.mat).delta;
-
-#if SOLSTICE_HAVE_OPENPGL
-            if (eyePath && guiding && guiding->active()) {
-                guiding->recordBounce(prev.ns, wiWorld, bs.pdf, weight, bs.specular, prev.mat.roughness,
-                                      computeLobes(prev.mat).eta, 1.0f);
-            }
-#endif
-        }
-
-        const Vec3 origin = offsetRayOrigin(prev.p, prev.ng, wiWorld);
-        Vertex next{};
+    while (count < maxVerts) {
+        Vert& prev = path[count - 1];
         RayHit hit;
-        if (!tracer.intersect(origin, wiWorld, kFloatMax, hit)) {
-            // Eye path escaped to env — record as infinite light vertex.
-            if (eyePath && scene.domeLightIndex >= 0 && scene.settings.envVisibleCamera) {
-                next.kind = VertKind::Light;
-                next.lightIndex = scene.domeLightIndex;
-                next.p = origin + wiWorld * 1.0e5f;
-                next.ng = next.ns = -wiWorld;
-                next.wo = -wiWorld;
-                next.beta = prev.beta * weight;
-                next.pdfFwd = pdfSa;
-                next.connectable = true;
-                path[count++] = next;
-#if SOLSTICE_HAVE_OPENPGL
-                if (guiding && guiding->active()) {
-                    const Vec3 Le = environmentRadiance(scene, wiWorld);
-                    guiding->recordBackground(origin, wiWorld, Le, 1.0f);
-                }
-#endif
+        if (!tracer.intersect(origin, dir, kFloatMax, hit)) {
+            // Escaped. For eye paths record an environment pseudo-vertex.
+            if (cfg.eyePath && scene.domeLightIndex >= 0) {
+                Vert v{};
+                v.type = VType::Light;
+                v.lightIndex = scene.domeLightIndex;
+                v.p = origin + dir * 1.0e6f;
+                v.ng = v.ns = -dir;
+                v.wo = -dir;
+                v.beta = beta;
+                v.pdfFwd = pdfSaFwd;  // solid-angle pdf (env special case)
+                v.connectable = false;
+                path[count++] = v;
             }
             break;
         }
         SurfaceInteraction si;
-        if (!buildSurfaceInteraction(scene, hit, origin, wiWorld, si)) break;
+        if (!buildSurfaceInteraction(scene, hit, origin, dir, si)) break;
 
         if (si.lightIndex >= 0) {
-            next.kind = VertKind::Light;
-            next.p = si.p;
-            next.ng = next.ns = si.ng;
-            next.lightIndex = si.lightIndex;
-            next.wo = -wiWorld;
-            next.beta = prev.beta * weight;
-            next.pdfFwd = pdfSolidAngleToArea(pdfSa, prev.p, next.p, next.ns);
-            next.connectable = true;
-            path[count++] = next;
-#if SOLSTICE_HAVE_OPENPGL
-            if (eyePath && guiding && guiding->active()) {
-                const LightData& l = scene.lights[si.lightIndex];
-                const Vec3 lightN = l.type == kLightSphere ? si.ng : areaLightNormal(l);
-                const Vec3 Le = areaLightEmission(scene, l, wiWorld, lightN);
-                guiding->recordLightHit(si.p, -wiWorld, Le, 1.0f);
+            if (cfg.eyePath) {
+                Vert v{};
+                v.type = VType::Light;
+                v.lightIndex = si.lightIndex;
+                v.p = si.p;
+                v.ng = v.ns = si.ng;
+                v.wo = -dir;
+                v.beta = beta;
+                v.pdfFwd = toAreaPdf(pdfSaFwd, prev.p, si.p, si.ng);
+                v.connectable = false;
+                path[count++] = v;
             }
-#endif
-            if (eyePath) break;
-            // Light path hitting another emitter — stop.
-            break;
+            break;  // light geometry terminates both subpaths
         }
 
         Material mat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
                            ? scene.materials[si.materialIndex]
                            : defaultMaterial();
         mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
-        next.kind = VertKind::Surface;
-        next.p = si.p;
-        next.ng = si.ng;
-        next.ns = si.ns;
-        next.mat = mat;
-        next.materialIndex = si.materialIndex;
-        next.wo = -wiWorld;
-        next.beta = prev.beta * weight;
-        next.pdfFwd = pdfSolidAngleToArea(pdfSa, prev.p, next.p, next.ns);
-        next.specular = specular;
-        next.transmitted = transmitted;
-        next.delta = deltaBounce || (computeLobes(mat).delta && computeLobes(mat).diffuse < 1e-4f);
-        next.connectable = isConnectableMaterial(mat);
-        path[count++] = next;
 
-        if (count > scene.settings.rrStartDepth) {
-            const float lum = average(vmax(Vec3(0.0f), next.beta));
-            const float q = clampf(lum, 0.05f, 0.95f);
-            if (rng.nextFloat() > q) break;
-            path[count - 1].beta = path[count - 1].beta / q;
+        // Stochastic cutout — pass through without creating a vertex.
+        if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
+            origin = offsetRayOrigin(si.p, si.ng, dir);
+            if (++passThrough > 16) break;
+            continue;
+        }
+
+        Vert v{};
+        v.type = VType::Surface;
+        v.p = si.p;
+        v.ng = si.ng;
+        v.ns = si.ns;
+        v.mat = mat;
+        v.wo = -dir;
+        v.beta = beta;
+        v.pdfFwd = toAreaPdf(pdfSaFwd, prev.p, si.p, si.ns);
+        {
+            const LobeWeights lw = computeLobes(mat);
+            v.delta = lw.delta && lw.diffuse < 1e-4f;
+            v.connectable = !v.delta;
+        }
+        path[count++] = v;
+        if (count >= maxVerts) break;
+        Vert& cur = path[count - 1];
+
+        // Sample the next direction (guided mixture on eye paths).
+        const Frame frame(cur.ns);
+        const Vec3 woLocal = frame.toLocal(cur.wo);
+        BsdfSample bs{};
+        bool haveSample = false;
+        Vec3 wiWorld;
 #if SOLSTICE_HAVE_OPENPGL
-            if (eyePath && guiding && guiding->active()) guiding->setRussianRoulette(q);
+        bool guideReady = false;
+        if (cfg.eyePath && cfg.guiding && cfg.guiding->active() && !cur.delta) {
+            guideReady = cfg.guiding->prepare(cur.p, cur.ns, rng);
+            if (guideReady && rng.nextFloat() < cfg.guiding->guideProbability()) {
+                float gPdf = 0.0f;
+                if (cfg.guiding->sample(rng.nextFloat(), rng.nextFloat(), wiWorld, gPdf) && gPdf > 0.0f) {
+                    const Vec3 wiLocal = frame.toLocal(wiWorld);
+                    const BsdfEval ev = bsdfEvalLocal(cur.mat, woLocal, wiLocal);
+                    if (ev.pdf > 0.0f && !isBlack(ev.f)) {
+                        const float pg = cfg.guiding->guideProbability();
+                        const float mixPdf = pg * gPdf + (1.0f - pg) * ev.pdf;
+                        bs.wi = wiLocal;
+                        bs.pdf = mixPdf;
+                        bs.weight = ev.f * (fabsf(wiLocal.z) / mixPdf);
+                        bs.specular = false;
+                        bs.transmitted = wiLocal.z < 0.0f;
+                        haveSample = true;
+                    }
+                }
+            }
+        }
+#endif
+        if (!haveSample) {
+            bs = bsdfSampleLocal(cur.mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                 rng.nextFloat());
+            if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
+            wiWorld = normalize(frame.toWorld(bs.wi));
+#if SOLSTICE_HAVE_OPENPGL
+            if (cfg.eyePath && cfg.guiding && guideReady && !bs.specular) {
+                const float pg = cfg.guiding->guideProbability();
+                const float gPdf = cfg.guiding->pdf(wiWorld);
+                const float mixPdf = pg * gPdf + (1.0f - pg) * bs.pdf;
+                if (mixPdf > 0.0f) {
+                    bs.weight = bs.weight * (bs.pdf / mixPdf);
+                    bs.pdf = mixPdf;
+                }
+            }
 #endif
         }
+
+        // Reverse pdf of the segment we just travelled (for MIS).
+        {
+            const float revSa = bs.specular ? 0.0f : bsdfPdfSa(cur.mat, cur.ns, wiWorld, cur.wo);
+            prev.pdfRev = toAreaPdf(revSa, cur.p, prev.p, prev.type == VType::Surface ? prev.ns : prev.ng);
+        }
+
+#if SOLSTICE_HAVE_OPENPGL
+        if (cfg.eyePath && cfg.guiding && cfg.guiding->active()) {
+            cfg.guiding->recordBounce(cur.ns, wiWorld, bs.pdf, bs.weight, bs.specular, cur.mat.roughness,
+                                      computeLobes(cur.mat).eta, 1.0f);
+        }
+#endif
+
+        beta = beta * bs.weight;
+        if (!isFinite(beta) || isBlack(beta)) break;
+        // Delta segments carry pdf 0 → remap0() treats them as unit ratios in MIS
+        // and the delta flags keep those strategies out of the sums (PBRT convention).
+        pdfSaFwd = bs.specular ? 0.0f : bs.pdf;
+        origin = offsetRayOrigin(cur.p, cur.ng, wiWorld);
+        dir = wiWorld;
+        passThrough = 0;
     }
     return count;
 }
 
-SR_INL Vec3 emissionOnEyePath(const SceneView& scene, const Vertex* eye, int t) {
-    if (t < 2) return Vec3(0.0f);
-    const Vertex& v = eye[t - 1];
-    if (v.kind != VertKind::Light || v.lightIndex < 0) return Vec3(0.0f);
-    const Vertex& prev = eye[t - 2];
-    const LightData& l = scene.lights[v.lightIndex];
-    Vec3 Le(0.0f);
-    if (l.type == kLightDome) {
-        Le = environmentRadiance(scene, -v.wo);
-    } else {
-        const Vec3 wi = normalize(v.p - prev.p);
-        const Vec3 lightN = l.type == kLightSphere ? v.ng : areaLightNormal(l);
-        Le = areaLightEmission(scene, l, wi, lightN);
+// --------------------------------------------------------------------------
+// MIS weight (PBRT MISWeight with pdfRev overrides for the connection ends)
+// --------------------------------------------------------------------------
+struct MisOverride {
+    float eyeLastRev = -1.0f;   // pdfRev of eye[t-1]
+    float eyePrevRev = -1.0f;   // pdfRev of eye[t-2]
+    float lightLastRev = -1.0f; // pdfRev of light[s-1]
+    float lightPrevRev = -1.0f; // pdfRev of light[s-2]
+    bool lightOriginDelta = false;
+};
+
+SR_INL float misWeight(const Vert* eye, int t, const Vert* light, int s, const MisOverride& ov) {
+    if (s + t == 2) return 1.0f;  // only one strategy for a length-2 path
+
+    float sumRi = 0.0f;
+
+    // Eye side: hypothetical strategies where eye[i..t-1] came from the light side.
+    {
+        float ri = 1.0f;
+        for (int i = t - 1; i >= 1; --i) {
+            float rev = eye[i].pdfRev;
+            if (i == t - 1 && ov.eyeLastRev >= 0.0f) rev = ov.eyeLastRev;
+            if (i == t - 2 && ov.eyePrevRev >= 0.0f) rev = ov.eyePrevRev;
+            ri *= remap0(rev) / remap0(eye[i].pdfFwd);
+            if (i == 1) break;  // t'=1 (light tracing splat) is never sampled — skip
+            const bool curDelta = eye[i].delta;
+            const bool prevDelta = eye[i - 1].delta;
+            if (!curDelta && !prevDelta) sumRi += ri;
+        }
     }
-    if (isBlack(Le)) return Vec3(0.0f);
-    // prev.beta already includes path weight up to prev; for t==2 camera→light, beta=1.
-    // For t>2, beta includes BSDF weights; multiply by Le.
-    return prev.beta * Le * (t == 2 ? 1.0f : 1.0f);
+
+    // Light side: strategies with shorter light subpaths (down to s'=0).
+    {
+        float ri = 1.0f;
+        for (int i = s - 1; i >= 0; --i) {
+            float rev = light[i].pdfRev;
+            if (i == s - 1 && ov.lightLastRev >= 0.0f) rev = ov.lightLastRev;
+            if (i == s - 2 && ov.lightPrevRev >= 0.0f) rev = ov.lightPrevRev;
+            ri *= remap0(rev) / remap0(light[i].pdfFwd);
+            const bool curDelta = light[i].delta && i > 0;  // origin delta handled below
+            const bool prevDelta = i > 0 ? light[i - 1].delta : ov.lightOriginDelta;
+            if (!curDelta && !prevDelta && !(i == 0 && ov.lightOriginDelta)) sumRi += ri;
+        }
+    }
+
+    const float w = 1.0f / (1.0f + sumRi);
+    return srIsFinite(w) ? w : 0.0f;
 }
 
+// --------------------------------------------------------------------------
+// Full estimator
+// --------------------------------------------------------------------------
 template <typename Tracer>
-SR_INL Vec3 connectVertices(const SceneView& scene, const Tracer& tracer, const Vertex* eye, int t,
-                            const Vertex* light, int s) {
-    if (t < 2 || s < 1) return Vec3(0.0f);
-    const Vertex& ev = eye[t - 1];
-    const Vertex& lv = light[s - 1];
-
-    // Need a connectable eye surface vertex.
-    if (ev.kind != VertKind::Surface || !ev.connectable) return Vec3(0.0f);
-    if (ev.delta) return Vec3(0.0f);
-
-    // Caustic gates on the eye endpoint.
-    if (ev.specular && ev.transmitted && !allowsRefractiveCaustics(ev.mat)) return Vec3(0.0f);
-    if (ev.specular && !ev.transmitted && !allowsReflectiveCaustics(ev.mat) &&
-        computeLobes(ev.mat).diffuse < 1e-4f)
-        return Vec3(0.0f);
-
-    if (s == 1 && lv.kind == VertKind::Light) {
-        // Connect eye surface → light sample (classic NEE / BDPT s=1).
-        if (lv.lightIndex < 0) return Vec3(0.0f);
-        const LightData& l = scene.lights[lv.lightIndex];
-        Vec3 wi;
-        float dist = 0.0f;
-        float pdf = 0.0f;
-        Vec3 radiance(0.0f);
-        bool delta = lv.delta;
-        if (l.type == kLightDome || l.type == kLightDistant) {
-            LightSample ls;
-            if (!sampleLight(scene, lv.lightIndex, ev.p, 0.5f, 0.5f, ls)) return Vec3(0.0f);
-            wi = ls.wi;
-            dist = ls.distance;
-            pdf = ls.pdf;
-            radiance = ls.radiance;
-            delta = ls.delta;
-        } else if (l.type == kLightPoint) {
-            Vec3 d = lv.p - ev.p;
-            const float dist2 = lengthSquared(d);
-            if (dist2 < 1e-12f) return Vec3(0.0f);
-            dist = sqrtf(dist2);
-            wi = d / dist;
-            pdf = 1.0f;
-            radiance = l.emittedRadiance() / dist2;
-            delta = true;
-        } else {
-            Vec3 d = lv.p - ev.p;
-            const float dist2 = lengthSquared(d);
-            if (dist2 < 1e-12f) return Vec3(0.0f);
-            dist = sqrtf(dist2);
-            wi = d / dist;
-            float cosL = fabsf(dot(lv.ns, -wi));
-            if (cosL < 1e-6f) return Vec3(0.0f);
-            float area = 1.0f;
-            if (l.type == kLightRect) area = rectLightArea(l);
-            else if (l.type == kLightDisk) area = diskLightArea(l);
-            else if (l.type == kLightSphere)
-                area = 4.0f * kPi * sphereLightRadius(l) * sphereLightRadius(l);
-            pdf = dist2 / (cosL * srMax(1e-8f, area));
-            radiance = areaLightEmission(scene, l, wi, lv.ns);
-        }
-        const float selectPdf = lightSelectionPdfIndex(scene, lv.lightIndex);
-        if (pdf <= 0.0f || selectPdf <= 0.0f || isBlack(radiance)) return Vec3(0.0f);
-
-        if (l.shadowEnable) {
-            const Vec3 o = offsetRayOrigin(ev.p, ev.ng, wi);
-            float tMax = 1.0e8f;
-            if (dist < 1.0e7f) tMax = dist * (1.0f - 1e-3f);
-            if (l.type == kLightDome || l.type == kLightDistant) {
-                RayHit hit;
-                if (tracer.intersect(o, wi, tMax, hit)) return Vec3(0.0f);
-            } else if (!visibleOpaque(scene, tracer, ev.p, ev.ng, lv.p, lv.ns)) {
-                return Vec3(0.0f);
-            }
-        }
-
-        const Frame frame(ev.ns);
-        const BsdfEval be = bsdfEvalLocal(ev.mat, frame.toLocal(ev.wo), frame.toLocal(wi));
-        if (be.pdf <= 0.0f || isBlack(be.f)) return Vec3(0.0f);
-        const float cosTheta = fabsf(dot(ev.ns, wi));
-        const float lightPdf = pdf * selectPdf;
-        float mis = 1.0f;
-        if (!delta) mis = powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
-        return ev.beta * be.f * (cosTheta * mis / lightPdf) * radiance;
+SR_INL bool connectionVisible(const SceneView& scene, const Tracer& tracer, Vec3 a, Vec3 na, Vec3 b,
+                              int targetLight) {
+    Vec3 d = b - a;
+    const float dist = length(d);
+    if (dist < 1e-5f) return false;
+    d = d / dist;
+    const Vec3 o = offsetRayOrigin(a, na, d);
+    RayHit hit;
+    if (!tracer.intersect(o, d, dist * (1.0f - 1e-3f), hit)) return true;
+    if (targetLight >= 0) {
+        SurfaceInteraction si;
+        if (buildSurfaceInteraction(scene, hit, o, d, si) && si.lightIndex == targetLight) return true;
     }
-
-    // General surface ↔ surface (or light path surface) connection.
-    if (lv.kind != VertKind::Surface || !lv.connectable || lv.delta) return Vec3(0.0f);
-    if (lv.specular && lv.transmitted && !allowsRefractiveCaustics(lv.mat)) return Vec3(0.0f);
-    if (lv.specular && !lv.transmitted && !allowsReflectiveCaustics(lv.mat) &&
-        computeLobes(lv.mat).diffuse < 1e-4f)
-        return Vec3(0.0f);
-
-    if (!visibleOpaque(scene, tracer, ev.p, ev.ng, lv.p, lv.ns)) return Vec3(0.0f);
-
-    Vec3 w = lv.p - ev.p;
-    const float dist2 = lengthSquared(w);
-    if (dist2 < 1e-12f) return Vec3(0.0f);
-    w = w * (1.0f / sqrtf(dist2));
-    const Frame fe(ev.ns);
-    const Frame fl(lv.ns);
-    const BsdfEval be = bsdfEvalLocal(ev.mat, fe.toLocal(ev.wo), fe.toLocal(w));
-    const BsdfEval bl = bsdfEvalLocal(lv.mat, fl.toLocal(lv.wo), fl.toLocal(-w));
-    if (be.pdf <= 0.0f || isBlack(be.f) || bl.pdf <= 0.0f || isBlack(bl.f)) return Vec3(0.0f);
-    const float G = geometryTerm(ev.p, ev.ns, lv.p, lv.ns);
-    if (G <= 0.0f) return Vec3(0.0f);
-    return ev.beta * be.f * G * bl.f * lv.beta;
-}
-
-// Balance heuristic over strategies with the same total vertex count.
-SR_INL float misWeight(int s, int t) {
-    const int n = s + t - 1;
-    if (n <= 1) return 1.0f;
-    return 1.0f / float(n);
+    return false;
 }
 
 }  // namespace bdpt
@@ -535,108 +416,312 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 #endif
 ) {
     using namespace bdpt;
-    const int maxDepth = srMax(1, scene.settings.maxDepth);
+    const RenderSettingsData& settings = scene.settings;
+    int maxVerts = settings.maxDepth + 1;
+    if (maxVerts > kMaxVerts) maxVerts = kMaxVerts;
+    if (maxVerts < 2) maxVerts = 2;
+    const bool causticsOn = settings.caustics != 0;
 
-    Vertex eye[kMaxBdptVerts];
-    Vertex light[kMaxBdptVerts];
+    Vert eye[kMaxVerts];
+    Vert light[kMaxVerts];
 
-    eye[0] = Vertex{};
-    eye[0].kind = VertKind::Camera;
+    // ---- Light subpath (finite lights only) ----
+    int nLight = 0;
+    bool lightOriginDelta = false;
+    if (scene.lightCount > 0) {
+        Vec3 emitDir;
+        float pdfDirSa = 0.0f;
+        if (startLightPath(scene, rng, light[0], emitDir, pdfDirSa)) {
+            nLight = 1;
+            lightOriginDelta =
+                light[0].lightIndex >= 0 && scene.lights[light[0].lightIndex].type == kLightPoint;
+            WalkConfig cfg;
+            cfg.eyePath = false;
+            const Vec3 o = offsetRayOrigin(light[0].p, light[0].ng, emitDir);
+            nLight = randomWalk(scene, tracer, rng, light, nLight, o, emitDir, pdfDirSa, maxVerts, cfg);
+        }
+    }
+
+    // ---- Eye subpath ----
+    eye[0] = Vert{};
+    eye[0].type = VType::Camera;
     eye[0].p = origin;
     eye[0].ng = eye[0].ns = direction;
     eye[0].wo = -direction;
     eye[0].beta = Vec3(1.0f);
     eye[0].pdfFwd = 1.0f;
     eye[0].connectable = false;
-
+    WalkConfig eyeCfg;
+    eyeCfg.eyePath = true;
 #if SOLSTICE_HAVE_OPENPGL
-    if (guiding && guiding->active()) guiding->beginSegment(origin, direction);
-#else
-    (void)0;
+    eyeCfg.guiding = guiding;
 #endif
+    const int nEye = randomWalk(scene, tracer, rng, eye, 1, origin, direction, 1.0f, maxVerts, eyeCfg);
 
-    int tCount = extendPath(scene, tracer, rng, eye, 1, maxDepth, true
-#if SOLSTICE_HAVE_OPENPGL
-                            ,
-                            guiding
-#endif
-    );
+    Vec3 L(0.0f);
 
-    int sCount = 0;
-    {
-        Vec3 emitDir;
-        float pdfPos = 0.0f, pdfDir = 0.0f;
-        if (sampleLightVertex(scene, rng, light[0], emitDir, pdfPos, pdfDir)) {
-            (void)emitDir;
-            (void)pdfPos;
-            (void)pdfDir;
-            sCount = 1;
-            // Direction weight (cos / pdfDir) is applied inside extendPath when leaving the light.
-            sCount = extendPath(scene, tracer, rng, light, sCount, maxDepth, false
-#if SOLSTICE_HAVE_OPENPGL
-                                ,
-                                nullptr
-#endif
-            );
+    // ---- s = 0: eye path hit an emitter / the environment ----
+    for (int t = 2; t <= nEye; ++t) {
+        const Vert& v = eye[t - 1];
+        if (v.type == VType::Surface) {
+            // Emissive mesh material — not part of the light list, weight 1.
+            if (v.mat.emissionStrength > 0.0f && !isBlack(v.mat.emissionColor)) {
+                const bool front = dot(v.ns, v.wo) > 0.0f;
+                if (front || v.mat.doubleSided) {
+                    Vec3 c = v.beta * v.mat.emissionColor * v.mat.emissionStrength;
+                    if (t > 2) c = clampContribution(c, settings.clampIndirect);
+                    L += c;
+                }
+            }
+            continue;
         }
-    }
+        if (v.type != VType::Light || v.lightIndex < 0) continue;
+        const LightData& l = scene.lights[v.lightIndex];
 
-    Vec3 luminance(0.0f);
-
-    // (s=0) eye path hit emitter / environment / emissive material.
-    for (int t = 2; t <= tCount; ++t) {
-        const Vertex& v = eye[t - 1];
-        if (v.kind == VertKind::Light) {
-            Vec3 c = emissionOnEyePath(scene, eye, t);
-            if (isBlack(c)) continue;
-            float mis = (t == 2) ? 1.0f : misWeight(0, t);
-            c = c * mis;
-            if (t > 2) c = clampContribution(c, scene.settings.clampIndirect);
-            luminance += c;
+        if (l.type == kLightDome) {
+            // Environment: MIS against s=1 env NEE (PT-style power heuristic).
+            const bool primary = t == 2;
+            if (primary && (!settings.envVisibleCamera || !l.visibleCamera)) break;
+            const Vec3 dirW = -v.wo;
+            Vec3 Le = domeRadiance(scene, l, dirW);
+            if (!isBlack(Le)) {
+                float w = 1.0f;
+                const Vert& prev = eye[t - 2];
+                if (t > 2 && !prev.delta && prev.type == VType::Surface) {
+                    const float lp = lightPdfDirection(scene, v.lightIndex, prev.p, dirW, prev.p, dirW) *
+                                     lightSelectionPdfIndex(scene, v.lightIndex);
+                    w = powerHeuristic(1.0f, v.pdfFwd, 1.0f, lp);  // pdfFwd = solid-angle here
+                }
+                Vec3 c = v.beta * Le * w;
+                if (t > 2) c = clampContribution(c, settings.clampIndirect);
+                L += c;
 #if SOLSTICE_HAVE_OPENPGL
-            if (guiding && guiding->active()) guiding->recordEmission(c, mis);
+                if (guiding && guiding->active()) guiding->recordBackground(eye[t - 2].p, dirW, Le, w);
 #endif
+            }
             break;
         }
-        if (v.kind == VertKind::Surface && v.mat.emissionStrength > 0.0f &&
-            !isBlack(v.mat.emissionColor)) {
-            // Mesh emission: throughput to this vertex times Le (same as unidirectional PT).
-            Vec3 Le = v.mat.emissionColor * v.mat.emissionStrength;
-            Vec3 c = v.beta * Le;
-            float mis = (t == 2) ? 1.0f : misWeight(0, t);
-            c = c * mis;
-            if (t > 2) c = clampContribution(c, scene.settings.clampIndirect);
-            luminance += c;
+
+        // Finite light hit: full BDPT MIS.
+        const Vec3 lightN = l.type == kLightSphere ? v.ng : areaLightNormal(l);
+        const Vec3 wi = -v.wo;  // direction of travel into the light
+        Vec3 Le = areaLightEmission(scene, l, wi, lightN);
+        if (isBlack(Le)) break;
+        // Caustics off: kill specular-chain→light after a diffuse vertex.
+        if (!causticsOn && t >= 4) {
+            bool sawDiffuseThenSpec = false;
+            bool diffuseSeen = false;
+            for (int i = 1; i < t - 1; ++i) {
+                if (!eye[i].delta) diffuseSeen = true;
+                else if (diffuseSeen) sawDiffuseThenSpec = true;
+            }
+            if (sawDiffuseThenSpec) break;
+        }
+
+        MisOverride ov;
+        ov.lightOriginDelta = false;
+        ov.eyeLastRev = pdfLightOrigin(scene, l, v.lightIndex);
+        const Vec3 emitToPrev = normalize(eye[t - 2].p - v.p);
+        ov.eyePrevRev = toAreaPdf(pdfLightDirSa(l, lightN, emitToPrev), v.p, eye[t - 2].p,
+                                  eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
+        const float w = misWeight(eye, t, light, 0, ov);
+        Vec3 c = v.beta * Le * w;
+        if (t > 2) c = clampContribution(c, settings.clampIndirect);
+        L += c;
 #if SOLSTICE_HAVE_OPENPGL
-            if (guiding && guiding->active()) guiding->recordEmission(Le, mis);
+        if (guiding && guiding->active()) guiding->recordLightHit(v.p, v.wo, Le, w);
 #endif
-            // Keep walking strategies for non-emissive connections; emission itself is added once.
-            // For pure emitters we can stop considering longer s=0 prefixes from deeper hits.
-            if (computeLobes(v.mat).diffuse < 1e-4f && computeLobes(v.mat).specular < 1e-4f &&
-                computeLobes(v.mat).transmission < 1e-4f)
-                break;
+        break;
+    }
+
+    // ---- s = 1: resample the light toward each eye vertex (NEE-like) ----
+    for (int t = 2; t <= nEye; ++t) {
+        const Vert& E = eye[t - 1];
+        if (E.type != VType::Surface || !E.connectable) continue;
+
+        float selectPdf = 0.0f;
+        const int li = sampleLightIndex(scene, rng.nextFloat(), selectPdf);
+        if (li < 0 || selectPdf <= 0.0f) continue;
+        const LightData& l = scene.lights[li];
+
+        if (l.type == kLightDome || l.type == kLightDistant) {
+            // PT-style env NEE with power heuristic (no deeper strategies exist).
+            LightSample ls;
+            if (!sampleLight(scene, li, E.p, rng.nextFloat(), rng.nextFloat(), ls)) continue;
+            if (ls.pdf <= 0.0f || isBlack(ls.radiance)) continue;
+            float visibility = 1.0f;
+            if (l.shadowEnable) {
+                const Vec3 o = offsetRayOrigin(E.p, E.ng, ls.wi);
+                visibility = shadowVisibility(scene, tracer, o, ls.wi, 1.0e8f);
+            }
+            if (visibility <= 1e-5f) continue;
+            const Vec3 f = bsdfF(E.mat, E.ns, E.wo, ls.wi);
+            if (isBlack(f)) continue;
+            const float bsdfPdf = ls.delta ? 0.0f : bsdfPdfSa(E.mat, E.ns, E.wo, ls.wi);
+            const float lightPdf = ls.pdf * selectPdf;
+            const float w = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdf);
+            Vec3 c = E.beta * f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf);
+            if (t > 2) c = clampContribution(c, settings.clampIndirect);
+            L += c;
+#if SOLSTICE_HAVE_OPENPGL
+            if (guiding && guiding->active())
+                guiding->addScattered(f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf));
+#endif
+            continue;
+        }
+        if (!lightIsFinite(l)) continue;
+
+        // Sample a point on the finite light (area measure).
+        Vert Ls{};
+        Ls.type = VType::Light;
+        Ls.lightIndex = li;
+        float pdfPosArea = 0.0f;
+        Vec3 lightN;
+        if (l.type == kLightPoint) {
+            Ls.p = lightOrigin(l);
+            Ls.ng = Ls.ns = Vec3(0.0f, 1.0f, 0.0f);
+            Ls.delta = true;
+            pdfPosArea = 1.0f;  // delta position
+            lightN = Ls.ns;
+        } else if (l.type == kLightSphere) {
+            const Vec3 center = lightOrigin(l);
+            const float radius = srMax(1e-5f, sphereLightRadius(l));
+            const Vec3 dir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
+            Ls.p = center + dir * radius;
+            Ls.ng = Ls.ns = dir;
+            pdfPosArea = 1.0f / (4.0f * kPi * radius * radius);
+            lightN = dir;
+        } else {
+            if (l.type == kLightRect) {
+                const Vec3 pLocal((rng.nextFloat() - 0.5f) * l.width, (rng.nextFloat() - 0.5f) * l.height,
+                                  0.0f);
+                Ls.p = transformPoint(l.xform, pLocal);
+                pdfPosArea = 1.0f / srMax(1e-12f, rectLightArea(l));
+            } else {
+                const Vec2 d = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
+                Ls.p = transformPoint(l.xform, Vec3(d.x * l.radius, d.y * l.radius, 0.0f));
+                pdfPosArea = 1.0f / srMax(1e-12f, diskLightArea(l));
+            }
+            Ls.ng = Ls.ns = areaLightNormal(l);
+            lightN = Ls.ns;
+        }
+        Ls.pdfFwd = selectPdf * pdfPosArea;
+
+        Vec3 toL = Ls.p - E.p;
+        const float dist2 = lengthSquared(toL);
+        if (dist2 < 1e-10f) continue;
+        const float dist = sqrtf(dist2);
+        const Vec3 wi = toL / dist;
+
+        Vec3 Le(0.0f);
+        if (l.type == kLightPoint) {
+            Le = l.emittedRadiance() / dist2;  // radiant intensity → irradiance factor
+        } else if (l.type == kLightSphere) {
+            // Back-facing sphere samples are self-occluded — reject instead of |cos|.
+            if (dot(lightN, -wi) <= 1e-6f) continue;
+            Le = lightRadiance(l);
+        } else {
+            Le = areaLightEmission(scene, l, wi, lightN);
+        }
+        if (isBlack(Le)) continue;
+
+        const Vec3 f = bsdfF(E.mat, E.ns, E.wo, wi);
+        if (isBlack(f)) continue;
+
+        if (l.shadowEnable && !connectionVisible(scene, tracer, E.p, E.ng, Ls.p, li)) continue;
+
+        Vec3 c;
+        if (l.type == kLightPoint) {
+            c = E.beta * f * Le * (fabsf(dot(E.ns, wi)) / srMax(1e-12f, selectPdf));
+        } else {
+            const float G = geometryTerm(E.p, E.ns, Ls.p, Ls.ns);
+            if (G <= 0.0f) continue;
+            c = E.beta * f * Le * (G / srMax(1e-12f, Ls.pdfFwd));
+        }
+
+        // MIS overrides for this strategy.
+        MisOverride ov;
+        ov.lightOriginDelta = l.type == kLightPoint;
+        // Light vertex generated from the eye side: bsdf at E toward L.
+        ov.lightLastRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, E.wo, wi), E.p, Ls.p, Ls.ns);
+        // Eye vertex generated from the light: emission dir pdf.
+        ov.eyeLastRev = toAreaPdf(pdfLightDirSa(l, lightN, -wi), Ls.p, E.p, E.ns);
+        // Eye prev regenerated by bsdf at E arriving from L.
+        if (t >= 3)
+            ov.eyePrevRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, wi, normalize(eye[t - 2].p - E.p)), E.p,
+                                      eye[t - 2].p,
+                                      eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
+        Vert lightArr[1] = {Ls};
+        const float w = misWeight(eye, t, lightArr, 1, ov);
+        c = c * w;
+        if (t > 2) c = clampContribution(c, settings.clampIndirect);
+        if (!isFinite(c)) continue;
+        L += c;
+#if SOLSTICE_HAVE_OPENPGL
+        if (guiding && guiding->active() && !isBlack(E.beta)) {
+            const Vec3 local(c.x / srMax(1e-8f, E.beta.x), c.y / srMax(1e-8f, E.beta.y),
+                             c.z / srMax(1e-8f, E.beta.z));
+            guiding->addScattered(local);
+        }
+#endif
+    }
+
+    // ---- s >= 2: surface ↔ surface connections ----
+    for (int t = 2; t <= nEye; ++t) {
+        const Vert& E = eye[t - 1];
+        if (E.type != VType::Surface || !E.connectable) continue;
+        for (int s = 2; s <= nLight; ++s) {
+            if (s + t > maxVerts + 1) break;
+            const Vert& Lv = light[s - 1];
+            if (Lv.type != VType::Surface || !Lv.connectable) continue;
+
+            // Caustics off: skip connections whose eye side has diffuse→specular chains.
+            if (!causticsOn) {
+                bool diffuseSeen = false, chainAfterDiffuse = false;
+                for (int i = 1; i < t; ++i) {
+                    if (!eye[i].delta) diffuseSeen = true;
+                    else if (diffuseSeen) chainAfterDiffuse = true;
+                }
+                if (chainAfterDiffuse) continue;
+            }
+
+            Vec3 d = Lv.p - E.p;
+            const float dist2 = lengthSquared(d);
+            if (dist2 < 1e-10f) continue;
+            d = d * (1.0f / sqrtf(dist2));
+
+            const Vec3 fE = bsdfF(E.mat, E.ns, E.wo, d);
+            if (isBlack(fE)) continue;
+            const Vec3 fL = bsdfF(Lv.mat, Lv.ns, Lv.wo, -d);
+            if (isBlack(fL)) continue;
+            const float G = geometryTerm(E.p, E.ns, Lv.p, Lv.ns);
+            if (G <= 0.0f) continue;
+            if (!connectionVisible(scene, tracer, E.p, E.ng, Lv.p, -1)) continue;
+
+            MisOverride ov;
+            ov.lightOriginDelta = lightOriginDelta;
+            ov.lightLastRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, E.wo, d), E.p, Lv.p, Lv.ns);
+            ov.eyeLastRev = toAreaPdf(bsdfPdfSa(Lv.mat, Lv.ns, Lv.wo, -d), Lv.p, E.p, E.ns);
+            if (t >= 3)
+                ov.eyePrevRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, d, normalize(eye[t - 2].p - E.p)), E.p,
+                                          eye[t - 2].p,
+                                          eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
+            if (s >= 2)
+                ov.lightPrevRev =
+                    toAreaPdf(bsdfPdfSa(Lv.mat, Lv.ns, -d, normalize(light[s - 2].p - Lv.p)), Lv.p,
+                              light[s - 2].p,
+                              light[s - 2].type == VType::Surface ? light[s - 2].ns : light[s - 2].ng);
+
+            const float w = misWeight(eye, t, light, s, ov);
+            Vec3 c = E.beta * fE * G * fL * Lv.beta * w;
+            c = clampContribution(c, settings.clampIndirect);
+            if (!isFinite(c)) continue;
+            L += c;
         }
     }
 
-    // Connect (s,t) strategies. Skip s=1 when t path already used unidirectional-style
-    // emission only — s=1 provides NEE at every eye surface vertex.
-    for (int t = 2; t <= tCount; ++t) {
-        if (eye[t - 1].kind != VertKind::Surface) continue;
-        for (int s = 1; s <= sCount; ++s) {
-            if (s + t - 2 > maxDepth) continue;
-            Vec3 c = connectVertices(scene, tracer, eye, t, light, s);
-            if (isBlack(c)) continue;
-            c = c * misWeight(s, t);
-            if (t > 2 || s > 1) c = clampContribution(c, scene.settings.clampIndirect);
-            luminance += c;
-#if SOLSTICE_HAVE_OPENPGL
-            if (guiding && guiding->active()) guiding->addScattered(c);
-#endif
-        }
-    }
-
-    if (!isFinite(luminance)) return Vec3(0.0f);
-    return vmax(Vec3(0.0f), luminance);
+    if (!isFinite(L)) return Vec3(0.0f);
+    return vmax(Vec3(0.0f), L);
 }
 
 }  // namespace sol

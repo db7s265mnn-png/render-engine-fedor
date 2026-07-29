@@ -1,6 +1,19 @@
-// Manifold Next-Event Estimation (MNEE) caustics solver (Hanika et al. 2015 style).
-// Unidirectional path tracing + specular-manifold connections through one interface.
+// Path tracer with Manifold Next-Event Estimation for refractive caustics
+// (Hanika et al. 2015, formulated as a 2D Newton solve on the initial direction
+// of a specular refraction chain — robust for glass with several interfaces).
 // CPU / Embree only — included from embree_device.cpp.
+//
+// At every connectable vertex the light sample is first checked with a plain
+// shadow segment. If the first blocker is a delta-transmissive "caustic caster",
+// the solver walks the refraction chain from the shading point and Newton-steps
+// the launch direction until the chain exits toward the light point. The
+// converged Jacobian |dx⊥/dω| provides the generalized geometry term, so the
+// estimator matches plain NEE when no glass is present.
+//
+// To avoid double counting, diffuse→(all-transmissive delta chain)→finite-light
+// BSDF hits are suppressed — MNEE is the (much lower variance) estimator for
+// that family. Reflective caustics stay with BSDF sampling; environment light
+// stays with regular NEE/MIS.
 #pragma once
 
 #include "core/rng.h"
@@ -16,79 +29,336 @@
 namespace sol {
 namespace mnee {
 
-constexpr int kNewtonIters = 5;
+constexpr int kMaxChain = 6;      // max specular interfaces (glass sphere = 2)
+constexpr int kNewtonIters = 24;
+constexpr int kBacktrackSteps = 5;
 
-SR_INL bool allowsReflectiveCaustics(const Material& m) { return m.reflectiveCaustics != 0; }
-SR_INL bool allowsRefractiveCaustics(const Material& m) { return m.refractiveCaustics != 0; }
 
-SR_INL bool isSpecularCausticMaterial(const Material& m) {
+SR_INL bool isCausticCaster(const Material& m) {
     const LobeWeights lw = computeLobes(m);
-    if (lw.diffuse > 0.15f) return false;
-    const bool refl = lw.specular > 1e-3f && allowsReflectiveCaustics(m);
-    const bool refr = lw.transmission > 1e-3f && allowsRefractiveCaustics(m);
-    return refl || refr;
+    return lw.delta && lw.transmission > 0.25f && lw.diffuse < 1e-3f;
 }
 
-SR_INL float geometryTerm(Vec3 a, Vec3 na, Vec3 b, Vec3 nb) {
-    Vec3 d = b - a;
-    const float dist2 = lengthSquared(d);
-    if (dist2 < 1e-12f) return 0.0f;
-    d = d * (1.0f / sqrtf(dist2));
-    const float cosA = fabsf(dot(na, d));
-    const float cosB = fabsf(dot(nb, -d));
-    if (cosA < 1e-6f || cosB < 1e-6f) return 0.0f;
-    return (cosA * cosB) / dist2;
+// Refract direction d (travel direction) through a surface with normal n.
+// Returns false on total internal reflection.
+SR_INL bool refractTravel(Vec3 d, Vec3 n, float ior, Vec3& out, float& etaRel, float& fresnel) {
+    float cosI = -dot(d, n);
+    Vec3 nn = n;
+    float eta = 1.0f / ior;  // entering (air → glass)
+    if (cosI < 0.0f) {       // leaving the medium
+        cosI = -cosI;
+        nn = -n;
+        eta = ior;
+    }
+    const float sin2T = eta * eta * (1.0f - cosI * cosI);
+    if (sin2T >= 1.0f) return false;
+    const float cosT = sqrtf(srMax(0.0f, 1.0f - sin2T));
+    out = normalize(d * eta + nn * (eta * cosI - cosT));
+    etaRel = eta;
+    fresnel = fresnelDielectric(cosI, ior);
+    return true;
 }
 
-struct SpecVertex {
-    Vec3 p{0.0f};
-    Vec3 n{0.0f, 1.0f, 0.0f};
-    Material mat{};
-    bool refractive = false;
+struct ChainState {
+    Vec3 exitP{0.0f};    // last surface point of the chain
+    Vec3 exitDir{0.0f};  // travel direction after the last refraction
+    Vec3 exitN{0.0f};
+    Vec3 throughput{1.0f};
+    int interfaces = 0;
+    bool valid = false;
 };
 
-// Sample a finite light point (area / sphere / point). Returns false for dome/distant.
-SR_INL bool sampleLightPoint(const SceneView& scene, Rng& rng, int& lightIndex, Vec3& y, Vec3& yN, Vec3& Le,
-                             float& pdfPos) {
-    float selectPdf = 0.0f;
-    lightIndex = sampleLightIndex(scene, rng.nextFloat(), selectPdf);
-    if (lightIndex < 0 || selectPdf <= 0.0f) return false;
+// Trace the refraction chain from p along dir. Stops when the current segment
+// carries no more caustic casters before `maxDist` along its line.
+template <typename Tracer>
+SR_INL ChainState traceChain(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 dir,
+                             int targetLight) {
+    ChainState st;
+    Vec3 o = offsetRayOrigin(p, n, dir);
+    Vec3 d = dir;
+    Vec3 T(1.0f);
+    Vec3 lastP = p;
+    Vec3 lastN = n;
+    for (int k = 0; k <= kMaxChain; ++k) {
+        RayHit hit;
+        if (!tracer.intersect(o, d, kFloatMax, hit)) {
+            st.exitP = lastP;
+            st.exitDir = d;
+            st.exitN = lastN;
+            st.throughput = T;
+            st.interfaces = k;
+            st.valid = k > 0;
+            return st;
+        }
+        SurfaceInteraction si;
+        if (!buildSurfaceInteraction(scene, hit, o, d, si)) return st;
+        if (si.lightIndex >= 0) {
+            // Reached light geometry — chain complete (only the target light counts).
+            if (si.lightIndex == targetLight || targetLight < 0) {
+                st.exitP = lastP;
+                st.exitDir = d;
+                st.exitN = lastN;
+                st.throughput = T;
+                st.interfaces = k;
+                st.valid = k > 0;
+            }
+            return st;
+        }
+        Material mat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
+                           ? scene.materials[si.materialIndex]
+                           : defaultMaterial();
+        mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+        if (!isCausticCaster(mat)) return st;  // opaque blocker → fail
+        if (k == kMaxChain) return st;
+
+        Vec3 dNext;
+        float etaRel = 1.0f, fr = 0.0f;
+        const LobeWeights lw = computeLobes(mat);
+        if (!refractTravel(d, si.ns, lw.eta, dNext, etaRel, fr)) return st;  // TIR → fail
+        // Radiance scaling 1/eta² per interface cancels over enter/exit pairs.
+        T = T * lw.transmissionTint * ((1.0f - fr) / srMax(1e-4f, etaRel * etaRel));
+        if (isBlack(T)) return st;
+        lastP = si.p;
+        lastN = si.ns;
+        o = offsetRayOrigin(si.p, si.ng, dNext);
+        d = dNext;
+    }
+    return st;
+}
+
+// Miss of the chain exit ray measured on the fixed plane through y with normal
+// `planeN` (the seed direction p→y). Stays smooth for strongly diverging lens
+// exits, which is what Newton needs to walk back onto the manifold.
+template <typename Tracer>
+SR_INL bool chainError(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 dir, Vec3 y,
+                       int targetLight, Vec3 planeN, Vec3 b1, Vec3 b2, float& e1, float& e2,
+                       ChainState* outChain) {
+    const ChainState st = traceChain(scene, tracer, p, n, dir, targetLight);
+    if (!st.valid) return false;
+    const float denom = dot(st.exitDir, planeN);
+    if (denom <= 1e-5f) return false;  // exit ray parallel to / away from the plane
+    const float t = dot(y - st.exitP, planeN) / denom;
+    if (t <= 1e-6f) return false;  // plane behind the exit point
+    const Vec3 hit = st.exitP + st.exitDir * t;
+    const Vec3 e = hit - y;
+    e1 = dot(e, b1);
+    e2 = dot(e, b2);
+    if (outChain) *outChain = st;
+    return true;
+}
+
+struct MneeResult {
+    Vec3 contribution{0.0f};
+    bool solved = false;
+};
+
+struct ManifoldSolution {
+    Vec3 omega{0.0f};
+    ChainState chain;
+    float detJ = 0.0f;
+    Vec3 planeN{0.0f};
+    bool solved = false;
+};
+
+// Newton solve for the launch direction connecting p → (specular chain) → y.
+template <typename Tracer>
+SR_INL ManifoldSolution solveManifold(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n,
+                                      int lightIndex, Vec3 y) {
+    ManifoldSolution sol;
+    Vec3 dir = y - p;
+    const float distPy = length(dir);
+    if (distPy < 1e-5f) return sol;
+    dir = dir / distPy;
+
+    const Frame errFrame(dir);
+    const Vec3 planeN = dir;
+    const Vec3 b1 = errFrame.t;
+    const Vec3 b2 = errFrame.b;
+
+    Vec3 omega = dir;
+    const float tol = srMax(1e-5f, 1e-4f * distPy);
+    float e1 = 0.0f, e2 = 0.0f;
+    ChainState chain;
+    float j11 = 0, j12 = 0, j21 = 0, j22 = 0;
+
+    if (!chainError(scene, tracer, p, n, omega, y, lightIndex, planeN, b1, b2, e1, e2, &chain)) return sol;
+    float err = sqrtf(e1 * e1 + e2 * e2);
+    bool converged = err < tol;
+
+    for (int iter = 0; iter < kNewtonIters && !converged; ++iter) {
+        const Frame dirFrame(omega);
+        const float h = 1e-3f;
+        float p1 = 0, p2 = 0, q1 = 0, q2 = 0;
+        const Vec3 omU = normalize(omega + dirFrame.t * h);
+        const Vec3 omV = normalize(omega + dirFrame.b * h);
+        if (!chainError(scene, tracer, p, n, omU, y, lightIndex, planeN, b1, b2, p1, p2, nullptr))
+            return sol;
+        if (!chainError(scene, tracer, p, n, omV, y, lightIndex, planeN, b1, b2, q1, q2, nullptr))
+            return sol;
+        j11 = (p1 - e1) / h;
+        j21 = (p2 - e2) / h;
+        j12 = (q1 - e1) / h;
+        j22 = (q2 - e2) / h;
+        const float det = j11 * j22 - j12 * j21;
+        if (fabsf(det) < 1e-12f) return sol;
+        float du = (j22 * e1 - j12 * e2) / det;
+        float dv = (-j21 * e1 + j11 * e2) / det;
+        const float stepLen = sqrtf(du * du + dv * dv);
+        if (stepLen > 0.5f) {
+            du *= 0.5f / stepLen;
+            dv *= 0.5f / stepLen;
+        }
+        bool accepted = false;
+        float scale = 1.0f;
+        for (int k = 0; k < kBacktrackSteps; ++k, scale *= 0.5f) {
+            const Vec3 cand = normalize(omega - (dirFrame.t * du + dirFrame.b * dv) * scale);
+            if (dot(cand, dir) < -0.1f) continue;
+            float c1 = 0.0f, c2 = 0.0f;
+            ChainState candChain;
+            if (!chainError(scene, tracer, p, n, cand, y, lightIndex, planeN, b1, b2, c1, c2, &candChain))
+                continue;
+            const float cErr = sqrtf(c1 * c1 + c2 * c2);
+            if (cErr < err) {
+                omega = cand;
+                e1 = c1;
+                e2 = c2;
+                err = cErr;
+                chain = candChain;
+                accepted = true;
+                break;
+            }
+        }
+        if (!accepted) return sol;  // stuck — no manifold in reach
+        converged = err < tol;
+    }
+    if (!converged) return sol;
+
+    // Final Jacobian at the solution (generalized geometry term). Central
+    // differences with a small step: near caustic folds the mapping curvature is
+    // large and forward differences overestimate |det J| several-fold, dimming
+    // the caustic.
+    {
+        const Frame dirFrame(omega);
+        const float h = 2e-4f;
+        float a1 = 0, a2 = 0, c1 = 0, c2 = 0;
+        const Vec3 omUp = normalize(omega + dirFrame.t * h);
+        const Vec3 omUm = normalize(omega - dirFrame.t * h);
+        const Vec3 omVp = normalize(omega + dirFrame.b * h);
+        const Vec3 omVm = normalize(omega - dirFrame.b * h);
+        if (!chainError(scene, tracer, p, n, omUp, y, lightIndex, planeN, b1, b2, a1, a2, nullptr))
+            return sol;
+        if (!chainError(scene, tracer, p, n, omUm, y, lightIndex, planeN, b1, b2, c1, c2, nullptr))
+            return sol;
+        j11 = (a1 - c1) / (2.0f * h);
+        j21 = (a2 - c2) / (2.0f * h);
+        if (!chainError(scene, tracer, p, n, omVp, y, lightIndex, planeN, b1, b2, a1, a2, nullptr))
+            return sol;
+        if (!chainError(scene, tracer, p, n, omVm, y, lightIndex, planeN, b1, b2, c1, c2, nullptr))
+            return sol;
+        j12 = (a1 - c1) / (2.0f * h);
+        j22 = (a2 - c2) / (2.0f * h);
+    }
+    const float detJ = fabsf(j11 * j22 - j12 * j21);
+    if (!(detJ > 1e-10f) || !srIsFinite(detJ)) return sol;
+
+    sol.omega = omega;
+    sol.chain = chain;
+    sol.detJ = detJ;
+    sol.planeN = planeN;
+    sol.solved = true;
+    return sol;
+}
+
+// Solve the manifold connection p → (chain) → y. Returns the full NEE-style
+// contribution (BSDF at p included, light radiance included, pdfs divided out).
+template <typename Tracer>
+SR_INL MneeResult manifoldConnect(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 wo,
+                                  const Material& shadeMat, int lightIndex, Vec3 y, Vec3 yN, Vec3 Le,
+                                  float pdfArea, float selectPdf) {
+    MneeResult res;
+    const ManifoldSolution sol = solveManifold(scene, tracer, p, n, lightIndex, y);
+    if (!sol.solved) return res;
+    const ChainState& chain = sol.chain;
+
+    // Verify the final segment reaches y unoccluded.
+    {
+        const Vec3 toY = y - chain.exitP;
+        const float d = length(toY);
+        if (d < 1e-5f) return res;
+        const Vec3 wd = toY / d;
+        const Vec3 o = offsetRayOrigin(chain.exitP, chain.exitN, wd);
+        RayHit hit;
+        if (tracer.intersect(o, wd, d * (1.0f - 1e-3f), hit)) {
+            SurfaceInteraction si;
+            if (!buildSurfaceInteraction(scene, hit, o, wd, si) || si.lightIndex != lightIndex) return res;
+        }
+    }
+
+    const Frame frame(n);
+    const BsdfEval be = bsdfEvalLocal(shadeMat, frame.toLocal(wo), frame.toLocal(sol.omega));
+    if (be.pdf <= 0.0f || isBlack(be.f)) return res;
+    const float cosP = fabsf(dot(n, sol.omega));
+
+    // Plane → light-surface area conversion (the error plane has normal planeN).
+    // Point lights integrate radiant intensity directly (no cosine).
+    float planeToLight = 1.0f;
+    const LightData& l = scene.lights[lightIndex];
+    if (l.type != kLightPoint) {
+        const float cEmit = dot(yN, -chain.exitDir);
+        const float emitOk = (l.type != kLightSphere && l.twoSided) ? fabsf(cEmit) : srMax(0.0f, cEmit);
+        if (emitOk <= 1e-6f) return res;  // light does not emit toward the chain exit
+        planeToLight = fabsf(dot(yN, sol.planeN));
+        if (planeToLight <= 1e-6f) return res;
+    }
+
+    // dω/dA_y = |dot(yN, planeN)| / |det J|  (straight line: |det J| = dist² → 1/r²).
+    const float geom = planeToLight / sol.detJ;
+    Vec3 c = be.f * cosP * chain.throughput * Le * geom / srMax(1e-12f, pdfArea * selectPdf);
+    if (!isFinite(c)) return res;
+    res.solved = true;
+    res.contribution = vmax(Vec3(0.0f), c);
+    return res;
+}
+
+// Sample a point on a finite light in area measure.
+SR_INL bool sampleFiniteLightPoint(const SceneView& scene, int lightIndex, Rng& rng, Vec3& y, Vec3& yN,
+                                   Vec3& Le, float& pdfArea) {
     const LightData& l = scene.lights[lightIndex];
     switch (l.type) {
-        case kLightRect:
-        case kLightDisk: {
-            Vec3 pLocal;
-            float area = 0.0f;
-            if (l.type == kLightRect) {
-                pLocal = Vec3((rng.nextFloat() - 0.5f) * l.width, (rng.nextFloat() - 0.5f) * l.height, 0.0f);
-                area = rectLightArea(l);
-            } else {
-                const Vec2 d = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
-                pLocal = Vec3(d.x * l.radius, d.y * l.radius, 0.0f);
-                area = diskLightArea(l);
-            }
+        case kLightRect: {
+            const float area = rectLightArea(l);
             if (area <= 1e-12f) return false;
-            y = transformPoint(l.xform, pLocal);
+            y = transformPoint(l.xform, Vec3((rng.nextFloat() - 0.5f) * l.width,
+                                             (rng.nextFloat() - 0.5f) * l.height, 0.0f));
             yN = areaLightNormal(l);
             Le = lightRadiance(l);
-            pdfPos = selectPdf / area;
+            pdfArea = 1.0f / area;
+            return true;
+        }
+        case kLightDisk: {
+            const float area = diskLightArea(l);
+            if (area <= 1e-12f) return false;
+            const Vec2 d = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
+            y = transformPoint(l.xform, Vec3(d.x * l.radius, d.y * l.radius, 0.0f));
+            yN = areaLightNormal(l);
+            Le = lightRadiance(l);
+            pdfArea = 1.0f / area;
             return true;
         }
         case kLightSphere: {
             const Vec3 center = lightOrigin(l);
             const float radius = srMax(1e-5f, sphereLightRadius(l));
-            const float area = 4.0f * kPi * radius * radius;
             yN = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
             y = center + yN * radius;
             Le = lightRadiance(l);
-            pdfPos = selectPdf / area;
+            pdfArea = 1.0f / (4.0f * kPi * radius * radius);
             return true;
         }
         case kLightPoint: {
             y = lightOrigin(l);
             yN = Vec3(0.0f, 1.0f, 0.0f);
-            Le = l.emittedRadiance();
-            pdfPos = selectPdf;
+            Le = l.emittedRadiance();  // radiant intensity (W/sr)
+            pdfArea = 1.0f;
             return true;
         }
         default:
@@ -96,251 +366,30 @@ SR_INL bool sampleLightPoint(const SceneView& scene, Rng& rng, int& lightIndex, 
     }
 }
 
-// Constraint: generalized half-vector should align with surface normal (→ 0 when on manifold).
-SR_INL Vec3 halfVectorConstraint(Vec3 p, Vec3 y, Vec3 x, Vec3 n, const Material& mat, bool refractive) {
-    const Vec3 wi = normalize(p - x);
-    const Vec3 wo = normalize(y - x);
-    const LobeWeights lw = computeLobes(mat);
-    if (!refractive) {
-        Vec3 h = wi + wo;
-        if (lengthSquared(h) < 1e-12f) return Vec3(1.0f, 0.0f, 0.0f);
-        h = normalize(h);
-        if (dot(h, n) < 0.0f) h = -h;
-        return cross(h, n);
-    }
-    const float sideP = dot(n, wi);
-    const float sideY = dot(n, wo);
-    if (sideP * sideY > 0.0f) {
-        Vec3 h = wi + wo;
-        if (lengthSquared(h) < 1e-12f) return Vec3(1.0f, 0.0f, 0.0f);
-        h = normalize(h);
-        if (dot(h, n) < 0.0f) h = -h;
-        return cross(h, n);
-    }
-    const float eta = sideP > 0.0f ? lw.eta : 1.0f / lw.eta;
-    Vec3 h = normalize(wi + wo * eta);
-    if (dot(h, n) < 0.0f) h = -h;
-    return cross(h, n);
-}
-
-template <typename Tracer>
-SR_INL bool reprojectOntoSpecular(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 xGuess, Vec3 nGuess,
-                                  SpecVertex& sv) {
-    RayHit hit;
-    SurfaceInteraction si;
-    // Prefer a short probe along the guessed normal onto the surface.
-    const Vec3 probe = xGuess + nGuess * 0.05f;
-    const Vec3 probeDir = normalize(xGuess - probe);
-    if (tracer.intersect(probe, probeDir, 0.25f, hit) &&
-        buildSurfaceInteraction(scene, hit, probe, probeDir, si)) {
-        // ok
-    } else {
-        const Vec3 d = normalize(xGuess - p);
-        const Vec3 o = offsetRayOrigin(p, nGuess, d);
-        if (!tracer.intersect(o, d, kFloatMax, hit)) return false;
-        if (!buildSurfaceInteraction(scene, hit, o, d, si)) return false;
-    }
-    Material mat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
-                       ? scene.materials[si.materialIndex]
-                       : defaultMaterial();
-    mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
-    if (!isSpecularCausticMaterial(mat)) return false;
-    sv.p = si.p;
-    sv.n = si.ns;
-    sv.mat = mat;
-    sv.refractive = computeLobes(mat).transmission > 0.5f;
-    return true;
-}
-
-template <typename Tracer>
-SR_INL bool solveOneBounce(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 y, SpecVertex& sv) {
-    Vec3 x = sv.p;
-    Vec3 n = sv.n;
-    for (int iter = 0; iter < kNewtonIters; ++iter) {
-        const Vec3 C = halfVectorConstraint(p, y, x, n, sv.mat, sv.refractive);
-        if (length(C) < 1e-4f) {
-            sv.p = x;
-            sv.n = n;
-            return true;
-        }
-        const Frame f(n);
-        const Vec3 t1 = f.t;
-        const Vec3 t2 = f.b;
-        const float h = 5e-4f * srMax(1.0f, length(y - p) * 0.01f);
-        const Vec3 Cp = halfVectorConstraint(p, y, x + t1 * h, n, sv.mat, sv.refractive);
-        const Vec3 Cq = halfVectorConstraint(p, y, x + t2 * h, n, sv.mat, sv.refractive);
-        const float c1 = dot(C, t1);
-        const float c2 = dot(C, t2);
-        const float j11 = dot(Cp - C, t1) / h;
-        const float j12 = dot(Cq - C, t1) / h;
-        const float j21 = dot(Cp - C, t2) / h;
-        const float j22 = dot(Cq - C, t2) / h;
-        const float det = j11 * j22 - j12 * j21;
-        float da = 0.0f, db = 0.0f;
-        if (fabsf(det) > 1e-10f) {
-            da = (j22 * c1 - j12 * c2) / det;
-            db = (-j21 * c1 + j11 * c2) / det;
-        } else {
-            da = c1 * 0.5f;
-            db = c2 * 0.5f;
-        }
-        da = clampf(da, -0.05f, 0.05f);
-        db = clampf(db, -0.05f, 0.05f);
-        SpecVertex projected = sv;
-        if (!reprojectOntoSpecular(scene, tracer, p, x - t1 * da - t2 * db, n, projected)) return false;
-        x = projected.p;
-        n = projected.n;
-        sv = projected;
-    }
-    if (length(halfVectorConstraint(p, y, x, n, sv.mat, sv.refractive)) < 2.5e-3f) {
-        sv.p = x;
-        sv.n = n;
-        return true;
-    }
-    return false;
-}
-
-template <typename Tracer>
-SR_INL bool clearSegment(const SceneView& scene, const Tracer& tracer, Vec3 a, Vec3 na, Vec3 b) {
-    Vec3 d = b - a;
-    const float dist = length(d);
-    if (dist < 1e-5f) return false;
-    d = d / dist;
-    const Vec3 o = offsetRayOrigin(a, na, d);
-    RayHit hit;
-    if (!tracer.intersect(o, d, dist * (1.0f - 1e-3f), hit)) return true;
-    SurfaceInteraction si;
-    if (!buildSurfaceInteraction(scene, hit, o, d, si)) return false;
-    return si.lightIndex >= 0;
-}
-
-// MNEE from a mostly-diffuse shading point through one specular interface to a light point.
-template <typename Tracer>
-SR_INL Vec3 manifoldNeeOnce(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 wo,
-                            const Material& shadingMat, Rng& rng) {
-    // Only useful on surfaces that can receive a caustic (have a non-delta lobe).
-    const LobeWeights shadeLw = computeLobes(shadingMat);
-    if (shadeLw.diffuse < 1e-4f && shadeLw.delta) return Vec3(0.0f);
-
-    int lightIndex = -1;
-    Vec3 y, yN, Le;
-    float pdfPos = 0.0f;
-    if (!sampleLightPoint(scene, rng, lightIndex, y, yN, Le, pdfPos) || pdfPos <= 0.0f) return Vec3(0.0f);
-
-    Vec3 dir = y - p;
-    const float distPy = length(dir);
-    if (distPy < 1e-4f) return Vec3(0.0f);
-    dir = dir / distPy;
-
-    const Vec3 o0 = offsetRayOrigin(p, n, dir);
-    RayHit hit;
-    if (!tracer.intersect(o0, dir, distPy * (1.0f - 1e-3f), hit)) return Vec3(0.0f);  // clear → regular NEE
-    SurfaceInteraction si;
-    if (!buildSurfaceInteraction(scene, hit, o0, dir, si)) return Vec3(0.0f);
-    if (si.lightIndex >= 0) return Vec3(0.0f);
-
-    Material mat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
-                       ? scene.materials[si.materialIndex]
-                       : defaultMaterial();
-    mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
-    if (!isSpecularCausticMaterial(mat)) return Vec3(0.0f);
-
-    SpecVertex sv;
-    sv.p = si.p;
-    sv.n = si.ns;
-    sv.mat = mat;
-    sv.refractive = computeLobes(mat).transmission > 0.5f;
-    if (sv.refractive && !allowsRefractiveCaustics(mat)) return Vec3(0.0f);
-    if (!sv.refractive && !allowsReflectiveCaustics(mat)) return Vec3(0.0f);
-
-    if (!solveOneBounce(scene, tracer, p, y, sv)) return Vec3(0.0f);
-    if (!clearSegment(scene, tracer, p, n, sv.p)) return Vec3(0.0f);
-    if (length(halfVectorConstraint(p, y, sv.p, sv.n, sv.mat, sv.refractive)) > 2.5e-3f) return Vec3(0.0f);
-
-    const Vec3 wToLight = normalize(y - sv.p);
-    const Vec3 wToSpec = normalize(sv.p - p);
-    const LightData& l = scene.lights[lightIndex];
-    if (l.shadowEnable) {
-        const Vec3 ox = offsetRayOrigin(sv.p, sv.n, wToLight);
-        const float dist = length(y - sv.p);
-        RayHit h2;
-        if (tracer.intersect(ox, wToLight, dist * (1.0f - 1e-3f), h2)) {
-            SurfaceInteraction si2;
-            if (!buildSurfaceInteraction(scene, h2, ox, wToLight, si2) || si2.lightIndex != lightIndex)
-                return Vec3(0.0f);
-        }
-    }
-    if (l.type != kLightPoint && l.type != kLightSphere) {
-        if (dot(yN, -wToLight) <= 0.0f && !l.twoSided) return Vec3(0.0f);
-    }
-
-    const Frame frame(n);
-    const BsdfEval be = bsdfEvalLocal(shadingMat, frame.toLocal(wo), frame.toLocal(wToSpec));
-    if (be.pdf <= 0.0f || isBlack(be.f)) return Vec3(0.0f);
-
-    const LobeWeights lw = computeLobes(sv.mat);
-    const Vec3 wToP = normalize(p - sv.p);
-    Vec3 fs(0.0f);
-    if (sv.refractive) {
-        const float eta = dot(sv.n, wToP) > 0.0f ? lw.eta : 1.0f / lw.eta;
-        const float fr = fresnelDielectric(fabsf(dot(sv.n, wToP)), lw.eta);
-        fs = lw.transmissionTint * ((1.0f - fr) / srMax(1e-4f, eta * eta));
-    } else {
-        fs = fresnelSchlick(lw.f0, fabsf(dot(sv.n, wToP)));
-    }
-    if (isBlack(fs)) return Vec3(0.0f);
-
-    const float cosP = fabsf(dot(n, wToSpec));
-    const float dist2Px = lengthSquared(sv.p - p);
-    if (dist2Px < 1e-12f) return Vec3(0.0f);
-
-    Vec3 lightContrib = Le;
-    float geomLight = 1.0f;
-    if (l.type == kLightPoint) {
-        const float dist2 = lengthSquared(y - sv.p);
-        lightContrib = Le / srMax(1e-8f, dist2);
-        geomLight = fabsf(dot(sv.n, wToLight));
-    } else {
-        const float G2 = geometryTerm(sv.p, sv.n, y, yN);
-        if (G2 <= 0.0f) return Vec3(0.0f);
-        geomLight = G2;
-    }
-
-    // f_p * cos / |x-p|^2 * |cos at x toward p| * fs * light
-    const float cosX = fabsf(dot(sv.n, -wToSpec));
-    Vec3 result =
-        be.f * (cosP * cosX / dist2Px) * fs * lightContrib * geomLight / srMax(1e-8f, pdfPos);
-    // Conservative weight vs unidirectional strategies.
-    result = result * 0.5f;
-    if (!isFinite(result)) return Vec3(0.0f);
-    return vmax(Vec3(0.0f), result);
-}
-
-template <typename Tracer>
-SR_INL Vec3 manifoldNee(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 wo,
-                        const Material& shadingMat, Rng& rng) {
-    const int nSamples = srMax(1, scene.settings.lightSamples);
-    Vec3 sum(0.0f);
-    for (int i = 0; i < nSamples; ++i)
-        sum += manifoldNeeOnce(scene, tracer, p, n, wo, shadingMat, rng);
-    return sum * (1.0f / float(nSamples));
-}
-
 }  // namespace mnee
 
-// Path tracer with MNEE caustic connections at non-specular vertices.
+// ---------------------------------------------------------------------------
+// Path tracer with MNEE refractive caustics (dispatched by the Embree backend
+// when Integrator = Path Tracer and render-settings caustics are enabled).
+// ---------------------------------------------------------------------------
 template <typename Tracer, typename Guiding>
-SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                              Rng& rng, Guiding* guiding) {
+SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
+                                Rng& rng, Guiding* guiding) {
     Vec3 radiance(0.0f);
     Vec3 throughput(1.0f);
     float bsdfPdf = 0.0f;
     bool specularBounce = true;
-    bool suppressCausticLight = false;
+    // True while the path suffix after the last non-specular vertex is a pure
+    // delta-transmissive chain — the family MNEE covers for finite lights.
+    bool sawNonSpecular = false;
+    bool mneeFamily = false;
+    Vec3 anchorP(0.0f);  // last non-specular surface vertex (MNEE launch point)
+    Vec3 anchorN(0.0f, 1.0f, 0.0f);
+    Vec3 anchorDir(0.0f, 1.0f, 0.0f);  // direction the path left the anchor with
     int depth = 0;
     int passThrough = 0;
     const RenderSettingsData& settings = scene.settings;
-    const int maxDepth = settings.integrator == kIntegratorDirectLighting ? 1 : srMax(1, settings.maxDepth);
+    const int maxDepth = srMax(1, settings.maxDepth);
 
     while (depth <= maxDepth) {
         RayHit hit;
@@ -348,28 +397,26 @@ SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3
 
         if (!didHit) {
             if (scene.domeLightIndex >= 0) {
-                if (!(suppressCausticLight && !specularBounce)) {
-                    const LightData& dome = scene.lights[scene.domeLightIndex];
-                    const bool primary = depth == 0 && passThrough == 0;
-                    if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
-                        Vec3 envL = domeRadiance(scene, dome, direction);
-                        if (!isBlack(envL)) {
-                            float weight = 1.0f;
-                            if (!specularBounce) {
-                                const float lp = lightPdfDirection(scene, scene.domeLightIndex, origin, direction,
-                                                                   origin, direction) *
-                                                 lightSelectionPdfIndex(scene, scene.domeLightIndex);
-                                weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
-                            }
-                            Vec3 contrib = throughput * envL * weight;
-                            if (depth > 0 && !specularBounce)
-                                contrib = clampContribution(contrib, settings.clampIndirect);
-                            radiance += contrib;
-#if !defined(__CUDACC__)
-                            if (guiding && guiding->active())
-                                guiding->recordBackground(origin, direction, envL, weight);
-#endif
+                const LightData& dome = scene.lights[scene.domeLightIndex];
+                const bool primary = depth == 0 && passThrough == 0;
+                if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
+                    Vec3 envL = domeRadiance(scene, dome, direction);
+                    if (!isBlack(envL)) {
+                        float weight = 1.0f;
+                        if (!specularBounce) {
+                            const float lp = lightPdfDirection(scene, scene.domeLightIndex, origin, direction,
+                                                               origin, direction) *
+                                             lightSelectionPdfIndex(scene, scene.domeLightIndex);
+                            weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
+                        Vec3 contrib = throughput * envL * weight;
+                        if (depth > 0 && !specularBounce)
+                            contrib = clampContribution(contrib, settings.clampIndirect);
+                        radiance += contrib;
+#if !defined(__CUDACC__)
+                        if (guiding && guiding->active())
+                            guiding->recordBackground(origin, direction, envL, weight);
+#endif
                     }
                 }
             }
@@ -388,8 +435,25 @@ SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3
         }
 
         if (si.lightIndex >= 0) {
-            if (suppressCausticLight && !specularBounce) break;
+            // MNEE covers diffuse→transmissive-chain→finite-light paths — but only
+            // those its Newton solver can actually find. Suppress a BSDF-found path
+            // ONLY when the solver converges for the same anchor→light-point pair;
+            // everything the solver misses stays with unbiased BSDF sampling, so
+            // total energy is preserved regardless of the solver's success rate.
             const LightData& light = scene.lights[si.lightIndex];
+            const bool finiteLight = light.type == kLightRect || light.type == kLightDisk ||
+                                     light.type == kLightSphere || light.type == kLightPoint;
+            if (mneeFamily && finiteLight && settings.caustics != 0) {
+                const mnee::ManifoldSolution sol =
+                    mnee::solveManifold(scene, tracer, anchorP, anchorN, si.lightIndex, si.p);
+                // Glass objects have multiple manifold branches (direct, rim, TIR…).
+                // Suppress only when the solver landed on THIS branch — i.e. its
+                // launch direction matches the direction the path actually took.
+                if (sol.solved && dot(sol.omega, anchorDir) > 0.99996f /* ≈0.5° */)
+                    break;  // MNEE-covered — suppress the noisy BSDF copy
+            }
+            if (mneeFamily && finiteLight && settings.caustics == 0) break;
+
             const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
             Vec3 emitted = areaLightEmission(scene, light, direction, lightN);
             if (!isBlack(emitted)) {
@@ -422,14 +486,12 @@ SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3
             si.ng = -si.ng;
         }
 
-        // Emissive surfaces.
         if (mat.emissionStrength > 0.0f && !isBlack(mat.emissionColor)) {
             const bool frontFacing = dot(si.ns, -direction) > 0.0f;
             if (frontFacing || mat.doubleSided)
                 radiance += throughput * mat.emissionColor * mat.emissionStrength;
         }
 
-        // Stochastic opacity / cutout.
         if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
             origin = offsetRayOrigin(si.p, si.ng, direction);
             ++passThrough;
@@ -437,20 +499,10 @@ SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3
             continue;
         }
 
-        if (settings.integrator == kIntegratorAmbientOcclusion) {
-            const Frame frame(dot(si.ns, -direction) < 0.0f ? -si.ns : si.ns);
-            const Vec3 wi = frame.toWorld(sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat()));
-            const Vec3 aoOrigin = offsetRayOrigin(si.p, si.ng, wi);
-            const float dist = settings.aoDistance > 0.0f ? settings.aoDistance : kFloatMax;
-            const float visibility = tracer.occluded(aoOrigin, wi, dist) ? 0.0f : 1.0f;
-            radiance += throughput * Vec3(visibility);
-            break;
-        }
-
         if (depth >= maxDepth) break;
 
-        const Frame frame(si.ns);
         const Vec3 wo = -direction;
+        const Frame frame(si.ns);
         const LobeWeights lw = computeLobes(mat);
 
 #if !defined(__CUDACC__)
@@ -464,27 +516,132 @@ SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3
         (void)guiding;
 #endif
 
-        // Regular NEE (opaque shadows — glass blocks; caustics via MNEE / BSDF).
-        if (!(suppressCausticLight && !specularBounce) && lw.diffuse + (lw.delta ? 0.0f : lw.specular) > 1e-5f) {
-            const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, guiding);
+        // --- NEE with lazy MNEE upgrade -------------------------------------
+        const bool connectable = lw.diffuse > 1e-4f || !lw.delta;
+        if (connectable) {
+            const int nLightSamples = srMax(1, settings.lightSamples);
+            Vec3 neeSum(0.0f);
+            for (int ls = 0; ls < nLightSamples; ++ls) {
+                float selectPdf = 0.0f;
+                const int li = sampleLightIndex(scene, rng.nextFloat(), selectPdf);
+                if (li < 0 || selectPdf <= 0.0f) continue;
+                const LightData& l = scene.lights[li];
+
+                if (l.type == kLightDome || l.type == kLightDistant) {
+                    LightSample lsam;
+                    if (!sampleLight(scene, li, si.p, rng.nextFloat(), rng.nextFloat(), lsam)) continue;
+                    if (lsam.pdf <= 0.0f || isBlack(lsam.radiance)) continue;
+                    float visibility = 1.0f;
+                    if (l.shadowEnable) {
+                        const Vec3 o = offsetRayOrigin(si.p, si.ng, lsam.wi);
+                        visibility = shadowVisibility(scene, tracer, o, lsam.wi, 1.0e8f);
+                    }
+                    if (visibility <= 1e-5f) continue;
+                    const Vec3 wiL = frame.toLocal(lsam.wi);
+                    const BsdfEval be = bsdfEvalLocal(mat, frame.toLocal(wo), wiL);
+                    if (be.pdf <= 0.0f || isBlack(be.f)) continue;
+                    float scatterPdf = be.pdf;
+#if !defined(__CUDACC__)
+                    if (guideReady) {
+                        const float pg = guiding->guideProbability();
+                        scatterPdf = pg * guiding->pdf(lsam.wi) + (1.0f - pg) * be.pdf;
+                    }
+#endif
+                    const float lightPdf = lsam.pdf * selectPdf;
+                    const float w = lsam.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
+                    neeSum += lsam.radiance * be.f * (fabsf(wiL.z) * w * visibility / lightPdf);
+                    continue;
+                }
+
+                // Finite light: sample an area point, one shadow segment first.
+                Vec3 y, yN, Le;
+                float pdfArea = 0.0f;
+                if (!mnee::sampleFiniteLightPoint(scene, li, rng, y, yN, Le, pdfArea)) continue;
+                if (pdfArea <= 0.0f || isBlack(Le)) continue;
+
+                Vec3 toY = y - si.p;
+                const float dist2 = lengthSquared(toY);
+                if (dist2 < 1e-10f) continue;
+                const float dist = sqrtf(dist2);
+                const Vec3 wi = toY / dist;
+
+                // Peek along the shadow segment: clear, glass, or blocked?
+                bool clearPath = true;
+                bool glassPath = false;
+                if (l.shadowEnable) {
+                    const Vec3 o = offsetRayOrigin(si.p, si.ng, wi);
+                    RayHit sh;
+                    if (tracer.intersect(o, wi, dist * (1.0f - 1e-3f), sh)) {
+                        SurfaceInteraction bsi;
+                        clearPath = false;
+                        if (buildSurfaceInteraction(scene, sh, o, wi, bsi)) {
+                            if (bsi.lightIndex == li) {
+                                clearPath = true;
+                            } else if (bsi.lightIndex < 0 && settings.caustics != 0) {
+                                Material bmat = bsi.materialIndex >= 0 && bsi.materialIndex < scene.materialCount
+                                                    ? scene.materials[bsi.materialIndex]
+                                                    : defaultMaterial();
+                                bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject,
+                                                                bsi.nObject, bsi.uvFilterWidth);
+                                glassPath = mnee::isCausticCaster(bmat);
+                            }
+                        }
+                    }
+                }
+
+                if (clearPath) {
+                    Vec3 lightN = yN;
+                    float cosL = dot(lightN, -wi);
+                    if (l.type == kLightSphere) {
+                        // Back-facing sphere samples are self-occluded — reject.
+                        if (cosL <= 1e-6f) continue;
+                    } else if (l.type != kLightPoint) {
+                        if (cosL <= 0.0f && !l.twoSided) continue;
+                        cosL = fabsf(cosL);
+                        if (cosL <= 1e-6f) continue;
+                    }
+                    const Vec3 wiLocal = frame.toLocal(wi);
+                    const BsdfEval be = bsdfEvalLocal(mat, frame.toLocal(wo), wiLocal);
+                    if (be.pdf <= 0.0f || isBlack(be.f)) continue;
+                    float scatterPdf = be.pdf;
+#if !defined(__CUDACC__)
+                    if (guideReady) {
+                        const float pg = guiding->guideProbability();
+                        scatterPdf = pg * guiding->pdf(wi) + (1.0f - pg) * be.pdf;
+                    }
+#endif
+                    if (l.type == kLightPoint) {
+                        neeSum += Le * be.f * (fabsf(wiLocal.z) / (dist2 * selectPdf));
+                    } else {
+                        const float pdfSa = pdfArea * dist2 / cosL;  // area → solid angle
+                        const float lightPdf = pdfSa * selectPdf;
+                        const float w = powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
+                        neeSum += Le * be.f * (fabsf(wiLocal.z) * w / lightPdf);
+                    }
+                } else if (glassPath) {
+                    // MNEE: manifold connection through the refraction chain (weight 1 —
+                    // the matching BSDF-sampled path family is suppressed at light hits).
+                    const mnee::MneeResult mr = mnee::manifoldConnect(
+                        scene, tracer, si.p, si.ns, wo, mat, li, y, yN, Le, pdfArea, selectPdf);
+                    if (mr.solved && !isBlack(mr.contribution)) {
+                        Vec3 c = mr.contribution;
+                        c = clampContribution(c, settings.clampIndirect > 0.0f
+                                                     ? settings.clampIndirect * 4.0f
+                                                     : 0.0f);  // caustics keep more energy
+                        neeSum += c;
+                    }
+                }
+            }
+            const Vec3 nee = neeSum * (1.0f / float(srMax(1, settings.lightSamples)));
             Vec3 contrib = throughput * nee;
             if (depth > 0 && !specularBounce) contrib = clampContribution(contrib, settings.clampIndirect);
             radiance += contrib;
 #if !defined(__CUDACC__)
             if (guiding && guiding->active()) guiding->addScattered(nee);
 #endif
-
-            // MNEE: manifold connection through specular blockers between this point and lights.
-            if (!lw.delta || lw.diffuse > 1e-4f) {
-                Vec3 mneeL = mnee::manifoldNee(scene, tracer, si.p, si.ns, wo, mat, rng);
-                mneeL = clampContribution(mneeL, settings.clampIndirect > 0 ? settings.clampIndirect : 50.0f);
-                radiance += throughput * mneeL;
-#if !defined(__CUDACC__)
-                if (guiding && guiding->active()) guiding->addScattered(mneeL);
-#endif
-            }
         }
 
+        // --- BSDF continuation (guided mixture) ------------------------------
         const Vec3 woLocal = frame.toLocal(wo);
         BsdfSample bs;
         bool gotSample = false;
@@ -516,7 +673,7 @@ SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3
             bs = bsdfSampleLocal(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
                                  rng.nextFloat());
 #if !defined(__CUDACC__)
-            if (bs.pdf > 0.0f && guideReady) {
+            if (bs.pdf > 0.0f && guideReady && !bs.specular) {
                 const float pg = guiding->guideProbability();
                 const float gPdf = guiding->pdf(normalize(frame.toWorld(bs.wi)));
                 const float mixPdf = pg * gPdf + (1.0f - pg) * bs.pdf;
@@ -529,12 +686,25 @@ SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3
         }
         if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
 
-        // Caustic gates on specular continuation.
-        if (bs.transmitted && mat.refractiveCaustics == 0) {
-            suppressCausticLight = true;
-        } else if (bs.specular && !bs.transmitted && mat.reflectiveCaustics == 0) {
-            suppressCausticLight = true;
+        // Track the MNEE-covered family: non-specular vertex → pure delta
+        // transmissive chain afterwards.
+        const bool deltaTransmit = bs.specular && bs.transmitted && mnee::isCausticCaster(mat);
+        const bool deltaReflectInsideChain = bs.specular && !bs.transmitted && mnee::isCausticCaster(mat);
+        if (!bs.specular) {
+            sawNonSpecular = true;
+            mneeFamily = false;
+            anchorP = si.p;
+            anchorN = si.ns;
+            anchorDir = normalize(frame.toWorld(bs.wi));
+        } else if (sawNonSpecular && settings.caustics != 0) {
+            if (deltaTransmit) {
+                mneeFamily = true;
+            } else if (!deltaReflectInsideChain) {
+                mneeFamily = false;  // reflective / rough specular → not covered by MNEE
+            }
         }
+        // Caustics disabled: suppress all diffuse→specular→light transport.
+        if (settings.caustics == 0 && bs.specular && sawNonSpecular) mneeFamily = true;
 
         Vec3 weight = bs.weight;
         if (settings.clampIndirect > 0.0f) {
@@ -572,9 +742,9 @@ SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3
 }
 
 template <typename Tracer>
-SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                              Rng& rng) {
-    return traceRadianceMnee<Tracer, NullGuiding>(scene, tracer, origin, direction, rng, nullptr);
+SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
+                                Rng& rng) {
+    return traceRadiancePtMnee<Tracer, NullGuiding>(scene, tracer, origin, direction, rng, nullptr);
 }
 
 }  // namespace sol

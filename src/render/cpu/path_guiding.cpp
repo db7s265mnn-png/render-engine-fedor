@@ -3,11 +3,11 @@
 #if SOLSTICE_HAVE_OPENPGL
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
-#include <mutex>
 #include <string>
 #include <thread>
-#include <unordered_map>
+#include <vector>
 
 #include <openpgl/cpp/OpenPGL.h>
 
@@ -63,6 +63,7 @@ void PathGuiding::ThreadState::endPath() {
 bool PathGuiding::ThreadState::prepare(Vec3 p, Vec3 n, Rng& rng) {
     prepared_ = false;
     if (!active_ || !data_ || !data_->field || !data_->surfaceDist) return false;
+    if (guideProb_ <= 0.0f) return false;  // field not trained yet
     float u = rng.nextFloat();
     if (!data_->surfaceDist->Init(data_->field, toPglPoint(p), u)) return false;
     if (data_->surfaceDist->SupportsApplyCosineProduct())
@@ -174,8 +175,8 @@ struct PathGuiding::Impl {
     std::unique_ptr<openpgl::cpp::Device> device;
     std::unique_ptr<openpgl::cpp::Field> field;
     std::unique_ptr<openpgl::cpp::SampleStorage> sampleStorage;
-    std::mutex threadMutex;
-    std::unordered_map<std::thread::id, std::unique_ptr<ThreadState>> threads;
+    std::vector<std::unique_ptr<ThreadState>> threads;
+    std::atomic<int> trainedIterations{0};
     bool ready = false;
 };
 
@@ -186,10 +187,8 @@ bool PathGuiding::available() const { return impl_ && impl_->ready; }
 
 void PathGuiding::reset(const Bounds3& worldBounds, int threadCount) {
     impl_->ready = false;
-    {
-        std::lock_guard<std::mutex> lock(impl_->threadMutex);
-        impl_->threads.clear();
-    }
+    impl_->threads.clear();
+    impl_->trainedIterations.store(0);
     impl_->field.reset();
     impl_->sampleStorage.reset();
     impl_->device.reset();
@@ -210,13 +209,24 @@ void PathGuiding::reset(const Bounds3& worldBounds, int threadCount) {
                 worldBounds.hi.x + pad.x, worldBounds.hi.y + pad.y, worldBounds.hi.z + pad.z));
         }
         impl_->sampleStorage = std::make_unique<openpgl::cpp::SampleStorage>();
+        // Preallocate per-pool-thread states — thread() must be lock-free (called per pixel).
+        impl_->threads.reserve(size_t(n));
+        for (int i = 0; i < n; ++i) {
+            auto ts = std::make_unique<ThreadState>();
+            ts->data_->field = impl_->field.get();
+            ts->data_->sampleStorage = impl_->sampleStorage.get();
+            ts->data_->surfaceDist =
+                std::make_unique<openpgl::cpp::SurfaceSamplingDistribution>(impl_->field.get());
+            ts->data_->segments.Reserve(128);
+            ts->active_ = true;
+            ts->guideProb_ = 0.0f;  // stays 0 until the field is trained
+            impl_->threads.push_back(std::move(ts));
+        }
         impl_->ready = true;
-        logInfo("OpenPGL: path guiding field ready (lazy per-thread state, pool=" +
-                std::to_string(n) + ")");
+        logInfo("OpenPGL: path guiding field ready (threads=" + std::to_string(n) + ")");
     } catch (const std::exception& ex) {
         logError(std::string("OpenPGL init failed: ") + ex.what());
         impl_->ready = false;
-        std::lock_guard<std::mutex> lock(impl_->threadMutex);
         impl_->threads.clear();
         impl_->field.reset();
         impl_->sampleStorage.reset();
@@ -231,27 +241,26 @@ void PathGuiding::commitSample() {
     try {
         impl_->field->Update(*impl_->sampleStorage);
         impl_->sampleStorage->Clear();
+        const int iters = impl_->trainedIterations.fetch_add(1) + 1;
+        // Ramp the guided fraction in as the field converges: 0 (untrained) → 0.5.
+        const float prob = iters <= 0 ? 0.0f : std::min(0.5f, 0.2f + 0.1f * float(iters));
+        for (auto& ts : impl_->threads)
+            if (ts) ts->guideProb_ = prob;
     } catch (const std::exception& ex) {
         logError(std::string("OpenPGL update failed: ") + ex.what());
     }
 }
 
-PathGuiding::ThreadState& PathGuiding::thread(int /*threadId*/) {
-    const std::thread::id id = std::this_thread::get_id();
-    std::lock_guard<std::mutex> lock(impl_->threadMutex);
-    auto it = impl_->threads.find(id);
-    if (it == impl_->threads.end()) {
-        auto ts = std::make_unique<ThreadState>();
-        ts->data_->field = impl_->field.get();
-        ts->data_->sampleStorage = impl_->sampleStorage.get();
-        ts->data_->surfaceDist =
-            std::make_unique<openpgl::cpp::SurfaceSamplingDistribution>(impl_->field.get());
-        ts->data_->segments.Reserve(128);
-        ts->active_ = impl_->ready && impl_->field && impl_->sampleStorage;
-        ts->guideProb_ = 0.5f;
-        it = impl_->threads.emplace(id, std::move(ts)).first;
-    }
-    return *it->second;
+int PathGuiding::trainedIterations() const {
+    return impl_ ? impl_->trainedIterations.load() : 0;
+}
+
+PathGuiding::ThreadState& PathGuiding::thread(int threadId) {
+    static ThreadState fallback;
+    if (!impl_ || impl_->threads.empty()) return fallback;
+    size_t idx = size_t(threadId < 0 ? 0 : threadId);
+    if (idx >= impl_->threads.size()) idx = impl_->threads.size() - 1;
+    return *impl_->threads[idx];
 }
 
 }  // namespace sol

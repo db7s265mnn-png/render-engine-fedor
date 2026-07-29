@@ -221,12 +221,10 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
 
         float block = 1.0f;
         if (mat.transmission > 1e-3f) {
-            // Real caustics solvers (BDPT / MNEE) use opaque shadow rays; transport
-            // through glass is handled by the integrator. Legacy fake-caustics
-            // (shadow_opacity) only applies when refractive caustics are on AND the
-            // artist explicitly wants open shadows — kept via shadowOpacity < 1, but
-            // default materials keep hard occlusion so SDS paths are not double-lit.
-            if (mat.refractiveCaustics != 0 && mat.shadowOpacity < 0.999f)
+            // Caustics ON: shadow rays treat glass as opaque — transmitted light is
+            // delivered by MNEE (Path Tracer) or bidirectional connections (BDPT).
+            // Caustics OFF: artists can fake bright shadows with shadow_opacity < 1.
+            if (scene.settings.caustics == 0)
                 block = saturatef(mat.shadowOpacity);
             else
                 block = 1.0f;
@@ -316,8 +314,10 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     Vec3 throughput(1.0f);
     float bsdfPdf = 0.0f;
     bool specularBounce = true;   // primary rays behave like a specular bounce for MIS
-    // When a bounce disables reflective/refractive caustics, suppress later diffuse lighting.
+    // Caustics OFF: kill diffuse→specular→light transport (matches the dark shadows
+    // produced by opaque shadow rays through glass).
     bool suppressCausticLight = false;
+    bool sawNonSpecular = false;
     int depth = 0;
     int passThrough = 0;
     const RenderSettingsData& settings = scene.settings;
@@ -329,7 +329,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
         if (!didHit) {
             if (scene.domeLightIndex >= 0) {
-                if (!(suppressCausticLight && !specularBounce)) {
+                if (!suppressCausticLight) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
                 const bool primary = depth == 0 && passThrough == 0;
                 if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
@@ -374,8 +374,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
         // Emission from area light geometry.
         if (si.lightIndex >= 0) {
-            // Reflective/refractive caustics off: don't accept light via a prior specular path onto diffuse.
-            if (suppressCausticLight && !specularBounce) break;
+            // Caustics off: no light transport through specular chains after a
+            // diffuse vertex (matches the opaque shadow rays through glass).
+            if (suppressCausticLight) break;
             const LightData& light = scene.lights[si.lightIndex];
             const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
             Vec3 emitted = areaLightEmission(scene, light, direction, lightN);
@@ -778,13 +779,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         direction = wiWorld;
         bsdfPdf = bs.pdf;
         specularBounce = bs.specular;
-        if (bs.specular) {
-            if (bs.transmitted) {
-                if (mat.refractiveCaustics == 0) suppressCausticLight = true;
-            } else if (mat.reflectiveCaustics == 0) {
-                suppressCausticLight = true;
-            }
-        }
+        if (settings.caustics == 0 && bs.specular && sawNonSpecular) suppressCausticLight = true;
+        if (!bs.specular) sawNonSpecular = true;
         ++depth;
 
         // Russian roulette.

@@ -294,27 +294,6 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     setFloat("shadow_opacity", shadowOpacity);
     material.shadowOpacity = saturatef(shadowOpacity);
 
-    auto setBool01 = [&](const char* name, int& dst, int defaultValue) {
-        if (resolveConnectedNode(ss, name)) return;
-        const std::string raw = inputValueString(ss, name);
-        if (raw.empty()) {
-            dst = defaultValue;
-            return;
-        }
-        if (raw == "true" || raw == "1") {
-            dst = 1;
-            return;
-        }
-        if (raw == "false" || raw == "0") {
-            dst = 0;
-            return;
-        }
-        float v = float(defaultValue);
-        if (parseFloat(raw, v)) dst = v > 0.5f ? 1 : 0;
-    };
-    setBool01("reflective_caustics", material.reflectiveCaustics, 1);
-    setBool01("refractive_caustics", material.refractiveCaustics, 1);
-
     setColor("emission_color", material.emissionColor);
     setFloat("emission", material.emissionStrength);
     setFloat("subsurface", material.subsurface);
@@ -563,8 +542,6 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"transmission", "float", "0"},
          {"opacity", "color3", "1, 1, 1"},
          {"shadow_opacity", "float", "1"},
-         {"reflective_caustics", "boolean", "true"},
-         {"refractive_caustics", "boolean", "true"},
          {"emission", "float", "0"},
          {"emission_color", "color3", "1, 1, 1"},
          {"normal", "vector3", {}},

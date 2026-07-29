@@ -673,8 +673,14 @@ public:
                                           : QStringLiteral("This executable was built without OptiX/CUDA. "
                                                           "GPU (OptiX) will fall back to Embree.")));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
-                                         {"Path Tracer", "Direct Lighting", "Ambient Occlusion"}, 0)
-                         .withGroup("Engine"));
+                                         {"Path Tracer", "Direct Lighting", "Ambient Occlusion",
+                                          "BDPT (Bidirectional)"},
+                                         0)
+                         .withGroup("Engine")
+                         .withTooltip("Path Tracer: unidirectional + MNEE refractive caustics.\n"
+                                      "BDPT: bidirectional connections (better caustics / interiors, "
+                                      "CPU only — OptiX falls back to Path Tracer).\n"
+                                      "The log reports which caustics mode is active."));
         addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
@@ -691,21 +697,20 @@ public:
                          .withTooltip("0 uses every available core"));
         addParameter(Parameter::makeInt("tilesize", "Tile Size", 32, 8, 256).withGroup("Engine"));
         addParameter(Parameter::makeFloat("aodistance", "AO Distance", 1.0, 0.01, 100.0, false).withGroup("Engine"));
-        addParameter(Parameter::makeBool("pathguiding", "Path Guiding (OpenPGL)", true)
+        addParameter(Parameter::makeBool("caustics", "Caustics", true)
+                         .withGroup("Engine")
+                         .withTooltip("Enable caustic light transport (light focused through glass "
+                                      "and off mirrors).\n"
+                                      "Path Tracer: refractive caustics via MNEE (manifold "
+                                      "next-event estimation).\n"
+                                      "BDPT: caustics come from bidirectional connections.\n"
+                                      "Off: glass casts dark shadows (soften with the material's "
+                                      "shadow_opacity)."));
+        addParameter(Parameter::makeBool("pathguiding", "Path Guiding (OpenPGL)", false)
                          .withGroup("Engine")
                          .withTooltip("Learn incident radiance while rendering and guide BSDF "
-                                      "samples (CPU / Embree). Recommended with BDPT+Guiding caustics."));
-        addParameter(Parameter::makeMenu("causticssolver", "Caustics Solver",
-                                         {"BDPT + Path Guiding (D+A)", "MNEE / Manifold (C)"}, 0)
-                         .withGroup("Engine")
-                         .withTooltip(
-                             "CPU Path Tracer only.\n"
-                             "BDPT + Guiding: bidirectional path tracing with OpenPGL "
-                             "(reflective/refractive caustics via light↔camera connections).\n"
-                             "MNEE / Manifold: unidirectional PT plus manifold next-event "
-                             "estimation through specular chains (glass SDS).\n"
-                             "Per-material Reflective/Refractive Caustics toggles still gate "
-                             "whether that shader participates."));
+                                      "samples (CPU / Embree). Kicks in after the first training "
+                                      "passes; helps indirect-heavy scenes."));
         addParameter(Parameter::makeMenu("tonemap", "Tone Map", {"None", "Reinhard", "ACES"}, 2).withGroup("Film"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -8.0, 8.0).withGroup("Film"));
         addParameter(Parameter::makeFloat("gamma", "Gamma", 2.2, 1.0, 4.0).withGroup("Film"));
@@ -727,9 +732,8 @@ public:
         settings.threads = intValue("threads", 0);
         settings.tileSize = intValue("tilesize", 32);
         settings.aoDistance = float(floatValue("aodistance", 1.0));
-        settings.pathGuiding = boolValue("pathguiding", true) ? 1 : 0;
-        settings.causticsSolver =
-            intValue("causticssolver", 0) == 1 ? kCausticsMnee : kCausticsBdptGuided;
+        settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
+        settings.caustics = boolValue("caustics", true) ? 1 : 0;
         settings.toneMapper = intValue("tonemap", 2);
         settings.exposure = float(floatValue("exposure", 0.0));
         settings.gamma = float(floatValue("gamma", 2.2));
