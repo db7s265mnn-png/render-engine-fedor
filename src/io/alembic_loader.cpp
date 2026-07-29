@@ -1,6 +1,8 @@
 #include "io/alembic_loader.h"
 
 #include <algorithm>
+#include <mutex>
+#include <unordered_map>
 
 #include "core/log.h"
 #include "solstice_config.h"
@@ -285,13 +287,27 @@ bool alembicSupportAvailable() { return true; }
 bool loadAlembic(const std::string& filePath, const AlembicLoadOptions& options, AlembicContents& out,
                  std::string& error) {
     try {
-        Alembic::AbcCoreFactory::IFactory factory;
-        factory.setPolicy(Alembic::Abc::ErrorHandler::kThrowPolicy);
-        Alembic::AbcCoreFactory::IFactory::CoreType coreType;
-        IArchive archive = factory.getArchive(filePath, coreType);
-        if (!archive.valid()) {
-            error = "cannot open Alembic archive " + filePath;
-            return false;
+        // Keep archives open so timeline scrubbing does not reopen the file every frame.
+        static std::mutex archiveMutex;
+        static std::unordered_map<std::string, IArchive> archives;
+
+        IArchive archive;
+        {
+            std::lock_guard<std::mutex> lock(archiveMutex);
+            auto it = archives.find(filePath);
+            if (it != archives.end() && it->second.valid()) {
+                archive = it->second;
+            } else {
+                Alembic::AbcCoreFactory::IFactory factory;
+                factory.setPolicy(Alembic::Abc::ErrorHandler::kThrowPolicy);
+                Alembic::AbcCoreFactory::IFactory::CoreType coreType;
+                archive = factory.getArchive(filePath, coreType);
+                if (!archive.valid()) {
+                    error = "cannot open Alembic archive " + filePath;
+                    return false;
+                }
+                archives[filePath] = archive;
+            }
         }
 
         LoadContext context;
@@ -306,8 +322,13 @@ bool loadAlembic(const std::string& filePath, const AlembicLoadOptions& options,
             error = "no polygonal geometry found in " + filePath;
             return false;
         }
-        logInfo("Alembic: loaded " + std::to_string(out.prims.size()) + " prims from " + filePath +
-                (context.skipped ? " (" + std::to_string(context.skipped) + " skipped)" : ""));
+        static thread_local std::string lastLogged;
+        const std::string logKey = filePath + "|" + std::to_string(out.prims.size());
+        if (lastLogged != logKey) {
+            lastLogged = logKey;
+            logInfo("Alembic: loaded " + std::to_string(out.prims.size()) + " prims from " + filePath +
+                    (context.skipped ? " (" + std::to_string(context.skipped) + " skipped)" : ""));
+        }
         return true;
     } catch (const std::exception& e) {
         error = std::string("Alembic: ") + e.what();

@@ -90,6 +90,8 @@ public:
     // Cooking ---------------------------------------------------------------
     // When true the graph pre-fills the output stage with a copy of input 0.
     virtual bool copiesFirstInput() const { return true; }
+    // True when the cook result depends on CookContext::time / frame.
+    virtual bool dependsOnTime() const { return false; }
     virtual void cook(CookContext& context, const std::vector<StagePtr>& inputStages, Stage& stage) = 0;
 
     bool isDirty() const { return dirty_; }

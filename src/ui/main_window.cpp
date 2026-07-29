@@ -366,12 +366,24 @@ void MainWindow::createTimeline() {
     // TimelineBar is created with the central widget (under the viewport).
     if (!timelineBar_) return;
     connect(timelineBar_, &TimelineBar::frameChanged, this, &MainWindow::onTimelineFrameChanged);
+    // After scrubbing / stop, cook once more with full Embree quality when needed.
+    auto qualityCook = [this] {
+        if (!graph_.markTimeDependentDirty()) return;
+        scheduleCook(0);
+    };
+    connect(timelineBar_, &TimelineBar::playbackStopped, this, qualityCook);
+    connect(timelineBar_, &TimelineBar::scrubFinished, this, qualityCook);
 }
 
 void MainWindow::onTimelineFrameChanged(int) {
-    graph_.markAllDirty();
-    // Playback needs immediate cooks; scrubbing still benefits from a short debounce.
-    scheduleCook(timelineBar_ && timelineBar_->isPlaying() ? 0 : 30);
+    // Only time-dependent caches (animated Alembic/USD) need a recook.
+    if (!graph_.markTimeDependentDirty()) {
+        updateStatusBar();
+        return;
+    }
+    // Scrubbing coalesces via the single-shot cook timer; clicks/play are immediate.
+    const int delay = (timelineBar_ && timelineBar_->isScrubbing()) ? 8 : 0;
+    scheduleCook(delay);
 }
 
 void MainWindow::createDocks() {
@@ -734,16 +746,20 @@ void MainWindow::cookNow() {
         context.time = timelineBar_->timeSeconds();
     }
 
+    const bool timelineInteractive = timelineBar_ && timelineBar_->isInteractive();
+
     stage_ = graph_.cookDisplay(context);
     if (timelineBar_ && context.hasSuggestedRange)
         timelineBar_->suggestTimeRange(context.suggestedStartTime, context.suggestedEndTime);
 
-    QStringList materialContainers;
-    for (const NodePtr& node : graph_.nodes()) {
-        if (node && node->typeName() == "material") materialContainers << node->name();
+    if (!timelineInteractive) {
+        QStringList materialContainers;
+        for (const NodePtr& node : graph_.nodes()) {
+            if (node && node->typeName() == "material") materialContainers << node->name();
+        }
+        materialContainers.sort(Qt::CaseInsensitive);
+        sceneGraphPanel_->setStage(stage_, materialContainers);
     }
-    materialContainers.sort(Qt::CaseInsensitive);
-    sceneGraphPanel_->setStage(stage_, materialContainers);
     // Do not rebuild Parameters on every cook — that steals focus / selection while editing.
 
     if (!stage_) return;
@@ -775,6 +791,7 @@ void MainWindow::cookNow() {
     }
 
     scene_ = stage_->toScene();
+    if (scene_) scene_->fastRebuild = timelineInteractive;
 
     if (Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
         // Looking through: transform + full thin-lens params from that camera node.
@@ -805,7 +822,7 @@ void MainWindow::cookNow() {
 
     session_.setScene(scene_);
     updateStatusBar();
-    refreshViewportCameraMenu();
+    if (!timelineInteractive) refreshViewportCameraMenu();
 
     if (iprAction_->isChecked() || renderRequested_) restartRender();
 }

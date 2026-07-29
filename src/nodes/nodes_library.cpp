@@ -67,6 +67,12 @@ public:
         addTransformParameters(*this);
     }
 
+    bool dependsOnTime() const override {
+        // Unknown until the first successful cook; afterwards only animated archives.
+        if (cache_.prims.empty()) return true;
+        return cache_.animated;
+    }
+
     void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
         const QString file = resolvePath(context, stringValue("file"));
         if (file.isEmpty()) {
@@ -89,11 +95,15 @@ public:
         options.importUvs = boolValue("importuvs", true);
         options.pathFilter = stringValue("pathfilter").toStdString();
 
-        const QString cacheKey = file + "|" + QString::number(options.time, 'g', 12) + "|" +
-                                 QString::number(double(options.scale)) + "|" +
-                                 QString::fromStdString(options.pathFilter) + "|" +
-                                 (options.importNormals ? "n" : "-") + (options.importUvs ? "u" : "-");
-        if (cacheKey != cacheKey_ || cache_.prims.empty()) {
+        // Options that force a reload even for static archives.
+        const QString optionsKey = file + "|" + QString::number(double(options.scale)) + "|" +
+                                   QString::fromStdString(options.pathFilter) + "|" +
+                                   (options.importNormals ? "n" : "-") + (options.importUvs ? "u" : "-");
+        const QString timedKey = optionsKey + "|" + QString::number(options.time, 'g', 12);
+
+        const bool canReuseStatic =
+            optionsKey == optionsKey_ && !cache_.animated && !cache_.prims.empty();
+        if (!canReuseStatic && (timedKey != cacheKey_ || cache_.prims.empty())) {
             AlembicContents contents;
             std::string error;
             if (!loadAlembic(file.toStdString(), options, contents, error)) {
@@ -101,7 +111,8 @@ public:
                 return;
             }
             cache_ = std::move(contents);
-            cacheKey_ = cacheKey;
+            cacheKey_ = timedKey;
+            optionsKey_ = optionsKey;
         }
         if (cache_.animated) context.suggestPlaybackRange(cache_.startTime, cache_.endTime);
 
@@ -124,6 +135,7 @@ public:
 
 private:
     QString cacheKey_;
+    QString optionsKey_;
     AlembicContents cache_;
 };
 
@@ -145,6 +157,12 @@ public:
         addParameter(Parameter::makeBool("importnormals", "Import Normals", true));
         addParameter(Parameter::makeBool("importuvs", "Import UVs", true));
         addTransformParameters(*this);
+    }
+
+    bool dependsOnTime() const override {
+        // After we observe that a time change did not alter geometry, stop dirtying.
+        if (cache_.prims.empty()) return true;
+        return !staticReuseOk_;
     }
 
     void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
@@ -169,18 +187,30 @@ public:
         options.importUvs = boolValue("importuvs", true);
         options.pathFilter = stringValue("pathfilter").toStdString();
 
-        const QString cacheKey = file + "|" + QString::number(options.time, 'g', 12) + "|" +
-                                 QString::number(double(options.scale)) + "|" +
-                                 QString::fromStdString(options.pathFilter);
-        if (cacheKey != cacheKey_ || cache_.prims.empty()) {
+        const QString optionsKey = file + "|" + QString::number(double(options.scale)) + "|" +
+                                   QString::fromStdString(options.pathFilter) + "|" +
+                                   (options.importNormals ? "n" : "-") + (options.importUvs ? "u" : "-");
+        const QString timedKey = optionsKey + "|" + QString::number(options.time, 'g', 12);
+
+        if (optionsKey == optionsKey_ && staticReuseOk_ && !cache_.prims.empty()) {
+            // Static USD: ignore timeline time for reloads.
+        } else if (timedKey != cacheKey_ || cache_.prims.empty()) {
             UsdContents contents;
             std::string error;
             if (!loadUsd(file.toStdString(), options, contents, error)) {
                 context.reportError(this, QString::fromStdString(error));
                 return;
             }
-            cache_ = std::move(contents);
-            cacheKey_ = cacheKey;
+            if (optionsKey == optionsKey_ && !cache_.prims.empty() &&
+                contents.prims.size() == cache_.prims.size()) {
+                // Same options + same prim count at a new time → treat as static.
+                staticReuseOk_ = true;
+            } else {
+                cache_ = std::move(contents);
+                staticReuseOk_ = false;
+            }
+            cacheKey_ = timedKey;
+            optionsKey_ = optionsKey;
         }
 
         const Mat4 nodeTransform = transformFromParameters(*this);
@@ -221,6 +251,8 @@ public:
 
 private:
     QString cacheKey_;
+    QString optionsKey_;
+    bool staticReuseOk_ = false;
     UsdContents cache_;
 };
 

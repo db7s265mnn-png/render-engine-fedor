@@ -9,7 +9,7 @@ class QToolButton;
 
 namespace sol {
 
-// Scrub track with start/end labels and a playhead that shows the frame number.
+// Scrub track with a fixed-width playhead that shows the frame number.
 // Double-click the playhead to type a frame.
 class TimelineScrubber : public QWidget {
     Q_OBJECT
@@ -20,6 +20,7 @@ public:
     void setRange(int startFrame, int endFrame);
     void setFrame(int frame);
     int frame() const { return frame_; }
+    bool isScrubbing() const { return dragging_; }
 
 signals:
     void frameChanged(int frame);
@@ -61,6 +62,9 @@ public:
     int currentFrame() const { return currentFrame_; }
     double fps() const { return fps_; }
     bool isPlaying() const { return playing_; }
+    bool isScrubbing() const;
+    // Playing or dragging — cook/render should stay lightweight.
+    bool isInteractive() const { return isPlaying() || isScrubbing(); }
 
     // Houdini-style: time = (frame - 1) / fps.
     double timeSeconds() const;
@@ -79,18 +83,24 @@ public slots:
 signals:
     void frameChanged(int frame);
     void playbackStopped();
+    void scrubFinished();
 
 private slots:
     void onPlayStop();
     void onTick();
     void onScrubFrame(int frame);
+    void onStartEdited();
+    void onEndEdited();
 
 private:
     void syncFromState();
     void clampFrame();
     void updatePlayStopIcon();
     void emitFrame();
+    QLineEdit* makeRangeEdit(const QString& tip);
 
+    QLineEdit* startEdit_ = nullptr;
+    QLineEdit* endEdit_ = nullptr;
     QToolButton* toStartBtn_ = nullptr;
     QToolButton* playStopBtn_ = nullptr;
     QToolButton* toEndBtn_ = nullptr;

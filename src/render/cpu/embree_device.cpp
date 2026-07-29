@@ -112,13 +112,16 @@ public:
 
         const auto start = std::chrono::steady_clock::now();
 
+        const RTCBuildQuality buildQuality =
+            scene_->fastRebuild ? RTC_BUILD_QUALITY_LOW : RTC_BUILD_QUALITY_HIGH;
+
         // One Embree scene per mesh so instances can share geometry.
         meshScenes_.assign(scene_->meshes.size(), nullptr);
         for (size_t i = 0; i < scene_->meshes.size(); ++i) {
             const MeshPtr& mesh = scene_->meshes[i];
             if (!mesh || mesh->indices.empty()) continue;
             RTCScene meshScene = rtcNewScene(device_);
-            rtcSetSceneBuildQuality(meshScene, RTC_BUILD_QUALITY_HIGH);
+            rtcSetSceneBuildQuality(meshScene, buildQuality);
             RTCGeometry geom = rtcNewGeometry(device_, RTC_GEOMETRY_TYPE_TRIANGLE);
 
             const size_t vertexCount = mesh->positions.size();
@@ -146,7 +149,7 @@ public:
 
         topScene_ = rtcNewScene(device_);
         rtcSetSceneFlags(topScene_, RTC_SCENE_FLAG_ROBUST);
-        rtcSetSceneBuildQuality(topScene_, RTC_BUILD_QUALITY_HIGH);
+        rtcSetSceneBuildQuality(topScene_, buildQuality);
         for (size_t i = 0; i < scene_->instances.size(); ++i) {
             const InstanceData& inst = scene_->instances[i];
             if (inst.meshIndex < 0 || inst.meshIndex >= int(meshScenes_.size())) continue;
@@ -174,8 +177,10 @@ public:
 #endif
 
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-        logInfo("Embree: built BVH for " + std::to_string(scene_->instances.size()) + " instances, " +
-                std::to_string(scene_->totalTriangles()) + " triangles in " + std::to_string(int(ms)) + " ms");
+        if (!scene_->fastRebuild) {
+            logInfo("Embree: built BVH for " + std::to_string(scene_->instances.size()) + " instances, " +
+                    std::to_string(scene_->totalTriangles()) + " triangles in " + std::to_string(int(ms)) + " ms");
+        }
         return true;
     }
 

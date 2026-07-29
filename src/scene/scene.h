@@ -64,6 +64,8 @@ public:
     CameraData camera;
     RenderSettingsData settings;
     bool cameraAuthored = false;
+    // Timeline scrub / playback: prefer a fast accel rebuild over final quality.
+    bool fastRebuild = false;
 
     int addMesh(MeshPtr mesh);
     int addMaterial(const Material& material);

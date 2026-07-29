@@ -41,6 +41,9 @@ public:
 
     void markDirty(Node* node);
     void markAllDirty();
+    // Dirties nodes whose cook depends on timeline time (and their outputs).
+    // Returns true when at least one node was dirtied.
+    bool markTimeDependentDirty();
 
     QJsonObject toJson() const;
     bool fromJson(const QJsonObject& json, QString& error);

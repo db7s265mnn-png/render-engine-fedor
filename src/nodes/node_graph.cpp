@@ -161,6 +161,17 @@ void NodeGraph::markAllDirty() {
     }
 }
 
+bool NodeGraph::markTimeDependentDirty() {
+    bool any = false;
+    for (const NodePtr& node : nodes_) {
+        if (node && node->dependsOnTime()) {
+            markDirty(node.get());
+            any = true;
+        }
+    }
+    return any;
+}
+
 void NodeGraph::onParameterChanged(Node* node, const QString& /*parameterName*/) {
     markDirty(node);
     setModified(true);

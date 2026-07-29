@@ -4,9 +4,11 @@
 #include <QPainterPath>
 #include <QLineEdit>
 #include <QHBoxLayout>
+#include <QVBoxLayout>
 #include <QMouseEvent>
 #include <QToolButton>
 #include <QTimer>
+#include <QIntValidator>
 #include <QFontMetrics>
 #include <cmath>
 #include <algorithm>
@@ -15,6 +17,10 @@
 
 namespace sol {
 namespace {
+
+constexpr int kRangeEditWidth = 52;
+constexpr qreal kPlayheadWidth = 40.0;
+constexpr qreal kPlayheadHeight = 16.0;
 
 QIcon makeHoudiniTransportIcon(const QString& kind, int size = 18) {
     QPixmap pm(size, size);
@@ -27,7 +33,7 @@ QIcon makeHoudiniTransportIcon(const QString& kind, int size = 18) {
 
     const qreal s = size;
     if (kind == QLatin1String("toStart")) {
-        // |<<  — vertical bar + double left chevrons (Houdini "jump to start")
+        // |<<
         p.drawRect(QRectF(s * 0.14, s * 0.22, s * 0.10, s * 0.56));
         QPainterPath a;
         a.moveTo(s * 0.52, s * 0.22);
@@ -51,7 +57,7 @@ QIcon makeHoudiniTransportIcon(const QString& kind, int size = 18) {
     } else if (kind == QLatin1String("stop")) {
         p.drawRoundedRect(QRectF(s * 0.28, s * 0.28, s * 0.44, s * 0.44), 1.0, 1.0);
     } else if (kind == QLatin1String("toEnd")) {
-        // >>| 
+        // >>|
         QPainterPath a;
         a.moveTo(s * 0.22, s * 0.22);
         a.lineTo(s * 0.46, s * 0.50);
@@ -87,7 +93,7 @@ QToolButton* makeTransportButton(QWidget* parent, const QString& kind, const QSt
 // ---------------------------------------------------------------------------
 
 TimelineScrubber::TimelineScrubber(QWidget* parent) : QWidget(parent) {
-    setMinimumHeight(26);
+    setMinimumHeight(22);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     setMouseTracking(true);
     setCursor(Qt::PointingHandCursor);
@@ -108,7 +114,7 @@ void TimelineScrubber::setFrame(int frame) {
 }
 
 QRectF TimelineScrubber::trackRect() const {
-    return QRectF(36.0, height() * 0.5 - 1.0, width() - 72.0, 2.0);
+    return QRectF(4.0, height() * 0.5 - 1.0, std::max(8.0, width() - 8.0), 2.0);
 }
 
 qreal TimelineScrubber::xForFrame(int frame) const {
@@ -128,14 +134,8 @@ int TimelineScrubber::frameAtX(qreal x) const {
 
 QRectF TimelineScrubber::playheadRect() const {
     const qreal x = xForFrame(frame_);
-    const QString text = QString::number(frame_);
-    QFont font = this->font();
-    font.setPointSizeF(9.0);
-    font.setBold(true);
-    const QFontMetrics fm(font);
-    const qreal tw = std::max(28.0, fm.horizontalAdvance(text) + 10.0);
-    const qreal th = 16.0;
-    return QRectF(x - tw * 0.5, height() * 0.5 - th * 0.5, tw, th);
+    return QRectF(x - kPlayheadWidth * 0.5, height() * 0.5 - kPlayheadHeight * 0.5, kPlayheadWidth,
+                  kPlayheadHeight);
 }
 
 void TimelineScrubber::paintEvent(QPaintEvent*) {
@@ -143,10 +143,10 @@ void TimelineScrubber::paintEvent(QPaintEvent*) {
     p.setRenderHint(QPainter::Antialiasing, true);
 
     const QRectF track = trackRect();
-    // Groove
-    p.setPen(Qt::NoPen);
-    p.setBrush(QColor(90, 94, 100));
-    p.drawRoundedRect(track.adjusted(0, -1, 0, 1), 2.0, 2.0);
+    // Groove with grey border
+    p.setPen(QPen(QColor(110, 114, 122), 1.0));
+    p.setBrush(QColor(72, 76, 82));
+    p.drawRoundedRect(track.adjusted(0, -2, 0, 2), 2.0, 2.0);
 
     // Tick marks
     const int span = std::max(1, endFrame_ - startFrame_);
@@ -154,29 +154,19 @@ void TimelineScrubber::paintEvent(QPaintEvent*) {
     if (span > 200) step = 10;
     else if (span > 80) step = 5;
     else if (span > 40) step = 2;
-    p.setPen(QPen(QColor(130, 134, 140), 1.0));
+    p.setPen(QPen(QColor(140, 144, 150), 1.0));
     for (int f = startFrame_; f <= endFrame_; f += step) {
         const qreal x = xForFrame(f);
         const bool major = ((f - startFrame_) % (step * 4) == 0) || f == startFrame_ || f == endFrame_;
-        const qreal h = major ? 6.0 : 3.5;
+        const qreal h = major ? 5.5 : 3.0;
         p.drawLine(QPointF(x, track.center().y() - h), QPointF(x, track.center().y() + h));
     }
 
-    // Start / end labels
-    QFont labelFont = font();
-    labelFont.setPointSizeF(8.5);
-    p.setFont(labelFont);
-    p.setPen(theme::textDim());
-    p.drawText(QRectF(2, 0, 32, height()), Qt::AlignVCenter | Qt::AlignRight, QString::number(startFrame_));
-    p.drawText(QRectF(width() - 34, 0, 32, height()), Qt::AlignVCenter | Qt::AlignLeft,
-               QString::number(endFrame_));
-
-    // Playhead frame box (Houdini-like black field)
+    // Playhead frame box — fixed width, grey border
     const QRectF head = playheadRect();
-    p.setPen(QPen(QColor(20, 21, 24), 1.0));
+    p.setPen(QPen(QColor(120, 124, 132), 1.0));
     p.setBrush(QColor(12, 13, 15));
     p.drawRoundedRect(head, 2.0, 2.0);
-    // Stem through the track
     const qreal cx = head.center().x();
     p.setPen(QPen(QColor(220, 222, 226), 1.2));
     p.drawLine(QPointF(cx, track.center().y() - 7.0), QPointF(cx, track.center().y() + 7.0));
@@ -226,7 +216,6 @@ void TimelineScrubber::mouseReleaseEvent(QMouseEvent* event) {
 
 void TimelineScrubber::mouseDoubleClickEvent(QMouseEvent* event) {
     if (event->button() != Qt::LeftButton) return;
-    // Double-click playhead (or nearby) to type a frame.
     if (playheadRect().adjusted(-8, -4, 8, 4).contains(event->position())) {
         beginFrameEdit();
         event->accept();
@@ -239,7 +228,7 @@ void TimelineScrubber::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     if (editor_) {
         const QRectF head = playheadRect();
-        editor_->setGeometry(head.toRect().adjusted(-2, -1, 2, 1));
+        editor_->setGeometry(head.toRect());
     }
 }
 
@@ -248,11 +237,12 @@ void TimelineScrubber::beginFrameEdit() {
     editor_ = new QLineEdit(this);
     editor_->setAlignment(Qt::AlignCenter);
     editor_->setText(QString::number(frame_));
+    editor_->setValidator(new QIntValidator(-999999, 999999, editor_));
+    editor_->setFixedSize(int(kPlayheadWidth), int(kPlayheadHeight) + 2);
     editor_->setStyleSheet(
         "QLineEdit { background: #0c0d0f; color: #ebebef; border: 1px solid #50aaff;"
-        " border-radius: 2px; padding: 0 4px; font-weight: 700; }");
-    const QRectF head = playheadRect();
-    editor_->setGeometry(head.toRect().adjusted(-4, -2, 4, 2));
+        " border-radius: 2px; padding: 0 2px; font-weight: 700; }");
+    editor_->move(playheadRect().toRect().topLeft());
     editor_->selectAll();
     editor_->show();
     editor_->setFocus(Qt::MouseFocusReason);
@@ -289,9 +279,30 @@ void TimelineScrubber::cancelFrameEdit() {
 // TimelineBar
 // ---------------------------------------------------------------------------
 
+QLineEdit* TimelineBar::makeRangeEdit(const QString& tip) {
+    auto* edit = new QLineEdit(this);
+    edit->setAlignment(Qt::AlignCenter);
+    edit->setFixedSize(kRangeEditWidth, 20);
+    edit->setMaxLength(6);
+    edit->setValidator(new QIntValidator(-999999, 999999, edit));
+    edit->setToolTip(tip);
+    edit->setStyleSheet(QStringLiteral(
+        "QLineEdit {"
+        "  background: #1a1c20;"
+        "  color: #d8dae0;"
+        "  border: 1px solid #7a7e86;"
+        "  border-radius: 2px;"
+        "  padding: 0 2px;"
+        "  font-size: 11px;"
+        "  font-weight: 600;"
+        "}"
+        "QLineEdit:focus { border: 1px solid #50aaff; }"));
+    return edit;
+}
+
 TimelineBar::TimelineBar(QWidget* parent) : QWidget(parent) {
     setObjectName("timelineBar");
-    setFixedHeight(30);
+    setFixedHeight(54);
     setStyleSheet(QStringLiteral(
         "QWidget#timelineBar {"
         "  background: #2e3136;"
@@ -311,22 +322,39 @@ TimelineBar::TimelineBar(QWidget* parent) : QWidget(parent) {
         "  border-color: #50aaff;"
         "}"));
 
-    auto* layout = new QHBoxLayout(this);
-    layout->setContentsMargins(6, 2, 8, 2);
-    layout->setSpacing(3);
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(8, 3, 8, 3);
+    root->setSpacing(2);
+
+    auto* scrubRow = new QHBoxLayout();
+    scrubRow->setContentsMargins(0, 0, 0, 0);
+    scrubRow->setSpacing(6);
+
+    startEdit_ = makeRangeEdit(QStringLiteral("Start frame"));
+    endEdit_ = makeRangeEdit(QStringLiteral("End frame"));
+    scrubber_ = new TimelineScrubber(this);
+
+    scrubRow->addWidget(startEdit_, 0);
+    scrubRow->addWidget(scrubber_, 1);
+    scrubRow->addWidget(endEdit_, 0);
+
+    auto* buttonRow = new QHBoxLayout();
+    buttonRow->setContentsMargins(0, 0, 0, 0);
+    buttonRow->setSpacing(4);
 
     toStartBtn_ = makeTransportButton(this, QStringLiteral("toStart"), QStringLiteral("Go to start frame"));
     playStopBtn_ = makeTransportButton(this, QStringLiteral("play"), QStringLiteral("Play / Stop"));
     playStopBtn_->setCheckable(true);
     toEndBtn_ = makeTransportButton(this, QStringLiteral("toEnd"), QStringLiteral("Go to end frame"));
 
-    scrubber_ = new TimelineScrubber(this);
+    buttonRow->addStretch(1);
+    buttonRow->addWidget(toStartBtn_);
+    buttonRow->addWidget(playStopBtn_);
+    buttonRow->addWidget(toEndBtn_);
+    buttonRow->addStretch(1);
 
-    layout->addWidget(toStartBtn_);
-    layout->addWidget(playStopBtn_);
-    layout->addWidget(toEndBtn_);
-    layout->addSpacing(6);
-    layout->addWidget(scrubber_, 1);
+    root->addLayout(scrubRow);
+    root->addLayout(buttonRow);
 
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &TimelineBar::onTick);
@@ -337,9 +365,14 @@ TimelineBar::TimelineBar(QWidget* parent) : QWidget(parent) {
     connect(scrubber_, &TimelineScrubber::scrubStarted, this, [this] {
         if (playing_) stopPlayback();
     });
+    connect(scrubber_, &TimelineScrubber::scrubFinished, this, [this] { emit scrubFinished(); });
+    connect(startEdit_, &QLineEdit::editingFinished, this, &TimelineBar::onStartEdited);
+    connect(endEdit_, &QLineEdit::editingFinished, this, &TimelineBar::onEndEdited);
 
     syncFromState();
 }
+
+bool TimelineBar::isScrubbing() const { return scrubber_ && scrubber_->isScrubbing(); }
 
 double TimelineBar::timeSeconds() const {
     return double(currentFrame_ - 1) / std::max(1e-6, fps_);
@@ -433,8 +466,46 @@ void TimelineBar::onScrubFrame(int frame) {
     emitFrame();
 }
 
+void TimelineBar::onStartEdited() {
+    if (updating_ || !startEdit_) return;
+    bool ok = false;
+    int value = startEdit_->text().trimmed().toInt(&ok);
+    if (!ok) {
+        updating_ = true;
+        startEdit_->setText(QString::number(startFrame_));
+        updating_ = false;
+        return;
+    }
+    rangeTouched_ = true;
+    startFrame_ = value;
+    if (endFrame_ < startFrame_) endFrame_ = startFrame_;
+    clampFrame();
+    syncFromState();
+    emitFrame();
+}
+
+void TimelineBar::onEndEdited() {
+    if (updating_ || !endEdit_) return;
+    bool ok = false;
+    int value = endEdit_->text().trimmed().toInt(&ok);
+    if (!ok) {
+        updating_ = true;
+        endEdit_->setText(QString::number(endFrame_));
+        updating_ = false;
+        return;
+    }
+    rangeTouched_ = true;
+    endFrame_ = value;
+    if (endFrame_ < startFrame_) startFrame_ = endFrame_;
+    clampFrame();
+    syncFromState();
+    emitFrame();
+}
+
 void TimelineBar::syncFromState() {
     updating_ = true;
+    if (startEdit_) startEdit_->setText(QString::number(startFrame_));
+    if (endEdit_) endEdit_->setText(QString::number(endFrame_));
     scrubber_->setRange(startFrame_, endFrame_);
     scrubber_->setFrame(currentFrame_);
     updatePlayStopIcon();
