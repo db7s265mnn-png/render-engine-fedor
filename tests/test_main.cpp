@@ -453,9 +453,10 @@ void testCausticsGlassSphere() {
     std::printf("  sumPT=%.1f sumBDPT=%.1f sumOFF=%.1f ratio=%.3f\n", sumPt, sumBdpt, sumOff, ratio);
 
     // Point light: BSDF sampling can never hit a delta light, so refractive
-    // caustics from small sources exist ONLY through the manifold connections.
-    auto renderPoint = [&](int caustics, bool& finiteOut) -> double {
-        auto scene = buildScene(kIntegratorPathTracer, caustics);
+    // caustics from small sources exist ONLY through the manifold connections
+    // (both in the Path Tracer and in BDPT).
+    auto renderPoint = [&](int integrator, int caustics, bool& finiteOut) -> double {
+        auto scene = buildScene(integrator, caustics);
         scene->lights[0].type = kLightPoint;
         scene->lights[0].intensity = 30.0f;
         scene->lights[0].normalize = 0;
@@ -475,12 +476,17 @@ void testCausticsGlassSphere() {
             }
         return sum;
     };
-    bool finPointOn = true, finPointOff = true;
-    const double sumPointOn = renderPoint(1, finPointOn);
-    const double sumPointOff = renderPoint(0, finPointOff);
-    check(finPointOn && finPointOff, "point-light caustics renders are finite");
+    bool finPointOn = true, finPointOff = true, finPointBdpt = true;
+    const double sumPointOn = renderPoint(kIntegratorPathTracer, 1, finPointOn);
+    const double sumPointOff = renderPoint(kIntegratorPathTracer, 0, finPointOff);
+    const double sumPointBdpt = renderPoint(kIntegratorBdpt, 1, finPointBdpt);
+    check(finPointOn && finPointOff && finPointBdpt, "point-light caustics renders are finite");
     check(sumPointOn > sumPointOff * 1.1, "MNEE delivers point-light caustics through glass");
-    std::printf("  pointOn=%.1f pointOff=%.1f\n", sumPointOn, sumPointOff);
+    check(sumPointBdpt > sumPointOff * 1.1, "BDPT manifold connections deliver point-light caustics");
+    const double pointRatio = sumPointOn > 0.0 ? sumPointBdpt / sumPointOn : 0.0;
+    check(pointRatio > 0.8 && pointRatio < 1.25, "BDPT and PT point-light caustics agree");
+    std::printf("  pointOn=%.1f pointOff=%.1f pointBDPT=%.1f ratio=%.3f\n", sumPointOn, sumPointOff,
+                sumPointBdpt, pointRatio);
 }
 
 // Renders an emissive sphere that is only in frame when instance transforms

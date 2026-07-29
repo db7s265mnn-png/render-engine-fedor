@@ -12,6 +12,7 @@
 
 #include "core/rng.h"
 #include "render/integrator.h"
+#include "render/integrator_mnee.h"  // multi-seed manifold connections through glass
 #include "render/lights.h"
 #include "render/shading.h"
 #include "solstice_config.h"
@@ -517,6 +518,45 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             }
             if (sawDiffuseThenSpec) break;
         }
+        // Caustics on: paths of the form connectable-anchor → delta-transmissive
+        // chain → light are covered by the manifold s=1 connections below.
+        // Suppress the noisy BSDF copy exactly when the same seed set finds the
+        // branch this path took (mirrors the Path Tracer's suppression rule).
+        if (causticsOn && t >= 4) {
+            int j = t - 2;
+            int chainLen = 0;
+            while (j >= 1 && eye[j].type == VType::Surface && eye[j].delta &&
+                   mnee::isCausticCaster(eye[j].mat) && chainLen <= mnee::kMaxChain) {
+                ++chainLen;
+                --j;
+            }
+            if (chainLen >= 1 && chainLen <= mnee::kMaxChain && j >= 1 &&
+                eye[j].type == VType::Surface && eye[j].connectable) {
+                const Vert& anchor = eye[j];
+                const Vec3 anchorDir = normalize(eye[j + 1].p - anchor.p);
+                Vec3 seg = v.p - anchor.p;
+                const float segLen = length(seg);
+                if (segLen > 1e-5f) {
+                    seg = seg / segLen;
+                    const Vec3 o = offsetRayOrigin(anchor.p, anchor.ng, seg);
+                    RayHit sh;
+                    if (tracer.intersect(o, seg, segLen * (1.0f - 1e-3f), sh)) {
+                        SurfaceInteraction ssi;
+                        if (buildSurfaceInteraction(scene, sh, o, seg, ssi) && ssi.lightIndex < 0) {
+                            Material smat = ssi.materialIndex >= 0 && ssi.materialIndex < scene.materialCount
+                                                ? scene.materials[ssi.materialIndex]
+                                                : defaultMaterial();
+                            smat = evaluateTexturedMaterial(scene, smat, ssi.uv, ssi.ns, ssi.pObject,
+                                                            ssi.nObject, ssi.uvFilterWidth);
+                            if (mnee::isCausticCaster(smat) &&
+                                mnee::branchCovered(scene, tracer, anchor.p, anchor.ns, v.lightIndex, v.p,
+                                                    ssi.instanceIndex, anchorDir))
+                                break;  // manifold-covered — suppress
+                        }
+                    }
+                }
+            }
+        }
 
         MisOverride ov;
         ov.lightOriginDelta = false;
@@ -626,9 +666,53 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         if (isBlack(Le)) continue;
 
         const Vec3 f = bsdfF(E.mat, E.ns, E.wo, wi);
-        if (isBlack(f)) continue;
+        if (isBlack(f) && !causticsOn) continue;
 
-        if (l.shadowEnable && !connectionVisible(scene, tracer, E.p, E.ng, Ls.p, li)) continue;
+        if (l.shadowEnable && !connectionVisible(scene, tracer, E.p, E.ng, Ls.p, li)) {
+            // Blocked. If the first blocker is a delta-transmissive caustic caster,
+            // connect through the glass with the multi-seed manifold estimator
+            // (weight 1 — no other BDPT strategy samples delta chains; the s=0
+            // BSDF copies of covered branches are suppressed above).
+            if (!causticsOn) continue;
+            Vec3 segD = Ls.p - E.p;
+            const float segLen = length(segD);
+            if (segLen < 1e-5f) continue;
+            segD = segD / segLen;
+            const Vec3 o = offsetRayOrigin(E.p, E.ng, segD);
+            RayHit sh;
+            if (!tracer.intersect(o, segD, segLen * (1.0f - 1e-3f), sh)) continue;
+            SurfaceInteraction bsi;
+            if (!buildSurfaceInteraction(scene, sh, o, segD, bsi)) continue;
+            if (bsi.lightIndex >= 0) continue;
+            Material bmat = bsi.materialIndex >= 0 && bsi.materialIndex < scene.materialCount
+                                ? scene.materials[bsi.materialIndex]
+                                : defaultMaterial();
+            bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject, bsi.nObject,
+                                            bsi.uvFilterWidth);
+            if (!mnee::isCausticCaster(bmat)) continue;
+            // mnee conventions: Le = radiance (area lights) / intensity (point),
+            // pdfArea in area measure without light selection.
+            Vec3 LeM;
+            float pdfAreaM = 1.0f;
+            if (l.type == kLightPoint) {
+                LeM = l.emittedRadiance();
+                pdfAreaM = 1.0f;
+            } else {
+                LeM = lightRadiance(l);
+                pdfAreaM = Ls.pdfFwd / srMax(1e-12f, selectPdf);
+            }
+            const mnee::MneeResult mr =
+                mnee::manifoldConnect(scene, tracer, E.p, E.ns, E.wo, E.mat, li, Ls.p, Ls.ns, LeM,
+                                      pdfAreaM, selectPdf, bsi.instanceIndex);
+            if (mr.solved && !isBlack(mr.contribution)) {
+                Vec3 c = E.beta * mr.contribution;
+                c = clampContribution(c, settings.clampIndirect > 0.0f ? settings.clampIndirect * 4.0f
+                                                                       : 0.0f);
+                if (isFinite(c)) L += c;
+            }
+            continue;
+        }
+        if (isBlack(f)) continue;
 
         Vec3 c;
         if (l.type == kLightPoint) {

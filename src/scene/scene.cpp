@@ -172,6 +172,11 @@ void Scene::buildLightProxies() {
     // Area lights are represented analytically for sampling but also need real
     // geometry so that BSDF rays can hit them (needed for MIS and for the
     // "visible to camera" flag).
+    // Idempotent: drop proxies from a previous finalize() so re-finalizing a
+    // mutated scene never leaves phantom light geometry behind.
+    instances.erase(std::remove_if(instances.begin(), instances.end(),
+                                   [](const InstanceData& inst) { return inst.lightIndex >= 0; }),
+                    instances.end());
     const size_t lightCount = lights.size();
     for (size_t i = 0; i < lightCount; ++i) {
         LightData& light = lights[i];
