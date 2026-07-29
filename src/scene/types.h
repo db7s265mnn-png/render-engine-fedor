@@ -259,6 +259,9 @@ struct CameraData {
 enum ToneMapper : int { kToneNone = 0, kToneReinhard = 1, kToneAces = 2 };
 enum RenderBackendType : int { kBackendCpuEmbree = 0, kBackendGpuOptix = 1 };
 enum IntegratorMode : int { kIntegratorPathTracer = 0, kIntegratorDirectLighting = 1, kIntegratorAmbientOcclusion = 2 };
+// Caustics solver used when Integrator = Path Tracer (CPU / Embree).
+// 0 = BDPT + OpenPGL guiding (D+A), 1 = MNEE / manifold next-event (C).
+enum CausticsSolver : int { kCausticsBdptGuided = 0, kCausticsMnee = 1 };
 
 struct RenderSettingsData {
     int resolutionX = 960;
@@ -282,8 +285,9 @@ struct RenderSettingsData {
     int threads = 0;               // 0 = hardware concurrency
 
     float aoDistance = 1.0f;
-    int pathGuiding = 0;           // OpenPGL on CPU (Embree); ignored on OptiX
-    float pad2 = 0.0f;
+    int pathGuiding = 1;           // OpenPGL on CPU (Embree); recommended with BDPT (D+A)
+    // BDPT+Guiding vs MNEE — see CausticsSolver. OptiX falls back to unidirectional PT.
+    int causticsSolver = kCausticsBdptGuided;
     float pad3 = 0.0f;
 };
 

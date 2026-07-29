@@ -12,6 +12,8 @@
 #include "render/blue_noise.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
+#include "render/integrator_bdpt.h"
+#include "render/integrator_mnee.h"
 #include "render/render_device.h"
 #include "solstice_config.h"
 
@@ -193,10 +195,13 @@ public:
         const SceneView& scene = view_;
         const uint32_t frameSeed = uint32_t(settings.seed) * 9781u + uint32_t(sampleIndex) * 6271u;
 
+        const bool pathTracer = settings.integrator == kIntegratorPathTracer;
+        const bool useMnee = pathTracer && settings.causticsSolver == kCausticsMnee;
+        const bool useBdpt = pathTracer && settings.causticsSolver == kCausticsBdptGuided;
 #if SOLSTICE_HAVE_OPENPGL
+        // OpenPGL trains on the eye path for both BDPT (D+A) and MNEE; most useful with BDPT.
         const bool useGuiding =
-            settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() &&
-            settings.integrator == kIntegratorPathTracer;
+            settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() && pathTracer;
 #else
         const bool useGuiding = false;
 #endif
@@ -227,20 +232,34 @@ public:
             } else {
                 generateCameraRay(scene, float(x) + jx, float(y) + jy, lensU, lensV, origin, direction);
             }
-#if SOLSTICE_HAVE_OPENPGL
             Vec3 radiance;
+#if SOLSTICE_HAVE_OPENPGL
             if (useGuiding) {
                 PathGuiding::ThreadState& guiding = pathGuiding_->thread(threadId);
                 guiding.beginPath();
-                radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding);
+                if (useBdpt)
+                    radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, &guiding);
+                else if (useMnee)
+                    radiance = traceRadianceMnee(scene, tracer, origin, direction, rng, &guiding);
+                else
+                    radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding);
                 guiding.endPath();
+            } else if (useBdpt) {
+                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, nullptr);
+            } else if (useMnee) {
+                radiance = traceRadianceMnee(scene, tracer, origin, direction, rng);
             } else {
                 radiance = traceRadiance(scene, tracer, origin, direction, rng);
             }
 #else
             (void)threadId;
             (void)useGuiding;
-            Vec3 radiance = traceRadiance(scene, tracer, origin, direction, rng);
+            if (useBdpt)
+                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng);
+            else if (useMnee)
+                radiance = traceRadianceMnee(scene, tracer, origin, direction, rng);
+            else
+                radiance = traceRadiance(scene, tracer, origin, direction, rng);
 #endif
             if (chromaticChannel >= 0) {
                 // Hero-wavelength RGB: deposit only the sampled channel, scaled by 3 / pdf.

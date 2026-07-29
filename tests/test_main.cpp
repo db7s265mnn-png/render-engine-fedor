@@ -272,6 +272,32 @@ void testRender() {
     check(finite, "render output is finite");
     check(nonBlack > image.width() * image.height() / 2, "most pixels receive light");
     check(sum > 0.0 && maxValue < 1e4, "render output is in a sane range");
+
+    // Caustics solvers (CPU Path Tracer): BDPT+Guiding (D+A) and MNEE (C).
+    auto smokeCaustics = [&](int solver, const char* label) {
+        scene->settings.causticsSolver = solver;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.samplesPerPixel = 4;
+        scene->settings.pathGuiding = 0;  // keep the smoke test offline-friendly
+        RenderSession s2;
+        s2.setScene(scene);
+        s2.start();
+        s2.waitForCompletion();
+        const Image img = s2.linearImage();
+        bool ok = true;
+        double s = 0.0;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) ok = false;
+                s += double(luminance(c));
+            }
+        }
+        check(ok, std::string(label) + " output is finite");
+        check(s > 0.0, std::string(label) + " produces light");
+    };
+    smokeCaustics(kCausticsBdptGuided, "BDPT+Guiding (D+A)");
+    smokeCaustics(kCausticsMnee, "MNEE (C)");
 }
 
 // The equirectangular convention must stay stable: +Y is the top row of the

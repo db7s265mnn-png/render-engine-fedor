@@ -221,9 +221,15 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
 
         float block = 1.0f;
         if (mat.transmission > 1e-3f) {
-            // Glass / dielectric: refractive caustics off → solid shadow;
-            // on → shadow_opacity (1 = opaque fake shadow, 0 = fully open).
-            block = mat.refractiveCaustics != 0 ? saturatef(mat.shadowOpacity) : 1.0f;
+            // Real caustics solvers (BDPT / MNEE) use opaque shadow rays; transport
+            // through glass is handled by the integrator. Legacy fake-caustics
+            // (shadow_opacity) only applies when refractive caustics are on AND the
+            // artist explicitly wants open shadows — kept via shadowOpacity < 1, but
+            // default materials keep hard occlusion so SDS paths are not double-lit.
+            if (mat.refractiveCaustics != 0 && mat.shadowOpacity < 0.999f)
+                block = saturatef(mat.shadowOpacity);
+            else
+                block = 1.0f;
         }
         visibility *= (1.0f - block);
         if (block >= 0.999f || visibility <= 1e-5f) return 0.0f;
