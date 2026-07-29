@@ -1,151 +1,348 @@
 #include "ui/timeline_bar.h"
 
+#include <QPainter>
+#include <QPainterPath>
+#include <QLineEdit>
 #include <QHBoxLayout>
-#include <QDoubleSpinBox>
-#include <QLabel>
-#include <QPushButton>
-#include <QSlider>
-#include <QSpinBox>
+#include <QMouseEvent>
+#include <QToolButton>
 #include <QTimer>
+#include <QFontMetrics>
 #include <cmath>
+#include <algorithm>
 
 #include "ui/theme.h"
 
 namespace sol {
 namespace {
 
-QSpinBox* makeFrameSpin(QWidget* parent, int value) {
-    auto* spin = new QSpinBox(parent);
-    spin->setRange(-1000000, 1000000);
-    spin->setValue(value);
-    spin->setFixedWidth(72);
-    spin->setButtonSymbols(QAbstractSpinBox::UpDownArrows);
-    spin->setToolTip("Frame");
-    return spin;
+QIcon makeHoudiniTransportIcon(const QString& kind, int size = 18) {
+    QPixmap pm(size, size);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const QColor ink(220, 222, 226);
+    p.setPen(Qt::NoPen);
+    p.setBrush(ink);
+
+    const qreal s = size;
+    if (kind == QLatin1String("toStart")) {
+        // |<<  — vertical bar + double left chevrons (Houdini "jump to start")
+        p.drawRect(QRectF(s * 0.14, s * 0.22, s * 0.10, s * 0.56));
+        QPainterPath a;
+        a.moveTo(s * 0.52, s * 0.22);
+        a.lineTo(s * 0.28, s * 0.50);
+        a.lineTo(s * 0.52, s * 0.78);
+        a.closeSubpath();
+        p.drawPath(a);
+        QPainterPath b;
+        b.moveTo(s * 0.78, s * 0.22);
+        b.lineTo(s * 0.54, s * 0.50);
+        b.lineTo(s * 0.78, s * 0.78);
+        b.closeSubpath();
+        p.drawPath(b);
+    } else if (kind == QLatin1String("play")) {
+        QPainterPath tri;
+        tri.moveTo(s * 0.30, s * 0.20);
+        tri.lineTo(s * 0.78, s * 0.50);
+        tri.lineTo(s * 0.30, s * 0.80);
+        tri.closeSubpath();
+        p.drawPath(tri);
+    } else if (kind == QLatin1String("stop")) {
+        p.drawRoundedRect(QRectF(s * 0.28, s * 0.28, s * 0.44, s * 0.44), 1.0, 1.0);
+    } else if (kind == QLatin1String("toEnd")) {
+        // >>| 
+        QPainterPath a;
+        a.moveTo(s * 0.22, s * 0.22);
+        a.lineTo(s * 0.46, s * 0.50);
+        a.lineTo(s * 0.22, s * 0.78);
+        a.closeSubpath();
+        p.drawPath(a);
+        QPainterPath b;
+        b.moveTo(s * 0.46, s * 0.22);
+        b.lineTo(s * 0.70, s * 0.50);
+        b.lineTo(s * 0.46, s * 0.78);
+        b.closeSubpath();
+        p.drawPath(b);
+        p.drawRect(QRectF(s * 0.76, s * 0.22, s * 0.10, s * 0.56));
+    }
+    return QIcon(pm);
+}
+
+QToolButton* makeTransportButton(QWidget* parent, const QString& kind, const QString& tip) {
+    auto* btn = new QToolButton(parent);
+    btn->setIcon(makeHoudiniTransportIcon(kind));
+    btn->setIconSize(QSize(16, 16));
+    btn->setToolTip(tip);
+    btn->setAutoRaise(false);
+    btn->setFixedSize(26, 24);
+    btn->setFocusPolicy(Qt::NoFocus);
+    return btn;
 }
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// TimelineScrubber
+// ---------------------------------------------------------------------------
+
+TimelineScrubber::TimelineScrubber(QWidget* parent) : QWidget(parent) {
+    setMinimumHeight(26);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    setMouseTracking(true);
+    setCursor(Qt::PointingHandCursor);
+}
+
+void TimelineScrubber::setRange(int startFrame, int endFrame) {
+    if (endFrame < startFrame) endFrame = startFrame;
+    startFrame_ = startFrame;
+    endFrame_ = endFrame;
+    if (frame_ < startFrame_) frame_ = startFrame_;
+    if (frame_ > endFrame_) frame_ = endFrame_;
+    update();
+}
+
+void TimelineScrubber::setFrame(int frame) {
+    frame_ = std::clamp(frame, startFrame_, endFrame_);
+    update();
+}
+
+QRectF TimelineScrubber::trackRect() const {
+    return QRectF(36.0, height() * 0.5 - 1.0, width() - 72.0, 2.0);
+}
+
+qreal TimelineScrubber::xForFrame(int frame) const {
+    const QRectF track = trackRect();
+    const int span = std::max(1, endFrame_ - startFrame_);
+    const qreal t = double(frame - startFrame_) / double(span);
+    return track.left() + t * track.width();
+}
+
+int TimelineScrubber::frameAtX(qreal x) const {
+    const QRectF track = trackRect();
+    if (track.width() < 1.0) return startFrame_;
+    const qreal t = std::clamp((x - track.left()) / track.width(), 0.0, 1.0);
+    const int span = std::max(1, endFrame_ - startFrame_);
+    return startFrame_ + int(std::lround(t * span));
+}
+
+QRectF TimelineScrubber::playheadRect() const {
+    const qreal x = xForFrame(frame_);
+    const QString text = QString::number(frame_);
+    QFont font = this->font();
+    font.setPointSizeF(9.0);
+    font.setBold(true);
+    const QFontMetrics fm(font);
+    const qreal tw = std::max(28.0, fm.horizontalAdvance(text) + 10.0);
+    const qreal th = 16.0;
+    return QRectF(x - tw * 0.5, height() * 0.5 - th * 0.5, tw, th);
+}
+
+void TimelineScrubber::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    const QRectF track = trackRect();
+    // Groove
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(90, 94, 100));
+    p.drawRoundedRect(track.adjusted(0, -1, 0, 1), 2.0, 2.0);
+
+    // Tick marks
+    const int span = std::max(1, endFrame_ - startFrame_);
+    int step = 1;
+    if (span > 200) step = 10;
+    else if (span > 80) step = 5;
+    else if (span > 40) step = 2;
+    p.setPen(QPen(QColor(130, 134, 140), 1.0));
+    for (int f = startFrame_; f <= endFrame_; f += step) {
+        const qreal x = xForFrame(f);
+        const bool major = ((f - startFrame_) % (step * 4) == 0) || f == startFrame_ || f == endFrame_;
+        const qreal h = major ? 6.0 : 3.5;
+        p.drawLine(QPointF(x, track.center().y() - h), QPointF(x, track.center().y() + h));
+    }
+
+    // Start / end labels
+    QFont labelFont = font();
+    labelFont.setPointSizeF(8.5);
+    p.setFont(labelFont);
+    p.setPen(theme::textDim());
+    p.drawText(QRectF(2, 0, 32, height()), Qt::AlignVCenter | Qt::AlignRight, QString::number(startFrame_));
+    p.drawText(QRectF(width() - 34, 0, 32, height()), Qt::AlignVCenter | Qt::AlignLeft,
+               QString::number(endFrame_));
+
+    // Playhead frame box (Houdini-like black field)
+    const QRectF head = playheadRect();
+    p.setPen(QPen(QColor(20, 21, 24), 1.0));
+    p.setBrush(QColor(12, 13, 15));
+    p.drawRoundedRect(head, 2.0, 2.0);
+    // Stem through the track
+    const qreal cx = head.center().x();
+    p.setPen(QPen(QColor(220, 222, 226), 1.2));
+    p.drawLine(QPointF(cx, track.center().y() - 7.0), QPointF(cx, track.center().y() + 7.0));
+
+    QFont frameFont = font();
+    frameFont.setPointSizeF(9.0);
+    frameFont.setBold(true);
+    p.setFont(frameFont);
+    p.setPen(QColor(235, 237, 240));
+    p.drawText(head, Qt::AlignCenter, QString::number(frame_));
+}
+
+void TimelineScrubber::mousePressEvent(QMouseEvent* event) {
+    if (event->button() != Qt::LeftButton) return;
+    if (editor_) {
+        commitFrameEdit();
+        return;
+    }
+    dragging_ = true;
+    emit scrubStarted();
+    const int f = frameAtX(event->position().x());
+    if (f != frame_) {
+        frame_ = f;
+        update();
+        emit frameChanged(frame_);
+    }
+    event->accept();
+}
+
+void TimelineScrubber::mouseMoveEvent(QMouseEvent* event) {
+    if (!dragging_) return;
+    const int f = frameAtX(event->position().x());
+    if (f != frame_) {
+        frame_ = f;
+        update();
+        emit frameChanged(frame_);
+    }
+    event->accept();
+}
+
+void TimelineScrubber::mouseReleaseEvent(QMouseEvent* event) {
+    if (event->button() != Qt::LeftButton || !dragging_) return;
+    dragging_ = false;
+    emit scrubFinished();
+    event->accept();
+}
+
+void TimelineScrubber::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (event->button() != Qt::LeftButton) return;
+    // Double-click playhead (or nearby) to type a frame.
+    if (playheadRect().adjusted(-8, -4, 8, 4).contains(event->position())) {
+        beginFrameEdit();
+        event->accept();
+        return;
+    }
+    QWidget::mouseDoubleClickEvent(event);
+}
+
+void TimelineScrubber::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    if (editor_) {
+        const QRectF head = playheadRect();
+        editor_->setGeometry(head.toRect().adjusted(-2, -1, 2, 1));
+    }
+}
+
+void TimelineScrubber::beginFrameEdit() {
+    if (editor_) return;
+    editor_ = new QLineEdit(this);
+    editor_->setAlignment(Qt::AlignCenter);
+    editor_->setText(QString::number(frame_));
+    editor_->setStyleSheet(
+        "QLineEdit { background: #0c0d0f; color: #ebebef; border: 1px solid #50aaff;"
+        " border-radius: 2px; padding: 0 4px; font-weight: 700; }");
+    const QRectF head = playheadRect();
+    editor_->setGeometry(head.toRect().adjusted(-4, -2, 4, 2));
+    editor_->selectAll();
+    editor_->show();
+    editor_->setFocus(Qt::MouseFocusReason);
+    connect(editor_, &QLineEdit::editingFinished, this, &TimelineScrubber::commitFrameEdit);
+    connect(editor_, &QLineEdit::returnPressed, this, &TimelineScrubber::commitFrameEdit);
+}
+
+void TimelineScrubber::commitFrameEdit() {
+    if (!editor_) return;
+    bool ok = false;
+    const int value = editor_->text().trimmed().toInt(&ok);
+    editor_->deleteLater();
+    editor_ = nullptr;
+    if (!ok) {
+        update();
+        return;
+    }
+    const int clamped = std::clamp(value, startFrame_, endFrame_);
+    if (clamped != frame_) {
+        frame_ = clamped;
+        emit frameChanged(frame_);
+    }
+    update();
+}
+
+void TimelineScrubber::cancelFrameEdit() {
+    if (!editor_) return;
+    editor_->deleteLater();
+    editor_ = nullptr;
+    update();
+}
+
+// ---------------------------------------------------------------------------
+// TimelineBar
+// ---------------------------------------------------------------------------
+
 TimelineBar::TimelineBar(QWidget* parent) : QWidget(parent) {
     setObjectName("timelineBar");
-    setFixedHeight(36);
+    setFixedHeight(30);
     setStyleSheet(QStringLiteral(
         "QWidget#timelineBar {"
-        "  background: %1;"
-        "  border-top: 1px solid %2;"
+        "  background: #2e3136;"
+        "  border-top: 1px solid #22242a;"
+        "  border-bottom: 1px solid #22242a;"
         "}"
-        "QLabel { color: %3; }"
-        "QPushButton {"
-        "  background: %4; color: %5; border: 1px solid %2;"
-        "  border-radius: 3px; padding: 2px 8px; min-width: 28px;"
+        "QToolButton {"
+        "  background: #3a3e44;"
+        "  border: 1px solid #4a4f57;"
+        "  border-radius: 3px;"
+        "  padding: 0;"
         "}"
-        "QPushButton:hover { background: %6; }"
-        "QPushButton:pressed { background: %2; }"
-        "QSlider::groove:horizontal {"
-        "  height: 6px; background: %2; border-radius: 3px;"
-        "}"
-        "QSlider::handle:horizontal {"
-        "  width: 12px; margin: -5px 0; border-radius: 6px;"
-        "  background: %7;"
-        "}"
-        "QSpinBox, QDoubleSpinBox {"
-        "  background: %4; color: %5; border: 1px solid %2; border-radius: 3px;"
-        "  padding: 1px 4px;"
-        "}")
-                      .arg(theme::panel().name(), theme::panelLight().name(), theme::textDim().name(),
-                           theme::panelDark().name(), theme::text().name(), theme::panelLight().lighter(110).name(),
-                           theme::accent().name()));
+        "QToolButton:hover { background: #474c54; }"
+        "QToolButton:pressed { background: #2a2d32; }"
+        "QToolButton:checked {"
+        "  background: rgba(80, 170, 255, 70);"
+        "  border-color: #50aaff;"
+        "}"));
 
     auto* layout = new QHBoxLayout(this);
-    layout->setContentsMargins(8, 4, 8, 4);
-    layout->setSpacing(6);
+    layout->setContentsMargins(6, 2, 8, 2);
+    layout->setSpacing(3);
 
-    auto* startLabel = new QLabel("Start", this);
-    startSpin_ = makeFrameSpin(this, startFrame_);
-    startSpin_->setToolTip("Timeline start frame");
+    toStartBtn_ = makeTransportButton(this, QStringLiteral("toStart"), QStringLiteral("Go to start frame"));
+    playStopBtn_ = makeTransportButton(this, QStringLiteral("play"), QStringLiteral("Play / Stop"));
+    playStopBtn_->setCheckable(true);
+    toEndBtn_ = makeTransportButton(this, QStringLiteral("toEnd"), QStringLiteral("Go to end frame"));
 
-    auto* endLabel = new QLabel("End", this);
-    endSpin_ = makeFrameSpin(this, endFrame_);
-    endSpin_->setToolTip("Timeline end frame");
+    scrubber_ = new TimelineScrubber(this);
 
-    fpsSpin_ = new QDoubleSpinBox(this);
-    fpsSpin_->setRange(1.0, 240.0);
-    fpsSpin_->setDecimals(3);
-    fpsSpin_->setValue(fps_);
-    fpsSpin_->setSuffix(" fps");
-    fpsSpin_->setFixedWidth(88);
-    fpsSpin_->setToolTip("Frames per second — converts the current frame to sample time");
-
-    auto* toStart = new QPushButton("|◀", this);
-    toStart->setToolTip("Go to start");
-    auto* stepBack = new QPushButton("◀", this);
-    stepBack->setToolTip("Previous frame");
-    playButton_ = new QPushButton("▶", this);
-    playButton_->setToolTip("Play / Pause");
-    playButton_->setFixedWidth(36);
-    auto* stopButton = new QPushButton("■", this);
-    stopButton->setToolTip("Stop (return to start)");
-    auto* stepFwd = new QPushButton("▶", this);
-    stepFwd->setToolTip("Next frame");
-    auto* toEnd = new QPushButton("▶|", this);
-    toEnd->setToolTip("Go to end");
-
-    scrub_ = new QSlider(Qt::Horizontal, this);
-    scrub_->setRange(startFrame_, endFrame_);
-    scrub_->setValue(currentFrame_);
-    scrub_->setToolTip("Scrub timeline");
-
-    frameSpin_ = makeFrameSpin(this, currentFrame_);
-    frameSpin_->setToolTip("Current frame");
-
-    timeLabel_ = new QLabel(this);
-    timeLabel_->setMinimumWidth(64);
-    timeLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-
-    layout->addWidget(startLabel);
-    layout->addWidget(startSpin_);
-    layout->addSpacing(4);
-    layout->addWidget(toStart);
-    layout->addWidget(stepBack);
-    layout->addWidget(playButton_);
-    layout->addWidget(stopButton);
-    layout->addWidget(stepFwd);
-    layout->addWidget(toEnd);
+    layout->addWidget(toStartBtn_);
+    layout->addWidget(playStopBtn_);
+    layout->addWidget(toEndBtn_);
     layout->addSpacing(6);
-    layout->addWidget(scrub_, 1);
-    layout->addWidget(frameSpin_);
-    layout->addWidget(timeLabel_);
-    layout->addSpacing(8);
-    layout->addWidget(endLabel);
-    layout->addWidget(endSpin_);
-    layout->addWidget(fpsSpin_);
+    layout->addWidget(scrubber_, 1);
 
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &TimelineBar::onTick);
+    connect(toStartBtn_, &QToolButton::clicked, this, &TimelineBar::goToStart);
+    connect(toEndBtn_, &QToolButton::clicked, this, &TimelineBar::goToEnd);
+    connect(playStopBtn_, &QToolButton::clicked, this, &TimelineBar::onPlayStop);
+    connect(scrubber_, &TimelineScrubber::frameChanged, this, &TimelineBar::onScrubFrame);
+    connect(scrubber_, &TimelineScrubber::scrubStarted, this, [this] {
+        if (playing_) stopPlayback();
+    });
 
-    connect(playButton_, &QPushButton::clicked, this, &TimelineBar::onPlayPause);
-    connect(stopButton, &QPushButton::clicked, this, &TimelineBar::stop);
-    connect(toStart, &QPushButton::clicked, this, &TimelineBar::goToStart);
-    connect(toEnd, &QPushButton::clicked, this, &TimelineBar::goToEnd);
-    connect(stepBack, &QPushButton::clicked, this, &TimelineBar::stepBackward);
-    connect(stepFwd, &QPushButton::clicked, this, &TimelineBar::stepForward);
-    connect(scrub_, &QSlider::valueChanged, this, &TimelineBar::onSliderMoved);
-    connect(startSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &TimelineBar::onStartEdited);
-    connect(endSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &TimelineBar::onEndEdited);
-    connect(fpsSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &TimelineBar::onFpsEdited);
-    connect(frameSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &TimelineBar::onFrameEdited);
-
-    syncWidgetsFromState();
+    syncFromState();
 }
 
-int TimelineBar::startFrame() const { return startFrame_; }
-int TimelineBar::endFrame() const { return endFrame_; }
-int TimelineBar::currentFrame() const { return currentFrame_; }
-double TimelineBar::fps() const { return fps_; }
-
 double TimelineBar::timeSeconds() const {
-    const double rate = std::max(1e-6, fps_);
-    return double(currentFrame_ - 1) / rate;
+    return double(currentFrame_ - 1) / std::max(1e-6, fps_);
 }
 
 void TimelineBar::setRange(int startFrame, int endFrame) {
@@ -153,18 +350,18 @@ void TimelineBar::setRange(int startFrame, int endFrame) {
     startFrame_ = startFrame;
     endFrame_ = endFrame;
     clampFrame();
-    syncWidgetsFromState();
+    syncFromState();
 }
 
 void TimelineBar::setFps(double fps) {
     fps_ = std::max(1.0, fps);
-    syncWidgetsFromState();
+    if (playing_) timer_->setInterval(std::max(1, int(std::round(1000.0 / fps_))));
 }
 
 void TimelineBar::setCurrentFrame(int frame) {
     currentFrame_ = frame;
     clampFrame();
-    syncWidgetsFromState();
+    syncFromState();
     emitFrame();
 }
 
@@ -172,7 +369,6 @@ void TimelineBar::suggestTimeRange(double startSeconds, double endSeconds, bool 
     if (rangeTouched_ && !force) return;
     if (!(endSeconds >= startSeconds)) return;
     const double rate = std::max(1e-6, fps_);
-    // Map archive seconds onto integer frames with time = (frame - 1) / fps.
     int start = 1 + int(std::floor(startSeconds * rate + 1e-6));
     int end = 1 + int(std::ceil(endSeconds * rate - 1e-6));
     if (start < 1) start = 1;
@@ -180,141 +376,68 @@ void TimelineBar::suggestTimeRange(double startSeconds, double endSeconds, bool 
     startFrame_ = start;
     endFrame_ = end;
     clampFrame();
-    syncWidgetsFromState();
+    syncFromState();
 }
 
 void TimelineBar::play() {
     if (playing_) return;
     if (currentFrame_ >= endFrame_) currentFrame_ = startFrame_;
     playing_ = true;
-    playButton_->setText("❚❚");
     const int intervalMs = int(std::round(1000.0 / std::max(1.0, fps_)));
     timer_->start(std::max(1, intervalMs));
-    syncWidgetsFromState();
+    updatePlayStopIcon();
+    syncFromState();
     emitFrame();
 }
 
-void TimelineBar::pause() {
+void TimelineBar::stopPlayback() {
     if (!playing_) return;
     playing_ = false;
-    playButton_->setText("▶");
     timer_->stop();
+    updatePlayStopIcon();
     emit playbackStopped();
 }
 
-void TimelineBar::stop() {
-    pause();
-    currentFrame_ = startFrame_;
-    syncWidgetsFromState();
-    emitFrame();
-}
-
-void TimelineBar::stepBackward() {
-    pause();
-    --currentFrame_;
-    clampFrame();
-    syncWidgetsFromState();
-    emitFrame();
-}
-
-void TimelineBar::stepForward() {
-    pause();
-    ++currentFrame_;
-    clampFrame();
-    syncWidgetsFromState();
-    emitFrame();
-}
-
 void TimelineBar::goToStart() {
-    pause();
+    stopPlayback();
     currentFrame_ = startFrame_;
-    syncWidgetsFromState();
+    syncFromState();
     emitFrame();
 }
 
 void TimelineBar::goToEnd() {
-    pause();
+    stopPlayback();
     currentFrame_ = endFrame_;
-    syncWidgetsFromState();
+    syncFromState();
     emitFrame();
 }
 
-void TimelineBar::onPlayPause() {
-    if (playing_) pause();
+void TimelineBar::onPlayStop() {
+    if (playing_) stopPlayback();
     else play();
 }
 
 void TimelineBar::onTick() {
     if (!playing_) return;
     ++currentFrame_;
-    if (currentFrame_ > endFrame_) {
-        currentFrame_ = startFrame_;  // loop
-    }
-    syncWidgetsFromState();
+    if (currentFrame_ > endFrame_) currentFrame_ = startFrame_;
+    syncFromState();
     emitFrame();
 }
 
-void TimelineBar::onSliderMoved(int value) {
+void TimelineBar::onScrubFrame(int frame) {
     if (updating_) return;
     rangeTouched_ = true;
-    pause();
-    currentFrame_ = value;
+    currentFrame_ = frame;
     clampFrame();
-    syncWidgetsFromState();
     emitFrame();
 }
 
-void TimelineBar::onStartEdited(int value) {
-    if (updating_) return;
-    rangeTouched_ = true;
-    startFrame_ = value;
-    if (endFrame_ < startFrame_) endFrame_ = startFrame_;
-    clampFrame();
-    syncWidgetsFromState();
-    emitFrame();
-}
-
-void TimelineBar::onEndEdited(int value) {
-    if (updating_) return;
-    rangeTouched_ = true;
-    endFrame_ = value;
-    if (endFrame_ < startFrame_) startFrame_ = endFrame_;
-    clampFrame();
-    syncWidgetsFromState();
-    emitFrame();
-}
-
-void TimelineBar::onFpsEdited(double value) {
-    if (updating_) return;
-    fps_ = std::max(1.0, value);
-    if (playing_) {
-        timer_->setInterval(std::max(1, int(std::round(1000.0 / fps_))));
-    }
-    syncWidgetsFromState();
-    emitFrame();
-}
-
-void TimelineBar::onFrameEdited(int value) {
-    if (updating_) return;
-    rangeTouched_ = true;
-    pause();
-    currentFrame_ = value;
-    clampFrame();
-    syncWidgetsFromState();
-    emitFrame();
-}
-
-void TimelineBar::syncWidgetsFromState() {
+void TimelineBar::syncFromState() {
     updating_ = true;
-    startSpin_->setValue(startFrame_);
-    endSpin_->setValue(endFrame_);
-    frameSpin_->setRange(startFrame_, endFrame_);
-    frameSpin_->setValue(currentFrame_);
-    scrub_->setRange(startFrame_, endFrame_);
-    scrub_->setValue(currentFrame_);
-    fpsSpin_->setValue(fps_);
-    timeLabel_->setText(QString("%1 s").arg(timeSeconds(), 0, 'f', 3));
-    playButton_->setText(playing_ ? QStringLiteral("❚❚") : QStringLiteral("▶"));
+    scrubber_->setRange(startFrame_, endFrame_);
+    scrubber_->setFrame(currentFrame_);
+    updatePlayStopIcon();
     updating_ = false;
 }
 
@@ -322,6 +445,14 @@ void TimelineBar::clampFrame() {
     if (endFrame_ < startFrame_) endFrame_ = startFrame_;
     if (currentFrame_ < startFrame_) currentFrame_ = startFrame_;
     if (currentFrame_ > endFrame_) currentFrame_ = endFrame_;
+}
+
+void TimelineBar::updatePlayStopIcon() {
+    if (!playStopBtn_) return;
+    playStopBtn_->setChecked(playing_);
+    playStopBtn_->setIcon(makeHoudiniTransportIcon(playing_ ? QStringLiteral("stop")
+                                                            : QStringLiteral("play")));
+    playStopBtn_->setToolTip(playing_ ? QStringLiteral("Stop") : QStringLiteral("Play"));
 }
 
 void TimelineBar::emitFrame() { emit frameChanged(currentFrame_); }

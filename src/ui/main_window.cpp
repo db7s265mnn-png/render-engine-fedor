@@ -8,6 +8,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
+#include <QVBoxLayout>
 #include <QLabel>
 #include <QMenuBar>
 #include <QIcon>
@@ -121,8 +122,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowIcon(QIcon(QStringLiteral(":/icons/app_icon.png")));
     resize(1720, 1000);
 
-    renderView_ = new RenderView(this);
-    setCentralWidget(renderView_);
+    auto* central = new QWidget(this);
+    auto* centralLayout = new QVBoxLayout(central);
+    centralLayout->setContentsMargins(0, 0, 0, 0);
+    centralLayout->setSpacing(0);
+
+    renderView_ = new RenderView(central);
+    centralLayout->addWidget(renderView_, 1);
+
+    // Compact Houdini-style timeline in the dark strip under the viewport
+    // (above Scene Network / Material Network docks).
+    timelineBar_ = new TimelineBar(central);
+    centralLayout->addWidget(timelineBar_, 0);
+
+    setCentralWidget(central);
 
     createActions();
     createDocks();
@@ -350,14 +363,8 @@ void MainWindow::createToolBar() {
 }
 
 void MainWindow::createTimeline() {
-    timelineBar_ = new TimelineBar(this);
-    auto* timelineDock = new QToolBar("Timeline", this);
-    timelineDock->setObjectName("timelineToolBar");
-    timelineDock->setMovable(false);
-    timelineDock->setFloatable(false);
-    timelineDock->addWidget(timelineBar_);
-    addToolBar(Qt::BottomToolBarArea, timelineDock);
-
+    // TimelineBar is created with the central widget (under the viewport).
+    if (!timelineBar_) return;
     connect(timelineBar_, &TimelineBar::frameChanged, this, &MainWindow::onTimelineFrameChanged);
 }
 
@@ -1092,11 +1099,10 @@ void MainWindow::onShowShortcuts() {
                              "Units\n"
                              "  1 scene unit = 1 metre (Houdini MKS)\n"
                              "  angles in degrees, focal length in millimetres\n\n"
-                             "Timeline\n"
-                             "  Start / End   playback range (frames)\n"
-                             "  FPS           converts frame → sample time\n"
-                             "  ▶ / ❚❚ / ■    play, pause, stop\n"
-                             "  Scrub / frame drives Alembic & USD sample time\n\n"
+                             "Timeline (under viewport)\n"
+                             "  |<<  /  ▶■  /  >>|   start, play/stop, end\n"
+                             "  Scrubber playhead    current frame (double-click to type)\n"
+                             "  Frame → time         Alembic & USD sample time\n\n"
                              "General\n"
                              "  F5            render\n"
                              "  Esc           stop\n"
