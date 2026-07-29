@@ -233,10 +233,11 @@ public:
             float lensTau = 1.0f;
             if (polyOptics_.active) {
                 float wavelengthNm = -1.0f;
-                if (scene.camera.chromaticAberration != 0) {
+                if (scene.camera.chromaticAberration != 0 || scene.hasDispersion != 0) {
                     chromaticChannel = int(rng.nextFloat() * 3.0f);
                     if (chromaticChannel > 2) chromaticChannel = 2;
-                    wavelengthNm = chromaticWavelengthNm(chromaticChannel);
+                    if (scene.camera.chromaticAberration != 0)
+                        wavelengthNm = chromaticWavelengthNm(chromaticChannel);
                 }
                 if (!generatePolynomialOpticsRay(polyOptics_, scene.camera, float(x) + jx, float(y) + jy,
                                                  width, height, lensU, lensV, rng, origin, direction,
@@ -245,39 +246,46 @@ public:
                     return;
                 }
             } else {
+                // Material dispersion needs a hero channel even without lens CA.
+                if (scene.hasDispersion != 0) {
+                    chromaticChannel = int(rng.nextFloat() * 3.0f);
+                    if (chromaticChannel > 2) chromaticChannel = 2;
+                }
                 generateCameraRay(scene, float(x) + jx, float(y) + jy, lensU, lensV, origin, direction);
             }
             // Light-tracing splats assume the pinhole/thin-lens projection —
             // polynomial optics rays bypass it, so splats are disabled there.
             Framebuffer* splatFb = polyOptics_.active ? nullptr : &fb;
+            const int hero = chromaticChannel;
             Vec3 radiance;
 #if SOLSTICE_HAVE_OPENPGL
             if (useGuiding) {
                 PathGuiding::ThreadState& guiding = pathGuiding_->thread(threadId);
                 guiding.beginPath();
                 if (useBdpt)
-                    radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, &guiding, splatFb);
+                    radiance =
+                        traceRadianceBdpt(scene, tracer, origin, direction, rng, &guiding, splatFb, hero);
                 else if (useMnee)
-                    radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, &guiding);
+                    radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, &guiding, hero);
                 else
-                    radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding);
+                    radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding, hero);
                 guiding.endPath();
             } else if (useBdpt) {
-                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, nullptr, splatFb);
+                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, nullptr, splatFb, hero);
             } else if (useMnee) {
-                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng);
+                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, hero);
             } else {
-                radiance = traceRadiance(scene, tracer, origin, direction, rng);
+                radiance = traceRadiance(scene, tracer, origin, direction, rng, hero);
             }
 #else
             (void)threadId;
             (void)useGuiding;
             if (useBdpt)
-                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, splatFb);
+                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, splatFb, hero);
             else if (useMnee)
-                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng);
+                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, hero);
             else
-                radiance = traceRadiance(scene, tracer, origin, direction, rng);
+                radiance = traceRadiance(scene, tracer, origin, direction, rng, hero);
 #endif
             if (chromaticChannel >= 0) {
                 // Hero-wavelength RGB: deposit only the sampled channel, scaled by 3 / pdf.

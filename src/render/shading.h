@@ -34,6 +34,28 @@ SR_INL SR_HD float roughnessToAlpha(float roughness) {
     return srMax(kMinAlpha, r * r);
 }
 
+// ---------------------------------------------------------------------------
+// Chromatic dispersion (hero-channel RGB): Cauchy model fitted through the
+// material IOR (taken at the d-line) and the Abbe number V = (n_d-1)/(n_F-n_C).
+// Channel wavelengths: R 630 nm, G 532 nm, B 465 nm.
+// ---------------------------------------------------------------------------
+SR_INL SR_HD float dispersedIor(float ior, float abbe, int channel) {
+    if (abbe <= 0.0f || channel < 0) return ior;
+    constexpr float invLd2 = 1.0f / (0.5876f * 0.5876f);
+    constexpr float invLF2 = 1.0f / (0.4861f * 0.4861f);
+    constexpr float invLC2 = 1.0f / (0.6563f * 0.6563f);
+    const float B = (ior - 1.0f) / (srMax(1.0f, abbe) * (invLF2 - invLC2));
+    const float A = ior - B * invLd2;
+    const float lam = channel == 0 ? 0.630f : (channel == 1 ? 0.532f : 0.465f);
+    return srMax(1.005f, A + B / (lam * lam));
+}
+
+// Adjusts the transmissive IOR for the path's hero channel (no-op otherwise).
+SR_INL SR_HD void applyDispersion(Material& m, int channel) {
+    if (channel >= 0 && m.dispersionAbbe > 0.0f && m.transmission > 1e-4f)
+        m.ior = dispersedIor(m.ior, m.dispersionAbbe, channel);
+}
+
 // Bilinear fetch in normalized UV [0,1] with clamp (no wrap).
 SR_INL SR_HD Vec4 sampleTextureClampedRGBA(const float* pixels, int width, int height, float u, float v) {
     if (!pixels || width <= 0 || height <= 0) return Vec4(0.0f, 0.0f, 0.0f, 1.0f);
@@ -311,6 +333,57 @@ SR_INL SR_HD Vec3 fresnelSchlick(Vec3 f0, float cosTheta) {
     return f0 + (Vec3(1.0f) - f0) * m5;
 }
 
+// ---------------------------------------------------------------------------
+// Thin-film iridescence: Airy interference in a single film (air / film / base)
+// evaluated at the three RGB wavelengths. Base reflectivity comes from the
+// material's f0 (|r23| ≈ sqrt(f0) — exact for dielectrics, a good approximation
+// for conductors), so metals keep their tint under the film.
+// ---------------------------------------------------------------------------
+SR_INL SR_HD float airyReflectanceScalar(float cosTheta1, float filmIor, float thicknessNm,
+                                         float lambdaNm, float r23mag) {
+    const float n1 = 1.0f;
+    const float n2 = srMax(1.01f, filmIor);
+    const float c1 = clampf(cosTheta1, 0.0f, 1.0f);
+    const float s1 = sqrtf(srMax(0.0f, 1.0f - c1 * c1));
+    const float s2 = n1 * s1 / n2;
+    if (s2 >= 1.0f) return 1.0f;  // TIR at the film entry
+    const float c2 = sqrtf(srMax(0.0f, 1.0f - s2 * s2));
+
+    // Air→film amplitude coefficients, s/p averaged.
+    const float r12s = (n1 * c1 - n2 * c2) / (n1 * c1 + n2 * c2);
+    const float r12p = (n2 * c1 - n1 * c2) / (n2 * c1 + n1 * c2);
+
+    // Interference phase for one round trip inside the film.
+    const float phi = (4.0f * kPi * n2 * thicknessNm * c2) / srMax(1.0f, lambdaNm);
+    const float cphi = cosf(phi);
+
+    float sum = 0.0f;
+    for (int pol = 0; pol < 2; ++pol) {
+        const float r12 = pol == 0 ? r12s : r12p;
+        const float r23 = r12 < 0.0f ? -r23mag : r23mag;  // keep the phase relation
+        // |r12 + r23 e^{iφ}|² / |1 + r12 r23 e^{iφ}|²
+        const float num = r12 * r12 + r23 * r23 + 2.0f * r12 * r23 * cphi;
+        const float den = 1.0f + r12 * r12 * r23 * r23 + 2.0f * r12 * r23 * cphi;
+        sum += clampf(num / srMax(1e-6f, den), 0.0f, 1.0f);
+    }
+    return 0.5f * sum;
+}
+
+SR_INL SR_HD Vec3 thinFilmFresnel(Vec3 f0, float cosTheta, float filmIor, float thicknessNm) {
+    const Vec3 r23(sqrtf(clampf(f0.x, 0.0f, 1.0f)), sqrtf(clampf(f0.y, 0.0f, 1.0f)),
+                   sqrtf(clampf(f0.z, 0.0f, 1.0f)));
+    return Vec3(airyReflectanceScalar(cosTheta, filmIor, thicknessNm, 630.0f, r23.x),
+                airyReflectanceScalar(cosTheta, filmIor, thicknessNm, 532.0f, r23.y),
+                airyReflectanceScalar(cosTheta, filmIor, thicknessNm, 465.0f, r23.z));
+}
+
+// Fresnel for the opaque specular lobe: Schlick, or Airy when a film is present.
+SR_INL SR_HD Vec3 specularFresnel(const Material& mat, Vec3 f0, float cosTheta) {
+    if (mat.thinFilmThickness > 0.5f)
+        return thinFilmFresnel(f0, cosTheta, mat.thinFilmIor, mat.thinFilmThickness);
+    return fresnelSchlick(f0, cosTheta);
+}
+
 // Exact Fresnel for dielectrics. eta is the relative IOR (transmitted/incident).
 SR_INL SR_HD float fresnelDielectric(float cosThetaI, float eta) {
     cosThetaI = clampf(cosThetaI, -1.0f, 1.0f);
@@ -461,7 +534,7 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
                 const bool hasOpaqueSpec =
                     lw.specular > 0.0f && (saturatef(mat.metallic) > 1e-4f || saturatef(mat.specular) > 1e-4f);
                 if (opaqueSpec > 0.0f && hasOpaqueSpec && wo.z > 0.0f && wi.z > 0.0f) {
-                    const Vec3 fr = fresnelSchlick(lw.f0, cosOH);
+                    const Vec3 fr = specularFresnel(mat, lw.f0, cosOH);
                     out.f += fr * (d * g / (4.0f * wo.z * wi.z)) * opaqueSpec;
                     out.pdf += lw.specular * ggxVndfPdf(wo, h, lw.alpha) / (4.0f * srMax(1e-6f, cosOH));
                 }
@@ -529,7 +602,7 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
             s.wi = wi;
             s.specular = true;
             s.pdf = 1.0f;  // delta lobe: f*cos/pdf collapses to Fresnel over the lobe probability
-            s.weight = fresnelSchlick(lw.f0, fabsf(wo.z)) * (opaqueSpec / srMax(1e-4f, pSpecular));
+            s.weight = specularFresnel(mat, lw.f0, fabsf(wo.z)) * (opaqueSpec / srMax(1e-4f, pSpecular));
             return s;
         }
         const Vec3 woUp = wo.z > 0.0f ? wo : -wo;

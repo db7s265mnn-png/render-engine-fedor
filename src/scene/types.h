@@ -69,6 +69,15 @@ struct Material {
     int bumpTex = -1;
     int bumpProc = -1;
     int _padBump = 0;
+
+    // Chromatic dispersion of the transmission lobe (Abbe number, Arnold-style
+    // `dispersion_abbe`): 0 = off; typical glass 20–60, lower = stronger rainbow.
+    float dispersionAbbe = 0.0f;
+    // Thin-film iridescence on the specular reflection lobe (soap bubble / oil):
+    // film thickness in nanometres (0 = off) and film IOR.
+    float thinFilmThickness = 0.0f;
+    float thinFilmIor = 1.4f;
+    float _padFilm = 0.0f;
 };
 
 // Shade-time MaterialX procedural opcode (see render/procedural.h for evaluation).
@@ -322,6 +331,8 @@ struct SceneView {
     int textureCount = 0;
     int proceduralCount = 0;
     int domeLightIndex = -1;  // first dome light, used for ray misses
+    // Any material with dispersionAbbe > 0 — enables hero-channel sampling.
+    int hasDispersion = 0;
 
     CameraData camera;
     RenderSettingsData settings;

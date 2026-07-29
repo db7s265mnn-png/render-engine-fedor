@@ -78,7 +78,7 @@ struct ChainState {
 // carries no more caustic casters before `maxDist` along its line.
 template <typename Tracer>
 SR_INL ChainState traceChain(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 dir,
-                             int targetLight) {
+                             int targetLight, int heroChannel) {
     ChainState st;
     Vec3 o = offsetRayOrigin(p, n, dir);
     Vec3 d = dir;
@@ -114,6 +114,7 @@ SR_INL ChainState traceChain(const SceneView& scene, const Tracer& tracer, Vec3 
                            ? scene.materials[si.materialIndex]
                            : defaultMaterial();
         mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+        applyDispersion(mat, heroChannel);
         if (!isCausticCaster(mat)) return st;  // opaque blocker → fail
         if (k == kMaxChain) return st;
 
@@ -138,8 +139,8 @@ SR_INL ChainState traceChain(const SceneView& scene, const Tracer& tracer, Vec3 
 template <typename Tracer>
 SR_INL bool chainError(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 dir, Vec3 y,
                        int targetLight, Vec3 planeN, Vec3 b1, Vec3 b2, float& e1, float& e2,
-                       ChainState* outChain) {
-    const ChainState st = traceChain(scene, tracer, p, n, dir, targetLight);
+                       ChainState* outChain, int heroChannel) {
+    const ChainState st = traceChain(scene, tracer, p, n, dir, targetLight, heroChannel);
     if (!st.valid) return false;
     const float denom = dot(st.exitDir, planeN);
     if (denom <= 1e-5f) return false;  // exit ray parallel to / away from the plane
@@ -170,7 +171,7 @@ struct ManifoldSolution {
 // starting from `omegaInit` (SMS-style random seeds discover distinct branches).
 template <typename Tracer>
 SR_INL ManifoldSolution solveManifold(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n,
-                                      int lightIndex, Vec3 y, Vec3 omegaInit) {
+                                      int lightIndex, Vec3 y, Vec3 omegaInit, int heroChannel) {
     ManifoldSolution sol;
     Vec3 dir = y - p;
     const float distPy = length(dir);
@@ -188,7 +189,7 @@ SR_INL ManifoldSolution solveManifold(const SceneView& scene, const Tracer& trac
     ChainState chain;
     float j11 = 0, j12 = 0, j21 = 0, j22 = 0;
 
-    if (!chainError(scene, tracer, p, n, omega, y, lightIndex, planeN, b1, b2, e1, e2, &chain)) return sol;
+    if (!chainError(scene, tracer, p, n, omega, y, lightIndex, planeN, b1, b2, e1, e2, &chain, heroChannel)) return sol;
     float err = sqrtf(e1 * e1 + e2 * e2);
     bool converged = err < tol;
 
@@ -198,9 +199,9 @@ SR_INL ManifoldSolution solveManifold(const SceneView& scene, const Tracer& trac
         float p1 = 0, p2 = 0, q1 = 0, q2 = 0;
         const Vec3 omU = normalize(omega + dirFrame.t * h);
         const Vec3 omV = normalize(omega + dirFrame.b * h);
-        if (!chainError(scene, tracer, p, n, omU, y, lightIndex, planeN, b1, b2, p1, p2, nullptr))
+        if (!chainError(scene, tracer, p, n, omU, y, lightIndex, planeN, b1, b2, p1, p2, nullptr, heroChannel))
             return sol;
-        if (!chainError(scene, tracer, p, n, omV, y, lightIndex, planeN, b1, b2, q1, q2, nullptr))
+        if (!chainError(scene, tracer, p, n, omV, y, lightIndex, planeN, b1, b2, q1, q2, nullptr, heroChannel))
             return sol;
         j11 = (p1 - e1) / h;
         j21 = (p2 - e2) / h;
@@ -222,7 +223,7 @@ SR_INL ManifoldSolution solveManifold(const SceneView& scene, const Tracer& trac
             if (dot(cand, dir) < -0.1f) continue;
             float c1 = 0.0f, c2 = 0.0f;
             ChainState candChain;
-            if (!chainError(scene, tracer, p, n, cand, y, lightIndex, planeN, b1, b2, c1, c2, &candChain))
+            if (!chainError(scene, tracer, p, n, cand, y, lightIndex, planeN, b1, b2, c1, c2, &candChain, heroChannel))
                 continue;
             const float cErr = sqrtf(c1 * c1 + c2 * c2);
             if (cErr < err) {
@@ -252,15 +253,15 @@ SR_INL ManifoldSolution solveManifold(const SceneView& scene, const Tracer& trac
         const Vec3 omUm = normalize(omega - dirFrame.t * h);
         const Vec3 omVp = normalize(omega + dirFrame.b * h);
         const Vec3 omVm = normalize(omega - dirFrame.b * h);
-        if (!chainError(scene, tracer, p, n, omUp, y, lightIndex, planeN, b1, b2, a1, a2, nullptr))
+        if (!chainError(scene, tracer, p, n, omUp, y, lightIndex, planeN, b1, b2, a1, a2, nullptr, heroChannel))
             return sol;
-        if (!chainError(scene, tracer, p, n, omUm, y, lightIndex, planeN, b1, b2, c1, c2, nullptr))
+        if (!chainError(scene, tracer, p, n, omUm, y, lightIndex, planeN, b1, b2, c1, c2, nullptr, heroChannel))
             return sol;
         j11 = (a1 - c1) / (2.0f * h);
         j21 = (a2 - c2) / (2.0f * h);
-        if (!chainError(scene, tracer, p, n, omVp, y, lightIndex, planeN, b1, b2, a1, a2, nullptr))
+        if (!chainError(scene, tracer, p, n, omVp, y, lightIndex, planeN, b1, b2, a1, a2, nullptr, heroChannel))
             return sol;
-        if (!chainError(scene, tracer, p, n, omVm, y, lightIndex, planeN, b1, b2, c1, c2, nullptr))
+        if (!chainError(scene, tracer, p, n, omVm, y, lightIndex, planeN, b1, b2, c1, c2, nullptr, heroChannel))
             return sol;
         j12 = (a1 - c1) / (2.0f * h);
         j22 = (a2 - c2) / (2.0f * h);
@@ -403,7 +404,7 @@ SR_INL float bsdfPdfOnLightArea(const Material& anchorMat, Vec3 anchorN, Vec3 an
 template <typename Tracer>
 SR_INL MneeResult manifoldConnect(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 wo,
                                   const Material& shadeMat, int lightIndex, Vec3 y, Vec3 yN, Vec3 Le,
-                                  float pdfArea, float selectPdf, int casterInstance) {
+                                  float pdfArea, float selectPdf, int casterInstance, int heroChannel) {
     MneeResult res;
     Vec3 dir = y - p;
     const float distPy = length(dir);
@@ -417,7 +418,7 @@ SR_INL MneeResult manifoldConnect(const SceneView& scene, const Tracer& tracer, 
     int foundCount = 0;
     Vec3 total(0.0f);
     for (int i = 0; i < seeds.count; ++i) {
-        const ManifoldSolution sol = solveManifold(scene, tracer, p, n, lightIndex, y, seeds.dirs[i]);
+        const ManifoldSolution sol = solveManifold(scene, tracer, p, n, lightIndex, y, seeds.dirs[i], heroChannel);
         if (!sol.solved) continue;
         bool duplicate = false;
         for (int k = 0; k < foundCount; ++k)
@@ -452,7 +453,7 @@ struct BranchMatch {
 // matching the branch a BSDF path actually took (if the solver can find it).
 template <typename Tracer>
 SR_INL BranchMatch matchBranch(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, int lightIndex,
-                               Vec3 y, int casterInstance, Vec3 pathDir) {
+                               Vec3 y, int casterInstance, Vec3 pathDir, int heroChannel) {
     BranchMatch out;
     Vec3 dir = y - p;
     const float distPy = length(dir);
@@ -460,7 +461,7 @@ SR_INL BranchMatch matchBranch(const SceneView& scene, const Tracer& tracer, Vec
     dir = dir / distPy;
     const SeedSet seeds = buildSeedSet(scene, p, dir, casterInstance);
     for (int i = 0; i < seeds.count; ++i) {
-        const ManifoldSolution sol = solveManifold(scene, tracer, p, n, lightIndex, y, seeds.dirs[i]);
+        const ManifoldSolution sol = solveManifold(scene, tracer, p, n, lightIndex, y, seeds.dirs[i], heroChannel);
         if (sol.solved && sameBranch(sol.omega, pathDir)) {
             out.matched = true;
             out.sol = sol;
@@ -524,7 +525,7 @@ SR_INL bool sampleFiniteLightPoint(const SceneView& scene, int lightIndex, Rng& 
 // ---------------------------------------------------------------------------
 template <typename Tracer, typename Guiding>
 SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                                Rng& rng, Guiding* guiding) {
+                                Rng& rng, Guiding* guiding, int heroChannel = -1) {
     Vec3 radiance(0.0f);
     Vec3 throughput(1.0f);
     float bsdfPdf = 0.0f;
@@ -615,7 +616,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                             if (mnee::isCausticCaster(smat)) {
                                 const mnee::BranchMatch bm =
                                     mnee::matchBranch(scene, tracer, anchorP, anchorN, si.lightIndex, si.p,
-                                                      ssi.instanceIndex, anchorDir);
+                                                      ssi.instanceIndex, anchorDir, heroChannel);
                                 if (bm.matched) {
                                     const Vec3 lightNHit =
                                         light.type == kLightSphere ? si.ng : areaLightNormal(light);
@@ -665,6 +666,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                                : defaultMaterial();
         Material mat =
             evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+        applyDispersion(mat, heroChannel);
 
         if (mat.transmission <= 0.0f && mat.doubleSided && dot(si.ns, -direction) < 0.0f) {
             si.ns = -si.ns;
@@ -810,7 +812,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     // chain (matching BSDF path copies are suppressed at light hits).
                     const mnee::MneeResult mr =
                         mnee::manifoldConnect(scene, tracer, si.p, si.ns, wo, mat, li, y, yN, Le, pdfArea,
-                                              selectPdf, blockerInstance);
+                                              selectPdf, blockerInstance, heroChannel);
                     if (mr.solved && !isBlack(mr.contribution)) {
                         Vec3 c = mr.contribution;
                         c = clampContribution(c, settings.clampIndirect > 0.0f
@@ -938,8 +940,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 
 template <typename Tracer>
 SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                                Rng& rng) {
-    return traceRadiancePtMnee<Tracer, NullGuiding>(scene, tracer, origin, direction, rng, nullptr);
+                                Rng& rng, int heroChannel = -1) {
+    return traceRadiancePtMnee<Tracer, NullGuiding>(scene, tracer, origin, direction, rng, nullptr,
+                                                    heroChannel);
 }
 
 }  // namespace sol

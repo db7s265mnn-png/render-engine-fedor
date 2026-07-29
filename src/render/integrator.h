@@ -309,7 +309,7 @@ SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& trac
 
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                                Rng& rng, Guiding* guiding) {
+                                Rng& rng, Guiding* guiding, int heroChannel = -1) {
     Vec3 radiance(0.0f);
     Vec3 throughput(1.0f);
     float bsdfPdf = 0.0f;
@@ -406,6 +406,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                                : defaultMaterial();
         Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject,
                                                 si.uvFilterWidth);
+        applyDispersion(mat, heroChannel);
 
         // Two sided shading for opaque surfaces. Winding order varies between
         // DCCs, so back faces are shaded as if their normals pointed at us.
@@ -800,8 +801,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
 template <typename Tracer>
 SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                                Rng& rng) {
-    return traceRadiance<Tracer, NullGuiding>(scene, tracer, origin, direction, rng, nullptr);
+                                Rng& rng, int heroChannel = -1) {
+    return traceRadiance<Tracer, NullGuiding>(scene, tracer, origin, direction, rng, nullptr, heroChannel);
 }
 
 }  // namespace sol

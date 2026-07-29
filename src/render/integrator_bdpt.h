@@ -238,6 +238,7 @@ SR_INL bool startLightPath(const SceneView& scene, Rng& rng, Vert& v0, Vec3& emi
 
 struct WalkConfig {
     bool eyePath = false;
+    int heroChannel = -1;  // chromatic dispersion hero channel (-1 = off)
 #if SOLSTICE_HAVE_OPENPGL
     PathGuiding::ThreadState* guiding = nullptr;
 #endif
@@ -293,6 +294,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
                            ? scene.materials[si.materialIndex]
                            : defaultMaterial();
         mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+        applyDispersion(mat, cfg.heroChannel);
 
         // Stochastic cutout — pass through without creating a vertex.
         if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
@@ -482,7 +484,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                               PathGuiding::ThreadState* guiding = nullptr
 #endif
                               ,
-                              Framebuffer* splatFb = nullptr) {
+                              Framebuffer* splatFb = nullptr, int heroChannel = -1) {
     using namespace bdpt;
     const RenderSettingsData& settings = scene.settings;
     int maxVerts = settings.maxDepth + 1;
@@ -509,6 +511,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                 light[0].lightIndex >= 0 && scene.lights[light[0].lightIndex].type == kLightPoint;
             WalkConfig cfg;
             cfg.eyePath = false;
+            cfg.heroChannel = heroChannel;
             const Vec3 o = offsetRayOrigin(light[0].p, light[0].ng, emitDir);
             nLight = randomWalk(scene, tracer, rng, light, nLight, o, emitDir, pdfDirSa, maxVerts, cfg);
         }
@@ -525,6 +528,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
     eye[0].connectable = false;
     WalkConfig eyeCfg;
     eyeCfg.eyePath = true;
+    eyeCfg.heroChannel = heroChannel;
 #if SOLSTICE_HAVE_OPENPGL
     eyeCfg.guiding = guiding;
 #endif
@@ -588,6 +592,15 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             c = c * w;
             if (s > 2) c = clampContribution(c, settings.clampIndirect);
             if (!isFinite(c)) continue;
+            if (heroChannel >= 0) {
+                // Hero-channel discipline: deposit only the sampled channel, ×3.
+                const float hero =
+                    (heroChannel == 0 ? c.x : (heroChannel == 1 ? c.y : c.z)) * 3.0f;
+                c = Vec3(0.0f);
+                if (heroChannel == 0) c.x = hero;
+                else if (heroChannel == 1) c.y = hero;
+                else c.z = hero;
+            }
             splatFb->addSplat(int(px), int(py), c);
         }
     }

@@ -489,6 +489,127 @@ void testCausticsGlassSphere() {
                 sumPointBdpt, pointRatio);
 }
 
+// Chromatic dispersion + thin-film iridescence sanity.
+void testDispersionAndThinFilm() {
+    std::printf("dispersion-thinfilm\n");
+    // Cauchy/Abbe: blue bends more than red, spread scales with 1/Abbe.
+    const float nR = dispersedIor(1.5f, 30.0f, 0);
+    const float nG = dispersedIor(1.5f, 30.0f, 1);
+    const float nB = dispersedIor(1.5f, 30.0f, 2);
+    check(nB > nG && nG > nR, "dispersed IOR ordering B > G > R");
+    checkNear(nG, 1.5f, 0.02f, "green stays near the base IOR");
+    const float spreadStrong = dispersedIor(1.5f, 20.0f, 2) - dispersedIor(1.5f, 20.0f, 0);
+    const float spreadWeak = dispersedIor(1.5f, 60.0f, 2) - dispersedIor(1.5f, 60.0f, 0);
+    check(spreadStrong > 2.5f * spreadWeak, "lower Abbe disperses more");
+    check(dispersedIor(1.5f, 0.0f, 2) == 1.5f, "abbe 0 disables dispersion");
+
+    // Thin film: reflectance stays in [0,1], varies with thickness, and reduces
+    // to plain Fresnel when the film is absent.
+    Material m;
+    m.thinFilmIor = 1.4f;
+    const Vec3 f0(0.04f, 0.04f, 0.04f);
+    bool inRange = true;
+    float variation = 0.0f;
+    Vec3 prev = thinFilmFresnel(f0, 0.7f, 1.4f, 100.0f);
+    for (int t = 2; t <= 12; ++t) {
+        const Vec3 r = thinFilmFresnel(f0, 0.7f, 1.4f, float(t) * 100.0f);
+        if (r.x < 0.0f || r.x > 1.0f || r.y < 0.0f || r.y > 1.0f || r.z < 0.0f || r.z > 1.0f)
+            inRange = false;
+        variation += length(r - prev);
+        prev = r;
+    }
+    check(inRange, "thin-film reflectance stays in [0,1]");
+    check(variation > 0.05f, "thin-film reflectance varies with thickness (iridescence)");
+    m.thinFilmThickness = 0.0f;
+    const Vec3 plain = specularFresnel(m, f0, 0.7f);
+    const Vec3 schlick = fresnelSchlick(f0, 0.7f);
+    checkNear(length(plain - schlick), 0.0f, 1e-5f, "no film == Schlick Fresnel");
+
+    // Render check: dispersive glass sphere caustic — channels must separate in
+    // the caustic while total energy stays comparable to the non-dispersive one.
+    auto buildScene = [](float abbe) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->validate();
+        const int floorMesh = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.75f);
+        floorMat.roughness = 0.9f;
+        floorMat.specular = 0.0f;
+        const int floorIdx = scene->addMaterial(floorMat);
+        InstanceData fi;
+        fi.meshIndex = floorMesh;
+        fi.materialIndex = floorIdx;
+        scene->instances.push_back(fi);
+
+        MeshPtr ball = makeSphereMesh(0.7f, 48, 24);
+        const int ballMesh = scene->addMesh(ball);
+        Material glass;
+        glass.transmission = 1.0f;
+        glass.roughness = 0.0f;
+        glass.ior = 1.5f;
+        glass.dispersionAbbe = abbe;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData bi;
+        bi.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+        bi.meshIndex = ballMesh;
+        bi.materialIndex = glassIdx;
+        scene->instances.push_back(bi);
+
+        LightData light;
+        light.type = kLightRect;
+        light.width = 0.4f;
+        light.height = 0.4f;
+        light.intensity = 60.0f;
+        light.xform = Mat4::translate(Vec3(0.0f, 4.0f, 0.0f)) * Mat4::rotateX(-90.0f);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 72;
+        scene->settings.resolutionY = 54;
+        scene->settings.samplesPerPixel = 32;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.caustics = 1;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+    auto render = [&](float abbe, double& chroma, bool& finite) {
+        RenderSession session;
+        session.setScene(buildScene(abbe));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        chroma = 0.0;
+        finite = true;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finite = false;
+                sum += double(luminance(c));
+                const float mean = (c.x + c.y + c.z) / 3.0f;
+                chroma += double(std::fabs(c.x - mean) + std::fabs(c.y - mean) + std::fabs(c.z - mean));
+            }
+        return sum;
+    };
+    double chromaOff = 0.0, chromaOn = 0.0;
+    bool finOff = true, finOn = true;
+    const double sumOff = render(0.0f, chromaOff, finOff);
+    const double sumOn = render(20.0f, chromaOn, finOn);
+    check(finOff && finOn, "dispersion renders are finite");
+    check(sumOn > sumOff * 0.8 && sumOn < sumOff * 1.25, "dispersion conserves energy");
+    check(chromaOn > chromaOff * 1.5, "dispersion separates RGB channels (rainbow)");
+    std::printf("  sumOff=%.1f sumOn=%.1f chromaOff=%.1f chromaOn=%.1f\n", sumOff, sumOn, chromaOff,
+                chromaOn);
+}
+
 // Rapidly switch integrators / guiding / caustics on a live session — mirrors a
 // user toggling render settings in the UI. Must not crash or deadlock.
 void testIntegratorSwitchStress() {
@@ -1878,6 +1999,7 @@ int main() {
     testEnvironment();
     testRender();
     testCausticsGlassSphere();
+    testDispersionAndThinFilm();
     testIntegratorSwitchStress();
     testInstanceTransform();
     testUdimMaterialX();

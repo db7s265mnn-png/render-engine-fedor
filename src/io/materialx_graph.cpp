@@ -294,6 +294,19 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     setFloat("shadow_opacity", shadowOpacity);
     material.shadowOpacity = saturatef(shadowOpacity);
 
+    // Chromatic dispersion (Arnold-style Abbe number; 0 = off, lower = stronger).
+    float dispersionAbbe = 0.0f;
+    setFloat("dispersion_abbe", dispersionAbbe);
+    material.dispersionAbbe = clampf(dispersionAbbe, 0.0f, 200.0f);
+
+    // Thin-film iridescence on the specular lobe (standard_surface inputs).
+    float thinFilmThickness = 0.0f;
+    float thinFilmIor = 1.4f;
+    setFloat("thin_film_thickness", thinFilmThickness);
+    setFloat("thin_film_IOR", thinFilmIor);
+    material.thinFilmThickness = clampf(thinFilmThickness, 0.0f, 5000.0f);
+    material.thinFilmIor = clampf(thinFilmIor, 1.0f, 3.0f);
+
     setColor("emission_color", material.emissionColor);
     setFloat("emission", material.emissionStrength);
     setFloat("subsurface", material.subsurface);
@@ -542,6 +555,9 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"transmission", "float", "0"},
          {"opacity", "color3", "1, 1, 1"},
          {"shadow_opacity", "float", "1"},
+         {"dispersion_abbe", "float", "0"},
+         {"thin_film_thickness", "float", "0"},
+         {"thin_film_IOR", "float", "1.4"},
          {"emission", "float", "0"},
          {"emission_color", "color3", "1, 1, 1"},
          {"normal", "vector3", {}},

@@ -278,6 +278,13 @@ SceneView Scene::view() const {
     v.textureCount = static_cast<int>(textureViews_.size());
     v.proceduralCount = static_cast<int>(procedurals.size());
     v.domeLightIndex = domeLightIndex_;
+    v.hasDispersion = 0;
+    for (const Material& m : materials) {
+        if (m.dispersionAbbe > 0.0f && m.transmission > 1e-4f) {
+            v.hasDispersion = 1;
+            break;
+        }
+    }
     v.camera = camera;
     v.settings = settings;
     v.worldBounds = bounds_;
