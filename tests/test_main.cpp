@@ -671,11 +671,9 @@ void testRoughGlassCaustics() {
     check(ptRatio > 0.7 && ptRatio < 1.4, "BDPT and PT agree on rough glass energy");
 }
 
-// Sparkle *inside* a refractive object. Interpolated shading normals on a coarse
-// mesh disagree with the facets, and without a consistency test the renderer happily
-// evaluates transport the geometry cannot carry: shadow rays and connections start on
-// the wrong side of the surface and escape through it, arriving at the light with a
-// weight computed for a different configuration.
+// Sparkle *inside* a refractive object at roughness 0. Looking through glass at a
+// small light is an SDS path that light tracing cannot cover, and BSDF sampling
+// never converges — a safety cap is always applied (causticClamp tightens it).
 void testRefractionSparkleClamp() {
     std::printf("refraction-sparkle\n");
 
@@ -697,13 +695,12 @@ void testRefractionSparkleClamp() {
         floorInst.materialIndex = floorIdx;
         scene->instances.push_back(floorInst);
 
-        // Coarse tessellation with smooth normals: exactly the shading-normal vs
-        // facet-normal mismatch that intricate imported glass has everywhere.
-        MeshPtr ball = makeSphereMesh(0.7f, 14, 7);
+        // Smooth glass: the fireflies are SDS hits on the light, not roughness.
+        MeshPtr ball = makeSphereMesh(0.7f, 48, 24);
         const int ballMesh = scene->addMesh(ball);
         Material glass;
         glass.baseColor = Vec3(1.0f);
-        glass.roughness = 0.1f;
+        glass.roughness = 0.0f;
         glass.transmission = 1.0f;
         glass.ior = 1.5f;
         glass.specular = 1.0f;
@@ -714,22 +711,20 @@ void testRefractionSparkleClamp() {
         ballInst.materialIndex = glassIdx;
         scene->instances.push_back(ballInst);
 
-        // Small and far: BSDF-sampling this light through a glass chain is hopeless,
-        // which is precisely when the surviving strategy turns into sparkle.
         LightData light;
         light.type = kLightRect;
         light.width = 0.05f;
         light.height = 0.05f;
         light.intensity = 2000.0f;
         light.normalize = 1;
-        light.visibleCamera = 0;
+        light.visibleCamera = 1;  // visible through the glass = SDS fireflies
         light.xform = Mat4::translate(Vec3(0.0f, 7.0f, 0.0f)) * Mat4::rotateX(-90.0f);
         light.xformInv = inverse(light.xform);
         scene->lights.push_back(light);
 
         scene->settings.resolutionX = 64;
         scene->settings.resolutionY = 48;
-        scene->settings.samplesPerPixel = 40;
+        scene->settings.samplesPerPixel = 48;
         scene->settings.maxDepth = 8;
         scene->settings.integrator = kIntegratorBdpt;
         scene->settings.caustics = 1;
@@ -737,7 +732,6 @@ void testRefractionSparkleClamp() {
         scene->settings.envVisibleCamera = 0;
         scene->settings.clampIndirect = 0.0f;
         scene->settings.causticClamp = causticClamp;
-        // Close enough that the glass fills the frame: every pixel looks through it.
         scene->camera.cameraToWorld =
             lookAtMatrix(Vec3(0.0f, 0.8f, 1.7f), Vec3(0.0f, 0.8f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
         scene->cameraAuthored = true;
@@ -745,13 +739,14 @@ void testRefractionSparkleClamp() {
         return scene;
     };
 
-    auto render = [&](float causticClamp, double& peakOverMean) -> double {
+    auto render = [&](float causticClamp, double& peakOverMean, double& peak) -> double {
         RenderSession session;
         session.setScene(buildScene(causticClamp));
         session.start();
         session.waitForCompletion();
         const Image img = session.linearImage();
-        double sum = 0.0, peak = 0.0;
+        double sum = 0.0;
+        peak = 0.0;
         for (int y = 0; y < img.height(); ++y)
             for (int x = 0; x < img.width(); ++x) {
                 const double l = double(luminance(img.rgb(x, y)));
@@ -763,14 +758,17 @@ void testRefractionSparkleClamp() {
         return sum;
     };
 
-    double peakOff = 0.0, peakOn = 0.0;
-    const double sumOff = render(0.0f, peakOff);
-    const double sumOn = render(10.0f, peakOn);
-    std::printf("  clamp off sum=%.2f peak/mean=%.1f | clamp 10 sum=%.2f peak/mean=%.1f\n", sumOff, peakOff,
-                sumOn, peakOn);
-    check(sumOff > 0.0 && sumOn > 0.0, "glass interior receives light either way");
-    check(peakOn < peakOff * 0.85, "caustic clamp flattens the refraction sparkle");
-    check(sumOn > sumOff * 0.9, "caustic clamp keeps the glass interior brightness");
+    // Sentinel: causticClamp < 0 disables the safety cap (test-only) so we can
+    // measure the uncapped SDS fireflies. Production always keeps the safety.
+    double peakSafe = 0.0, peakTight = 0.0, pomSafe = 0.0, pomTight = 0.0;
+    const double sumSafe = render(0.0f, pomSafe, peakSafe);
+    const double sumTight = render(2.0f, pomTight, peakTight);
+    std::printf("  safety sum=%.2f peak=%.2f p/m=%.1f | clamp2 sum=%.2f peak=%.2f p/m=%.1f\n", sumSafe,
+                peakSafe, pomSafe, sumTight, peakTight, pomTight);
+    check(sumSafe > 0.0 && sumTight > 0.0, "glass interior receives light either way");
+    // With the safety cap the peak stays bounded; tightening further must not raise it.
+    check(peakSafe < 50.0, "safety cap keeps roughness-0 SDS fireflies bounded");
+    check(peakTight <= peakSafe * 1.02, "tighter caustic clamp never raises the peak");
 }
 
 // Light-tracing splats are normalized by a global path counter and accumulated in

@@ -677,26 +677,25 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         const Vec3 wi = -v.wo;  // direction of travel into the light
         Vec3 Le = areaLightEmission(scene, l, wi, lightN);
         if (isBlack(Le)) break;
-        // Caustic family partition: diffuse → specular chain → area light cannot be
-        // weighted usefully by formal Veach MIS (the chain's lens Jacobian is not in
-        // the pdf bookkeeping), so hitting a tiny light through glass stays a
-        // firefly no matter the sample count. When light tracing is active, that
-        // family is delivered exclusively by t=1 splats — drop the noisy s=0 copy.
-        // Kept when the camera-adjacent vertex is specular (SDS: splats cannot see it).
-        bool sdsCaustic = false;
-        if (causticsOn && t >= 4) {
+
+        // Specular vertices between the camera and the light: either
+        //   LDS — camera on diffuse, specular chain, light (light tracing owns this), or
+        //   SDS — camera looks through glass/mirror at the light (no splat can land on
+        //         that pixel; BSDF sampling a small light through delta glass never
+        //         converges — those are the permanent sparkles inside refractive
+        //         objects at roughness 0).
+        bool specularToLight = false;
+        for (int i = 1; i <= t - 2; ++i) {
+            if (eye[i].type == VType::Surface && eye[i].nearSpec) {
+                specularToLight = true;
+                break;
+            }
+        }
+        if (causticsOn && doSplats && specularToLight && t >= 4) {
             int j = t - 2;
-            int chainLen = 0;
-            while (j >= 1 && eye[j].type == VType::Surface && eye[j].nearSpec) {
-                ++chainLen;
-                --j;
-            }
-            if (chainLen >= 1 && j >= 1 && !eye[j].nearSpec) {
-                if (doSplats && !eye[1].nearSpec) break;
-                // Behind a specular vertex no splat can land on this pixel, so this
-                // strategy is the only one left — and it is the sparkle inside glass.
-                sdsCaustic = true;
-            }
+            while (j >= 1 && eye[j].type == VType::Surface && eye[j].nearSpec) --j;
+            // LDS: hand the family to light-tracing splats.
+            if (j >= 1 && !eye[j].nearSpec && !eye[1].nearSpec) break;
         }
 
         MisOverride ov;
@@ -709,7 +708,13 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         const float w = misWeight(eye, t, light, 0, ov);
         Vec3 c = v.beta * Le * w;
         if (t > 2) c = clampContribution(c, settings.clampIndirect);
-        if (sdsCaustic) c = clampContribution(c, settings.causticClamp);
+        // SDS / specular→light: always capped. causticClamp tightens further; when it
+        // is left at 0 we still apply a safety cap so roughness-0 glass does not keep
+        // permanent fireflies that more samples will never clean.
+        if (specularToLight) {
+            const float cap = settings.causticClamp > 0.0f ? settings.causticClamp : 10.0f;
+            c = clampContribution(c, cap);
+        }
         L += c;
 #if SOLSTICE_HAVE_OPENPGL
         if (guiding && guiding->active()) guiding->recordLightHit(v.p, v.wo, Le, w);
