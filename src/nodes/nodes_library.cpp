@@ -680,8 +680,8 @@ public:
                                           : QStringLiteral("This executable was built without OptiX/CUDA. "
                                                           "GPU (OptiX) will fall back to Embree.")));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
-                                         {"Path Tracer", "Direct Lighting", "Ambient Occlusion",
-                                          "BDPT (Bidirectional)"},
+                                         {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
+                                          "Ambient Occlusion"},
                                          0)
                          .withGroup("Engine")
                          .withTooltip("Path Tracer: unidirectional (+ MNEE or Photon caustics).\n"
@@ -689,6 +689,9 @@ public:
                                       "(CPU only — OptiX falls back to Path Tracer).\n"
                                       "Pick the caustics estimator under Caustics Engine.\n"
                                       "The log reports which caustics mode is active."));
+        // Hidden migration marker: legacy menu was PT / DL / AO / BDPT.
+        // New nodes default to v2; legacy files without this key are remapped on load.
+        addParameter(Parameter::makeBool("_integrator_menu_v2", "", true));
         addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)

@@ -278,10 +278,25 @@ bool NodeGraph::fromJson(const QJsonObject& json, QString& error) {
         node->setBypassed(nodeJson.value("bypassed").toBool());
 
         const QJsonArray parametersArray = nodeJson.value("parameters").toArray();
+        bool sawIntegratorMenuV2 = false;
         for (const QJsonValue& parameterValue : parametersArray) {
             const QJsonObject parameterJson = parameterValue.toObject();
+            if (parameterJson.value("name").toString() == QLatin1String("_integrator_menu_v2"))
+                sawIntegratorMenuV2 = true;
             Parameter* parameter = node->findParameter(parameterJson.value("name").toString());
             if (parameter) parameter->fromJson(parameterJson);
+        }
+        // Legacy integrator menu was PT / DL / AO / BDPT (indices 0..3).
+        if (!sawIntegratorMenuV2 && node->typeName() == QLatin1String("rendersettings")) {
+            int idx = node->intValue("integrator", 0);
+            switch (idx) {
+                case 1: idx = 2; break;  // Direct Lighting
+                case 2: idx = 3; break;  // AO
+                case 3: idx = 1; break;  // BDPT
+                default: break;
+            }
+            node->setParameterValue("integrator", idx, false);
+            node->setParameterValue("_integrator_menu_v2", true, false);
         }
         node->extraStateFromJson(nodeJson.value("state").toObject());
 
@@ -401,10 +416,25 @@ QList<Node*> NodeGraph::pasteNodesFromClipboardJson(const QJsonObject& json, QPo
         node->setBypassed(nodeJson.value("bypassed").toBool());
 
         const QJsonArray parametersArray = nodeJson.value("parameters").toArray();
+        bool sawIntegratorMenuV2 = false;
         for (const QJsonValue& parameterValue : parametersArray) {
             const QJsonObject parameterJson = parameterValue.toObject();
+            if (parameterJson.value("name").toString() == QLatin1String("_integrator_menu_v2"))
+                sawIntegratorMenuV2 = true;
             Parameter* parameter = node->findParameter(parameterJson.value("name").toString());
             if (parameter) parameter->fromJson(parameterJson);
+        }
+        // Legacy integrator menu was PT / DL / AO / BDPT (indices 0..3).
+        if (!sawIntegratorMenuV2 && node->typeName() == QLatin1String("rendersettings")) {
+            int idx = node->intValue("integrator", 0);
+            switch (idx) {
+                case 1: idx = 2; break;  // Direct Lighting
+                case 2: idx = 3; break;  // AO
+                case 3: idx = 1; break;  // BDPT
+                default: break;
+            }
+            node->setParameterValue("integrator", idx, false);
+            node->setParameterValue("_integrator_menu_v2", true, false);
         }
         node->extraStateFromJson(nodeJson.value("state").toObject());
         positions.append(node->position());

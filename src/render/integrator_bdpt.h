@@ -351,9 +351,59 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         BsdfSample bs{};
         bool haveSample = false;
         Vec3 wiWorld;
+
+        // Subsurface: same Standard Surface mix lottery as the path tracer.
+        // Eye paths run the Chiang volume walk and relocate the vertex to the
+        // exit; light paths only keep the specular entry layer (eye owns BSSRDF).
+        if (materialSupportsSss(cur.mat) && rng.nextFloat() < saturatef(cur.mat.subsurface)) {
+            Material specMat = sssSpecularEntryMaterial(cur.mat);
+            const LobeWeights specLw = computeLobes(specMat);
+            const float pSpec = sssEntrySpecularProb(specMat, woLocal);
+
+            if (pSpec > 0.0f && rng.nextFloat() < pSpec) {
+                beta = beta * (1.0f / pSpec);
+                cur.mat = specMat;
+                cur.delta = specLw.delta && specLw.diffuse < 1e-4f;
+                cur.connectable = !cur.delta;
+                cur.nearSpec = cur.delta || isNearSpecularLobe(specLw);
+                cur.beta = beta;
+                const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
+                bs = bsdfSampleLocal(specMat, woLocal, uSpec, rng.nextFloat(), rng.nextFloat(),
+                                     rng.nextFloat());
+                if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
+                wiWorld = normalize(frame.toWorld(bs.wi));
+                haveSample = true;
+            } else if (!cfg.eyePath) {
+                // Light subpath: no volume walk — stop diffuse transport into SSS.
+                break;
+            } else {
+                if (pSpec > 0.0f && pSpec < 0.999f) beta = beta * (1.0f / (1.0f - pSpec));
+                const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, -dir, mat, rng);
+                if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
+                cur.p = walk.exitP;
+                cur.ng = walk.exitN;
+                cur.ns = walk.exitN;
+                cur.wo = walk.exitWo;
+                cur.mat = sssExitLambertMaterial();
+                cur.delta = false;
+                cur.connectable = true;
+                cur.nearSpec = false;
+                beta = beta * walk.pathWeight;
+                cur.beta = beta;
+
+                const Frame ssFrame(cur.ns);
+                const Vec3 ssWoLocal = ssFrame.toLocal(cur.wo);
+                bs = bsdfSampleLocal(cur.mat, ssWoLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                     rng.nextFloat());
+                if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
+                wiWorld = normalize(ssFrame.toWorld(bs.wi));
+                haveSample = true;
+            }
+        }
+
 #if SOLSTICE_HAVE_OPENPGL
         bool guideReady = false;
-        if (cfg.eyePath && cfg.guiding && cfg.guiding->active() && !cur.delta) {
+        if (!haveSample && cfg.eyePath && cfg.guiding && cfg.guiding->active() && !cur.delta) {
             guideReady = cfg.guiding->prepare(cur.p, cur.ns, rng);
             if (guideReady && rng.nextFloat() < cfg.guiding->guideProbability()) {
                 float gPdf = 0.0f;

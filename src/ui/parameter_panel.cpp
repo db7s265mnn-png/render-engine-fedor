@@ -470,6 +470,7 @@ void ParameterPanel::rebuildLop() {
         QFormLayout* form = nullptr;
         for (Parameter& parameter : node_->parameters()) {
             if (parameter.name == "mtlx") continue;
+            if (parameter.name.startsWith(QLatin1String("_"))) continue;
             if (parameter.group != group) continue;
             if (!form) {
                 auto* box = new QGroupBox(group.isEmpty() ? QString("Parameters") : group);

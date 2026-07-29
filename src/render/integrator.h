@@ -205,6 +205,175 @@ SR_INL SR_HD Vec3 offsetRayOrigin(Vec3 p, Vec3 n, Vec3 dir) {
     return dot(dir, n) > 0.0f ? p + offset : p - offset;
 }
 
+SR_INL SR_HD bool materialSupportsSss(const Material& mat) {
+    return saturatef(mat.subsurface) > 1e-4f && mat.transmission <= 1e-4f && mat.metallic < 0.999f;
+}
+
+SR_INL SR_HD Material sssSpecularEntryMaterial(const Material& mat) {
+    Material specMat = mat;
+    specMat.subsurface = 0.0f;
+    specMat.transmission = 0.0f;
+    if (specMat.metallic < 0.999f) specMat.baseColor = Vec3(0.0f);
+    return specMat;
+}
+
+SR_INL SR_HD Material sssExitLambertMaterial() {
+    Material lambert = defaultMaterial();
+    lambert.baseColor = Vec3(1.0f);
+    lambert.specular = 0.0f;
+    lambert.metallic = 0.0f;
+    lambert.transmission = 0.0f;
+    lambert.subsurface = 0.0f;
+    lambert.roughness = 1.0f;
+    return lambert;
+}
+
+// Fresnel RR probability of reflecting at the SSS entry instead of entering the body.
+SR_INL SR_HD float sssEntrySpecularProb(const Material& specMat, Vec3 woLocal) {
+    const LobeWeights specLw = computeLobes(specMat);
+    if (specLw.specular <= 1e-5f || saturatef(specMat.specular) <= 1e-5f) return 0.0f;
+    const float cosWo = srMax(0.0f, woLocal.z);
+    const float fresnelEst = average(fresnelSchlick(specLw.f0, cosWo));
+    return clampf(srMax(fresnelEst, specLw.specular * fresnelEst), 0.0f, 0.98f);
+}
+
+struct SssWalkResult {
+    bool escaped = false;
+    Vec3 exitP{0.0f};
+    Vec3 exitN{0.0f, 1.0f, 0.0f};
+    Vec3 exitWo{0.0f, 1.0f, 0.0f};
+    Vec3 pathWeight{1.0f};
+};
+
+// Spectral Chiang random-walk BSSRDF (hero-channel MIS). Shared by PT and BDPT.
+template <typename Tracer>
+SR_INL SssWalkResult sampleSssRandomWalk(const SceneView& scene, const Tracer& tracer,
+                                         const SurfaceInteraction& entrySi, Vec3 wo, const Material& mat,
+                                         Rng& rng) {
+    SssWalkResult out;
+    out.exitP = entrySi.p;
+    out.exitN = entrySi.ns;
+    out.exitWo = wo;
+    out.pathWeight = vmax(Vec3(0.0f), mat.subsurfaceColor);
+
+    const Vec3 mfpRGB = vmax(Vec3(0.0f), mat.subsurfaceRadius) * srMax(0.0f, mat.subsurfaceScale);
+    const Vec3 multiAlbedo = vmax(Vec3(0.0f), mat.subsurfaceColor);
+    if (maxComponent(mfpRGB) < 1e-8f) {
+        out.escaped = true;
+        out.pathWeight = multiAlbedo;
+        return out;
+    }
+
+    const Vec3 singleAlbedo = chiangSingleScatterAlbedo(multiAlbedo);
+    float sigma[3] = {1.0f / srMax(1e-5f, mfpRGB.x), 1.0f / srMax(1e-5f, mfpRGB.y),
+                      1.0f / srMax(1e-5f, mfpRGB.z)};
+    float alpha[3] = {srMax(0.0f, singleAlbedo.x), srMax(0.0f, singleAlbedo.y),
+                      srMax(0.0f, singleAlbedo.z)};
+
+    float sel[3];
+    for (int c = 0; c < 3; ++c) sel[c] = srMax(1e-3f, alpha[c] / sigma[c]);
+    const float selSum = sel[0] + sel[1] + sel[2];
+    float uSel = rng.nextFloat() * selSum;
+    int hero = 0;
+    if (uSel >= sel[0]) {
+        hero = 1;
+        uSel -= sel[0];
+    }
+    if (hero == 1 && uSel >= sel[1]) hero = 2;
+    const float pSel[3] = {sel[0] / selSum, sel[1] / selSum, sel[2] / selSum};
+    const float sigmaH = sigma[hero];
+
+    float pathPdf[3] = {pSel[0], pSel[1], pSel[2]};
+    float thr[3] = {1.0f, 1.0f, 1.0f};
+
+    Vec3 pWalk = entrySi.p - entrySi.ns * (kRayEpsilon * (1.0f + length(entrySi.p)));
+    bool escaped = false;
+
+    constexpr int kMaxWalkSteps = 24;
+    for (int step = 0; step < kMaxWalkSteps; ++step) {
+        const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) / sigmaH;
+
+        Vec3 walkDir;
+        if (step == 0) {
+            const Frame inFrame(-entrySi.ns);
+            walkDir = inFrame.toWorld(sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat()));
+        } else {
+            walkDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
+        }
+        if (lengthSquared(walkDir) < 1e-12f) continue;
+        walkDir = normalize(walkDir);
+
+        const float rayEps = kRayEpsilon * (1.0f + length(pWalk));
+        const Vec3 walkOrigin = pWalk + walkDir * rayEps;
+        RayHit walkHit;
+        if (!tracer.intersect(walkOrigin, walkDir, stepLen, walkHit)) {
+            pWalk = walkOrigin + walkDir * stepLen;
+            for (int c = 0; c < 3; ++c) {
+                const float tr = expf(-sigma[c] * stepLen);
+                const float dens = sigma[c] * tr;
+                thr[c] *= alpha[c] * dens;
+                pathPdf[c] *= dens;
+            }
+            const float wHero = thr[hero] / srMax(1e-20f, pathPdf[hero]);
+            if (wHero < 1e-5f) {
+                thr[0] = thr[1] = thr[2] = 0.0f;
+                break;
+            }
+            if (step >= 8) {
+                const float q = clampf(wHero, 0.25f, 1.0f);
+                if (rng.nextFloat() > q) {
+                    thr[0] = thr[1] = thr[2] = 0.0f;
+                    break;
+                }
+                thr[0] /= q;
+                thr[1] /= q;
+                thr[2] /= q;
+            }
+            continue;
+        }
+
+        SurfaceInteraction walkSi;
+        if (!buildSurfaceInteraction(scene, walkHit, walkOrigin, walkDir, walkSi)) break;
+
+        const float tHit = srMax(0.0f, walkHit.t);
+        for (int c = 0; c < 3; ++c) {
+            const float tr = expf(-sigma[c] * tHit);
+            thr[c] *= tr;
+            pathPdf[c] *= tr;
+        }
+
+        escaped = true;
+        out.exitP = walkSi.p;
+        out.exitN = walkSi.ns;
+        if (dot(out.exitN, walkDir) < 0.0f) out.exitN = -out.exitN;
+        if (lengthSquared(out.exitN) < 1e-12f) out.exitN = walkDir;
+        else out.exitN = normalize(out.exitN);
+
+        const float pdfSum = pathPdf[0] + pathPdf[1] + pathPdf[2];
+        if (pdfSum > 1e-20f) {
+            out.pathWeight = Vec3(thr[0] / pdfSum, thr[1] / pdfSum, thr[2] / pdfSum);
+        } else {
+            out.pathWeight = Vec3(0.0f);
+        }
+        const Vec3 toEntry = entrySi.p - out.exitP;
+        const float woLen2 = lengthSquared(toEntry);
+        out.exitWo = woLen2 > 1e-12f ? normalize(toEntry) : out.exitN;
+        break;
+    }
+
+    if (!escaped || isBlack(out.pathWeight) || !isFinite(out.pathWeight)) {
+        out.escaped = true;
+        out.exitP = entrySi.p;
+        out.exitN = entrySi.ns;
+        out.exitWo = wo;
+        out.pathWeight = multiAlbedo;
+        return out;
+    }
+    if (dot(out.exitN, out.exitWo) < 0.0f) out.exitWo = out.exitN;
+    out.escaped = true;
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // Camera
 // ---------------------------------------------------------------------------
@@ -543,23 +712,13 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         //
         // Spectral walk: hero RGB channel, MFP = scale * radius[ch], Chiang α.
         const float sssWeight = saturatef(mat.subsurface);
-        const bool canSss =
-            sssWeight > 1e-4f && mat.transmission <= 1e-4f && mat.metallic < 0.999f;
-        if (canSss && rng.nextFloat() < sssWeight) {
+        if (materialSupportsSss(mat) && rng.nextFloat() < sssWeight) {
             // Specular-only material at the ENTRY (dielectric F0 / metal base).
-            Material specMat = mat;
-            specMat.subsurface = 0.0f;
-            specMat.transmission = 0.0f;
-            if (specMat.metallic < 0.999f) specMat.baseColor = Vec3(0.0f);
+            Material specMat = sssSpecularEntryMaterial(mat);
 
             const Vec3 woLocalEntry = frame.toLocal(wo);
             const LobeWeights specLw = computeLobes(specMat);
-            const float cosWo = srMax(0.0f, woLocalEntry.z);
-            const float fresnelEst = average(fresnelSchlick(specLw.f0, cosWo));
-            // Probability of taking the specular bounce this path (layer over SSS).
-            float pSpec = 0.0f;
-            if (specLw.specular > 1e-5f && saturatef(mat.specular) > 1e-5f)
-                pSpec = clampf(srMax(fresnelEst, specLw.specular * fresnelEst), 0.0f, 0.98f);
+            const float pSpec = sssEntrySpecularProb(specMat, woLocalEntry);
 
             // Direct specular lighting at entry (works for rough GGX; delta → 0).
             if (pSpec > 0.0f) {
@@ -600,169 +759,34 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             }
             if (pSpec > 0.0f && pSpec < 0.999f) throughput /= (1.0f - pSpec);
 
-            const Vec3 mfpRGB = vmax(Vec3(0.0f), mat.subsurfaceRadius) * srMax(0.0f, mat.subsurfaceScale);
-            const Vec3 multiAlbedo = vmax(Vec3(0.0f), mat.subsurfaceColor);
-            const Vec3 singleAlbedo = chiangSingleScatterAlbedo(multiAlbedo);
-
-            // White Lambert at exit — spectral colour is carried by pathWeight.
-            Material lambert = defaultMaterial();
-            lambert.baseColor = Vec3(1.0f);
-            lambert.specular = 0.0f;
-            lambert.metallic = 0.0f;
-            lambert.transmission = 0.0f;
-            lambert.subsurface = 0.0f;
-            lambert.roughness = 1.0f;
-
-            Vec3 exitP = si.p;
-            Vec3 exitN = si.ns;
-            Vec3 exitWo = wo;
-            Vec3 pathWeight = multiAlbedo;  // fallback: full RGB Lambert look
-            bool useEntryFallback = maxComponent(mfpRGB) < 1e-8f;
-
-            if (!useEntryFallback) {
-                // Spectral random-walk with hero-channel MIS (HWSS-style for RGB):
-                // free-flight distances are sampled with one hero σ_t, but all three
-                // channels are evaluated along the same geometry and combined with
-                // balance-heuristic MIS. This cuts colour noise a lot vs single-channel.
-                float sigma[3] = {1.0f / srMax(1e-5f, mfpRGB.x), 1.0f / srMax(1e-5f, mfpRGB.y),
-                                  1.0f / srMax(1e-5f, mfpRGB.z)};
-                float alpha[3] = {srMax(0.0f, singleAlbedo.x), srMax(0.0f, singleAlbedo.y),
-                                  srMax(0.0f, singleAlbedo.z)};
-
-                // Prefer hero channels that carry more energy × longer MFP.
-                float sel[3];
-                for (int c = 0; c < 3; ++c)
-                    sel[c] = srMax(1e-3f, alpha[c] / sigma[c]);
-                const float selSum = sel[0] + sel[1] + sel[2];
-                float uSel = rng.nextFloat() * selSum;
-                int hero = 0;
-                if (uSel >= sel[0]) {
-                    hero = 1;
-                    uSel -= sel[0];
-                }
-                if (hero == 1 && uSel >= sel[1]) hero = 2;
-                const float pSel[3] = {sel[0] / selSum, sel[1] / selSum, sel[2] / selSum};
-                const float sigmaH = sigma[hero];
-
-                // pathPdf[c] = p(select c) × ∏ free-flight densities under σ_c
-                // thr[c]     = ∏ (α_c σ_c T_c) on scatters × T_c on exit
-                float pathPdf[3] = {pSel[0], pSel[1], pSel[2]};
-                float thr[3] = {1.0f, 1.0f, 1.0f};
-
-                Vec3 pWalk = si.p - si.ns * (kRayEpsilon * (1.0f + length(si.p)));
-                bool escaped = false;
-
-                constexpr int kMaxWalkSteps = 24;
-                for (int step = 0; step < kMaxWalkSteps; ++step) {
-                    const float stepLen = -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) / sigmaH;
-
-                    Vec3 walkDir;
-                    if (step == 0) {
-                        const Frame inFrame(-si.ns);
-                        walkDir = inFrame.toWorld(sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat()));
-                    } else {
-                        walkDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
-                    }
-                    if (lengthSquared(walkDir) < 1e-12f) continue;
-                    walkDir = normalize(walkDir);
-
-                    const float rayEps = kRayEpsilon * (1.0f + length(pWalk));
-                    const Vec3 walkOrigin = pWalk + walkDir * rayEps;
-                    RayHit walkHit;
-                    if (!tracer.intersect(walkOrigin, walkDir, stepLen, walkHit)) {
-                        pWalk = walkOrigin + walkDir * stepLen;
-                        for (int c = 0; c < 3; ++c) {
-                            const float tr = expf(-sigma[c] * stepLen);
-                            const float dens = sigma[c] * tr;
-                            thr[c] *= alpha[c] * dens;
-                            pathPdf[c] *= dens;
-                        }
-                        const float wHero = thr[hero] / srMax(1e-20f, pathPdf[hero]);
-                        if (wHero < 1e-5f) {
-                            thr[0] = thr[1] = thr[2] = 0.0f;
-                            break;
-                        }
-                        // Softer / later RR — early termination was a big noise source.
-                        if (step >= 8) {
-                            const float q = clampf(wHero, 0.25f, 1.0f);
-                            if (rng.nextFloat() > q) {
-                                thr[0] = thr[1] = thr[2] = 0.0f;
-                                break;
-                            }
-                            thr[0] /= q;
-                            thr[1] /= q;
-                            thr[2] /= q;
-                        }
-                        continue;
-                    }
-
-                    SurfaceInteraction walkSi;
-                    if (!buildSurfaceInteraction(scene, walkHit, walkOrigin, walkDir, walkSi)) break;
-
-                    const float tHit = srMax(0.0f, walkHit.t);
-                    for (int c = 0; c < 3; ++c) {
-                        const float tr = expf(-sigma[c] * tHit);
-                        thr[c] *= tr;
-                        pathPdf[c] *= tr;
-                    }
-
-                    escaped = true;
-                    exitP = walkSi.p;
-                    exitN = walkSi.ns;
-                    if (dot(exitN, walkDir) < 0.0f) exitN = -exitN;
-                    if (lengthSquared(exitN) < 1e-12f) exitN = walkDir;
-                    else exitN = normalize(exitN);
-
-                    const float pdfSum = pathPdf[0] + pathPdf[1] + pathPdf[2];
-                    if (pdfSum > 1e-20f) {
-                        pathWeight = Vec3(thr[0] / pdfSum, thr[1] / pdfSum, thr[2] / pdfSum);
-                    } else {
-                        pathWeight = Vec3(0.0f);
-                    }
-                    const Vec3 toEntry = si.p - exitP;
-                    const float woLen2 = lengthSquared(toEntry);
-                    exitWo = woLen2 > 1e-12f ? normalize(toEntry) : exitN;
-                    break;
-                }
-
-                if (!escaped || isBlack(pathWeight) || !isFinite(pathWeight)) useEntryFallback = true;
-            }
-
-            if (useEntryFallback) {
-                exitP = si.p;
-                exitN = si.ns;
-                exitWo = wo;
-                pathWeight = multiAlbedo;
-                lambert.baseColor = Vec3(1.0f);
-            }
-
-            if (dot(exitN, exitWo) < 0.0f) exitWo = exitN;
+            const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
+            Material lambert = sssExitLambertMaterial();
             SurfaceInteraction ssSi = si;
-            ssSi.p = exitP;
-            ssSi.ns = exitN;
-            ssSi.ng = exitN;
-            const Frame ssFrame(exitN);
+            ssSi.p = walk.exitP;
+            ssSi.ns = walk.exitN;
+            ssSi.ng = walk.exitN;
+            const Frame ssFrame(walk.exitN);
             // NEE at SSS exit (lightSamples is handled inside nextEventEstimation).
             const Vec3 nee =
-                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, exitWo, rng, guiding);
-            Vec3 contrib = throughput * pathWeight * nee;
+                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding);
+            Vec3 contrib = throughput * walk.pathWeight * nee;
             if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
             radiance += contrib;
 #if !defined(__CUDACC__)
-            if (guiding && guiding->active()) guiding->addScattered(pathWeight * nee);
+            if (guiding && guiding->active()) guiding->addScattered(walk.pathWeight * nee);
 #endif
             const BsdfSample ssBs =
-                bsdfSampleLocal(lambert, ssFrame.toLocal(exitWo), rng.nextFloat(), rng.nextFloat(),
+                bsdfSampleLocal(lambert, ssFrame.toLocal(walk.exitWo), rng.nextFloat(), rng.nextFloat(),
                                 rng.nextFloat(), rng.nextFloat());
             if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
                 const Vec3 wiWorld = normalize(ssFrame.toWorld(ssBs.wi));
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active())
-                    guiding->recordBounce(exitN, wiWorld, ssBs.pdf, pathWeight * ssBs.weight, false,
-                                          1.0f, 1.0f, 1.0f);
+                    guiding->recordBounce(walk.exitN, wiWorld, ssBs.pdf, walk.pathWeight * ssBs.weight,
+                                          false, 1.0f, 1.0f, 1.0f);
 #endif
-                throughput *= pathWeight * ssBs.weight;
-                origin = offsetRayOrigin(exitP, exitN, wiWorld);
+                throughput *= walk.pathWeight * ssBs.weight;
+                origin = offsetRayOrigin(walk.exitP, walk.exitN, wiWorld);
                 direction = wiWorld;
                 bsdfPdf = ssBs.pdf;
                 specularBounce = false;

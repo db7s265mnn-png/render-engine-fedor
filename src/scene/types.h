@@ -301,11 +301,12 @@ struct CameraData {
 enum ToneMapper : int { kToneNone = 0, kToneReinhard = 1, kToneAces = 2 };
 enum RenderBackendType : int { kBackendCpuEmbree = 0, kBackendGpuOptix = 1 };
 // BDPT is CPU / Embree only; OptiX falls back to the unidirectional path tracer.
+// Menu order matches these values: Path Tracer, BDPT, Direct Lighting, AO.
 enum IntegratorMode : int {
     kIntegratorPathTracer = 0,
-    kIntegratorDirectLighting = 1,
-    kIntegratorAmbientOcclusion = 2,
-    kIntegratorBdpt = 3,
+    kIntegratorBdpt = 1,
+    kIntegratorDirectLighting = 2,
+    kIntegratorAmbientOcclusion = 3,
 };
 
 // How refractive / reflective caustics are estimated when settings.caustics != 0.

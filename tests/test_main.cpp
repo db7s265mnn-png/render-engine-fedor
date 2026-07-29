@@ -2618,6 +2618,164 @@ void testTxMipmaps() {
 #endif
 }
 
+void testBdptShadersAndSss() {
+    std::printf("bdpt-shaders-sss\n");
+
+    auto makeBaseScene = []() {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+        floor->validate();
+        const int floorMesh = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.65f);
+        floorMat.roughness = 0.85f;
+        floorMat.specular = 0.0f;
+        InstanceData floorInst;
+        floorInst.meshIndex = floorMesh;
+        floorInst.materialIndex = scene->addMaterial(floorMat);
+        scene->instances.push_back(floorInst);
+
+        LightData light;
+        light.type = kLightRect;
+        light.width = 2.5f;
+        light.height = 2.5f;
+        light.intensity = 40.0f;
+        light.normalize = 1;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.0f, 4.5f, 0.0f)) * Mat4::rotateX(-90.0f);
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 48;
+        scene->settings.resolutionY = 36;
+        scene->settings.samplesPerPixel = 24;
+        scene->settings.maxDepth = 6;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampIndirect = 10.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(2.2f, 2.0f, 2.2f), Vec3(0.0f, 0.6f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        return scene;
+    };
+
+    auto addBall = [](ScenePtr scene, const Material& mat) {
+        MeshPtr ball = makeSphereMesh(0.7f, 32, 16);
+        InstanceData inst;
+        inst.xform = Mat4::translate(Vec3(0.0f, 0.7f, 0.0f));
+        inst.meshIndex = scene->addMesh(ball);
+        inst.materialIndex = scene->addMaterial(mat);
+        scene->instances.push_back(inst);
+    };
+
+    auto renderSum = [](ScenePtr scene, int integrator, int caustics) -> double {
+        scene->settings.integrator = integrator;
+        scene->settings.caustics = caustics;
+        scene->finalize();
+        RenderSession session;
+        session.setScene(scene);
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                check(isFinite(c), "bdpt shader pixel finite");
+                sum += double(luminance(c));
+            }
+        return sum;
+    };
+
+    // Diffuse / metal / glass: BDPT must stay in the same ballpark as PT.
+    {
+        Material diffuse;
+        diffuse.baseColor = Vec3(0.8f, 0.2f, 0.15f);
+        diffuse.roughness = 0.7f;
+        diffuse.specular = 0.2f;
+        auto sPt = makeBaseScene();
+        addBall(sPt, diffuse);
+        auto sBdpt = makeBaseScene();
+        addBall(sBdpt, diffuse);
+        const double pt = renderSum(sPt, kIntegratorPathTracer, 0);
+        const double bdpt = renderSum(sBdpt, kIntegratorBdpt, 0);
+        const double ratio = pt > 0.0 ? bdpt / pt : 0.0;
+        check(pt > 0.0 && bdpt > 0.0, "BDPT diffuse produces light");
+        check(ratio > 0.55 && ratio < 1.8, "BDPT diffuse energy ~ PT");
+        std::printf("  diffuse PT=%.1f BDPT=%.1f ratio=%.3f\n", pt, bdpt, ratio);
+    }
+    {
+        Material metal;
+        metal.baseColor = Vec3(0.95f, 0.75f, 0.35f);
+        metal.metallic = 1.0f;
+        metal.roughness = 0.15f;
+        metal.specular = 1.0f;
+        auto sPt = makeBaseScene();
+        addBall(sPt, metal);
+        auto sBdpt = makeBaseScene();
+        addBall(sBdpt, metal);
+        const double pt = renderSum(sPt, kIntegratorPathTracer, 0);
+        const double bdpt = renderSum(sBdpt, kIntegratorBdpt, 0);
+        const double ratio = pt > 0.0 ? bdpt / pt : 0.0;
+        check(pt > 0.0 && bdpt > 0.0, "BDPT metal produces light");
+        check(ratio > 0.5 && ratio < 2.0, "BDPT metal energy ~ PT");
+        std::printf("  metal PT=%.1f BDPT=%.1f ratio=%.3f\n", pt, bdpt, ratio);
+    }
+    {
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.roughness = 0.0f;
+        glass.specular = 1.0f;
+        auto sPt = makeBaseScene();
+        addBall(sPt, glass);
+        auto sBdpt = makeBaseScene();
+        addBall(sBdpt, glass);
+        const double pt = renderSum(sPt, kIntegratorPathTracer, 1);
+        const double bdpt = renderSum(sBdpt, kIntegratorBdpt, 1);
+        const double ratio = pt > 0.0 ? bdpt / pt : 0.0;
+        check(pt > 0.0 && bdpt > 0.0, "BDPT glass produces light");
+        check(ratio > 0.45 && ratio < 2.2, "BDPT glass energy ~ PT");
+        std::printf("  glass PT=%.1f BDPT=%.1f ratio=%.3f\n", pt, bdpt, ratio);
+    }
+
+    // SSS: PT with caustics off uses the random-walk BSSRDF; BDPT must now too.
+    {
+        Material sss;
+        sss.baseColor = Vec3(0.9f, 0.55f, 0.4f);
+        sss.subsurface = 1.0f;
+        sss.subsurfaceColor = Vec3(0.9f, 0.35f, 0.2f);
+        sss.subsurfaceRadius = Vec3(0.35f, 0.12f, 0.06f);
+        sss.subsurfaceScale = 1.0f;
+        sss.roughness = 0.55f;
+        sss.specular = 0.35f;
+        sss.ior = 1.4f;
+        auto sPt = makeBaseScene();
+        addBall(sPt, sss);
+        auto sBdpt = makeBaseScene();
+        addBall(sBdpt, sss);
+        auto sOff = makeBaseScene();
+        Material noSss = sss;
+        noSss.subsurface = 0.0f;
+        addBall(sOff, noSss);
+
+        const double pt = renderSum(sPt, kIntegratorPathTracer, 0);
+        const double bdpt = renderSum(sBdpt, kIntegratorBdpt, 0);
+        const double diffuseOnly = renderSum(sOff, kIntegratorPathTracer, 0);
+        const double ratio = pt > 0.0 ? bdpt / pt : 0.0;
+        check(pt > 0.0 && bdpt > 0.0, "BDPT SSS produces light");
+        // SSS should look different from pure diffuse base (softens / tints).
+        check(std::fabs(pt - diffuseOnly) / std::max(pt, diffuseOnly) > 0.02,
+              "SSS changes energy vs diffuse-only");
+        check(ratio > 0.45 && ratio < 2.2, "BDPT SSS energy ~ PT SSS");
+        std::printf("  sss PT=%.1f BDPT=%.1f diffuse=%.1f ratio=%.3f\n", pt, bdpt, diffuseOnly, ratio);
+    }
+}
+
 void testBinaryUsdLoad() {
     std::printf("binary-usd-usdc\n");
 #if SOLSTICE_HAVE_TINYUSDZ
@@ -2713,6 +2871,7 @@ int main() {
     testMaterialXKarmaArnoldWirings();
     testMaterialXRaySwitchCaustics();
     testMaterialXUdimCubeAsset();
+    testBdptShadersAndSss();
     testBinaryUsdLoad();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
