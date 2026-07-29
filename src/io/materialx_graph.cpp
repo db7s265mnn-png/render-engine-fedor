@@ -294,6 +294,26 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     setFloat("shadow_opacity", shadowOpacity);
     material.shadowOpacity = saturatef(shadowOpacity);
 
+    // Contribute to Caustics (default on). When off, this glass/mirror does not
+    // cast caustics; shadows use shadow_opacity even if render caustics are ON.
+    {
+        float cc = 1.0f;
+        if (!resolveConnectedNode(ss, "contribute_caustics")) {
+            const std::string raw = inputValueString(ss, "contribute_caustics");
+            if (!raw.empty()) {
+                if (raw == "false" || raw == "0" || raw == "False" || raw == "FALSE")
+                    cc = 0.0f;
+                else if (raw == "true" || raw == "1" || raw == "True" || raw == "TRUE")
+                    cc = 1.0f;
+                else {
+                    float v = 1.0f;
+                    if (parseFloat(raw, v)) cc = v > 0.5f ? 1.0f : 0.0f;
+                }
+            }
+        }
+        material.contributeCaustics = cc > 0.5f ? 1 : 0;
+    }
+
     // Chromatic dispersion (Arnold-style Abbe number; 0 = off, lower = stronger).
     float dispersionAbbe = 0.0f;
     setFloat("dispersion_abbe", dispersionAbbe);
@@ -574,6 +594,7 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"transmission", "float", "0"},
          {"opacity", "color3", "1, 1, 1"},
          {"shadow_opacity", "float", "1"},
+         {"contribute_caustics", "boolean", "true"},
          {"dispersion_abbe", "float", "0"},
          {"thin_film_thickness", "float", "0"},
          {"thin_film_IOR", "float", "1.4"},

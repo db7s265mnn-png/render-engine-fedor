@@ -449,7 +449,7 @@ public:
         addParameter(Parameter::makeBool("caustics", "Contribute to Caustics", true)
                          .withGroup("Light")
                          .withTooltip("When off, this light still illuminates surfaces directly but "
-                                      "does not cast caustics through glass (MNEE / BDPT / "
+                                      "does not cast caustics through glass (MNEE / BDPT / photon map / "
                                       "specular→light paths). Works for area, sun, and dome lights."));
 
         switch (type_) {
@@ -683,10 +683,10 @@ public:
                                           "BDPT (Bidirectional)"},
                                          0)
                          .withGroup("Engine")
-                         .withTooltip("Path Tracer: unidirectional + MNEE refractive caustics.\n"
-                                      "BDPT: light-tracing caustics on open surfaces; MNEE when the "
-                                      "camera looks through glass at a caustic (CPU only — OptiX "
-                                      "falls back to Path Tracer).\n"
+                         .withTooltip("Path Tracer: unidirectional (+ MNEE or Photon caustics).\n"
+                                      "BDPT: bidirectional + light-tracing / Photon caustics "
+                                      "(CPU only — OptiX falls back to Path Tracer).\n"
+                                      "Pick the caustics estimator under Caustics Engine.\n"
                                       "The log reports which caustics mode is active."));
         addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
@@ -708,11 +708,26 @@ public:
                          .withGroup("Engine")
                          .withTooltip("Enable caustic light transport (light focused through glass "
                                       "and off mirrors).\n"
-                                      "Path Tracer: refractive caustics via MNEE (manifold "
-                                      "next-event estimation).\n"
-                                      "BDPT: caustics come from bidirectional connections.\n"
-                                      "Off: glass casts dark shadows (soften with the material's "
-                                      "shadow_opacity)."));
+                                      "Engine picks the estimator (Auto / MNEE / Photon).\n"
+                                      "Per-light and per-material Contribute to Caustics can disable "
+                                      "individual sources or casters.\n"
+                                      "Off: glass casts dark shadows (soften with shadow_opacity)."));
+        addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
+                                         {"Automatic", "MNEE (manifolds)", "Photon / VCM"}, 0)
+                         .withGroup("Engine")
+                         .withTooltip("Automatic: Path Tracer → MNEE; BDPT → light tracing + MNEE "
+                                      "through glass.\n"
+                                      "MNEE: manifold next-event — best for near-delta glass.\n"
+                                      "Photon / VCM: caustic-only photon map gather — better for "
+                                      "rough glass and black bases seen through refraction."));
+        addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)
+                         .withGroup("Engine")
+                         .withTooltip("Photons emitted per progressive pass when Caustics Engine "
+                                      "is Photon / VCM."));
+        addParameter(Parameter::makeFloat("photonradius", "Photon Radius", 0.08, 0.001, 10.0, false)
+                         .withGroup("Engine")
+                         .withTooltip("Initial gather radius (scene units) for the caustic photon "
+                                      "map. Shrinks as samples accumulate."));
         addParameter(Parameter::makeFloat("causticclamp", "Caustic Firefly Clamp", 0.0, 0.0, 1000.0, false)
                          .withGroup("Engine")
                          .withTooltip("Extra cap on paths that look through glass/mirrors at a light "
@@ -748,7 +763,10 @@ public:
         settings.aoDistance = float(floatValue("aodistance", 1.0));
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
+        settings.causticsEngine = intValue("causticsengine", 0);
         settings.causticClamp = float(floatValue("causticclamp", 0.0));
+        settings.photonCount = std::max(1000, intValue("photoncount", 100000));
+        settings.photonRadius = float(floatValue("photonradius", 0.08));
         settings.toneMapper = intValue("tonemap", 2);
         settings.exposure = float(floatValue("exposure", 0.0));
         settings.gamma = float(floatValue("gamma", 2.2));

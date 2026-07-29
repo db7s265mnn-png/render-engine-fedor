@@ -19,6 +19,7 @@
 #include "render/integrator.h"
 #include "render/integrator_mnee.h"
 #include "render/lights.h"
+#include "render/photon_map.h"
 #include "render/shading.h"
 #include "solstice_config.h"
 
@@ -499,7 +500,9 @@ SR_INL bool connectionVisible(const SceneView& scene, const Tracer& tracer, Vec3
 
 // `splatFb` enables the t=1 light-tracing strategy (thread-safe splats; pass the
 // active framebuffer). Splats assume a pinhole / thin-lens-center camera and are
-// skipped when the projection is unavailable.
+// skipped when the projection is unavailable. `photons` enables caustic-only
+// photon gather (VCM-style); when non-null, light-tracing caustic splats and the
+// through-glass MNEE upgrade are suppressed so the map owns that family.
 template <typename Tracer>
 inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
                               Rng& rng
@@ -508,13 +511,16 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                               PathGuiding::ThreadState* guiding = nullptr
 #endif
                               ,
-                              Framebuffer* splatFb = nullptr, int heroChannel = -1) {
+                              Framebuffer* splatFb = nullptr, int heroChannel = -1,
+                              const CausticPhotonMap* photons = nullptr) {
     using namespace bdpt;
     const RenderSettingsData& settings = scene.settings;
     int maxVerts = settings.maxDepth + 1;
     if (maxVerts > kMaxVerts) maxVerts = kMaxVerts;
     if (maxVerts < 2) maxVerts = 2;
     const bool causticsOn = settings.caustics != 0;
+    const bool photonCaustics = photons != nullptr && !photons->empty();
+    const float photonRadius = photonCaustics ? photons->gatherRadius(settings) : 0.0f;
 
     const CameraProj camProj = buildCameraProj(scene);
     const bool doSplats = splatFb != nullptr && camProj.valid;
@@ -566,6 +572,20 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 
     Vec3 L(0.0f);
 
+    // ---- Caustic photon gather (VCM-style) on eye-path diffuse vertices ----
+    if (photonCaustics) {
+        for (int t = 2; t <= nEye; ++t) {
+            const Vert& E = eye[t - 1];
+            if (E.type != VType::Surface || !E.connectable || E.nearSpec) continue;
+            Vec3 g = photons->gather(E.p, E.ns, E.wo, E.mat, photonRadius);
+            if (isBlack(g) || !isFinite(g)) continue;
+            Vec3 c = E.beta * g;
+            if (t > 2) c = clampContribution(c, settings.clampIndirect);
+            if (!isFinite(c)) continue;
+            L += c;
+        }
+    }
+
     // ---- t = 1: splat light-subpath vertices onto the camera (light tracing).
     // This is what carries caustics from small lights: the specular chain is
     // sampled from the light with delta refractions, and the final connection
@@ -578,9 +598,13 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             // family; drop them to match the dark-shadow look.
             bool lightPrefixCaustic = false;
             for (int i = 1; i < s - 1; ++i)
-                if (light[i].nearSpec) lightPrefixCaustic = true;
+                if (light[i].nearSpec && materialContributesCaustics(light[i].mat))
+                    lightPrefixCaustic = true;
             if (!causticsOn) {
                 if (lightPrefixCaustic) continue;
+            } else if (photonCaustics && lightPrefixCaustic) {
+                // Photon map owns the caustic family — skip LT splats for it.
+                continue;
             } else if (lightPrefixCaustic && light[0].lightIndex >= 0 &&
                        !lightContributesCaustics(scene.lights[light[0].lightIndex])) {
                 // Per-light Contribute to Caustics off.
@@ -858,7 +882,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             // (floor→camera occluded) — MNEE owns that family. On open floor
             // the same glass block is already handled by t=1 splats; skip MNEE
             // there to avoid double-counting.
-            if (!(glassPath && eyeThroughSpec)) continue;
+            if (!(glassPath && eyeThroughSpec) || photonCaustics) continue;
             // Radiance / intensity as expected by manifoldConnect (not /r²).
             const Vec3 LeMnee =
                 l.type == kLightPoint ? l.emittedRadiance() : lightRadiance(l);
@@ -949,15 +973,19 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 
             bool lightPrefixCaustic = false;
             for (int i = 1; i < s - 1; ++i)
-                if (light[i].nearSpec) lightPrefixCaustic = true;
+                if (light[i].nearSpec && materialContributesCaustics(light[i].mat))
+                    lightPrefixCaustic = true;
             // Caustics off: skip connections whose eye side has diffuse→specular chains.
             if (!causticsOn) {
                 bool diffuseSeen = false, chainAfterDiffuse = false;
                 for (int i = 1; i < t; ++i) {
                     if (!eye[i].nearSpec) diffuseSeen = true;
-                    else if (diffuseSeen) chainAfterDiffuse = true;
+                    else if (diffuseSeen && materialContributesCaustics(eye[i].mat))
+                        chainAfterDiffuse = true;
                 }
                 if (chainAfterDiffuse) continue;
+            } else if (photonCaustics && lightPrefixCaustic) {
+                continue;
             } else if (lightPrefixCaustic && light[0].lightIndex >= 0 &&
                        !lightContributesCaustics(scene.lights[light[0].lightIndex])) {
                 continue;

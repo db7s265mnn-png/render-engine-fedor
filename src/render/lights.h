@@ -21,6 +21,8 @@ struct LightSample {
 
 SR_INL SR_HD bool lightContributesCaustics(const LightData& l) { return l.contributeCaustics != 0; }
 
+SR_INL SR_HD bool materialContributesCaustics(const Material& m) { return m.contributeCaustics != 0; }
+
 // ---------------------------------------------------------------------------
 // Environment map helpers
 // ---------------------------------------------------------------------------

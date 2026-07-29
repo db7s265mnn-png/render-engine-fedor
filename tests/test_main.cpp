@@ -664,6 +664,104 @@ void testBdptCausticThroughRefraction() {
     std::printf("  bdptOn=%.1f bdptOff=%.1f ptOn=%.1f ratio=%.3f\n", sumBdptOn, sumBdptOff, sumPtOn, ratio);
 }
 
+// Photon / VCM caustic engine: must deliver more energy under glass than caustics
+// off, and material Contribute to Caustics off must kill that transport.
+void testPhotonCaustics() {
+    std::printf("photon-caustics\n");
+
+    auto buildScene = [](int caustics, int engine, int matContribute) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+        floor->validate();
+        const int floorMesh = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.75f);
+        floorMat.roughness = 0.9f;
+        floorMat.specular = 0.0f;
+        const int floorIdx = scene->addMaterial(floorMat);
+        InstanceData floorInst;
+        floorInst.meshIndex = floorMesh;
+        floorInst.materialIndex = floorIdx;
+        scene->instances.push_back(floorInst);
+
+        MeshPtr ball = makeSphereMesh(0.7f, 48, 24);
+        const int ballMesh = scene->addMesh(ball);
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.roughness = 0.0f;
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.specular = 1.0f;
+        glass.contributeCaustics = matContribute;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData ballInst;
+        ballInst.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+        ballInst.meshIndex = ballMesh;
+        ballInst.materialIndex = glassIdx;
+        scene->instances.push_back(ballInst);
+
+        LightData light;
+        light.type = kLightRect;
+        light.width = 0.8f;
+        light.height = 0.8f;
+        light.intensity = 60.0f;
+        light.normalize = 1;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.0f, 4.0f, 0.0f)) * Mat4::rotateX(-90.0f);
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 72;
+        scene->settings.resolutionY = 54;
+        scene->settings.samplesPerPixel = 16;
+        scene->settings.maxDepth = 8;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.caustics = caustics;
+        scene->settings.causticsEngine = engine;
+        scene->settings.photonCount = 40000;
+        scene->settings.photonRadius = 0.15f;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto renderSum = [&](int caustics, int engine, int matContribute, bool& finiteOut) -> double {
+        RenderSession session;
+        session.setScene(buildScene(caustics, engine, matContribute));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        return sum;
+    };
+
+    bool finOn = true, finOff = true, finMatOff = true, finMnee = true;
+    const double sumPhoton = renderSum(1, kCausticsEnginePhoton, 1, finOn);
+    const double sumOff = renderSum(0, kCausticsEnginePhoton, 1, finOff);
+    const double sumMatOff = renderSum(1, kCausticsEnginePhoton, 0, finMatOff);
+    const double sumMnee = renderSum(1, kCausticsEngineMnee, 1, finMnee);
+    check(finOn && finOff && finMatOff && finMnee, "photon caustics renders are finite");
+    check(sumPhoton > sumOff * 1.1, "photon map adds caustic energy vs caustics off");
+    check(sumMatOff < sumPhoton * 0.85, "material Contribute to Caustics off reduces caustics");
+    check(sumMnee > sumOff * 1.1, "MNEE engine still adds caustic energy");
+    std::printf("  photon=%.1f off=%.1f matOff=%.1f mnee=%.1f\n", sumPhoton, sumOff, sumMatOff, sumMnee);
+}
+
 // Rough (but still tightly focusing) glass must converge like smooth glass: the
 // caustic family belongs to light tracing, otherwise the eye path has to stumble
 // onto a small light through the chain and the render is all fireflies.
@@ -2421,6 +2519,7 @@ int main() {
     testRender();
     testCausticsGlassSphere();
     testBdptCausticThroughRefraction();
+    testPhotonCaustics();
     testRoughGlassCaustics();
     testRefractionSparkleClamp();
     testSplatAccumulationPrecision();

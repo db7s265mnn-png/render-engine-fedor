@@ -25,7 +25,10 @@ struct Material {
     // Mix weight vs diffuse (Standard Surface): base_mix = (1-w)*diffuse + w*SSS.
     float subsurface = 0.0f;
     int doubleSided = 1;
-    int _padCaustics0 = 0;
+    // Arnold-style: when 0 this transmissive/specular material still shades
+    // normally but does not cast caustics (MNEE / BDPT LT / photon map).
+    // Shadows then use shadowOpacity even with render-settings caustics ON.
+    int contributeCaustics = 1;
 
     Vec3 subsurfaceColor{1.0f, 0.75f, 0.55f};
     // Arnold: MFP (scene units / metres) = subsurfaceScale * subsurfaceRadius.
@@ -61,7 +64,7 @@ struct Material {
     // are OFF: 1 = fully opaque shadow, 0 = fully open. With caustics ON shadow
     // rays treat glass as opaque and light arrives via MNEE / BDPT instead.
     float shadowOpacity = 1.0f;
-    int _padCaustics1 = 0;
+    int _padMat0 = 0;
 
     // MaterialX normalmap.scale / bump.scale (tangent XY strength).
     float normalScale = 1.0f;
@@ -285,6 +288,17 @@ enum IntegratorMode : int {
     kIntegratorBdpt = 3,
 };
 
+// How refractive / reflective caustics are estimated when settings.caustics != 0.
+enum CausticsEngine : int {
+    // Path Tracer → MNEE; BDPT → light-tracing splats + MNEE through glass.
+    kCausticsEngineAuto = 0,
+    // Manifold next-event (PT) / BDPT LT+MNEE — best for near-delta glass.
+    kCausticsEngineMnee = 1,
+    // Caustic-only photon map gather (VCM-style density estimation) — better for
+    // rough glass and caustics seen through thick refractive bases.
+    kCausticsEnginePhoton = 2,
+};
+
 struct RenderSettingsData {
     int resolutionX = 960;
     int resolutionY = 540;
@@ -308,15 +322,19 @@ struct RenderSettingsData {
 
     float aoDistance = 1.0f;
     int pathGuiding = 0;           // OpenPGL on CPU (Embree); ignored on OptiX
-    // Enable caustic light transport (specular→diffuse). Path Tracer uses MNEE for
-    // refractive caustics; BDPT regularizes indirect specular vertices so caustics
-    // arrive through its standard connections. Off = dark glass shadows.
+    // Enable caustic light transport (specular→diffuse). Off = dark glass shadows
+    // (soften per-material with shadow_opacity / contribute_caustics).
     int caustics = 1;
+    // Which estimator carries caustics when enabled (see CausticsEngine).
+    int causticsEngine = kCausticsEngineAuto;
     // Firefly cap for paths that look through glass/mirrors at a light (SDS).
     // Those never converge with more samples when the light is small; a safety
     // cap of 10 is always applied even when this is left at 0. Raise it to
     // tighten further. The light-tracing caustic on diffuse surfaces is not capped.
     float causticClamp = 0.0f;
+    // Photon / VCM caustic map (used when causticsEngine == Photon).
+    int photonCount = 100000;
+    float photonRadius = 0.08f;    // gather radius in scene units (shrinks over spp)
     // Progressive pass index (set per sample by the CPU backend).
     int progressiveSample = 0;
 };

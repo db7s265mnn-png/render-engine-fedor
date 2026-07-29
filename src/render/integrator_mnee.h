@@ -19,6 +19,7 @@
 #include "core/rng.h"
 #include "render/integrator.h"
 #include "render/lights.h"
+#include "render/photon_map.h"
 #include "render/shading.h"
 #include "solstice_config.h"
 
@@ -41,6 +42,7 @@ constexpr float kSeedRingRadius = 0.75f;        // fraction of the cone angle
 
 
 SR_INL bool isCausticCaster(const Material& m) {
+    if (!materialContributesCaustics(m)) return false;
     const LobeWeights lw = computeLobes(m);
     return lw.delta && lw.transmission > 0.25f && lw.diffuse < 1e-3f;
 }
@@ -525,7 +527,8 @@ SR_INL bool sampleFiniteLightPoint(const SceneView& scene, int lightIndex, Rng& 
 // ---------------------------------------------------------------------------
 template <typename Tracer, typename Guiding>
 SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                                Rng& rng, Guiding* guiding, int heroChannel = -1) {
+                                Rng& rng, Guiding* guiding, int heroChannel = -1,
+                                const CausticPhotonMap* photons = nullptr) {
     Vec3 radiance(0.0f);
     Vec3 throughput(1.0f);
     float bsdfPdf = 0.0f;
@@ -544,6 +547,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
     int passThrough = 0;
     const RenderSettingsData& settings = scene.settings;
     const int maxDepth = srMax(1, settings.maxDepth);
+    const bool photonCaustics = photons != nullptr && !photons->empty();
+    const float photonRadius = photonCaustics ? photons->gatherRadius(settings) : 0.0f;
 
     while (depth <= maxDepth) {
         RayHit hit;
@@ -711,6 +716,15 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         // --- NEE with lazy MNEE upgrade -------------------------------------
         const bool connectable = lw.diffuse > 1e-4f || !lw.delta;
         if (connectable) {
+            if (photonCaustics) {
+                Vec3 g = photons->gather(si.p, si.ns, wo, mat, photonRadius);
+                if (!isBlack(g) && isFinite(g)) {
+                    Vec3 contrib = throughput * g;
+                    if (depth > 0 && !specularBounce)
+                        contrib = clampContribution(contrib, settings.clampIndirect);
+                    radiance += contrib;
+                }
+            }
             const int nLightSamples = srMax(1, settings.lightSamples);
             Vec3 neeSum(0.0f);
             for (int ls = 0; ls < nLightSamples; ++ls) {
@@ -815,9 +829,10 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         const float w = powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
                         neeSum += Le * be.f * (fabsf(wiLocal.z) * w / lightPdf);
                     }
-                } else if (glassPath) {
+                } else if (glassPath && !photonCaustics) {
                     // Multi-seed MNEE: manifold connections through the refraction
                     // chain (matching BSDF path copies are suppressed at light hits).
+                    // Skipped when the photon map owns caustics.
                     const mnee::MneeResult mr =
                         mnee::manifoldConnect(scene, tracer, si.p, si.ns, wo, mat, li, y, yN, Le, pdfArea,
                                               selectPdf, blockerInstance, heroChannel);
@@ -949,9 +964,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 
 template <typename Tracer>
 SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                                Rng& rng, int heroChannel = -1) {
+                                Rng& rng, int heroChannel = -1, const CausticPhotonMap* photons = nullptr) {
     return traceRadiancePtMnee<Tracer, NullGuiding>(scene, tracer, origin, direction, rng, nullptr,
-                                                    heroChannel);
+                                                    heroChannel, photons);
 }
 
 }  // namespace sol

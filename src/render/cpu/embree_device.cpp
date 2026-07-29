@@ -14,6 +14,7 @@
 #include "render/integrator.h"
 #include "render/integrator_bdpt.h"
 #include "render/integrator_mnee.h"
+#include "render/photon_map.h"
 #include "render/render_device.h"
 #include "solstice_config.h"
 
@@ -198,8 +199,9 @@ public:
 
         const bool pathTracer = settings.integrator == kIntegratorPathTracer;
         const bool useBdpt = settings.integrator == kIntegratorBdpt;
-        // Path Tracer: MNEE handles refractive caustics automatically when enabled.
-        const bool useMnee = pathTracer && settings.caustics != 0;
+        const bool usePhoton = causticsUsePhotonMap(settings);
+        // Path Tracer + Auto/MNEE: manifold next-event. Photon engine skips MNEE.
+        const bool useMnee = pathTracer && causticsUseMnee(settings);
 #if SOLSTICE_HAVE_OPENPGL
         // Guiding trains on unidirectional path streams; BDPT's bidirectional
         // recording produced malformed OpenPGL segment chains (heap corruption on
@@ -210,8 +212,24 @@ public:
 #else
         const bool useGuiding = false;
 #endif
+
+        const CausticPhotonMap* photonPtr = nullptr;
+        if (usePhoton) {
+            // Rebuild each progressive pass (independent estimate averaged in the FB).
+            const uint32_t photonSeed =
+                hashCombine(uint32_t(settings.seed) * 9176u, uint32_t(sampleIndex) * 2654435761u);
+            photonMap_.build(scene, tracer, srMax(0, settings.photonCount), photonSeed);
+            photonPtr = photonMap_.empty() ? nullptr : &photonMap_;
+        } else {
+            photonMap_.clear();
+        }
+
         if (sampleIndex == 0) {
-            if (useBdpt)
+            if (usePhoton)
+                logInfo(std::string("Caustics: Photon map (VCM-style gather, ") +
+                        std::to_string(photonMap_.size()) + " photons, r=" +
+                        std::to_string(settings.photonRadius) + ")");
+            else if (useBdpt)
                 logInfo(std::string("Caustics: BDPT (bidirectional + light-tracing splats)") +
                         (useGuiding ? " + OpenPGL guiding" : ""));
             else if (useMnee)
@@ -263,17 +281,19 @@ public:
                 PathGuiding::ThreadState& guiding = pathGuiding_->thread(threadId);
                 guiding.beginPath();
                 if (useBdpt)
-                    radiance =
-                        traceRadianceBdpt(scene, tracer, origin, direction, rng, &guiding, splatFb, hero);
-                else if (useMnee)
-                    radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, &guiding, hero);
+                    radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, &guiding, splatFb,
+                                                 hero, photonPtr);
+                else if (useMnee || usePhoton)
+                    radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, &guiding, hero,
+                                                   photonPtr);
                 else
                     radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding, hero);
                 guiding.endPath();
             } else if (useBdpt) {
-                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, nullptr, splatFb, hero);
-            } else if (useMnee) {
-                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, hero);
+                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, nullptr, splatFb, hero,
+                                             photonPtr);
+            } else if (useMnee || usePhoton) {
+                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, hero, photonPtr);
             } else {
                 radiance = traceRadiance(scene, tracer, origin, direction, rng, hero);
             }
@@ -281,9 +301,9 @@ public:
             (void)threadId;
             (void)useGuiding;
             if (useBdpt)
-                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, splatFb, hero);
-            else if (useMnee)
-                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, hero);
+                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, splatFb, hero, photonPtr);
+            else if (useMnee || usePhoton)
+                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, hero, photonPtr);
             else
                 radiance = traceRadiance(scene, tracer, origin, direction, rng, hero);
 #endif
@@ -373,6 +393,7 @@ private:
         }
         meshScenes_.clear();
         scene_.reset();
+        photonMap_.clear();
     }
 
     RTCDevice device_ = nullptr;
@@ -383,6 +404,7 @@ private:
     PolynomialOpticsCamera polyOptics_;
     std::unique_ptr<ThreadPool> pool_;
     int threadCount_ = 0;
+    CausticPhotonMap photonMap_;
 #if SOLSTICE_HAVE_OPENPGL
     std::unique_ptr<PathGuiding> pathGuiding_;
 #endif

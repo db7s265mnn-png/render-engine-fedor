@@ -270,6 +270,7 @@ set(SOLSTICE_LIB_HEADERS
     src/render/shading.h
     src/render/lights.h
     src/render/integrator.h
+    src/render/photon_map.h
     src/render/framebuffer.h
     src/render/render_device.h
     src/render/render_session.h

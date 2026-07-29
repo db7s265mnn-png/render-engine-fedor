@@ -221,10 +221,10 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
 
         float block = 1.0f;
         if (mat.transmission > 1e-3f) {
-            // Caustics ON: shadow rays treat glass as opaque — transmitted light is
-            // delivered by MNEE (Path Tracer) or bidirectional connections (BDPT).
-            // Caustics OFF: artists can fake bright shadows with shadow_opacity < 1.
-            if (scene.settings.caustics == 0)
+            // Caustics ON + material contributes: shadow rays treat glass as opaque —
+            // transmitted light is delivered by MNEE / BDPT LT / photon gather.
+            // Caustics OFF, or material Contribute to Caustics off: fake with shadow_opacity.
+            if (scene.settings.caustics == 0 || !materialContributesCaustics(mat))
                 block = saturatef(mat.shadowOpacity);
             else
                 block = 1.0f;
