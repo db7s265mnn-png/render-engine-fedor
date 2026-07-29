@@ -317,12 +317,17 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         matCau = evaluateTexturedMaterial(scene, matCau, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
         applyDispersion(matCam, cfg.heroChannel);
         applyDispersion(matCau, cfg.heroChannel);
-        // Light subpaths that form caustics prefer the caustics ray-switch slot
-        // (e.g. roughness 0 glass while the camera look stays rough).
+        const bool cauSwitch = materialHasCausticsSwitch(scene, si.materialIndex);
+        // Light subpaths that form caustics prefer the caustics ray-switch slot.
+        // Eye subpaths with a caustics switch also use that slot for glass so
+        // camera roughness cannot inject glossy caustic fireflies into BDPT.
         Material mat = matCam;
         if (!cfg.eyePath) {
             const LobeWeights lwC = computeLobes(matCau);
             if ((lwC.delta || isNearSpecularLobe(lwC)) && materialContributesCaustics(matCau)) mat = matCau;
+        } else if (cauSwitch) {
+            const LobeWeights lwC = computeLobes(matCau);
+            if (lwC.transmission > 0.25f && materialContributesCaustics(matCau)) mat = matCau;
         }
 
         // Stochastic cutout — pass through without creating a vertex.

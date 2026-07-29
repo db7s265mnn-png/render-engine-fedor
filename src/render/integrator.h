@@ -88,6 +88,11 @@ SR_INL SR_HD Material materialForRay(const SceneView& scene, const SurfaceIntera
     return materialForRay(scene, si.materialIndex, kind);
 }
 
+SR_INL SR_HD bool materialHasCausticsSwitch(const SceneView& scene, int baseIndex) {
+    if (baseIndex < 0 || baseIndex >= scene.materialCount) return false;
+    return scene.materials[baseIndex].raySwitch.caustics >= 0;
+}
+
 // Chiang et al. 2016: map artist multiple-scattering albedo A → single-scattering α.
 SR_INL SR_HD float chiangSingleScatterAlbedo(float A) {
     A = saturatef(A);
@@ -452,12 +457,17 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
-        // Camera look uses the ray_switch camera/base material. Caustic transport
-        // (photon / MNEE / BDPT LT) resolves RayShadeKind::Caustics separately.
-        Material baseMat = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
-        Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject,
-                                                si.uvFilterWidth);
-        applyDispersion(mat, heroChannel);
+        // Camera look + optional caustics-branch split (sharp refraction).
+        Material matCam = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
+        Material matCau = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
+        matCam = evaluateTexturedMaterial(scene, matCam, si.uv, si.ns, si.pObject, si.nObject,
+                                          si.uvFilterWidth);
+        matCau = evaluateTexturedMaterial(scene, matCau, si.uv, si.ns, si.pObject, si.nObject,
+                                          si.uvFilterWidth);
+        applyDispersion(matCam, heroChannel);
+        applyDispersion(matCau, heroChannel);
+        const bool cauSwitch = materialHasCausticsSwitch(scene, si.materialIndex);
+        Material mat = matCam;
 
         // Two sided shading for opaque surfaces. Winding order varies between
         // DCCs, so back faces are shaded as if their normals pointed at us.
@@ -777,7 +787,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 float gPdf = 0.0f;
                 if (guiding->sample(rng.nextFloat(), rng.nextFloat(), wiWorld, gPdf) && gPdf > 0.0f) {
                     const Vec3 wiLocal = frame.toLocal(wiWorld);
-                    const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
+                    const BsdfEval be =
+                        bsdfEvalCameraCaustics(matCam, matCau, woLocal, wiLocal, cauSwitch);
                     if (be.pdf > 0.0f && !isBlack(be.f)) {
                         const float mixPdf = pg * gPdf + (1.0f - pg) * be.pdf;
                         if (mixPdf > 0.0f) {
@@ -794,8 +805,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         }
 #endif
         if (!gotSample) {
-            bs = bsdfSampleLocal(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
-                                 rng.nextFloat());
+            bs = bsdfSampleCameraCaustics(matCam, matCau, woLocal, rng.nextFloat(), rng.nextFloat(),
+                                          rng.nextFloat(), rng.nextFloat(), cauSwitch);
 #if !defined(__CUDACC__)
             if (bs.pdf > 0.0f && guideReady) {
                 const float pg = guiding->guideProbability();

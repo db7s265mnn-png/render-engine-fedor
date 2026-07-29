@@ -723,4 +723,56 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
     return s;
 }
 
+// Eye-path ray_switch: muddy camera look on reflection, sharp caustics branch on
+// the dielectric (refraction / glass). `useSplit` is true when a distinct
+// caustics slot was authored. Light / photon / MNEE paths should sample `cau`
+// alone — not this mixture.
+SR_INL SR_HD BsdfEval bsdfEvalCameraCaustics(const Material& cam, const Material& cau, Vec3 wo, Vec3 wi,
+                                            bool useSplit) {
+    if (!useSplit) return bsdfEvalLocal(cam, wo, wi);
+    Material camRefl = cam;
+    camRefl.transmission = 0.0f;
+    const float pGlass = saturatef(cam.transmission) * (1.0f - saturatef(cam.metallic));
+    const float pOpaque = 1.0f - pGlass;
+    if (pGlass <= 1e-5f) return bsdfEvalLocal(camRefl, wo, wi);
+    if (pOpaque <= 1e-5f) return bsdfEvalLocal(cau, wo, wi);
+    const BsdfEval er = bsdfEvalLocal(camRefl, wo, wi);
+    const BsdfEval eg = bsdfEvalLocal(cau, wo, wi);
+    BsdfEval out;
+    out.f = er.f * pOpaque + eg.f * pGlass;
+    out.pdf = er.pdf * pOpaque + eg.pdf * pGlass;
+    if (!isFinite(out.f) || !srIsFinite(out.pdf)) {
+        out.f = Vec3(0.0f);
+        out.pdf = 0.0f;
+    }
+    return out;
+}
+
+SR_INL SR_HD BsdfSample bsdfSampleCameraCaustics(const Material& cam, const Material& cau, Vec3 wo,
+                                                float uLobe, float u1, float u2, float uChoice,
+                                                bool useSplit) {
+    if (!useSplit) return bsdfSampleLocal(cam, wo, uLobe, u1, u2, uChoice);
+    Material camRefl = cam;
+    camRefl.transmission = 0.0f;
+    const float pGlass = saturatef(cam.transmission) * (1.0f - saturatef(cam.metallic));
+    const float pOpaque = 1.0f - pGlass;
+    if (pGlass <= 1e-5f) return bsdfSampleLocal(camRefl, wo, uLobe, u1, u2, uChoice);
+    if (pOpaque <= 1e-5f) return bsdfSampleLocal(cau, wo, uLobe, u1, u2, uChoice);
+
+    if (uLobe < pOpaque) {
+        const float uRemap = uLobe / srMax(1e-6f, pOpaque);
+        BsdfSample s = bsdfSampleLocal(camRefl, wo, uRemap, u1, u2, uChoice);
+        if (s.pdf <= 0.0f) return s;
+        s.pdf *= pOpaque;
+        s.weight *= 1.0f / pOpaque;
+        return s;
+    }
+    const float uRemap = (uLobe - pOpaque) / srMax(1e-6f, pGlass);
+    BsdfSample s = bsdfSampleLocal(cau, wo, uRemap, u1, u2, uChoice);
+    if (s.pdf <= 0.0f) return s;
+    s.pdf *= pGlass;
+    s.weight *= 1.0f / pGlass;
+    return s;
+}
+
 }  // namespace sol

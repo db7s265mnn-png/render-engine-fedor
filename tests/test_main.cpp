@@ -2325,8 +2325,19 @@ void testMaterialXRaySwitchCaustics() {
     const Material cau = materialForRay(view, baseIdx, RayShadeKind::Caustics);
     check(std::fabs(cam.roughness - 0.12f) < 1e-4f, "materialForRay Camera = rough");
     check(cau.roughness < 1e-5f, "materialForRay Caustics = sharp");
-    std::printf("  cameraR=%.3f causticsR=%.3f slot=%d\n", cam.roughness, cau.roughness,
-                base.raySwitch.caustics);
+    // Eye-path hybrid: reflection uses camera roughness, refraction uses caustics.
+    const Vec3 wo(0.0f, 0.0f, 1.0f);
+    int gotTransmit = 0;
+    Rng rng(42);
+    for (int i = 0; i < 64; ++i) {
+        const BsdfSample s =
+            bsdfSampleCameraCaustics(cam, cau, wo, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                     rng.nextFloat(), true);
+        if (s.pdf > 0.0f && s.transmitted && s.specular) ++gotTransmit;
+    }
+    check(gotTransmit > 0, "hybrid eye sample can delta-refract via caustics branch");
+    std::printf("  cameraR=%.3f causticsR=%.3f slot=%d deltaTransmitSamples=%d/64\n", cam.roughness,
+                cau.roughness, base.raySwitch.caustics, gotTransmit);
 #endif
 }
 
