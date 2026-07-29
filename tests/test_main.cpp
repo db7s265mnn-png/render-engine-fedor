@@ -186,6 +186,39 @@ void testBsdf() {
         check(evaluated.pdf > 0.0f, "matte sample has a pdf");
     }
     check(specularHits == 0, "specular=0 never samples a specular bounce");
+
+    // Arnold Advanced → Internal Reflections: from inside, disable Fresnel
+    // reflections (keep TIR). Exterior behaviour unchanged.
+    Material glassIR = glass;
+    glassIR.roughness = 0.0f;
+    glassIR.internalReflections = 0.0f;
+    const Vec3 woInside(0.0f, 0.0f, -1.0f);  // leaving toward the interface from inside
+    int insideReflect = 0;
+    int insideTransmit = 0;
+    for (int i = 0; i < 2000; ++i) {
+        const BsdfSample sample =
+            bsdfSampleLocal(glassIR, woInside, 0.99f, rng.nextFloat(), rng.nextFloat(), rng.nextFloat());
+        if (sample.pdf <= 0.0f) continue;
+        if (sample.transmitted)
+            ++insideTransmit;
+        else
+            ++insideReflect;
+    }
+    check(insideTransmit > 1500, "IR-off: almost all inside samples refract out");
+    check(insideReflect == 0, "IR-off: no Fresnel internal reflections at normal incidence");
+
+    // Grazing inside ray past critical angle must still TIR-reflect.
+    const float crit = std::asin(1.0f / 1.5f);
+    const float theta = crit + 0.15f;
+    const Vec3 woTir(std::sin(theta), 0.0f, -std::cos(theta));
+    int tirHits = 0;
+    for (int i = 0; i < 200; ++i) {
+        const BsdfSample sample =
+            bsdfSampleLocal(glassIR, woTir, 0.99f, rng.nextFloat(), rng.nextFloat(), rng.nextFloat());
+        if (sample.pdf <= 0.0f) continue;
+        if (!sample.transmitted && sample.wi.z < 0.0f) ++tirHits;
+    }
+    check(tirHits > 150, "IR-off: TIR still reflects past the critical angle");
 }
 
 void testGlob() {

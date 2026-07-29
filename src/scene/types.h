@@ -77,7 +77,9 @@ struct Material {
     // film thickness in nanometres (0 = off) and film IOR.
     float thinFilmThickness = 0.0f;
     float thinFilmIor = 1.4f;
-    float _padFilm = 0.0f;
+    // Arnold Advanced → Internal Reflections (1 = on). When off, rays inside a
+    // dielectric skip Fresnel reflections (TIR still reflects — nowhere else to go).
+    float internalReflections = 1.0f;
 };
 
 // Shade-time MaterialX procedural opcode (see render/procedural.h for evaluation).

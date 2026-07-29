@@ -523,7 +523,16 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
                 const float d = ggxD(h, lw.alpha);
                 const float g = smithG2(wo, wi, lw.alpha);
                 const float cosOH = absDot(wo, h);
-                if (tw > 0.0f) {
+                // Inside the medium: skip dielectric reflection when Internal Reflections
+                // is off (Arnold Advanced). TIR still contributes — nowhere else to go.
+                bool allowDielectricReflect = wo.z > 0.0f || mat.internalReflections > 0.5f;
+                if (!allowDielectricReflect && tw > 0.0f) {
+                    const float eta = lw.eta > 0.0f ? 1.0f / lw.eta : 1.0f;
+                    const float cosHI = absDot(wo, h);
+                    const float sin2 = srMax(0.0f, 1.0f - cosHI * cosHI);
+                    allowDielectricReflect = (sin2 / (eta * eta)) >= 1.0f;
+                }
+                if (tw > 0.0f && allowDielectricReflect) {
                     const float fr = fresnelDielectric(dot(wo, h), lw.eta);
                     const float specF = d * g * fr / (4.0f * fabsf(wo.z) * fabsf(wi.z));
                     out.f += Vec3(specF * tw);
@@ -559,7 +568,11 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
                     const float ft = (1.0f - fr) * d * g * factor / (sqrtDenom * sqrtDenom);
                     out.f += lw.transmissionTint * (ft * tw);
                     const float dwhDwi = fabsf(eta * eta * dotIH) / (sqrtDenom * sqrtDenom);
-                    out.pdf += lw.transmission * (1.0f - fr) * ggxVndfPdf(wo, h, lw.alpha) * dwhDwi;
+                    // When Internal Reflections is off from inside we always sample
+                    // refraction (except TIR), so drop the (1-fr) from the PDF.
+                    const float reflectProb =
+                        (wo.z < 0.0f && mat.internalReflections <= 0.5f) ? 0.0f : fr;
+                    out.pdf += lw.transmission * (1.0f - reflectProb) * ggxVndfPdf(wo, h, lw.alpha) * dwhDwi;
                 }
             }
         }
@@ -632,7 +645,16 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
     const float dotOH = dot(wo, h);
     const float fr = fresnelDielectric(dotOH, lw.eta);
 
-    if (uChoice < fr) {
+    // Inside + Internal Reflections off: skip Fresnel reflection. TIR still
+    // reflects — refraction is impossible (Arnold keeps critical-angle TIR).
+    const bool allowInternalReflect = mat.internalReflections > 0.5f || wo.z > 0.0f;
+    const float cosThetaI = dotOH;
+    const float sin2ThetaI = srMax(0.0f, 1.0f - cosThetaI * cosThetaI);
+    const float sin2ThetaT = sin2ThetaI / (eta * eta);
+    const bool tir = sin2ThetaT >= 1.0f;
+    const bool chooseReflect = tir || (allowInternalReflect && uChoice < fr);
+
+    if (chooseReflect) {
         const Vec3 wi = reflect(wo, h);
         if (wi.z * wo.z <= 0.0f) return s;
         s.wi = wi;
@@ -652,10 +674,6 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
     }
 
     // Refract wo about h (h is always on the same side as wo, so cosThetaI > 0).
-    const float cosThetaI = dotOH;
-    const float sin2ThetaI = srMax(0.0f, 1.0f - cosThetaI * cosThetaI);
-    const float sin2ThetaT = sin2ThetaI / (eta * eta);
-    if (sin2ThetaT >= 1.0f) return s;  // total internal reflection, handled by the reflect branch
     const float cosThetaT = sqrtf(srMax(0.0f, 1.0f - sin2ThetaT));
     const Vec3 wiN = normalize(-wo * (1.0f / eta) + h * (cosThetaI / eta - cosThetaT));
     if (wiN.z * wo.z >= 0.0f) return s;
@@ -666,7 +684,11 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
         s.specular = true;
         s.pdf = 1.0f;
         // 1/eta^2 is the radiance compression when crossing the interface.
-        s.weight = lw.transmissionTint * (tw / (eta * eta * srMax(1e-4f, lw.transmission)));
+        // Normally Fresnel cancels with the reflect/refract choice. When Internal
+        // Reflections is off from inside we always refract, so multiply by (1-fr).
+        float scale = tw / (eta * eta * srMax(1e-4f, lw.transmission));
+        if (!allowInternalReflect && wo.z < 0.0f) scale *= (1.0f - fr);
+        s.weight = lw.transmissionTint * scale;
         return s;
     }
     const BsdfEval e = bsdfEvalLocal(mat, wo, wiN);

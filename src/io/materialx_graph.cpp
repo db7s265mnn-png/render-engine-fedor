@@ -307,6 +307,25 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     material.thinFilmThickness = clampf(thinFilmThickness, 0.0f, 5000.0f);
     material.thinFilmIor = clampf(thinFilmIor, 1.0f, 3.0f);
 
+    // Arnold Advanced → Internal Reflections (default on). Accept boolean or 0/1.
+    {
+        float ir = 1.0f;
+        if (!resolveConnectedNode(ss, "internal_reflections")) {
+            const std::string raw = inputValueString(ss, "internal_reflections");
+            if (!raw.empty()) {
+                if (raw == "false" || raw == "0" || raw == "False" || raw == "FALSE")
+                    ir = 0.0f;
+                else if (raw == "true" || raw == "1" || raw == "True" || raw == "TRUE")
+                    ir = 1.0f;
+                else {
+                    float v = 1.0f;
+                    if (parseFloat(raw, v)) ir = v > 0.5f ? 1.0f : 0.0f;
+                }
+            }
+        }
+        material.internalReflections = ir;
+    }
+
     setColor("emission_color", material.emissionColor);
     setFloat("emission", material.emissionStrength);
     setFloat("subsurface", material.subsurface);

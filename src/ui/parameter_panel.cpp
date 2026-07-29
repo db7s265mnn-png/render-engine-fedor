@@ -164,6 +164,7 @@ QString prettyMaterialXLabel(const QString& name) {
         {QStringLiteral("specular_IOR"), QStringLiteral("Specular IOR")},
         {QStringLiteral("coat_IOR"), QStringLiteral("Coat IOR")},
         {QStringLiteral("thin_film_IOR"), QStringLiteral("Thin Film IOR")},
+        {QStringLiteral("internal_reflections"), QStringLiteral("Internal Reflections")},
         {QStringLiteral("subsurface_scale"), QStringLiteral("Subsurface Scale")},
         {QStringLiteral("input_per_axis"), QStringLiteral("Input Per Axis")},
         {QStringLiteral("file"), QStringLiteral("Input")},
