@@ -20,6 +20,9 @@ class Image;
 
 struct MaterialXEvalResult {
     Material material;
+    // Extra materials from ray_switch_shader branches (not including `material`).
+    // `material.raySwitch.*` holds local indices into this vector (-1 = use material).
+    std::vector<Material> raySwitchBranches;
     std::shared_ptr<Image> baseColorTexture;
     std::shared_ptr<Image> roughnessTexture;
     std::shared_ptr<Image> metallicTexture;

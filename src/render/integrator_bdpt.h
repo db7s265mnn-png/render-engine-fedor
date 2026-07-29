@@ -311,11 +311,19 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
             break;  // light geometry terminates both subpaths
         }
 
-        Material mat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
-                           ? scene.materials[si.materialIndex]
-                           : defaultMaterial();
-        mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
-        applyDispersion(mat, cfg.heroChannel);
+        Material matCam = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
+        Material matCau = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
+        matCam = evaluateTexturedMaterial(scene, matCam, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+        matCau = evaluateTexturedMaterial(scene, matCau, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+        applyDispersion(matCam, cfg.heroChannel);
+        applyDispersion(matCau, cfg.heroChannel);
+        // Light subpaths that form caustics prefer the caustics ray-switch slot
+        // (e.g. roughness 0 glass while the camera look stays rough).
+        Material mat = matCam;
+        if (!cfg.eyePath) {
+            const LobeWeights lwC = computeLobes(matCau);
+            if ((lwC.delta || isNearSpecularLobe(lwC)) && materialContributesCaustics(matCau)) mat = matCau;
+        }
 
         // Stochastic cutout — pass through without creating a vertex.
         if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
@@ -852,9 +860,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                     if (bsi.lightIndex == li) {
                         clearPath = true;
                     } else if (bsi.lightIndex < 0 && causticsOn && lightContributesCaustics(l)) {
-                        Material bmat = bsi.materialIndex >= 0 && bsi.materialIndex < scene.materialCount
-                                            ? scene.materials[bsi.materialIndex]
-                                            : defaultMaterial();
+                        Material bmat = materialForRay(scene, bsi.materialIndex, RayShadeKind::Caustics);
                         bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject, bsi.nObject,
                                                         bsi.uvFilterWidth);
                         glassPath = mnee::isCausticCaster(bmat);

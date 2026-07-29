@@ -177,6 +177,27 @@ ScenePtr Stage::toScene() const {
                     clampRoot(material.bumpProc);
                 }
 
+                // Ray-switch branches: add as separate Materials, rewrite local → scene indices.
+                auto remapSwitchSlot = [&](int& slot) {
+                    if (slot < 0) return;
+                    if (slot >= int(prim.raySwitchBranches.size())) {
+                        slot = -1;
+                        return;
+                    }
+                    Material branch = prim.raySwitchBranches[size_t(slot)];
+                    branch.raySwitch = RaySwitchTable{};
+                    // Branches currently carry scalar/params only (no private textures).
+                    slot = scene->addMaterial(branch);
+                };
+                remapSwitchSlot(material.raySwitch.camera);
+                remapSwitchSlot(material.raySwitch.shadow);
+                remapSwitchSlot(material.raySwitch.diffuseReflection);
+                remapSwitchSlot(material.raySwitch.specularReflection);
+                remapSwitchSlot(material.raySwitch.diffuseTransmission);
+                remapSwitchSlot(material.raySwitch.specularTransmission);
+                remapSwitchSlot(material.raySwitch.sss);
+                remapSwitchSlot(material.raySwitch.caustics);
+
                 const int materialIndex = scene->addMaterial(material);
                 InstanceData inst;
                 inst.xform = prim.xform;

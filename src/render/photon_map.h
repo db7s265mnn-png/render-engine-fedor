@@ -209,9 +209,7 @@ private:
             if (!buildSurfaceInteraction(scene, hit, o, d, si)) break;
             if (si.lightIndex >= 0) break;
 
-            Material mat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
-                               ? scene.materials[si.materialIndex]
-                               : defaultMaterial();
+            Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
             mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
 
             if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {

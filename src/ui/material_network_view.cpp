@@ -204,7 +204,8 @@ bool isKnownMaterialXCategory(const QString& category) {
         return false;
     if (findCatalogEntry(category)) return true;
     // Keep previously hardcoded essentials even if libraries failed to load.
-    return category == "standard_surface" || category == "surfacematerial" || category == "image" ||
+    return category == "standard_surface" || category == "ray_switch_shader" || category == "ray_switch" ||
+           category == "surfacematerial" || category == "image" ||
            category == "constant" || category == "multiply" || category == "mix" || category == "normalmap" ||
            category == "bump" || category == "tiledimage" || category == "add" || category == "texcoord" ||
            category == "triplanarprojection";
@@ -213,6 +214,7 @@ bool isKnownMaterialXCategory(const QString& category) {
 QColor colorForCategory(const QString& category) {
     if (category == "image" || category == "tiledimage") return QColor(42, 132, 132);
     if (category == "standard_surface") return QColor(189, 116, 45);
+    if (category == "ray_switch_shader" || category == "ray_switch") return QColor(72, 140, 160);
     if (category == "surfacematerial") return QColor(126, 82, 170);
     if (category == "normalmap" || category == "bump") return QColor(96, 101, 108);
     const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category);
@@ -738,6 +740,16 @@ QStringList MaterialNetworkGraphView::canonicalInputOrder(const QString& categor
                 QStringLiteral("subsurface_radius"),
                 QStringLiteral("subsurface_scale")};
     }
+    if (category == "ray_switch_shader" || category == "ray_switch") {
+        return {QStringLiteral("camera"),
+                QStringLiteral("shadow"),
+                QStringLiteral("diffuse_reflection"),
+                QStringLiteral("specular_reflection"),
+                QStringLiteral("diffuse_transmission"),
+                QStringLiteral("specular_transmission"),
+                QStringLiteral("sss"),
+                QStringLiteral("caustics")};
+    }
     if (category == "triplanarprojection") {
         // Arnold Triplanar: Input → Input Per Axis → axis files → Transform → Blend.
         return {QStringLiteral("file"),
@@ -824,6 +836,27 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
             inputs = kDefaults;
         }
         return inputs;
+    }
+
+    if (category == "ray_switch_shader") {
+        return {{"camera", "surfaceshader", {}, {}},
+                {"shadow", "surfaceshader", {}, {}},
+                {"diffuse_reflection", "surfaceshader", {}, {}},
+                {"specular_reflection", "surfaceshader", {}, {}},
+                {"diffuse_transmission", "surfaceshader", {}, {}},
+                {"specular_transmission", "surfaceshader", {}, {}},
+                {"sss", "surfaceshader", {}, {}},
+                {"caustics", "surfaceshader", {}, {}}};
+    }
+    if (category == "ray_switch") {
+        return {{"camera", "color3", "0.8, 0.8, 0.8", {}},
+                {"shadow", "color3", "0.8, 0.8, 0.8", {}},
+                {"diffuse_reflection", "color3", "0.8, 0.8, 0.8", {}},
+                {"specular_reflection", "color3", "0.8, 0.8, 0.8", {}},
+                {"diffuse_transmission", "color3", "0.8, 0.8, 0.8", {}},
+                {"specular_transmission", "color3", "0.8, 0.8, 0.8", {}},
+                {"sss", "color3", "0.8, 0.8, 0.8", {}},
+                {"caustics", "color3", "0.8, 0.8, 0.8", {}}};
     }
 
     if (category == "triplanarprojection") {

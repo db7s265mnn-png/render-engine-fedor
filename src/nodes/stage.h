@@ -26,6 +26,8 @@ struct StagePrim {
     Material material;
     bool materialAssigned = false;
     QString materialName;
+    // Extra Materials from MaterialX ray_switch_shader (local indices in material.raySwitch).
+    std::vector<Material> raySwitchBranches;
     // Optional MaterialX-style texture maps (loaded by the material node).
     std::shared_ptr<Image> baseColorTexture;
     std::shared_ptr<Image> roughnessTexture;

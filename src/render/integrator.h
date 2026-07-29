@@ -47,6 +47,47 @@ SR_INL SR_HD Material defaultMaterial() {
     return m;
 }
 
+// Incoming ray classification for MaterialX ray_switch_shader (Arnold-like).
+enum class RayShadeKind : int {
+    Camera = 0,
+    Shadow,
+    DiffuseReflection,
+    SpecularReflection,
+    DiffuseTransmission,
+    SpecularTransmission,
+    Sss,
+    Caustics  // Solstice: caustic light transport only (photon / MNEE / LT)
+};
+
+SR_INL SR_HD int raySwitchSlot(const RaySwitchTable& t, RayShadeKind kind) {
+    switch (kind) {
+        case RayShadeKind::Camera: return t.camera;
+        case RayShadeKind::Shadow: return t.shadow;
+        case RayShadeKind::DiffuseReflection: return t.diffuseReflection;
+        case RayShadeKind::SpecularReflection: return t.specularReflection;
+        case RayShadeKind::DiffuseTransmission: return t.diffuseTransmission;
+        case RayShadeKind::SpecularTransmission: return t.specularTransmission;
+        case RayShadeKind::Sss: return t.sss;
+        case RayShadeKind::Caustics: return t.caustics;
+    }
+    return -1;
+}
+
+// Resolve the Material POD for a hit given the incoming ray kind. `baseIndex` is
+// InstanceData::materialIndex (owns the RaySwitchTable).
+SR_INL SR_HD Material materialForRay(const SceneView& scene, int baseIndex, RayShadeKind kind) {
+    if (baseIndex < 0 || baseIndex >= scene.materialCount) return defaultMaterial();
+    const Material& base = scene.materials[baseIndex];
+    const int slot = raySwitchSlot(base.raySwitch, kind);
+    if (slot < 0 || slot >= scene.materialCount) return base;
+    return scene.materials[slot];
+}
+
+SR_INL SR_HD Material materialForRay(const SceneView& scene, const SurfaceInteraction& si,
+                                     RayShadeKind kind) {
+    return materialForRay(scene, si.materialIndex, kind);
+}
+
 // Chiang et al. 2016: map artist multiple-scattering albedo A → single-scattering α.
 SR_INL SR_HD float chiangSingleScatterAlbedo(float A) {
     A = saturatef(A);
@@ -215,16 +256,17 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
         // Reached light proxy geometry along the shadow segment — connection ok.
         if (si.lightIndex >= 0) return visibility;
 
-        Material mat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
-                           ? scene.materials[si.materialIndex]
-                           : defaultMaterial();
+        Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Shadow);
+        // Whether caustic estimators own this glass follows the caustics slot
+        // (contribute_caustics on the caustic-transport material).
+        const Material matCau = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
 
         float block = 1.0f;
         if (mat.transmission > 1e-3f) {
             // Caustics ON + material contributes: shadow rays treat glass as opaque —
             // transmitted light is delivered by MNEE / BDPT LT / photon gather.
             // Caustics OFF, or material Contribute to Caustics off: fake with shadow_opacity.
-            if (scene.settings.caustics == 0 || !materialContributesCaustics(mat))
+            if (scene.settings.caustics == 0 || !materialContributesCaustics(matCau))
                 block = saturatef(mat.shadowOpacity);
             else
                 block = 1.0f;
@@ -410,9 +452,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
-        Material baseMat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
-                               ? scene.materials[si.materialIndex]
-                               : defaultMaterial();
+        // Camera look uses the ray_switch camera/base material. Caustic transport
+        // (photon / MNEE / BDPT LT) resolves RayShadeKind::Caustics separately.
+        Material baseMat = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
         Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject,
                                                 si.uvFilterWidth);
         applyDispersion(mat, heroChannel);

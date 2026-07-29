@@ -6,6 +6,22 @@
 
 namespace sol {
 
+// Arnold-like ray switch: absolute indices into SceneView::materials (-1 = use
+// the material that owns this table — typically the camera/base assignment).
+struct RaySwitchTable {
+    int camera = -1;
+    int shadow = -1;
+    int diffuseReflection = -1;
+    int specularReflection = -1;
+    int diffuseTransmission = -1;
+    int specularTransmission = -1;
+    int sss = -1;
+    // Solstice extension: material used for caustic light transport only
+    // (photon map / MNEE / BDPT light-tracing through glass). Not used for the
+    // camera look of the surface.
+    int caustics = -1;
+};
+
 // ---------------------------------------------------------------------------
 // Materials
 // ---------------------------------------------------------------------------
@@ -83,6 +99,10 @@ struct Material {
     // Arnold Advanced → Internal Reflections (1 = on). When off, rays inside a
     // dielectric skip Fresnel reflections (TIR still reflects — nowhere else to go).
     float internalReflections = 1.0f;
+
+    // MaterialX ray_switch_shader → per-ray-type material indices (scene-absolute
+    // after Stage::toScene). -1 = this material.
+    RaySwitchTable raySwitch;
 };
 
 // Shade-time MaterialX procedural opcode (see render/procedural.h for evaluation).

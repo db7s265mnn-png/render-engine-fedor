@@ -112,9 +112,7 @@ SR_INL ChainState traceChain(const SceneView& scene, const Tracer& tracer, Vec3 
             }
             return st;
         }
-        Material mat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
-                           ? scene.materials[si.materialIndex]
-                           : defaultMaterial();
+        Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
         mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
         applyDispersion(mat, heroChannel);
         if (!isCausticCaster(mat)) return st;  // opaque blocker → fail
@@ -616,9 +614,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     if (tracer.intersect(o, seg, segLen * (1.0f - 1e-3f), sh)) {
                         SurfaceInteraction ssi;
                         if (buildSurfaceInteraction(scene, sh, o, seg, ssi) && ssi.lightIndex < 0) {
-                            Material smat = ssi.materialIndex >= 0 && ssi.materialIndex < scene.materialCount
-                                                ? scene.materials[ssi.materialIndex]
-                                                : defaultMaterial();
+                            Material smat = materialForRay(scene, ssi.materialIndex, RayShadeKind::Caustics);
                             smat = evaluateTexturedMaterial(scene, smat, ssi.uv, ssi.ns, ssi.pObject,
                                                             ssi.nObject, ssi.uvFilterWidth);
                             if (mnee::isCausticCaster(smat)) {
@@ -671,9 +667,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
-        Material baseMat = si.materialIndex >= 0 && si.materialIndex < scene.materialCount
-                               ? scene.materials[si.materialIndex]
-                               : defaultMaterial();
+        // Camera look; caustic estimators use RayShadeKind::Caustics via materialForRay.
+        Material baseMat = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
         Material mat =
             evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
         applyDispersion(mat, heroChannel);
@@ -787,9 +782,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                                 clearPath = true;
                             } else if (bsi.lightIndex < 0 && settings.caustics != 0 &&
                                        lightContributesCaustics(l)) {
-                                Material bmat = bsi.materialIndex >= 0 && bsi.materialIndex < scene.materialCount
-                                                    ? scene.materials[bsi.materialIndex]
-                                                    : defaultMaterial();
+                                Material bmat = materialForRay(scene, bsi.materialIndex, RayShadeKind::Caustics);
                                 bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject,
                                                                 bsi.nObject, bsi.uvFilterWidth);
                                 glassPath = mnee::isCausticCaster(bmat);

@@ -406,6 +406,7 @@ public:
                 if (prim.type != PrimType::Mesh) continue;
                 if (!matchesPattern(pattern, prim.path)) continue;
                 prim.material = evaluated.material;
+                prim.raySwitchBranches = evaluated.raySwitchBranches;
                 prim.materialAssigned = true;
                 prim.materialName = name();
                 prim.baseColorTexture = evaluated.baseColorTexture;

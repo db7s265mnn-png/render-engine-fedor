@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QHash>
+#include <QSet>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -617,6 +618,27 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"blend", "float", "0.1"},
          {"default", "color3", "0.2, 0.5, 0.8"}});
     add("surfacematerial", "material", "PBR / Shading", {{"surfaceshader", "surfaceshader", {}}});
+    // Arnold-like ray switch (surfaceshader). Solstice adds `caustics` for caustic
+    // light transport (photon / MNEE / LT) — not used for the camera look.
+    add("ray_switch_shader", "surfaceshader", "PBR / Shading",
+        {{"camera", "surfaceshader", {}},
+         {"shadow", "surfaceshader", {}},
+         {"diffuse_reflection", "surfaceshader", {}},
+         {"specular_reflection", "surfaceshader", {}},
+         {"diffuse_transmission", "surfaceshader", {}},
+         {"specular_transmission", "surfaceshader", {}},
+         {"sss", "surfaceshader", {}},
+         {"caustics", "surfaceshader", {}}});
+    // Arnold ray_switch (color3) — UI catalog; per-ray color needs shade-time eval.
+    add("ray_switch", "color3", "PBR / Shading",
+        {{"camera", "color3", "0.8, 0.8, 0.8"},
+         {"shadow", "color3", "0.8, 0.8, 0.8"},
+         {"diffuse_reflection", "color3", "0.8, 0.8, 0.8"},
+         {"specular_reflection", "color3", "0.8, 0.8, 0.8"},
+         {"diffuse_transmission", "color3", "0.8, 0.8, 0.8"},
+         {"specular_transmission", "color3", "0.8, 0.8, 0.8"},
+         {"sss", "color3", "0.8, 0.8, 0.8"},
+         {"caustics", "color3", "0.8, 0.8, 0.8"}});
 
     QVector<MaterialXNodeCatalogEntry> out;
     out.reserve(byCategory.size());
@@ -675,7 +697,7 @@ QVector<MaterialXNodeCatalogEntry> listMaterialXNodeCatalog() {
     }
 
     QVector<MaterialXNodeCatalogEntry> entries;
-    entries.reserve(byCategory.size());
+    entries.reserve(byCategory.size() + 8);
     for (auto it = byCategory.begin(); it != byCategory.end(); ++it) {
         MaterialXNodeCatalogEntry entry;
         entry.category = it.key();
@@ -683,6 +705,23 @@ QVector<MaterialXNodeCatalogEntry> listMaterialXNodeCatalog() {
         entry.inputsByType = it.value().inputsByType;
         finalizeCatalogEntry(entry, it.value().nodeGroup);
         entries.push_back(entry);
+    }
+
+    // Solstice / Arnold extensions that are not in the stock MaterialX libs:
+    // merge so they still appear in Add Node when libraries load successfully.
+    {
+        const QVector<MaterialXNodeCatalogEntry> extras = fallbackMaterialXCatalog();
+        QSet<QString> have;
+        for (const MaterialXNodeCatalogEntry& e : entries) have.insert(e.category);
+        for (const MaterialXNodeCatalogEntry& e : extras) {
+            if (e.category == QStringLiteral("ray_switch_shader") ||
+                e.category == QStringLiteral("ray_switch")) {
+                if (!have.contains(e.category)) {
+                    entries.push_back(e);
+                    have.insert(e.category);
+                }
+            }
+        }
     }
 
     std::sort(entries.begin(), entries.end(), [](const MaterialXNodeCatalogEntry& a,
@@ -818,11 +857,70 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
             }
         }
         if (!ss) {
-            result.error = "MaterialX graph has no standard_surface";
+            result.error = "MaterialX graph has no standard_surface / ray_switch_shader";
             return result;
         }
 
-        applyStandardSurface(ss, result.material);
+        // ray_switch_shader: camera (or first connected) becomes the base Material;
+        // other ports become raySwitchBranches with local indices on raySwitch.
+        mx::NodePtr switchNode;
+        if (ss->getCategory() == "ray_switch_shader") {
+            switchNode = ss;
+            const char* kPorts[] = {"camera",
+                                    "shadow",
+                                    "diffuse_reflection",
+                                    "specular_reflection",
+                                    "diffuse_transmission",
+                                    "specular_transmission",
+                                    "sss",
+                                    "caustics"};
+            mx::NodePtr cameraSs = resolveConnectedNode(switchNode, "camera");
+            if (!cameraSs) {
+                for (const char* port : kPorts) {
+                    cameraSs = resolveConnectedNode(switchNode, port);
+                    if (cameraSs) break;
+                }
+            }
+            if (!cameraSs || cameraSs->getCategory() != "standard_surface") {
+                result.error = "ray_switch_shader needs a standard_surface on camera (or any port)";
+                return result;
+            }
+            applyStandardSurface(cameraSs, result.material);
+            result.material.raySwitch = RaySwitchTable{};
+
+            auto addBranch = [&](const char* port, int& slotField) {
+                mx::NodePtr n = resolveConnectedNode(switchNode, port);
+                if (!n || n.get() == cameraSs.get()) {
+                    slotField = -1;
+                    return;
+                }
+                if (n->getCategory() != "standard_surface") {
+                    slotField = -1;
+                    return;
+                }
+                Material branch;
+                applyStandardSurface(n, branch);
+                branch.raySwitch = RaySwitchTable{};
+                slotField = int(result.raySwitchBranches.size());
+                result.raySwitchBranches.push_back(branch);
+            };
+            result.material.raySwitch.camera = -1;
+            addBranch("shadow", result.material.raySwitch.shadow);
+            addBranch("diffuse_reflection", result.material.raySwitch.diffuseReflection);
+            addBranch("specular_reflection", result.material.raySwitch.specularReflection);
+            addBranch("diffuse_transmission", result.material.raySwitch.diffuseTransmission);
+            addBranch("specular_transmission", result.material.raySwitch.specularTransmission);
+            addBranch("sss", result.material.raySwitch.sss);
+            addBranch("caustics", result.material.raySwitch.caustics);
+            ss = cameraSs;  // texture binds target the camera surface
+        } else if (ss->getCategory() == "standard_surface") {
+            applyStandardSurface(ss, result.material);
+        } else {
+            result.error = QString("unsupported surfaceshader '%1' (expected standard_surface or "
+                                   "ray_switch_shader)")
+                               .arg(QString::fromStdString(ss->getCategory()));
+            return result;
+        }
 
         const std::vector<int> udimSet = readUdimSet(doc);
         if (!udimSet.empty()) {
