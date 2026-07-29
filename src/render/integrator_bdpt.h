@@ -401,6 +401,11 @@ struct MisOverride {
     float lightPrevRev = -1.0f; // pdfRev of light[s-2]
     bool lightOriginDelta = false;
     bool splatStrategy = false;  // t=1 light tracing is being sampled this pass
+    // False when the s'=0 strategy (eye path hits the light) has been handed to
+    // light tracing for this path family (delta chain adjacent to an area light):
+    // formal Veach weights cannot express the lens Jacobian of delta chains, so
+    // the family is partitioned deterministically instead of MIS-blended.
+    bool s0Sampled = true;
 };
 
 SR_INL float misWeight(const Vert* eye, int t, const Vert* light, int s, const MisOverride& ov) {
@@ -433,6 +438,7 @@ SR_INL float misWeight(const Vert* eye, int t, const Vert* light, int s, const M
             if (i == s - 1 && ov.lightLastRev >= 0.0f) rev = ov.lightLastRev;
             if (i == s - 2 && ov.lightPrevRev >= 0.0f) rev = ov.lightPrevRev;
             ri *= remap0(rev) / remap0(light[i].pdfFwd);
+            if (i == 0 && !ov.s0Sampled) break;  // s'=0 handed to light tracing
             const bool curDelta = light[i].delta && i > 0;  // origin delta handled below
             const bool prevDelta = i > 0 ? light[i - 1].delta : ov.lightOriginDelta;
             if (!curDelta && !prevDelta && !(i == 0 && ov.lightOriginDelta)) sumRi += ri;
@@ -560,9 +566,15 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             const float cosV = fabsf(dot(v.ns, toCam));
             Vec3 c = v.beta * f * (cosV * pdfOmega / dist2);
 
-            // MIS against the t >= 2 strategies for the same path.
+            // MIS against the t >= 2 strategies for the same path. When the prefix
+            // from the light runs through a delta chain, the s'=0 twin has been
+            // handed to this strategy (family partition) — weight it fully.
+            bool lightPrefixDelta = false;
+            for (int i = 1; i < s - 1; ++i)
+                if (light[i].delta) lightPrefixDelta = true;
             MisOverride ov;
             ov.splatStrategy = true;
+            ov.s0Sampled = !(causticsOn && lightPrefixDelta);
             ov.lightOriginDelta = lightOriginDelta;
             ov.lightLastRev = toAreaPdf(pdfOmega, camProj.camPos, v.p, v.ns);
             if (s >= 2)
@@ -637,6 +649,21 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                 else if (diffuseSeen) sawDiffuseThenSpec = true;
             }
             if (sawDiffuseThenSpec) break;
+        }
+        // Caustic family partition: diffuse → delta chain → area light cannot be
+        // weighted by formal Veach MIS (the delta-chain lens Jacobian is not in
+        // the pdf bookkeeping), so hitting a tiny light through glass stays a
+        // firefly no matter the sample count. When light tracing is active, that
+        // family is delivered exclusively by t=1 splats — drop the noisy s=0 copy.
+        // Kept when the camera-adjacent vertex is delta (SDS: splats cannot see it).
+        if (causticsOn && doSplats && t >= 4) {
+            int j = t - 2;
+            int chainLen = 0;
+            while (j >= 1 && eye[j].type == VType::Surface && eye[j].delta) {
+                ++chainLen;
+                --j;
+            }
+            if (chainLen >= 1 && j >= 1 && !eye[j].delta && !eye[1].delta) break;
         }
 
         MisOverride ov;
@@ -821,8 +848,12 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (G <= 0.0f) continue;
             if (!connectionVisible(scene, tracer, E.p, E.ng, Lv.p, -1)) continue;
 
+            bool lightPrefixDelta = false;
+            for (int i = 1; i < s - 1; ++i)
+                if (light[i].delta) lightPrefixDelta = true;
             MisOverride ov;
             ov.splatStrategy = doSplats;
+            ov.s0Sampled = !(causticsOn && doSplats && lightPrefixDelta);
             ov.lightOriginDelta = lightOriginDelta;
             ov.lightLastRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, E.wo, d), E.p, Lv.p, Lv.ns);
             ov.eyeLastRev = toAreaPdf(bsdfPdfSa(Lv.mat, Lv.ns, Lv.wo, -d), Lv.p, E.p, E.ns);
