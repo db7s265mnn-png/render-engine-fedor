@@ -384,11 +384,22 @@ SR_INL SeedSet buildSeedSet(const SceneView& scene, Vec3 p, Vec3 straightDir, in
 
 SR_INL bool sameBranch(Vec3 a, Vec3 b) { return dot(a, b) > 0.99996f; }  // ≈0.5°
 
-// Multi-branch MNEE: run the deterministic seed set, deduplicate the converged
-// branches and sum each unique contribution once. The BSDF-suppression check in
-// the path loop replays the same seed set, so a BSDF-found chain is suppressed
-// exactly when this estimator counts its branch — totals stay unbiased no matter
-// how many branches the solver finds.
+// BSDF density at the anchor mapped to light-surface area through a manifold
+// solution (dω → dA_y via the chain Jacobian). Used for MIS between MNEE and
+// the BSDF-sampled copy of the same caustic family.
+SR_INL float bsdfPdfOnLightArea(const Material& anchorMat, Vec3 anchorN, Vec3 anchorWo, Vec3 omega, Vec3 yN,
+                                const ManifoldSolution& sol, bool pointLight) {
+    const Frame frame(anchorN);
+    const BsdfEval e = bsdfEvalLocal(anchorMat, frame.toLocal(anchorWo), frame.toLocal(omega));
+    if (!(e.pdf > 0.0f) || !srIsFinite(e.pdf)) return 0.0f;
+    const float planeToLight = pointLight ? 1.0f : fabsf(dot(yN, sol.planeN));
+    return e.pdf * planeToLight / srMax(1e-12f, sol.detJ);
+}
+
+// Multi-branch MNEE with MIS against the BSDF-sampled copies (power heuristic in
+// light-area measure, chain Jacobian from the solver). Where the solver cannot
+// find a branch the BSDF copy keeps full weight in the path loop below, so no
+// energy is lost on geometry too hard for Newton walks (complex glass).
 template <typename Tracer>
 SR_INL MneeResult manifoldConnect(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, Vec3 wo,
                                   const Material& shadeMat, int lightIndex, Vec3 y, Vec3 yN, Vec3 Le,
@@ -399,6 +410,8 @@ SR_INL MneeResult manifoldConnect(const SceneView& scene, const Tracer& tracer, 
     if (distPy < 1e-5f) return res;
     dir = dir / distPy;
 
+    const bool pointLight = scene.lights[lightIndex].type == kLightPoint;
+    const float pM = pdfArea * selectPdf;
     const SeedSet seeds = buildSeedSet(scene, p, dir, casterInstance);
     Vec3 found[1 + kSeedRing];
     int foundCount = 0;
@@ -415,28 +428,46 @@ SR_INL MneeResult manifoldConnect(const SceneView& scene, const Tracer& tracer, 
         if (duplicate) continue;
         found[foundCount++] = sol.omega;
         res.solved = true;
-        total += solutionContribution(scene, tracer, sol, p, n, wo, shadeMat, lightIndex, y, yN, Le, pdfArea,
+        Vec3 c = solutionContribution(scene, tracer, sol, p, n, wo, shadeMat, lightIndex, y, yN, Le, pdfArea,
                                       selectPdf);
+        if (isBlack(c)) continue;
+        // Power-heuristic MIS vs the BSDF copy (delta lights are BSDF-unreachable).
+        if (!pointLight) {
+            const float pB = bsdfPdfOnLightArea(shadeMat, n, wo, sol.omega, yN, sol, pointLight);
+            const float w = (pM * pM) / srMax(1e-20f, pM * pM + pB * pB);
+            c = c * w;
+        }
+        total += c;
     }
     res.contribution = total;
     return res;
 }
 
-// True when the seed set converges to the branch a BSDF path actually took —
-// i.e. the MNEE estimator above covers this exact chain.
+struct BranchMatch {
+    bool matched = false;
+    ManifoldSolution sol;
+};
+
+// Replays the seed set for the anchor→light-point pair and returns the solution
+// matching the branch a BSDF path actually took (if the solver can find it).
 template <typename Tracer>
-SR_INL bool branchCovered(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, int lightIndex,
-                          Vec3 y, int casterInstance, Vec3 pathDir) {
+SR_INL BranchMatch matchBranch(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 n, int lightIndex,
+                               Vec3 y, int casterInstance, Vec3 pathDir) {
+    BranchMatch out;
     Vec3 dir = y - p;
     const float distPy = length(dir);
-    if (distPy < 1e-5f) return false;
+    if (distPy < 1e-5f) return out;
     dir = dir / distPy;
     const SeedSet seeds = buildSeedSet(scene, p, dir, casterInstance);
     for (int i = 0; i < seeds.count; ++i) {
         const ManifoldSolution sol = solveManifold(scene, tracer, p, n, lightIndex, y, seeds.dirs[i]);
-        if (sol.solved && sameBranch(sol.omega, pathDir)) return true;
+        if (sol.solved && sameBranch(sol.omega, pathDir)) {
+            out.matched = true;
+            out.sol = sol;
+            return out;
+        }
     }
-    return false;
+    return out;
 }
 
 // Sample a point on a finite light in area measure.
@@ -506,6 +537,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
     Vec3 anchorP(0.0f);  // last non-specular surface vertex (MNEE launch point)
     Vec3 anchorN(0.0f, 1.0f, 0.0f);
     Vec3 anchorDir(0.0f, 1.0f, 0.0f);  // direction the path left the anchor with
+    Vec3 anchorWo(0.0f, 1.0f, 0.0f);   // outgoing (toward camera) at the anchor
+    Material anchorMat{};
     int depth = 0;
     int passThrough = 0;
     const RenderSettingsData& settings = scene.settings;
@@ -555,14 +588,15 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         }
 
         if (si.lightIndex >= 0) {
-            // Suppress a BSDF-found caustic chain exactly when the multi-seed MNEE
-            // estimator covers its branch: the straight anchor→light segment must
-            // hit a caustic caster (the NEE trigger) AND replaying the same seed
-            // set must converge onto the direction this path actually took. Chains
-            // the seeds miss stay with unbiased BSDF sampling — totals preserved.
+            // MIS with the MNEE estimator: when replaying the seed set converges to
+            // the branch this BSDF path took, the two estimators sample the same
+            // family and the contribution gets the power-heuristic weight (in
+            // light-area measure via the chain Jacobian). If the solver cannot find
+            // the branch (complex glass), full weight stays here — no energy loss.
             const LightData& light = scene.lights[si.lightIndex];
             const bool finiteLight = light.type == kLightRect || light.type == kLightDisk ||
                                      light.type == kLightSphere || light.type == kLightPoint;
+            float misScale = 1.0f;
             if (mneeFamily && finiteLight && settings.caustics != 0) {
                 Vec3 seg = si.p - anchorP;
                 const float segLen = length(seg);
@@ -578,10 +612,27 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                                                 : defaultMaterial();
                             smat = evaluateTexturedMaterial(scene, smat, ssi.uv, ssi.ns, ssi.pObject,
                                                             ssi.nObject, ssi.uvFilterWidth);
-                            if (mnee::isCausticCaster(smat) &&
-                                mnee::branchCovered(scene, tracer, anchorP, anchorN, si.lightIndex, si.p,
-                                                    ssi.instanceIndex, anchorDir))
-                                break;  // MNEE-covered — suppress the noisy BSDF copy
+                            if (mnee::isCausticCaster(smat)) {
+                                const mnee::BranchMatch bm =
+                                    mnee::matchBranch(scene, tracer, anchorP, anchorN, si.lightIndex, si.p,
+                                                      ssi.instanceIndex, anchorDir);
+                                if (bm.matched) {
+                                    const Vec3 lightNHit =
+                                        light.type == kLightSphere ? si.ng : areaLightNormal(light);
+                                    float area = 1.0f;
+                                    if (light.type == kLightRect) area = rectLightArea(light);
+                                    else if (light.type == kLightDisk) area = diskLightArea(light);
+                                    else if (light.type == kLightSphere) {
+                                        const float r = sphereLightRadius(light);
+                                        area = 4.0f * kPi * r * r;
+                                    }
+                                    const float pM = lightSelectionPdfIndex(scene, si.lightIndex) /
+                                                     srMax(1e-12f, area);
+                                    const float pB = mnee::bsdfPdfOnLightArea(
+                                        anchorMat, anchorN, anchorWo, anchorDir, lightNHit, bm.sol, false);
+                                    misScale = (pB * pB) / srMax(1e-20f, pB * pB + pM * pM);
+                                }
+                            }
                         }
                     }
                 }
@@ -591,11 +642,11 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
             Vec3 emitted = areaLightEmission(scene, light, direction, lightN);
             if (!isBlack(emitted)) {
-                float weight = 1.0f;
+                float weight = misScale;
                 if (!specularBounce) {
                     const float lp = lightPdfDirection(scene, si.lightIndex, origin, direction, si.p, lightN) *
                                      lightSelectionPdfIndex(scene, si.lightIndex);
-                    weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
+                    weight *= powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                 }
                 Vec3 contrib = throughput * emitted * weight;
                 if (depth > 0 && !specularBounce)
@@ -834,6 +885,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             anchorP = si.p;
             anchorN = si.ns;
             anchorDir = normalize(frame.toWorld(bs.wi));
+            anchorWo = wo;
+            anchorMat = mat;
         } else if (sawNonSpecular && settings.caustics != 0) {
             if (deltaTransmit) {
                 ++familyChainLen;

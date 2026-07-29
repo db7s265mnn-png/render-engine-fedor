@@ -201,8 +201,12 @@ public:
         // Path Tracer: MNEE handles refractive caustics automatically when enabled.
         const bool useMnee = pathTracer && settings.caustics != 0;
 #if SOLSTICE_HAVE_OPENPGL
-        const bool useGuiding = settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() &&
-                                (pathTracer || useBdpt);
+        // Guiding trains on unidirectional path streams; BDPT's bidirectional
+        // recording produced malformed OpenPGL segment chains (heap corruption on
+        // repeated field resets), and its caustics are carried by light-tracing
+        // splats anyway — so guiding stays a Path Tracer feature.
+        const bool useGuiding =
+            settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() && pathTracer;
 #else
         const bool useGuiding = false;
 #endif

@@ -209,9 +209,13 @@ void PathGuiding::reset(const Bounds3& worldBounds, int threadCount) {
                 worldBounds.hi.x + pad.x, worldBounds.hi.y + pad.y, worldBounds.hi.z + pad.z));
         }
         impl_->sampleStorage = std::make_unique<openpgl::cpp::SampleStorage>();
-        // Preallocate per-pool-thread states — thread() must be lock-free (called per pixel).
-        impl_->threads.reserve(size_t(n));
-        for (int i = 0; i < n; ++i) {
+        // Preallocate per-thread states — thread() must be lock-free (called per
+        // pixel). ThreadPool::parallelFor runs chunks on the calling thread as
+        // thread id 0 AND on N workers as ids 1..N, so N+1 states are needed —
+        // sharing one state across two threads corrupts OpenPGL's segment storage.
+        const int states = n + 1;
+        impl_->threads.reserve(size_t(states));
+        for (int i = 0; i < states; ++i) {
             auto ts = std::make_unique<ThreadState>();
             ts->data_->field = impl_->field.get();
             ts->data_->sampleStorage = impl_->sampleStorage.get();

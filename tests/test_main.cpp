@@ -489,6 +489,78 @@ void testCausticsGlassSphere() {
                 sumPointBdpt, pointRatio);
 }
 
+// Rapidly switch integrators / guiding / caustics on a live session — mirrors a
+// user toggling render settings in the UI. Must not crash or deadlock.
+void testIntegratorSwitchStress() {
+    std::printf("integrator-switch-stress\n");
+    auto buildScene = [](int integrator, int guiding) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->validate();
+        const int floorMesh = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.7f, 0.7f, 0.7f);
+        floorMat.roughness = 0.8f;
+        const int floorIdx = scene->addMaterial(floorMat);
+        InstanceData fi;
+        fi.meshIndex = floorMesh;
+        fi.materialIndex = floorIdx;
+        scene->instances.push_back(fi);
+
+        MeshPtr ball = makeSphereMesh(0.7f, 24, 12);
+        const int ballMesh = scene->addMesh(ball);
+        Material glass;
+        glass.transmission = 1.0f;
+        glass.roughness = 0.0f;
+        glass.ior = 1.5f;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData bi;
+        bi.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+        bi.meshIndex = ballMesh;
+        bi.materialIndex = glassIdx;
+        scene->instances.push_back(bi);
+
+        LightData light;
+        light.type = kLightRect;
+        light.width = 0.2f;
+        light.height = 0.2f;
+        light.intensity = 60.0f;
+        light.xform = Mat4::translate(Vec3(0.0f, 4.0f, 0.0f)) * Mat4::rotateX(-90.0f);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 96;
+        scene->settings.resolutionY = 64;
+        scene->settings.samplesPerPixel = 1000;  // never finishes within the test
+        scene->settings.integrator = integrator;
+        scene->settings.pathGuiding = guiding;
+        scene->settings.caustics = 1;
+        scene->settings.envVisibleCamera = 0;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    RenderSession session;
+    const int integrators[] = {kIntegratorPathTracer, kIntegratorBdpt, kIntegratorPathTracer,
+                               kIntegratorBdpt, kIntegratorDirectLighting, kIntegratorBdpt};
+    for (int i = 0; i < 12; ++i) {
+        const int integrator = integrators[i % 6];
+        const int guiding = (i / 2) % 2;
+        session.setScene(buildScene(integrator, guiding));
+        session.start();
+        // Let a few samples land, then rip the settings out from under it.
+        std::this_thread::sleep_for(std::chrono::milliseconds(i % 3 == 0 ? 30 : 150));
+        if (i % 4 == 1) session.invalidate();
+        if (i % 4 == 3) session.updateSceneData();
+    }
+    session.stop();
+    check(true, "integrator switch stress survived");
+}
+
 // Renders an emissive sphere that is only in frame when instance transforms
 // are honoured by the acceleration structure.
 void testInstanceTransform() {
@@ -1789,6 +1861,12 @@ void testTxMipmaps() {
 
 int main() {
     std::printf("Solstice tests\n");
+    if (getenv("SOL_ONLY_STRESS")) {
+        registerBuiltinNodes();
+        testIntegratorSwitchStress();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     testMath();
     testSampling();
     testBsdf();
@@ -1800,6 +1878,7 @@ int main() {
     testEnvironment();
     testRender();
     testCausticsGlassSphere();
+    testIntegratorSwitchStress();
     testInstanceTransform();
     testUdimMaterialX();
     testTxMipmaps();
