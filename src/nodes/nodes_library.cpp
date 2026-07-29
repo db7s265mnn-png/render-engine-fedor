@@ -712,6 +712,15 @@ public:
                                       "BDPT: caustics come from bidirectional connections.\n"
                                       "Off: glass casts dark shadows (soften with the material's "
                                       "shadow_opacity)."));
+        addParameter(Parameter::makeFloat("causticclamp", "Caustic Firefly Clamp", 0.0, 0.0, 1000.0, false)
+                         .withGroup("Engine")
+                         .withTooltip("Caps caustic paths that light tracing cannot deliver: a caustic "
+                                      "seen through glass or in a mirror, where the pixel is behind a "
+                                      "specular bounce and no splat can reach it.\n"
+                                      "This is what removes the sparkle inside refractive objects. The "
+                                      "estimator carrying the bulk of the caustic is not capped, so the "
+                                      "visible caustic keeps its brightness.\n"
+                                      "0 disables."));
         addParameter(Parameter::makeBool("pathguiding", "Path Guiding (OpenPGL)", false)
                          .withGroup("Engine")
                          .withTooltip("Learn incident radiance while rendering and guide BSDF "
@@ -740,6 +749,7 @@ public:
         settings.aoDistance = float(floatValue("aodistance", 1.0));
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
+        settings.causticClamp = float(floatValue("causticclamp", 0.0));
         settings.toneMapper = intValue("tonemap", 2);
         settings.exposure = float(floatValue("exposure", 0.0));
         settings.gamma = float(floatValue("gamma", 2.2));

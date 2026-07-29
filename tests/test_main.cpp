@@ -22,6 +22,7 @@
 #include "nodes/node_registry.h"
 #include "nodes/stage.h"
 #include "render/cpu/polynomial_optics.h"
+#include "render/framebuffer.h"
 #include "render/integrator.h"
 #include "render/render_session.h"
 #include "render/shading.h"
@@ -565,7 +566,7 @@ void testCausticsGlassSphere() {
 void testRoughGlassCaustics() {
     std::printf("rough-glass-caustics\n");
 
-    auto buildScene = [](int integrator, float roughness) {
+    auto buildScene = [](int integrator, float roughness, float causticClamp) {
         auto scene = std::make_shared<Scene>();
         MeshPtr floor = std::make_shared<Mesh>();
         floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
@@ -619,6 +620,7 @@ void testRoughGlassCaustics() {
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
         scene->settings.clampIndirect = 0.0f;  // unbiased: fireflies stay visible
+        scene->settings.causticClamp = causticClamp;
         scene->camera.cameraToWorld =
             lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
         scene->cameraAuthored = true;
@@ -628,9 +630,10 @@ void testRoughGlassCaustics() {
 
     // Peak-to-mean luminance: a converged caustic has a smooth falloff, while an
     // unresolved one is a handful of enormous pixels over a black floor.
-    auto render = [&](int integrator, float roughness, double& peakOverMean) -> double {
+    auto render = [&](int integrator, float roughness, float causticClamp,
+                      double& peakOverMean) -> double {
         RenderSession session;
-        session.setScene(buildScene(integrator, roughness));
+        session.setScene(buildScene(integrator, roughness, causticClamp));
         session.start();
         session.waitForCompletion();
         const Image img = session.linearImage();
@@ -648,12 +651,13 @@ void testRoughGlassCaustics() {
     };
 
     double peakSmooth = 0.0, peakRough = 0.0, peakPtRough = 0.0;
-    const double sumSmooth = render(kIntegratorBdpt, 0.0f, peakSmooth);
-    const double sumRough = render(kIntegratorBdpt, 0.1f, peakRough);
-    const double sumPtRough = render(kIntegratorPathTracer, 0.1f, peakPtRough);
+    const double sumSmooth = render(kIntegratorBdpt, 0.0f, 0.0f, peakSmooth);
+    const double sumRough = render(kIntegratorBdpt, 0.1f, 0.0f, peakRough);
+    const double sumPtRough = render(kIntegratorPathTracer, 0.1f, 0.0f, peakPtRough);
     std::printf("  bdpt smooth sum=%.1f peak/mean=%.1f | rough(0.1) sum=%.1f peak/mean=%.1f\n", sumSmooth,
                 peakSmooth, sumRough, peakRough);
     std::printf("  pt rough(0.1) sum=%.1f peak/mean=%.1f\n", sumPtRough, peakPtRough);
+
 
     check(sumSmooth > 0.0 && sumRough > 0.0, "rough and smooth glass both transport light");
     // Roughening the glass slightly must not blow the estimator up: the caustic
@@ -665,6 +669,137 @@ void testRoughGlassCaustics() {
     // BSDF-samples them; the two must still agree on the transported energy.
     const double ptRatio = sumPtRough > 0.0 ? sumRough / sumPtRough : 0.0;
     check(ptRatio > 0.7 && ptRatio < 1.4, "BDPT and PT agree on rough glass energy");
+}
+
+// Sparkle *inside* a refractive object. Interpolated shading normals on a coarse
+// mesh disagree with the facets, and without a consistency test the renderer happily
+// evaluates transport the geometry cannot carry: shadow rays and connections start on
+// the wrong side of the surface and escape through it, arriving at the light with a
+// weight computed for a different configuration.
+void testRefractionSparkleClamp() {
+    std::printf("refraction-sparkle\n");
+
+    auto buildScene = [](float causticClamp) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-6, 0, -6), Vec3(6, 0, -6), Vec3(6, 0, 6), Vec3(-6, 0, 6)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+        floor->validate();
+        const int floorMesh = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.75f);
+        floorMat.roughness = 0.9f;
+        floorMat.specular = 0.0f;
+        const int floorIdx = scene->addMaterial(floorMat);
+        InstanceData floorInst;
+        floorInst.meshIndex = floorMesh;
+        floorInst.materialIndex = floorIdx;
+        scene->instances.push_back(floorInst);
+
+        // Coarse tessellation with smooth normals: exactly the shading-normal vs
+        // facet-normal mismatch that intricate imported glass has everywhere.
+        MeshPtr ball = makeSphereMesh(0.7f, 14, 7);
+        const int ballMesh = scene->addMesh(ball);
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.roughness = 0.1f;
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.specular = 1.0f;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData ballInst;
+        ballInst.xform = Mat4::translate(Vec3(0.0f, 0.8f, 0.0f));
+        ballInst.meshIndex = ballMesh;
+        ballInst.materialIndex = glassIdx;
+        scene->instances.push_back(ballInst);
+
+        // Small and far: BSDF-sampling this light through a glass chain is hopeless,
+        // which is precisely when the surviving strategy turns into sparkle.
+        LightData light;
+        light.type = kLightRect;
+        light.width = 0.05f;
+        light.height = 0.05f;
+        light.intensity = 2000.0f;
+        light.normalize = 1;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.0f, 7.0f, 0.0f)) * Mat4::rotateX(-90.0f);
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 64;
+        scene->settings.resolutionY = 48;
+        scene->settings.samplesPerPixel = 40;
+        scene->settings.maxDepth = 8;
+        scene->settings.integrator = kIntegratorBdpt;
+        scene->settings.caustics = 1;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampIndirect = 0.0f;
+        scene->settings.causticClamp = causticClamp;
+        // Close enough that the glass fills the frame: every pixel looks through it.
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(0.0f, 0.8f, 1.7f), Vec3(0.0f, 0.8f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto render = [&](float causticClamp, double& peakOverMean) -> double {
+        RenderSession session;
+        session.setScene(buildScene(causticClamp));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0, peak = 0.0;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) {
+                const double l = double(luminance(img.rgb(x, y)));
+                sum += l;
+                if (l > peak) peak = l;
+            }
+        const double mean = sum / double(img.width() * img.height());
+        peakOverMean = mean > 1e-9 ? peak / mean : 0.0;
+        return sum;
+    };
+
+    double peakOff = 0.0, peakOn = 0.0;
+    const double sumOff = render(0.0f, peakOff);
+    const double sumOn = render(10.0f, peakOn);
+    std::printf("  clamp off sum=%.2f peak/mean=%.1f | clamp 10 sum=%.2f peak/mean=%.1f\n", sumOff, peakOff,
+                sumOn, peakOn);
+    check(sumOff > 0.0 && sumOn > 0.0, "glass interior receives light either way");
+    check(peakOn < peakOff * 0.85, "caustic clamp flattens the refraction sparkle");
+    check(sumOn > sumOff * 0.9, "caustic clamp keeps the glass interior brightness");
+}
+
+// Light-tracing splats are normalized by a global path counter and accumulated in
+// a separate plane. Both used 32-bit / single-precision storage, which broke long
+// caustic renders: the counter wrapped negative (splats vanished, so caustics
+// disappeared and glass shadows went black) and single-precision sums stopped
+// growing once they dwarfed the incoming splat values.
+void testSplatAccumulationPrecision() {
+    std::printf("splat-accumulation\n");
+
+    Framebuffer fb;
+    fb.resize(4, 4);
+    fb.addSplat(1, 1, Vec3(4.0e9f, 8.0e9f, 1.6e10f));
+    const int64_t beyond32Bit = int64_t(1) << 32;  // 960x540 reaches this near 8300 passes
+    fb.addSplatPaths(beyond32Bit);
+    check(fb.splatPaths() == beyond32Bit, "splat path counter holds counts past 2^31");
+    const Vec3 resolved = fb.resolvePixel(1, 1);
+    check(resolved.x > 0.0f, "splats survive a path count past 2^31");
+    checkNear(resolved.x, 4.0e9f / float(beyond32Bit), 1e-4f, "splat scaling uses the 64-bit count");
+    checkNear(resolved.y / resolved.x, 2.0f, 1e-3f, "splat channels keep their ratio");
+
+    // A pixel whose running sum is already large must still absorb small splats.
+    Framebuffer deep;
+    deep.resize(1, 1);
+    deep.addSplat(0, 0, Vec3(1.0e13f, 0.0f, 0.0f));
+    for (int i = 0; i < 1000; ++i) deep.addSplat(0, 0, Vec3(1.0e6f, 0.0f, 0.0f));
+    deep.addSplatPaths(1);
+    // 1e6 is below the float spacing at 1e13, so float accumulation loses every add.
+    check(deep.resolvePixel(0, 0).x > 1.00005e13f, "large splat sums keep absorbing small adds");
 }
 
 // Chromatic dispersion + thin-film iridescence sanity.
@@ -2178,6 +2313,8 @@ int main() {
     testRender();
     testCausticsGlassSphere();
     testRoughGlassCaustics();
+    testRefractionSparkleClamp();
+    testSplatAccumulationPrecision();
     testDispersionAndThinFilm();
     testIntegratorSwitchStress();
     testInstanceTransform();

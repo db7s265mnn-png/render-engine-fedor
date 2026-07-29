@@ -683,6 +683,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         // firefly no matter the sample count. When light tracing is active, that
         // family is delivered exclusively by t=1 splats — drop the noisy s=0 copy.
         // Kept when the camera-adjacent vertex is specular (SDS: splats cannot see it).
+        bool sdsCaustic = false;
         if (causticsOn && t >= 4) {
             int j = t - 2;
             int chainLen = 0;
@@ -690,7 +691,12 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                 ++chainLen;
                 --j;
             }
-            if (chainLen >= 1 && j >= 1 && !eye[j].nearSpec && !eye[1].nearSpec) break;
+            if (chainLen >= 1 && j >= 1 && !eye[j].nearSpec) {
+                if (doSplats && !eye[1].nearSpec) break;
+                // Behind a specular vertex no splat can land on this pixel, so this
+                // strategy is the only one left — and it is the sparkle inside glass.
+                sdsCaustic = true;
+            }
         }
 
         MisOverride ov;
@@ -703,6 +709,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         const float w = misWeight(eye, t, light, 0, ov);
         Vec3 c = v.beta * Le * w;
         if (t > 2) c = clampContribution(c, settings.clampIndirect);
+        if (sdsCaustic) c = clampContribution(c, settings.causticClamp);
         L += c;
 #if SOLSTICE_HAVE_OPENPGL
         if (guiding && guiding->active()) guiding->recordLightHit(v.p, v.wo, Le, w);
@@ -738,6 +745,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             const float w = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdf);
             Vec3 c = E.beta * f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf);
             if (t > 2) c = clampContribution(c, settings.clampIndirect);
+            if (E.nearSpec) c = clampContribution(c, settings.causticClamp);
             L += c;
 #if SOLSTICE_HAVE_OPENPGL
             if (guiding && guiding->active())
@@ -832,6 +840,9 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         const float w = misWeight(eye, t, lightArr, 1, ov);
         c = c * w;
         if (t > 2) c = clampContribution(c, settings.clampIndirect);
+        // Resolving a light through a near-specular lobe by connection: the direction
+        // almost never lands in the lobe and the rare hit is enormous.
+        if (E.nearSpec) c = clampContribution(c, settings.causticClamp);
         if (!isFinite(c)) continue;
         L += c;
 #if SOLSTICE_HAVE_OPENPGL
@@ -900,6 +911,11 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             const float w = misWeight(eye, t, light, s, ov);
             Vec3 c = E.beta * fE * G * fL * Lv.beta * w;
             c = clampContribution(c, settings.clampIndirect);
+            // Connecting through a near-specular lobe means the connection direction
+            // almost never lands in it, and the rare hit is enormous. Those spikes are
+            // the sparkle seen inside glass; the light-tracing copy stays uncapped.
+            if (lightPrefixCaustic || Lv.nearSpec || E.nearSpec)
+                c = clampContribution(c, settings.causticClamp);
             if (!isFinite(c)) continue;
             L += c;
         }

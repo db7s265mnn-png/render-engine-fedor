@@ -312,6 +312,13 @@ struct RenderSettingsData {
     // refractive caustics; BDPT regularizes indirect specular vertices so caustics
     // arrive through its standard connections. Off = dark glass shadows.
     int caustics = 1;
+    // Firefly cap for caustic paths that light tracing cannot deliver — a caustic
+    // seen through glass or in a mirror, where the camera-adjacent vertex is
+    // specular so no splat can reach the pixel. Only the connection and
+    // eye-hits-light copies are capped; the light-tracing estimator that carries
+    // the bulk of the caustic is left alone. <= 0 disables (the default: it trades
+    // a little caustic energy for the cap, so it stays opt-in).
+    float causticClamp = 0.0f;
     // Progressive pass index (set per sample by the CPU backend).
     int progressiveSample = 0;
 };
