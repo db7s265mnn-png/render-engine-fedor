@@ -102,6 +102,9 @@ enum ProceduralOp : int {
     kProcChecker = 25,
     kProcUnified2d = 26,
     kProcUnified3d = 27,
+    // MaterialX place2d / rotate2d: UV = rotate((uv-pivot)*scale)+pivot+offset
+    // in0=texcoord child, p0=scale.xy, p1=offset.xy, p2=pivot.xy, s0=rotate degrees
+    kProcPlace2d = 28,
 };
 
 struct ProceduralNode {

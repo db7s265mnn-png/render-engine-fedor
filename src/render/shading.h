@@ -217,9 +217,10 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         }
         return sampleTextureScalar(scene, tex, uv, fallback, uvFilterWidth);
     };
-    auto sampleHeightAt = [&](Vec2 sampleUv) -> float {
+    auto sampleHeightAt = [&](Vec2 sampleUv, Vec3 sampleP) -> float {
         ProceduralCtx hctx = ctx;
         hctx.uv = sampleUv;
+        hctx.pObject = sampleP;
         if (base.bumpProc >= 0) {
             const Vec4 c = evalProceduralRoot(scene, base.bumpProc, hctx);
             return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
@@ -248,17 +249,37 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
     const float nScale = srIsFinite(base.normalScale) ? base.normalScale : 1.0f;
     if (base.bumpProc >= 0 || (base.bumpTex >= 0 && base.bumpTex < scene.textureCount && scene.textures)) {
         // MaterialX <bump>: finite-difference height → tangent-space normal.
-        float eps = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
+        // UV FD covers noise2d/image; object-P FD covers triplanar/noise3d (Karma/Arnold).
+        float epsUv = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
         if (base.bumpTex >= 0 && base.bumpTex < scene.textureCount && scene.textures) {
             const TextureView& tex = scene.textures[base.bumpTex];
-            if (tex.width > 1) eps = srMax(eps, 1.0f / float(tex.width));
+            if (tex.width > 1) epsUv = srMax(epsUv, 1.0f / float(tex.width));
         }
-        eps = srMax(1e-5f, eps);
-        const float h = sampleHeightAt(uv);
-        const float hx = sampleHeightAt(Vec2(uv.x + eps, uv.y));
-        const float hy = sampleHeightAt(Vec2(uv.x, uv.y + eps));
-        const float strength = nScale / eps;
-        Vec3 nMap(-(hx - h) * strength, -(hy - h) * strength, 1.0f);
+        epsUv = srMax(1e-5f, epsUv);
+        const float h = sampleHeightAt(uv, pObject);
+        float dHu = 0.0f;
+        float dHv = 0.0f;
+        if (base.bumpProc >= 0) {
+            const float hu = sampleHeightAt(Vec2(uv.x + epsUv, uv.y), pObject);
+            const float hv = sampleHeightAt(Vec2(uv.x, uv.y + epsUv), pObject);
+            dHu += (hu - h) / epsUv;
+            dHv += (hv - h) / epsUv;
+            // Object-space FD in the shading tangent frame (triplanar / 3d noise).
+            const Frame frameP(ns);
+            float epsP = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0e-3f;
+            // Prefer a world/object scale tied to filter width; clamp for stability.
+            epsP = clampf(epsP, 1.0e-4f, 0.05f);
+            const float ht = sampleHeightAt(uv, pObject + frameP.t * epsP);
+            const float hb = sampleHeightAt(uv, pObject + frameP.b * epsP);
+            dHu += (ht - h) / epsP;
+            dHv += (hb - h) / epsP;
+        } else {
+            const float hu = sampleHeightAt(Vec2(uv.x + epsUv, uv.y), pObject);
+            const float hv = sampleHeightAt(Vec2(uv.x, uv.y + epsUv), pObject);
+            dHu = (hu - h) / epsUv;
+            dHv = (hv - h) / epsUv;
+        }
+        Vec3 nMap(-dHu * nScale, -dHv * nScale, 1.0f);
         if (!srIsFinite(nMap.x) || !srIsFinite(nMap.y) || !srIsFinite(nMap.z)) nMap = Vec3(0.0f, 0.0f, 1.0f);
         nMap = normalize(nMap);
         const Frame frame(ns);

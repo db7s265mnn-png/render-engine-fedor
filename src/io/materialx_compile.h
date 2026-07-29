@@ -21,6 +21,10 @@ namespace sol {
 
 bool materialXNodeIsProcedural(MaterialX::NodePtr node);
 
+// True when an image/tiledimage must be shade-time compiled (connected texcoord /
+// place2d graph, or non-default uvtiling/uvoffset) instead of the pure texture path.
+bool materialXImageNeedsProceduralBind(MaterialX::NodePtr node);
+
 // Compile `root` into `outNodes`. Image leaves append to `outImages`; their
 // texture indices (stored on kProcImage/kProcTriplanar) are local to outImages.
 // Returns the root index into outNodes, or -1 on failure.

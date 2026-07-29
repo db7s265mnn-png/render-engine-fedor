@@ -135,12 +135,17 @@ ScenePtr Stage::toScene() const {
                         switch (node.op) {
                             case kProcImage:
                                 remapTex(node.in0);
-                                remapProc(node.in1);
+                                remapProc(node.in1);  // texcoord / place2d graph
+                                break;
+                            case kProcPlace2d:
+                                remapProc(node.in0);  // texcoord child
                                 break;
                             case kProcTriplanar:
                                 remapTex(node.in0);
                                 remapTex(node.in1);
                                 remapTex(node.in2);
+                                // Optional future: position/normal children on in3 — keep remap for safety.
+                                remapProc(node.in3);
                                 break;
                             default:
                                 remapProc(node.in0);

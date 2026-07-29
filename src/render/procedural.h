@@ -516,12 +516,45 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             result = procSplat(out);
             break;
         }
+        case kProcPlace2d: {
+            // UV = R*((uv - pivot) * scale) + pivot + offset
+            Vec2 uv = ctx.uv;
+            if (n.in0 >= 0) {
+                const Vec4 t = evalProceduralChild(scene, n.in0, ctx, depth, Vec4(uv.x, uv.y, 0.0f, 1.0f));
+                uv = Vec2(t.x, t.y);
+            }
+            float sx = srIsFinite(n.p0.x) ? n.p0.x : 1.0f;
+            float sy = srIsFinite(n.p0.y) ? n.p0.y : 1.0f;
+            float ox = srIsFinite(n.p1.x) ? n.p1.x : 0.0f;
+            float oy = srIsFinite(n.p1.y) ? n.p1.y : 0.0f;
+            float px = srIsFinite(n.p2.x) ? n.p2.x : 0.5f;
+            float py = srIsFinite(n.p2.y) ? n.p2.y : 0.5f;
+            float rotDeg = srIsFinite(n.s0) ? n.s0 : 0.0f;
+            rotDeg = fmodf(rotDeg, 360.0f);
+            const float rot = rotDeg * 0.017453292519943295f;
+            const float cr = cosf(rot);
+            const float sn = sinf(rot);
+            float u = (uv.x - px) * sx;
+            float v = (uv.y - py) * sy;
+            const float ru = u * cr - v * sn;
+            const float rv = u * sn + v * cr;
+            result = Vec4(ru + px + ox, rv + py + oy, 0.0f, 1.0f);
+            break;
+        }
         case kProcImage: {
             Vec2 uv = ctx.uv;
             if (n.in1 >= 0) {
                 const Vec4 t = evalProceduralChild(scene, n.in1, ctx, depth, Vec4(uv.x, uv.y, 0.0f, 1.0f));
                 uv = Vec2(t.x, t.y);
             }
+            // uvtiling / uvoffset (tiledimage / USD Preview Surface convention).
+            float tx = srIsFinite(n.p1.x) ? n.p1.x : 1.0f;
+            float ty = srIsFinite(n.p1.y) ? n.p1.y : 1.0f;
+            float ox = srIsFinite(n.p2.x) ? n.p2.x : 0.0f;
+            float oy = srIsFinite(n.p2.y) ? n.p2.y : 0.0f;
+            if (fabsf(tx) < 1.0e-8f) tx = 1.0f;
+            if (fabsf(ty) < 1.0e-8f) ty = 1.0f;
+            uv = Vec2(uv.x * tx + ox, uv.y * ty + oy);
             if (n.in0 >= 0 && n.in0 < scene.textureCount && scene.textures) {
                 result = procSampleTexture(scene.textures[n.in0], uv);
             } else {

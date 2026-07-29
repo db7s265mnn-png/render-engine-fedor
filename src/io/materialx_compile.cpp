@@ -75,7 +75,41 @@ int channelsForType(const std::string& type) {
     return 3;
 }
 
-bool isProceduralCategory(const std::string& cat) {
+// Karma / Arnold / MaterialX often emit typed aliases (multiplyfloat, addvector2, …).
+std::string normalizeCategory(const std::string& cat) {
+    if (cat == "multiplyfloat" || cat == "multiplyvector2" || cat == "multiplyvector3" ||
+        cat == "multiplyvector4" || cat == "multiplycolor3" || cat == "multiplycolor4")
+        return "multiply";
+    if (cat == "addfloat" || cat == "addvector2" || cat == "addvector3" || cat == "addvector4" ||
+        cat == "addcolor3" || cat == "addcolor4")
+        return "add";
+    if (cat == "subtractfloat" || cat == "subtractvector2" || cat == "subtractvector3" ||
+        cat == "subtractvector4" || cat == "subtractcolor3" || cat == "subtractcolor4")
+        return "subtract";
+    if (cat == "dividefloat" || cat == "dividevector2" || cat == "dividevector3" || cat == "dividevector4" ||
+        cat == "dividecolor3" || cat == "dividecolor4")
+        return "divide";
+    if (cat == "mixfloat" || cat == "mixvector2" || cat == "mixvector3" || cat == "mixvector4" ||
+        cat == "mixcolor3" || cat == "mixcolor4")
+        return "mix";
+    if (cat == "clampfloat" || cat == "clampvector2" || cat == "clampvector3" || cat == "clampvector4" ||
+        cat == "clampcolor3" || cat == "clampcolor4")
+        return "clamp";
+    if (cat == "invertfloat" || cat == "invertvector2" || cat == "invertvector3" || cat == "invertcolor3")
+        return "invert";
+    if (cat == "powerfloat" || cat == "powervector2" || cat == "powervector3" || cat == "powercolor3")
+        return "power";
+    if (cat == "absvalfloat" || cat == "absvalvector2" || cat == "absvalvector3" || cat == "absvalcolor3")
+        return "absval";
+    if (cat == "saturatefloat" || cat == "saturatevector2" || cat == "saturatevector3" ||
+        cat == "saturatecolor3")
+        return "saturate";
+    if (cat == "rotate2d") return "place2d";  // subset: pivot+rotate
+    return cat;
+}
+
+bool isProceduralCategory(const std::string& rawCat) {
+    const std::string cat = normalizeCategory(rawCat);
     return cat == "noise2d" || cat == "noise3d" || cat == "fractal2d" || cat == "fractal3d" ||
            cat == "cellnoise2d" || cat == "cellnoise3d" || cat == "worleynoise2d" || cat == "worleynoise3d" ||
            cat == "unifiednoise2d" || cat == "unifiednoise3d" || cat == "constant" || cat == "uniform" ||
@@ -84,7 +118,8 @@ bool isProceduralCategory(const std::string& cat) {
            cat == "saturate" || cat == "invert" || cat == "absval" || cat == "power" || cat == "convert" ||
            cat == "swizzle" || cat == "combine2" || cat == "combine3" || cat == "combine4" || cat == "extract" ||
            cat == "texcoord" || cat == "position" || cat == "normal" || cat == "tangent" || cat == "bump" ||
-           cat == "normalmap" || cat == "ramplr" || cat == "ramptb" || cat == "checkerboard";
+           cat == "normalmap" || cat == "ramplr" || cat == "ramptb" || cat == "checkerboard" ||
+           cat == "place2d" || cat == "rotate2d";
 }
 
 bool subtreeProcedural(const mx::NodePtr& node, int depth) {
@@ -113,6 +148,20 @@ bool readBool(const mx::NodePtr& node, const std::string& name, bool fallback) {
     const std::string raw = inputValueString(node, name);
     if (raw.empty()) return fallback;
     return raw == "true" || raw == "1" || raw == "True";
+}
+
+bool imageNeedsProceduralBind(const mx::NodePtr& node) {
+    if (!node) return false;
+    const std::string cat = normalizeCategory(node->getCategory());
+    if (cat != "image" && cat != "tiledimage") return false;
+    // Connected UV graph (texcoord → math → image.texcoord, place2d, …).
+    if (connected(node, "texcoord")) return true;
+    // Authored tiling / offset (Karma tiledimage / USD preview).
+    const Vec4 tiling = readVec4(node, "uvtiling", Vec4(1.0f, 1.0f, 1.0f, 1.0f));
+    const Vec4 offset = readVec4(node, "uvoffset", Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+    if (fabsf(tiling.x - 1.0f) > 1e-5f || fabsf(tiling.y - 1.0f) > 1e-5f) return true;
+    if (fabsf(offset.x) > 1e-5f || fabsf(offset.y) > 1e-5f) return true;
+    return false;
 }
 
 struct CompileState {
@@ -169,7 +218,7 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
     auto cached = state.cache.find(node.get());
     if (cached != state.cache.end()) return cached->second;
 
-    const std::string cat = node->getCategory();
+    const std::string cat = normalizeCategory(node->getCategory());
     const int channels = channelsForType(node->getType());
     ProceduralNode n;
     n.channels = channels;
@@ -188,11 +237,30 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
         n.op = kProcConst;
         n.p0 = readVec4(node, "value", Vec4(0.0f, 0.0f, 0.0f, 1.0f));
         result = pushNode(state, n);
+    } else if (cat == "place2d") {
+        // MaterialX / Karma UV placement. rotate2d aliases here with scale=1.
+        n.op = kProcPlace2d;
+        n.in0 = compileConnected(node, "texcoord", state, depth);
+        if (n.in0 < 0) n.in0 = compileConnected(node, "in", state, depth);
+        n.p0 = readVec4(node, "scale", Vec4(1.0f, 1.0f, 1.0f, 1.0f));
+        n.p1 = readVec4(node, "offset", Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+        n.p2 = readVec4(node, "pivot", Vec4(0.5f, 0.5f, 0.0f, 0.0f));
+        n.s0 = readFloat(node, "rotate", 0.0f);
+        // rotate2d often exposes angle as "amount" and UV as "in".
+        if (node->getCategory() == "rotate2d") {
+            n.p0 = Vec4(1.0f, 1.0f, 1.0f, 1.0f);
+            n.p1 = Vec4(0.0f, 0.0f, 0.0f, 0.0f);
+            n.s0 = readFloat(node, "amount", readFloat(node, "rotate", 0.0f));
+        }
+        result = pushNode(state, n);
     } else if (cat == "image" || cat == "tiledimage") {
         n.op = kProcImage;
         n.in0 = loadImageIndex(state, inputValueString(node, "file"));
         n.in1 = compileConnected(node, "texcoord", state, depth);
         n.p0 = readVec4(node, "default", Vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        // p1 = uvtiling, p2 = uvoffset (applied after texcoord graph).
+        n.p1 = readVec4(node, "uvtiling", Vec4(1.0f, 1.0f, 1.0f, 1.0f));
+        n.p2 = readVec4(node, "uvoffset", Vec4(0.0f, 0.0f, 0.0f, 0.0f));
         result = pushNode(state, n);
     } else if (cat == "noise2d") {
         n.op = kProcNoise2d;
@@ -419,9 +487,12 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
         n.op = kProcChecker;
         result = pushNode(state, n);
     } else {
+        // Pass-through wrappers: follow the most common Karma/Arnold input names.
         int child = compileConnected(node, "in", state, depth);
         if (child < 0) child = compileConnected(node, "in1", state, depth);
         if (child < 0) child = compileConnected(node, "height", state, depth);
+        if (child < 0) child = compileConnected(node, "texcoord", state, depth);
+        if (child < 0) child = compileConnected(node, "bg", state, depth);
         if (child >= 0) {
             result = child;
         } else {
@@ -438,6 +509,8 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
 }  // namespace
 
 bool materialXNodeIsProcedural(mx::NodePtr node) { return subtreeProcedural(node, 0); }
+
+bool materialXImageNeedsProceduralBind(mx::NodePtr node) { return imageNeedsProceduralBind(node); }
 
 int compileMaterialXNode(mx::NodePtr root, const QString& searchDirectory, const std::vector<int>& udimSet,
                          std::vector<ProceduralNode>& outNodes, std::vector<std::shared_ptr<Image>>& outImages,

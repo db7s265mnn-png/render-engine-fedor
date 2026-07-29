@@ -454,18 +454,60 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
         if (e.group.isEmpty()) e.group = QString::fromUtf8(group);
     };
 
-    add("image", "color3", "Texture", {{"file", "filename", {}}, {"default", "color3", "0, 0, 0"}});
-    add("image", "color4", "Texture", {{"file", "filename", {}}, {"default", "color4", "0, 0, 0, 1"}});
-    add("image", "float", "Texture", {{"file", "filename", {}}, {"default", "float", "0"}});
-    add("image", "vector2", "Texture", {{"file", "filename", {}}, {"default", "vector2", "0, 0"}});
-    add("image", "vector3", "Texture", {{"file", "filename", {}}, {"default", "vector3", "0, 0, 0"}});
-    add("image", "vector4", "Texture", {{"file", "filename", {}}, {"default", "vector4", "0, 0, 0, 1"}});
+    add("image", "color3", "Texture",
+        {{"file", "filename", {}},
+         {"texcoord", "vector2", {}},
+         {"uvtiling", "vector2", "1, 1"},
+         {"uvoffset", "vector2", "0, 0"},
+         {"default", "color3", "0, 0, 0"}});
+    add("image", "color4", "Texture",
+        {{"file", "filename", {}},
+         {"texcoord", "vector2", {}},
+         {"uvtiling", "vector2", "1, 1"},
+         {"uvoffset", "vector2", "0, 0"},
+         {"default", "color4", "0, 0, 0, 1"}});
+    add("image", "float", "Texture",
+        {{"file", "filename", {}},
+         {"texcoord", "vector2", {}},
+         {"uvtiling", "vector2", "1, 1"},
+         {"uvoffset", "vector2", "0, 0"},
+         {"default", "float", "0"}});
+    add("image", "vector2", "Texture",
+        {{"file", "filename", {}},
+         {"texcoord", "vector2", {}},
+         {"uvtiling", "vector2", "1, 1"},
+         {"uvoffset", "vector2", "0, 0"},
+         {"default", "vector2", "0, 0"}});
+    add("image", "vector3", "Texture",
+        {{"file", "filename", {}},
+         {"texcoord", "vector2", {}},
+         {"uvtiling", "vector2", "1, 1"},
+         {"uvoffset", "vector2", "0, 0"},
+         {"default", "vector3", "0, 0, 0"}});
+    add("image", "vector4", "Texture",
+        {{"file", "filename", {}},
+         {"texcoord", "vector2", {}},
+         {"uvtiling", "vector2", "1, 1"},
+         {"uvoffset", "vector2", "0, 0"},
+         {"default", "vector4", "0, 0, 0, 1"}});
     add("tiledimage", "color3", "Texture",
-        {{"file", "filename", {}}, {"uvtiling", "vector2", "1, 1"}, {"default", "color3", "0, 0, 0"}});
+        {{"file", "filename", {}},
+         {"texcoord", "vector2", {}},
+         {"uvtiling", "vector2", "1, 1"},
+         {"uvoffset", "vector2", "0, 0"},
+         {"default", "color3", "0, 0, 0"}});
     add("tiledimage", "float", "Texture",
-        {{"file", "filename", {}}, {"uvtiling", "vector2", "1, 1"}, {"default", "float", "0"}});
+        {{"file", "filename", {}},
+         {"texcoord", "vector2", {}},
+         {"uvtiling", "vector2", "1, 1"},
+         {"uvoffset", "vector2", "0, 0"},
+         {"default", "float", "0"}});
     add("tiledimage", "vector3", "Texture",
-        {{"file", "filename", {}}, {"uvtiling", "vector2", "1, 1"}, {"default", "vector3", "0, 0, 0"}});
+        {{"file", "filename", {}},
+         {"texcoord", "vector2", {}},
+         {"uvtiling", "vector2", "1, 1"},
+         {"uvoffset", "vector2", "0, 0"},
+         {"default", "vector3", "0, 0, 0"}});
     add("constant", "color3", "Math", {{"value", "color3", "1, 1, 1"}});
     add("constant", "color4", "Math", {{"value", "color4", "1, 1, 1, 1"}});
     add("constant", "float", "Math", {{"value", "float", "1"}});
@@ -474,9 +516,11 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
     add("constant", "vector4", "Math", {{"value", "vector4", "1, 1, 1, 1"}});
     add("multiply", "color3", "Math", {{"in1", "color3", "1, 1, 1"}, {"in2", "color3", "1, 1, 1"}});
     add("multiply", "float", "Math", {{"in1", "float", "1"}, {"in2", "float", "1"}});
+    add("multiply", "vector2", "Math", {{"in1", "vector2", "1, 1"}, {"in2", "vector2", "1, 1"}});
     add("multiply", "vector3", "Math", {{"in1", "vector3", "1, 1, 1"}, {"in2", "vector3", "1, 1, 1"}});
     add("add", "color3", "Math", {{"in1", "color3", "0, 0, 0"}, {"in2", "color3", "0, 0, 0"}});
     add("add", "float", "Math", {{"in1", "float", "0"}, {"in2", "float", "0"}});
+    add("add", "vector2", "Math", {{"in1", "vector2", "0, 0"}, {"in2", "vector2", "0, 0"}});
     add("add", "vector3", "Math", {{"in1", "vector3", "0, 0, 0"}, {"in2", "vector3", "0, 0, 0"}});
     add("mix", "color3", "Math",
         {{"bg", "color3", "0, 0, 0"}, {"fg", "color3", "1, 1, 1"}, {"mix", "float", "0.5"}});
@@ -499,6 +543,16 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
         {{"height", "float", "0"}, {"scale", "float", "1"}, {"normal", "vector3", {}}, {"tangent", "vector3", {}},
          {"bitangent", "vector3", {}}});
     add("texcoord", "vector2", "Geometric", {{"index", "integer", "0"}});
+    add("place2d", "vector2", "Geometric",
+        {{"texcoord", "vector2", {}},
+         {"pivot", "vector2", "0.5, 0.5"},
+         {"scale", "vector2", "1, 1"},
+         {"rotate", "float", "0"},
+         {"offset", "vector2", "0, 0"}});
+    add("rotate2d", "vector2", "Geometric",
+        {{"in", "vector2", {}}, {"texcoord", "vector2", {}}, {"amount", "float", "0"}, {"pivot", "vector2", "0.5, 0.5"}});
+    add("position", "vector3", "Geometric", {{"space", "string", "object"}});
+    add("normal", "vector3", "Geometric", {{"space", "string", "object"}});
     add("standard_surface", "surfaceshader", "PBR / Shading",
         {{"base_color", "color3", "0.8, 0.8, 0.8"},
          {"base", "float", "0.8"},
@@ -783,16 +837,33 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
             const std::string cat = connected->getCategory();
             const bool srgbColor = !dataMap;
 
-            // Pure image maps keep the texture path (mips / UDIM).
+            // Pure image maps keep the texture path (mips / UDIM) unless a UV graph
+            // (texcoord/place2d/math) or uvtiling/uvoffset requires shade-time sampling.
             if (cat == "image" || cat == "tiledimage") {
-                std::string texError;
-                slot = loadTextureFromImageNode(connected, searchDirectory, udimSet, texError, srgbColor);
-                if (!slot && !texError.empty()) logWarning("MaterialX: " + texError);
+                if (materialXImageNeedsProceduralBind(connected)) {
+                    compileProc(connected, procIndex, inputName);
+                } else {
+                    std::string texError;
+                    slot = loadTextureFromImageNode(connected, searchDirectory, udimSet, texError, srgbColor);
+                    if (!slot && !texError.empty()) logWarning("MaterialX: " + texError);
+                }
                 return;
             }
             if (cat == "normalmap") {
                 result.material.normalScale = readNodeFloat(connected, "scale", 1.0f);
+                mx::NodePtr inNode = resolveConnectedNode(connected, "in");
+                if (inNode && (inNode->getCategory() == "image" || inNode->getCategory() == "tiledimage") &&
+                    materialXImageNeedsProceduralBind(inNode)) {
+                    compileProc(inNode, procIndex, inputName);
+                    return;
+                }
                 if (mx::NodePtr image = findImageNode(connected)) {
+                    // Prefer procedural when any upstream UV graph exists under the map.
+                    if (materialXNodeIsProcedural(connected) &&
+                        (materialXImageNeedsProceduralBind(image) || resolveConnectedNode(image, "texcoord"))) {
+                        compileProc(inNode ? inNode : connected, procIndex, inputName);
+                        return;
+                    }
                     std::string texError;
                     slot = loadTextureFromImageNode(image, searchDirectory, udimSet, texError, false);
                     if (!slot && !texError.empty()) logWarning("MaterialX: " + texError);
@@ -800,7 +871,6 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                 }
                 // Procedural/vector upstream of normalmap → compile as RGB tangent map.
                 if (materialXNodeIsProcedural(connected)) {
-                    mx::NodePtr inNode = resolveConnectedNode(connected, "in");
                     compileProc(inNode ? inNode : connected, procIndex, inputName);
                 }
                 return;
@@ -810,10 +880,14 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                 mx::NodePtr height = resolveConnectedNode(connected, "height");
                 if (!height) height = resolveConnectedNode(connected, "in");
                 if (height && (height->getCategory() == "image" || height->getCategory() == "tiledimage")) {
-                    std::string texError;
-                    result.bumpTexture =
-                        loadTextureFromImageNode(height, searchDirectory, udimSet, texError, false);
-                    if (!result.bumpTexture && !texError.empty()) logWarning("MaterialX: " + texError);
+                    if (materialXImageNeedsProceduralBind(height)) {
+                        compileProc(height, result.material.bumpProc, "bump.height");
+                    } else {
+                        std::string texError;
+                        result.bumpTexture =
+                            loadTextureFromImageNode(height, searchDirectory, udimSet, texError, false);
+                        if (!result.bumpTexture && !texError.empty()) logWarning("MaterialX: " + texError);
+                    }
                     return;
                 }
                 if (height && materialXNodeIsProcedural(height)) {
