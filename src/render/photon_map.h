@@ -209,7 +209,7 @@ private:
             if (!buildSurfaceInteraction(scene, hit, o, d, si)) break;
             if (si.lightIndex >= 0) break;
 
-            Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
+            Material mat = materialForCausticTransport(scene, si.materialIndex);
             mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
 
             if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {

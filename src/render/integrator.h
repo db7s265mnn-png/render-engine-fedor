@@ -47,7 +47,11 @@ SR_INL SR_HD Material defaultMaterial() {
     return m;
 }
 
-// Incoming ray classification for MaterialX ray_switch_shader (Arnold-like).
+// Incoming ray classification for MaterialX ray_switch_shader — matches Arnold
+// aiRaySwitch: the *incoming* ray type selects which surfaceshader port is
+// evaluated for that hit (camera rays → camera port, specular transmission
+// rays → specular_transmission, etc.). Unconnected ports fall back to the
+// base/camera material (-1 in RaySwitchTable).
 enum class RayShadeKind : int {
     Camera = 0,
     Shadow,
@@ -56,7 +60,9 @@ enum class RayShadeKind : int {
     DiffuseTransmission,
     SpecularTransmission,
     Sss,
-    Caustics  // Solstice: caustic light transport only (photon / MNEE / LT)
+    // Solstice-only convenience for photon / MNEE / BDPT light-tracing through
+    // glass. Never used for camera or other eye-path ray types.
+    Caustics
 };
 
 SR_INL SR_HD int raySwitchSlot(const RaySwitchTable& t, RayShadeKind kind) {
@@ -88,9 +94,25 @@ SR_INL SR_HD Material materialForRay(const SceneView& scene, const SurfaceIntera
     return materialForRay(scene, si.materialIndex, kind);
 }
 
-SR_INL SR_HD bool materialHasCausticsSwitch(const SceneView& scene, int baseIndex) {
-    if (baseIndex < 0 || baseIndex >= scene.materialCount) return false;
-    return scene.materials[baseIndex].raySwitch.caustics >= 0;
+// Photon / MNEE / BDPT light-path glass: prefer Solstice `caustics` port, else
+// Arnold `specular_transmission`, else the camera/base material.
+SR_INL SR_HD Material materialForCausticTransport(const SceneView& scene, int baseIndex) {
+    if (baseIndex < 0 || baseIndex >= scene.materialCount) return defaultMaterial();
+    const Material& base = scene.materials[baseIndex];
+    if (base.raySwitch.caustics >= 0) return materialForRay(scene, baseIndex, RayShadeKind::Caustics);
+    if (base.raySwitch.specularTransmission >= 0)
+        return materialForRay(scene, baseIndex, RayShadeKind::SpecularTransmission);
+    return base;
+}
+
+// Tag the *next* ray after a BSDF sample (Arnold ray type for the child ray).
+SR_INL SR_HD RayShadeKind nextRayShadeKind(const BsdfSample& bs, const LobeWeights& lw) {
+    if (bs.transmitted) {
+        if (bs.specular || isNearSpecularLobe(lw)) return RayShadeKind::SpecularTransmission;
+        return RayShadeKind::DiffuseTransmission;
+    }
+    if (bs.specular || isNearSpecularLobe(lw)) return RayShadeKind::SpecularReflection;
+    return RayShadeKind::DiffuseReflection;
 }
 
 // Chiang et al. 2016: map artist multiple-scattering albedo A → single-scattering α.
@@ -262,9 +284,8 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
         if (si.lightIndex >= 0) return visibility;
 
         Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Shadow);
-        // Whether caustic estimators own this glass follows the caustics slot
-        // (contribute_caustics on the caustic-transport material).
-        const Material matCau = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
+        // Opaque-glass when caustics estimators own transport (caustics / specular_transmission slot).
+        const Material matCau = materialForCausticTransport(scene, si.materialIndex);
 
         float block = 1.0f;
         if (mat.transmission > 1e-3f) {
@@ -372,6 +393,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     bool causticSuffix = false;
     int depth = 0;
     int passThrough = 0;
+    // Arnold ray_switch: incoming ray type selects the surfaceshader port.
+    RayShadeKind rayKind = RayShadeKind::Camera;
     const RenderSettingsData& settings = scene.settings;
     const int maxDepth = settings.integrator == kIntegratorDirectLighting ? 1 : srMax(1, settings.maxDepth);
 
@@ -457,17 +480,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
-        // Camera look + optional caustics-branch split (sharp refraction).
-        Material matCam = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
-        Material matCau = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
-        matCam = evaluateTexturedMaterial(scene, matCam, si.uv, si.ns, si.pObject, si.nObject,
-                                          si.uvFilterWidth);
-        matCau = evaluateTexturedMaterial(scene, matCau, si.uv, si.ns, si.pObject, si.nObject,
-                                          si.uvFilterWidth);
-        applyDispersion(matCam, heroChannel);
-        applyDispersion(matCau, heroChannel);
-        const bool cauSwitch = materialHasCausticsSwitch(scene, si.materialIndex);
-        Material mat = matCam;
+        // Arnold ray_switch: shade with the port matching the *incoming* ray type.
+        // Camera rays never use the Solstice caustics port.
+        Material baseMat = materialForRay(scene, si.materialIndex, rayKind);
+        Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject,
+                                                si.uvFilterWidth);
+        applyDispersion(mat, heroChannel);
 
         // Two sided shading for opaque surfaces. Winding order varies between
         // DCCs, so back faces are shaded as if their normals pointed at us.
@@ -787,8 +805,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 float gPdf = 0.0f;
                 if (guiding->sample(rng.nextFloat(), rng.nextFloat(), wiWorld, gPdf) && gPdf > 0.0f) {
                     const Vec3 wiLocal = frame.toLocal(wiWorld);
-                    const BsdfEval be =
-                        bsdfEvalCameraCaustics(matCam, matCau, woLocal, wiLocal, cauSwitch);
+                    const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
                     if (be.pdf > 0.0f && !isBlack(be.f)) {
                         const float mixPdf = pg * gPdf + (1.0f - pg) * be.pdf;
                         if (mixPdf > 0.0f) {
@@ -805,8 +822,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         }
 #endif
         if (!gotSample) {
-            bs = bsdfSampleCameraCaustics(matCam, matCau, woLocal, rng.nextFloat(), rng.nextFloat(),
-                                          rng.nextFloat(), rng.nextFloat(), cauSwitch);
+            bs = bsdfSampleLocal(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                 rng.nextFloat());
 #if !defined(__CUDACC__)
             if (bs.pdf > 0.0f && guideReady) {
                 const float pg = guiding->guideProbability();
@@ -843,6 +860,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         direction = wiWorld;
         bsdfPdf = bs.pdf;
         specularBounce = bs.specular;
+        // Child ray type for the next hit (Arnold ray_switch on that surface).
+        rayKind = nextRayShadeKind(bs, lw);
         // Caustic bookkeeping follows the near-specular classification (same as BDPT)
         // so low-roughness glass counts as a caustic chain, not as diffuse transport.
         const bool causticBounce = bs.specular || isNearSpecularLobe(lw);

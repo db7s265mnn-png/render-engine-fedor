@@ -112,7 +112,7 @@ SR_INL ChainState traceChain(const SceneView& scene, const Tracer& tracer, Vec3 
             }
             return st;
         }
-        Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
+        Material mat = materialForCausticTransport(scene, si.materialIndex);
         mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
         applyDispersion(mat, heroChannel);
         if (!isCausticCaster(mat)) return st;  // opaque blocker → fail
@@ -543,6 +543,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
     Material anchorMat{};
     int depth = 0;
     int passThrough = 0;
+    RayShadeKind rayKind = RayShadeKind::Camera;
     const RenderSettingsData& settings = scene.settings;
     const int maxDepth = srMax(1, settings.maxDepth);
     const bool photonCaustics = photons != nullptr && !photons->empty();
@@ -614,7 +615,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     if (tracer.intersect(o, seg, segLen * (1.0f - 1e-3f), sh)) {
                         SurfaceInteraction ssi;
                         if (buildSurfaceInteraction(scene, sh, o, seg, ssi) && ssi.lightIndex < 0) {
-                            Material smat = materialForRay(scene, ssi.materialIndex, RayShadeKind::Caustics);
+                            Material smat = materialForCausticTransport(scene, ssi.materialIndex);
                             smat = evaluateTexturedMaterial(scene, smat, ssi.uv, ssi.ns, ssi.pObject,
                                                             ssi.nObject, ssi.uvFilterWidth);
                             if (mnee::isCausticCaster(smat)) {
@@ -667,19 +668,16 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
-        // Camera look + optional caustics-branch split (sharp refraction).
-        Material matCam = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
-        Material matCau = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
-        matCam = evaluateTexturedMaterial(scene, matCam, si.uv, si.ns, si.pObject, si.nObject,
-                                          si.uvFilterWidth);
+        // Arnold ray_switch by incoming ray type (camera rays → camera port only).
+        Material baseMat = materialForRay(scene, si.materialIndex, rayKind);
+        Material mat =
+            evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+        applyDispersion(mat, heroChannel);
+        // Glass classification for MNEE / caustic family uses caustic-transport ports.
+        Material matCau = materialForCausticTransport(scene, si.materialIndex);
         matCau = evaluateTexturedMaterial(scene, matCau, si.uv, si.ns, si.pObject, si.nObject,
                                           si.uvFilterWidth);
-        applyDispersion(matCam, heroChannel);
         applyDispersion(matCau, heroChannel);
-        const bool cauSwitch = materialHasCausticsSwitch(scene, si.materialIndex);
-        // Shading / NEE on the surface uses the camera look; glass transport
-        // classification and MNEE chains use the caustics branch.
-        Material mat = matCam;
 
         if (mat.transmission <= 0.0f && mat.doubleSided && dot(si.ns, -direction) < 0.0f) {
             si.ns = -si.ns;
@@ -748,7 +746,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     if (visibility <= 1e-5f) continue;
                     if (!shadingNormalConsistent(si.ng, si.ns, wo, lsam.wi)) continue;
                     const Vec3 wiL = frame.toLocal(lsam.wi);
-                    const BsdfEval be = bsdfEvalCameraCaustics(matCam, matCau, frame.toLocal(wo), wiL, cauSwitch);
+                    const BsdfEval be = bsdfEvalLocal(mat, frame.toLocal(wo), wiL);
                     if (be.pdf <= 0.0f || isBlack(be.f)) continue;
                     float scatterPdf = be.pdf;
 #if !defined(__CUDACC__)
@@ -790,7 +788,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                                 clearPath = true;
                             } else if (bsi.lightIndex < 0 && settings.caustics != 0 &&
                                        lightContributesCaustics(l)) {
-                                Material bmat = materialForRay(scene, bsi.materialIndex, RayShadeKind::Caustics);
+                                Material bmat = materialForCausticTransport(scene, bsi.materialIndex);
                                 bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject,
                                                                 bsi.nObject, bsi.uvFilterWidth);
                                 glassPath = mnee::isCausticCaster(bmat);
@@ -813,7 +811,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     }
                     if (!shadingNormalConsistent(si.ng, si.ns, wo, wi)) continue;
                     const Vec3 wiLocal = frame.toLocal(wi);
-                    const BsdfEval be = bsdfEvalCameraCaustics(matCam, matCau, frame.toLocal(wo), wiLocal, cauSwitch);
+                    const BsdfEval be = bsdfEvalLocal(mat, frame.toLocal(wo), wiLocal);
                     if (be.pdf <= 0.0f || isBlack(be.f)) continue;
                     float scatterPdf = be.pdf;
 #if !defined(__CUDACC__)
@@ -867,8 +865,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 float gPdf = 0.0f;
                 if (guiding->sample(rng.nextFloat(), rng.nextFloat(), wiWorld, gPdf) && gPdf > 0.0f) {
                     const Vec3 wiLocal = frame.toLocal(wiWorld);
-                    const BsdfEval be =
-                        bsdfEvalCameraCaustics(matCam, matCau, woLocal, wiLocal, cauSwitch);
+                    const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
                     if (be.pdf > 0.0f && !isBlack(be.f)) {
                         const float mixPdf = pg * gPdf + (1.0f - pg) * be.pdf;
                         if (mixPdf > 0.0f) {
@@ -885,8 +882,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         }
 #endif
         if (!gotSample) {
-            bs = bsdfSampleCameraCaustics(matCam, matCau, woLocal, rng.nextFloat(), rng.nextFloat(),
-                                          rng.nextFloat(), rng.nextFloat(), cauSwitch);
+            bs = bsdfSampleLocal(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                 rng.nextFloat());
 #if !defined(__CUDACC__)
             if (bs.pdf > 0.0f && guideReady && !bs.specular) {
                 const float pg = guiding->guideProbability();
@@ -901,9 +898,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         }
         if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
 
-        // Track the MNEE-covered family with the caustics-slot caster test.
-        // Hybrid eye sampling already refracts with `matCau`, so deltaTransmit
-        // is true for sharp caustics-branch glass even when the camera look is rough.
+        // Track the MNEE-covered family on the caustic-transport material.
         const bool deltaTransmit = bs.specular && bs.transmitted && mnee::isCausticCaster(matCau);
         if (!bs.specular) {
             sawNonSpecular = true;
@@ -946,6 +941,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         direction = wiWorld;
         bsdfPdf = bs.pdf;
         specularBounce = bs.specular;
+        rayKind = nextRayShadeKind(bs, lw);
         ++depth;
 
         if (depth >= srMax(1, settings.rrStartDepth)) {

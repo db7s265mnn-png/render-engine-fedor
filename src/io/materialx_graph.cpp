@@ -618,8 +618,9 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"blend", "float", "0.1"},
          {"default", "color3", "0.2, 0.5, 0.8"}});
     add("surfacematerial", "material", "PBR / Shading", {{"surfaceshader", "surfaceshader", {}}});
-    // Arnold-like ray switch (surfaceshader). Solstice adds `caustics` for caustic
-    // light transport (photon / MNEE / LT) — not used for the camera look.
+    // Arnold-like ray switch (surfaceshader). Incoming ray type selects the port
+    // (camera / shadow / specular_transmission / …). Solstice `caustics` is only
+    // for photon / MNEE / BDPT light-tracing — never for camera rays.
     add("ray_switch_shader", "surfaceshader", "PBR / Shading",
         {{"camera", "surfaceshader", {}},
          {"shadow", "surfaceshader", {}},

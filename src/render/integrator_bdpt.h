@@ -264,6 +264,8 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
     Vec3 beta = path[count - 1].beta;
     float pdfSaFwd = pdfDirSa;
     int passThrough = 0;
+    // Eye: Arnold incoming-ray ports. Light: caustic-transport ports (never camera).
+    RayShadeKind rayKind = RayShadeKind::Camera;
 
     while (count < maxVerts) {
         Vert& prev = path[count - 1];
@@ -311,24 +313,11 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
             break;  // light geometry terminates both subpaths
         }
 
-        Material matCam = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
-        Material matCau = materialForRay(scene, si.materialIndex, RayShadeKind::Caustics);
-        matCam = evaluateTexturedMaterial(scene, matCam, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
-        matCau = evaluateTexturedMaterial(scene, matCau, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
-        applyDispersion(matCam, cfg.heroChannel);
-        applyDispersion(matCau, cfg.heroChannel);
-        const bool cauSwitch = materialHasCausticsSwitch(scene, si.materialIndex);
-        // Light subpaths that form caustics prefer the caustics ray-switch slot.
-        // Eye subpaths with a caustics switch also use that slot for glass so
-        // camera roughness cannot inject glossy caustic fireflies into BDPT.
-        Material mat = matCam;
-        if (!cfg.eyePath) {
-            const LobeWeights lwC = computeLobes(matCau);
-            if ((lwC.delta || isNearSpecularLobe(lwC)) && materialContributesCaustics(matCau)) mat = matCau;
-        } else if (cauSwitch) {
-            const LobeWeights lwC = computeLobes(matCau);
-            if (lwC.transmission > 0.25f && materialContributesCaustics(matCau)) mat = matCau;
-        }
+        Material mat =
+            cfg.eyePath ? materialForRay(scene, si.materialIndex, rayKind)
+                        : materialForCausticTransport(scene, si.materialIndex);
+        mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+        applyDispersion(mat, cfg.heroChannel);
 
         // Stochastic cutout — pass through without creating a vertex.
         if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
@@ -426,6 +415,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         pdfSaFwd = bs.specular ? 0.0f : bs.pdf;
         origin = offsetRayOrigin(cur.p, cur.ng, wiWorld);
         dir = wiWorld;
+        if (cfg.eyePath) rayKind = nextRayShadeKind(bs, computeLobes(cur.mat));
         passThrough = 0;
     }
     return count;
@@ -865,7 +855,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                     if (bsi.lightIndex == li) {
                         clearPath = true;
                     } else if (bsi.lightIndex < 0 && causticsOn && lightContributesCaustics(l)) {
-                        Material bmat = materialForRay(scene, bsi.materialIndex, RayShadeKind::Caustics);
+                        Material bmat = materialForCausticTransport(scene, bsi.materialIndex);
                         bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject, bsi.nObject,
                                                         bsi.uvFilterWidth);
                         glassPath = mnee::isCausticCaster(bmat);

@@ -2322,22 +2322,16 @@ void testMaterialXRaySwitchCaustics() {
 
     SceneView view = scene->view();
     const Material cam = materialForRay(view, baseIdx, RayShadeKind::Camera);
-    const Material cau = materialForRay(view, baseIdx, RayShadeKind::Caustics);
-    check(std::fabs(cam.roughness - 0.12f) < 1e-4f, "materialForRay Camera = rough");
-    check(cau.roughness < 1e-5f, "materialForRay Caustics = sharp");
-    // Eye-path hybrid: reflection uses camera roughness, refraction uses caustics.
-    const Vec3 wo(0.0f, 0.0f, 1.0f);
-    int gotTransmit = 0;
-    Rng hybridRng(1ull, 42ull);
-    for (int i = 0; i < 64; ++i) {
-        const BsdfSample s = bsdfSampleCameraCaustics(
-            cam, cau, wo, hybridRng.nextFloat(), hybridRng.nextFloat(), hybridRng.nextFloat(),
-            hybridRng.nextFloat(), true);
-        if (s.pdf > 0.0f && s.transmitted && s.specular) ++gotTransmit;
-    }
-    check(gotTransmit > 0, "hybrid eye sample can delta-refract via caustics branch");
-    std::printf("  cameraR=%.3f causticsR=%.3f slot=%d deltaTransmitSamples=%d/64\n", cam.roughness,
-                cau.roughness, base.raySwitch.caustics, gotTransmit);
+    const Material specT = materialForRay(view, baseIdx, RayShadeKind::SpecularTransmission);
+    const Material cau = materialForCausticTransport(view, baseIdx);
+    check(std::fabs(cam.roughness - 0.12f) < 1e-4f, "Camera ray → camera port roughness 0.12");
+    // Unconnected specular_transmission falls back to camera/base (Arnold-like).
+    check(std::fabs(specT.roughness - 0.12f) < 1e-4f, "unconnected specular_transmission → camera");
+    check(cau.roughness < 1e-5f, "caustic transport → caustics port roughness 0");
+    check(std::fabs(cam.roughness - cau.roughness) > 0.05f,
+          "camera port must not equal caustics port");
+    std::printf("  cameraR=%.3f specTransR=%.3f causticTransportR=%.3f slot=%d\n", cam.roughness,
+                specT.roughness, cau.roughness, base.raySwitch.caustics);
 #endif
 }
 

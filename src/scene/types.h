@@ -8,6 +8,8 @@ namespace sol {
 
 // Arnold-like ray switch: absolute indices into SceneView::materials (-1 = use
 // the material that owns this table — typically the camera/base assignment).
+// Port selection follows the *incoming* ray type (aiRaySwitch). Solstice adds
+// `caustics` for photon / MNEE / BDPT light-tracing only — never for camera rays.
 struct RaySwitchTable {
     int camera = -1;
     int shadow = -1;
@@ -16,9 +18,7 @@ struct RaySwitchTable {
     int diffuseTransmission = -1;
     int specularTransmission = -1;
     int sss = -1;
-    // Solstice extension: material used for caustic light transport only
-    // (photon map / MNEE / BDPT light-tracing through glass). Not used for the
-    // camera look of the surface.
+    // Solstice extension: light-side caustic transport only (not camera rays).
     int caustics = -1;
 };
 
