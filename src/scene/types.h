@@ -319,6 +319,19 @@ enum CausticsEngine : int {
     kCausticsEnginePhoton = 2,
 };
 
+// Chromatic dispersion sampling (material dispersion_abbe / lens CA).
+enum DispersionMode : int {
+    // Current: one random hero RGB channel per sample; mask whole path to that channel.
+    kDispersionHero = 0,
+    // Lazy hero mask (only if path hit dispersing media) + stratified channel +
+    // dispersion IOR only on the first N glass interfaces.
+    kDispersionOptimized = 1,
+    // Trace R+G+B heroes and average (≈3× cost when dispersion is present).
+    kDispersionSpectral3 = 2,
+    // No IOR split: single path + artistic chromatic tint on transmission.
+    kDispersionFake = 3,
+};
+
 struct RenderSettingsData {
     int resolutionX = 960;
     int resolutionY = 540;
@@ -357,6 +370,10 @@ struct RenderSettingsData {
     float photonRadius = 0.08f;    // gather radius in scene units (shrinks over spp)
     // Progressive pass index (set per sample by the CPU backend).
     int progressiveSample = 0;
+    // Dispersion sampling strategy (see DispersionMode).
+    int dispersionMode = kDispersionHero;
+    // Optimized mode: max dispersing glass interfaces that change IOR (enter+exit = 2).
+    int dispersionMaxInterfaces = 2;
 };
 
 // ---------------------------------------------------------------------------

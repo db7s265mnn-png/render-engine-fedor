@@ -54,10 +54,55 @@ SR_INL SR_HD float dispersedIor(float ior, float abbe, int channel) {
     return srMax(1.005f, A + B / (lam * lam));
 }
 
-// Adjusts the transmissive IOR for the path's hero channel (no-op otherwise).
+// Per-path dispersion state (ray_switch-aware): only the material actually shaded
+// for this hit can enable dispersion — camera-port Abbe must not tint shadow rays.
+struct DispersionContext {
+    int mode = 0;           // DispersionMode
+    int heroChannel = -1;   // 0..2 or -1 (full RGB / off)
+    int disperseHits = 0;   // dispersing interfaces that changed IOR so far
+    int maxHits = 100000;   // Optimized: cap (enter+exit of one glass ≈ 2)
+    bool used = false;      // path actually applied dispersing IOR or fake tint
+};
+
+SR_INL SR_HD bool materialHasDispersion(const Material& m) {
+    return m.dispersionAbbe > 0.0f && m.transmission > 1e-4f;
+}
+
+// Artistic tint for Fake mode (no ray bending).
+SR_INL SR_HD Vec3 fakeDispersionTint(const Material& m) {
+    const float nR = dispersedIor(m.ior, m.dispersionAbbe, 0);
+    const float nG = dispersedIor(m.ior, m.dispersionAbbe, 1);
+    const float nB = dispersedIor(m.ior, m.dispersionAbbe, 2);
+    const float invG = 1.0f / srMax(1e-3f, nG);
+    Vec3 t(nR * invG, 1.0f, nB * invG);
+    const float strength = clampf(40.0f / srMax(1.0f, m.dispersionAbbe), 0.0f, 2.0f);
+    t = lerp(Vec3(1.0f), t, 0.35f * strength);
+    return Vec3(srMax(0.05f, t.x), srMax(0.05f, t.y), srMax(0.05f, t.z));
+}
+
+// Adjusts transmissive IOR for the path hero channel. No-op for Fake mode,
+// missing Abbe, or when Optimized has exhausted its interface budget.
+// Legacy: applyDispersion(mat, channel) keeps working.
 SR_INL SR_HD void applyDispersion(Material& m, int channel) {
-    if (channel >= 0 && m.dispersionAbbe > 0.0f && m.transmission > 1e-4f)
-        m.ior = dispersedIor(m.ior, m.dispersionAbbe, channel);
+    if (channel >= 0 && materialHasDispersion(m)) m.ior = dispersedIor(m.ior, m.dispersionAbbe, channel);
+}
+
+SR_INL SR_HD void applyDispersion(Material& m, DispersionContext* ctx) {
+    if (!ctx || ctx->heroChannel < 0) return;
+    if (!materialHasDispersion(m)) return;
+    if (ctx->mode == kDispersionFake) return;  // tint applied on transmission bounce
+    if (ctx->mode == kDispersionOptimized && ctx->disperseHits >= ctx->maxHits) return;
+    m.ior = dispersedIor(m.ior, m.dispersionAbbe, ctx->heroChannel);
+    ctx->used = true;
+    ++ctx->disperseHits;
+}
+
+// Call after a transmitted BSDF sample on a dispersing material (Fake mode).
+SR_INL SR_HD Vec3 applyFakeDispersionThroughput(Vec3 throughput, const Material& m,
+                                                DispersionContext* ctx) {
+    if (!ctx || ctx->mode != kDispersionFake || !materialHasDispersion(m)) return throughput;
+    ctx->used = true;
+    return throughput * fakeDispersionTint(m);
 }
 
 // Bilinear fetch in normalized UV [0,1] with clamp (no wrap).

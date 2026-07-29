@@ -239,6 +239,9 @@ public:
                 logInfo("Caustics: off (dark shadows through glass; shadow_opacity fakes)");
         }
 
+        const int dispersionMode = settings.dispersionMode;
+        const int dispersionMaxIfaces = srMax(1, settings.dispersionMaxInterfaces);
+
         auto shadePixel = [&](int x, int y, int threadId) {
             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
             Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
@@ -246,82 +249,131 @@ public:
             blueNoisePixelJitter(x, y, sampleIndex, jx, jy);
             float lensU = 0.5f, lensV = 0.5f;
             blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
-            Vec3 origin, direction;
-            int chromaticChannel = -1;
-            float lensTau = 1.0f;
-            if (polyOptics_.active) {
-                float wavelengthNm = -1.0f;
-                if (scene.camera.chromaticAberration != 0 || scene.hasDispersion != 0) {
-                    chromaticChannel = int(rng.nextFloat() * 3.0f);
-                    if (chromaticChannel > 2) chromaticChannel = 2;
-                    if (scene.camera.chromaticAberration != 0)
-                        wavelengthNm = chromaticWavelengthNm(chromaticChannel);
-                }
-                if (!generatePolynomialOpticsRay(polyOptics_, scene.camera, float(x) + jx, float(y) + jy,
-                                                 width, height, lensU, lensV, rng, origin, direction,
-                                                 wavelengthNm, &lensTau)) {
-                    fb.addSample(x, y, Vec3(0.0f, 0.0f, 0.0f));
-                    return;
-                }
-            } else {
-                // Material dispersion needs a hero channel even without lens CA.
-                if (scene.hasDispersion != 0) {
-                    chromaticChannel = int(rng.nextFloat() * 3.0f);
-                    if (chromaticChannel > 2) chromaticChannel = 2;
-                }
-                generateCameraRay(scene, float(x) + jx, float(y) + jy, lensU, lensV, origin, direction);
-            }
+
             // Light-tracing splats assume the pinhole/thin-lens projection —
             // polynomial optics rays bypass it, so splats are disabled there.
-            Framebuffer* splatFb = polyOptics_.active ? nullptr : &fb;
-            const int hero = chromaticChannel;
-            Vec3 radiance;
+            const bool allowSplats = !polyOptics_.active;
+            auto splatFbFor = [&](DispersionContext*) -> Framebuffer* {
+                return allowSplats ? &fb : nullptr;
+            };
+
+            auto pickHeroChannel = [&](Rng& r) -> int {
+                if (scene.camera.chromaticAberration == 0 && scene.hasDispersion == 0) return -1;
+                if (dispersionMode == kDispersionFake) return -1;  // no IOR hero
+                if (dispersionMode == kDispersionOptimized) {
+                    // Stratified across spp (and lightly by pixel) — п.2.
+                    return (sampleIndex + x + 2 * y) % 3;
+                }
+                if (dispersionMode == kDispersionSpectral3) return 0;  // filled per-channel below
+                // Hero (default): random channel.
+                int ch = int(r.nextFloat() * 3.0f);
+                return ch > 2 ? 2 : ch;
+            };
+
+            auto makeDispCtx = [&](int channel) {
+                DispersionContext ctx;
+                ctx.mode = dispersionMode;
+                ctx.heroChannel = channel;
+                ctx.maxHits = (dispersionMode == kDispersionOptimized) ? dispersionMaxIfaces : 100000;
+                ctx.disperseHits = 0;
+                ctx.used = false;
+                return ctx;
+            };
+
+            auto traceOnce = [&](Rng& r, Vec3 o, Vec3 d, DispersionContext* disp) -> Vec3 {
+                Vec3 radiance;
 #if SOLSTICE_HAVE_OPENPGL
-            if (useGuiding) {
-                PathGuiding::ThreadState& guiding = pathGuiding_->thread(threadId);
-                guiding.beginPath();
-                if (useBdpt)
-                    radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, &guiding, splatFb,
-                                                 hero, photonPtr);
-                else if (useMnee || usePhoton)
-                    radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, &guiding, hero,
-                                                   photonPtr);
-                else
-                    radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding, hero);
-                guiding.endPath();
-            } else if (useBdpt) {
-                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, nullptr, splatFb, hero,
-                                             photonPtr);
-            } else if (useMnee || usePhoton) {
-                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, hero, photonPtr);
-            } else {
-                radiance = traceRadiance(scene, tracer, origin, direction, rng, hero);
-            }
+                if (useGuiding) {
+                    PathGuiding::ThreadState& guiding = pathGuiding_->thread(threadId);
+                    guiding.beginPath();
+                    if (useBdpt)
+                        radiance = traceRadianceBdpt(scene, tracer, o, d, r, &guiding, splatFbFor(disp),
+                                                     disp, photonPtr);
+                    else if (useMnee || usePhoton)
+                        radiance = traceRadiancePtMnee(scene, tracer, o, d, r, &guiding, disp, photonPtr);
+                    else
+                        radiance = traceRadiance(scene, tracer, o, d, r, &guiding, disp);
+                    guiding.endPath();
+                } else if (useBdpt) {
+                    radiance =
+                        traceRadianceBdpt(scene, tracer, o, d, r, nullptr, splatFbFor(disp), disp, photonPtr);
+                } else if (useMnee || usePhoton) {
+                    radiance = traceRadiancePtMnee(scene, tracer, o, d, r, disp, photonPtr);
+                } else {
+                    radiance = traceRadiance(scene, tracer, o, d, r, disp);
+                }
 #else
-            (void)threadId;
-            (void)useGuiding;
-            if (useBdpt)
-                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, splatFb, hero, photonPtr);
-            else if (useMnee || usePhoton)
-                radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, hero, photonPtr);
-            else
-                radiance = traceRadiance(scene, tracer, origin, direction, rng, hero);
-#endif
-            if (chromaticChannel >= 0) {
-                // Hero-wavelength RGB: deposit only the sampled channel, scaled by 3 / pdf.
-                radiance = radiance * std::max(0.0f, lensTau);
-                const float hero = (chromaticChannel == 0   ? radiance.x
-                                    : chromaticChannel == 1 ? radiance.y
-                                                           : radiance.z) *
-                                   3.0f;
-                radiance = Vec3(0.0f, 0.0f, 0.0f);
-                if (chromaticChannel == 0)
-                    radiance.x = hero;
-                else if (chromaticChannel == 1)
-                    radiance.y = hero;
+                (void)threadId;
+                (void)useGuiding;
+                if (useBdpt)
+                    radiance = traceRadianceBdpt(scene, tracer, o, d, r, splatFbFor(disp), disp, photonPtr);
+                else if (useMnee || usePhoton)
+                    radiance = traceRadiancePtMnee(scene, tracer, o, d, r, disp, photonPtr);
                 else
-                    radiance.z = hero;
+                    radiance = traceRadiance(scene, tracer, o, d, r, disp);
+#endif
+                return radiance;
+            };
+
+            auto generateRay = [&](Rng& r, int chromaticChannel, Vec3& o, Vec3& d, float& tau) -> bool {
+                tau = 1.0f;
+                if (polyOptics_.active) {
+                    float wavelengthNm = -1.0f;
+                    if (chromaticChannel >= 0 && scene.camera.chromaticAberration != 0)
+                        wavelengthNm = chromaticWavelengthNm(chromaticChannel);
+                    return generatePolynomialOpticsRay(polyOptics_, scene.camera, float(x) + jx,
+                                                       float(y) + jy, width, height, lensU, lensV, r, o, d,
+                                                       wavelengthNm, &tau);
+                }
+                generateCameraRay(scene, float(x) + jx, float(y) + jy, lensU, lensV, o, d);
+                return true;
+            };
+
+            auto heroMask = [](Vec3 rad, int ch) {
+                const float h = (ch == 0 ? rad.x : (ch == 1 ? rad.y : rad.z)) * 3.0f;
+                Vec3 out(0.0f);
+                if (ch == 0) out.x = h;
+                else if (ch == 1) out.y = h;
+                else out.z = h;
+                return out;
+            };
+
+            Vec3 radiance(0.0f);
+            Vec3 origin, direction;
+            float lensTau = 1.0f;
+
+            if (dispersionMode == kDispersionSpectral3 &&
+                (scene.hasDispersion != 0 || scene.camera.chromaticAberration != 0)) {
+                // п.4: average independent R/G/B hero traces.
+                for (int ch = 0; ch < 3; ++ch) {
+                    Rng rCh(hashCombine(pixelIndex, frameSeed ^ uint32_t(ch + 1)),
+                            hashUint(pixelIndex ^ (frameSeed * 2654435761u) ^ uint32_t(0x9e3779b9u * (ch + 1))));
+                    DispersionContext ctx = makeDispCtx(ch);
+                    if (!generateRay(rCh, ch, origin, direction, lensTau)) continue;
+                    Vec3 r = traceOnce(rCh, origin, direction, &ctx);
+                    r = r * std::max(0.0f, lensTau);
+                    radiance = radiance + heroMask(r, ch) * (1.0f / 3.0f);
+                }
+            } else {
+                const int chromaticChannel = pickHeroChannel(rng);
+                DispersionContext ctx = makeDispCtx(chromaticChannel);
+                if (!generateRay(rng, chromaticChannel, origin, direction, lensTau)) {
+                    fb.addSample(x, y, Vec3(0.0f));
+                    return;
+                }
+                radiance = traceOnce(rng, origin, direction, &ctx);
+                radiance = radiance * std::max(0.0f, lensTau);
+
+                if (chromaticChannel >= 0) {
+                    const bool doMask =
+                        dispersionMode == kDispersionHero ||
+                        (dispersionMode == kDispersionOptimized && ctx.used);
+                    // Fake: never mask. Optimized without dispersing hits: full RGB
+                    // (fixes ray_switch: camera-only Abbe must not tint shadows).
+                    if (doMask) radiance = heroMask(radiance, chromaticChannel);
+                }
             }
+
             fb.addSample(x, y, radiance);
         };
 

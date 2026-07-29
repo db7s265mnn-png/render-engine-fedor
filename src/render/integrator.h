@@ -380,7 +380,7 @@ SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& trac
 
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                                Rng& rng, Guiding* guiding, int heroChannel = -1) {
+                                Rng& rng, Guiding* guiding, DispersionContext* dispersion = nullptr) {
     Vec3 radiance(0.0f);
     Vec3 throughput(1.0f);
     float bsdfPdf = 0.0f;
@@ -485,7 +485,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         Material baseMat = materialForRay(scene, si.materialIndex, rayKind);
         Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject,
                                                 si.uvFilterWidth);
-        applyDispersion(mat, heroChannel);
+        applyDispersion(mat, dispersion);
 
         // Two sided shading for opaque surfaces. Winding order varies between
         // DCCs, so back faces are shaded as if their normals pointed at us.
@@ -854,6 +854,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #endif
 
         throughput *= weight;
+        if (bs.transmitted) throughput = applyFakeDispersionThroughput(throughput, mat, dispersion);
         if (!isFinite(throughput) || isBlack(throughput)) break;
 
         origin = offsetRayOrigin(si.p, si.ng, wiWorld);
@@ -890,8 +891,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
 template <typename Tracer>
 SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
-                                Rng& rng, int heroChannel = -1) {
-    return traceRadiance<Tracer, NullGuiding>(scene, tracer, origin, direction, rng, nullptr, heroChannel);
+                                Rng& rng, DispersionContext* dispersion = nullptr) {
+    return traceRadiance<Tracer, NullGuiding>(scene, tracer, origin, direction, rng, nullptr, dispersion);
 }
 
 }  // namespace sol

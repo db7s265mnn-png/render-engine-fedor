@@ -736,6 +736,23 @@ public:
                                       "Even at 0, a safety cap of 10 is applied to those paths — they "
                                       "never converge with more samples when the light is small.\n"
                                       "Raise to tighten further; the caustic on the floor is not capped."));
+        addParameter(Parameter::makeMenu(
+                         "dispersionmode", "Dispersion Mode",
+                         {"Hero (default)", "Optimized", "Spectral RGB ×3", "Fake tint"}, 0)
+                         .withGroup("Engine")
+                         .withTooltip(
+                             "How chromatic dispersion (dispersion_abbe) is sampled.\n"
+                             "Hero: one random RGB channel per sample; masks the whole path "
+                             "(noisy; legacy).\n"
+                             "Optimized: stratified channel + hero mask only if the path hit "
+                             "dispersing glass + IOR change limited to first N interfaces. "
+                             "Fixes ray_switch: camera-only Abbe no longer tints shadows.\n"
+                             "Spectral RGB ×3: trace R+G+B and average (~3× slower, clean).\n"
+                             "Fake tint: no ray bending — chromatic transmission tint only."));
+        addParameter(Parameter::makeInt("dispersionmaxiface", "Dispersion Max Interfaces", 2, 1, 16)
+                         .withGroup("Engine")
+                         .withTooltip("Optimized mode only: how many dispersing glass interfaces "
+                                      "may change IOR (enter+exit of one pane ≈ 2)."));
         addParameter(Parameter::makeBool("pathguiding", "Path Guiding (OpenPGL)", false)
                          .withGroup("Engine")
                          .withTooltip("Learn incident radiance while rendering and guide BSDF "
@@ -766,6 +783,8 @@ public:
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
         settings.causticsEngine = intValue("causticsengine", 0);
         settings.causticClamp = float(floatValue("causticclamp", 0.0));
+        settings.dispersionMode = intValue("dispersionmode", 0);
+        settings.dispersionMaxInterfaces = std::max(1, intValue("dispersionmaxiface", 2));
         settings.photonCount = std::max(1000, intValue("photoncount", 100000));
         settings.photonRadius = float(floatValue("photonradius", 0.08));
         settings.toneMapper = intValue("tonemap", 2);

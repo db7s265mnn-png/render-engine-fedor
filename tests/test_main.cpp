@@ -1016,6 +1016,38 @@ void testDispersionAndThinFilm() {
     check(spreadStrong > 2.5f * spreadWeak, "lower Abbe disperses more");
     check(dispersedIor(1.5f, 0.0f, 2) == 1.5f, "abbe 0 disables dispersion");
 
+    // Ray-switch / mode plumbing: only the shaded material's Abbe can enable dispersion.
+    {
+        Material camGlass;
+        camGlass.transmission = 1.0f;
+        camGlass.ior = 1.5f;
+        camGlass.dispersionAbbe = 30.0f;
+        Material shadowGlass = camGlass;
+        shadowGlass.dispersionAbbe = 0.0f;
+
+        DispersionContext ctx;
+        ctx.mode = kDispersionOptimized;
+        ctx.heroChannel = 2;
+        ctx.maxHits = 2;
+        Material m = shadowGlass;
+        applyDispersion(m, &ctx);
+        check(!ctx.used && m.ior == 1.5f, "shadow-port glass without Abbe does not disperse");
+
+        m = camGlass;
+        applyDispersion(m, &ctx);
+        check(ctx.used && m.ior > 1.5f, "camera-port glass with Abbe disperses (blue)");
+
+        ctx.used = false;
+        ctx.disperseHits = 0;
+        ctx.mode = kDispersionFake;
+        m = camGlass;
+        m.ior = 1.5f;
+        applyDispersion(m, &ctx);
+        check(!ctx.used && m.ior == 1.5f, "Fake mode does not bend IOR");
+        const Vec3 tinted = applyFakeDispersionThroughput(Vec3(1.0f), camGlass, &ctx);
+        check(ctx.used && tinted.x != tinted.z, "Fake mode tints throughput chromatically");
+    }
+
     // Thin film: reflectance stays in [0,1], varies with thickness, and reduces
     // to plain Fresnel when the film is absent.
     Material m;
