@@ -10,6 +10,10 @@ void Framebuffer::resize(int width, int height) {
     width_ = width > 0 ? width : 0;
     height_ = height > 0 ? height : 0;
     accum_.assign(size_t(width_) * size_t(height_), Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+    const size_t n = size_t(width_) * size_t(height_) * 3;
+    splat_ = n > 0 ? std::make_unique<std::atomic<float>[]>(n) : nullptr;
+    for (size_t i = 0; i < n; ++i) splat_[i].store(0.0f, std::memory_order_relaxed);
+    splatPaths_.store(0, std::memory_order_relaxed);
     samples_.store(0, std::memory_order_relaxed);
     hasData_.store(false, std::memory_order_relaxed);
 }
@@ -17,6 +21,9 @@ void Framebuffer::resize(int width, int height) {
 void Framebuffer::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::fill(accum_.begin(), accum_.end(), Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+    const size_t n = size_t(width_) * size_t(height_) * 3;
+    for (size_t i = 0; i < n && splat_; ++i) splat_[i].store(0.0f, std::memory_order_relaxed);
+    splatPaths_.store(0, std::memory_order_relaxed);
     samples_.store(0, std::memory_order_relaxed);
     hasData_.store(false, std::memory_order_relaxed);
 }
@@ -24,10 +31,13 @@ void Framebuffer::clear() {
 Image Framebuffer::resolveLinear() const {
     std::lock_guard<std::mutex> lock(mutex_);
     Image image(width_, height_);
+    const long paths = splatPaths_.load(std::memory_order_relaxed);
+    const float invPaths = paths > 0 ? 1.0f / float(paths) : 0.0f;
     for (int y = 0; y < height_; ++y) {
         for (int x = 0; x < width_; ++x) {
             const Vec4& px = accum_[size_t(y) * size_t(width_) + size_t(x)];
-            const Vec3 c = px.w > 0.0f ? px.xyz() * (1.0f / px.w) : Vec3(0.0f);
+            Vec3 c = px.w > 0.0f ? px.xyz() * (1.0f / px.w) : Vec3(0.0f);
+            c += splatPixel(x, y, invPaths);
             image.setRgb(x, y, c, 1.0f);
         }
     }
@@ -55,12 +65,14 @@ Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
     // 4x4 cell so the viewport fills smoothly instead of flashing black tiles.
     constexpr int kBootstrapStep = 4;
 
+    const long paths = splatPaths_.load(std::memory_order_relaxed);
+    const float invPaths = paths > 0 ? 1.0f / float(paths) : 0.0f;
     for (int y = 0; y < height_; ++y) {
         for (int x = 0; x < width_; ++x) {
             const Vec4& px = accum_[size_t(y) * size_t(width_) + size_t(x)];
             Vec3 linearColor(0.0f);
             if (px.w > 0.0f) {
-                linearColor = px.xyz() * (1.0f / px.w);
+                linearColor = px.xyz() * (1.0f / px.w) + splatPixel(x, y, invPaths);
             } else if (bootstrap) {
                 const int x0 = x - (x % kBootstrapStep);
                 const int y0 = y - (y % kBootstrapStep);

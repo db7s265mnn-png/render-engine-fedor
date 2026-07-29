@@ -192,7 +192,8 @@ public:
         const int tileCount = tilesX * tilesY;
 
         EmbreeTracer tracer{topScene_};
-        const SceneView& scene = view_;
+        SceneView scene = view_;  // local copy: carries the progressive pass index
+        scene.settings.progressiveSample = sampleIndex;
         const uint32_t frameSeed = uint32_t(settings.seed) * 9781u + uint32_t(sampleIndex) * 6271u;
 
         const bool pathTracer = settings.integrator == kIntegratorPathTracer;
@@ -207,7 +208,7 @@ public:
 #endif
         if (sampleIndex == 0) {
             if (useBdpt)
-                logInfo(std::string("Caustics: BDPT (bidirectional connections)") +
+                logInfo(std::string("Caustics: BDPT (bidirectional + light-tracing splats)") +
                         (useGuiding ? " + OpenPGL guiding" : ""));
             else if (useMnee)
                 logInfo(std::string("Caustics: MNEE (manifold next-event, refractive)") +
@@ -242,20 +243,23 @@ public:
             } else {
                 generateCameraRay(scene, float(x) + jx, float(y) + jy, lensU, lensV, origin, direction);
             }
+            // Light-tracing splats assume the pinhole/thin-lens projection —
+            // polynomial optics rays bypass it, so splats are disabled there.
+            Framebuffer* splatFb = polyOptics_.active ? nullptr : &fb;
             Vec3 radiance;
 #if SOLSTICE_HAVE_OPENPGL
             if (useGuiding) {
                 PathGuiding::ThreadState& guiding = pathGuiding_->thread(threadId);
                 guiding.beginPath();
                 if (useBdpt)
-                    radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, &guiding);
+                    radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, &guiding, splatFb);
                 else if (useMnee)
                     radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng, &guiding);
                 else
                     radiance = traceRadiance(scene, tracer, origin, direction, rng, &guiding);
                 guiding.endPath();
             } else if (useBdpt) {
-                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, nullptr);
+                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, nullptr, splatFb);
             } else if (useMnee) {
                 radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng);
             } else {
@@ -265,7 +269,7 @@ public:
             (void)threadId;
             (void)useGuiding;
             if (useBdpt)
-                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng);
+                radiance = traceRadianceBdpt(scene, tracer, origin, direction, rng, splatFb);
             else if (useMnee)
                 radiance = traceRadiancePtMnee(scene, tracer, origin, direction, rng);
             else

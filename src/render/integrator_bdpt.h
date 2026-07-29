@@ -2,17 +2,18 @@
 // weighting over all (s,t) strategies (PBRT-v3 style pdfFwd/pdfRev remap).
 // CPU / Embree only — included from embree_device.cpp.
 //
-// Strategies: t >= 2 eye vertices (no light-tracing splats), s = 0 (eye path
-// hits an emitter), s = 1 (light resampled toward the eye vertex, NEE-like),
-// s >= 2 (surface↔surface connections). Dome / distant lights contribute via
-// s ∈ {0,1} with the standard power heuristic (no light subpath from them).
-// Optional OpenPGL guiding mixes into eye-path BSDF sampling; the mixture pdf
-// is used as the true forward pdf so MIS stays consistent.
+// Strategies: t = 1 light-tracing splats onto the camera (the workhorse for
+// caustics from small lights: light → delta glass chain → diffuse → camera),
+// s = 0 (eye path hits an emitter), s = 1 (light resampled toward the eye
+// vertex, NEE-like), s >= 2 (surface↔surface connections), all t >= 2.
+// Dome / distant lights contribute via s ∈ {0,1} with the power heuristic
+// (no light subpath from them). Optional OpenPGL guiding mixes into eye-path
+// BSDF sampling; the mixture pdf is the true forward pdf so MIS stays valid.
 #pragma once
 
 #include "core/rng.h"
+#include "render/framebuffer.h"
 #include "render/integrator.h"
-#include "render/integrator_mnee.h"  // multi-seed manifold connections through glass
 #include "render/lights.h"
 #include "render/shading.h"
 #include "solstice_config.h"
@@ -118,6 +119,58 @@ SR_INL float pdfLightDirSa(const LightData& l, Vec3 lightNormal, Vec3 dir) {
 }
 
 // --------------------------------------------------------------------------
+// Camera importance (pinhole / thin-lens center) for light-tracing splats.
+// --------------------------------------------------------------------------
+struct CameraProj {
+    Mat4 worldToCam;
+    Vec3 camPos{0.0f};
+    float focal = 50.0f;      // mm
+    float sensorW = 36.0f;    // mm
+    float sensorH = 24.0f;
+    float resX = 1.0f;
+    float resY = 1.0f;
+    float pixelArea = 1.0f;   // sensor mm² per pixel
+    bool valid = false;
+};
+
+SR_INL CameraProj buildCameraProj(const SceneView& scene) {
+    CameraProj c;
+    const CameraData& cam = scene.camera;
+    c.worldToCam = inverse(cam.cameraToWorld);
+    c.camPos = transformPoint(cam.cameraToWorld, Vec3(0.0f, 0.0f, 0.0f));
+    c.focal = srMax(1e-3f, cam.focalLength);
+    c.resX = float(srMax(1, scene.settings.resolutionX));
+    c.resY = float(srMax(1, scene.settings.resolutionY));
+    c.sensorW = cam.sensorWidth;
+    c.sensorH = cam.sensorWidth * (c.resY / c.resX);
+    c.pixelArea = (c.sensorW / c.resX) * (c.sensorH / c.resY);
+    c.valid = c.pixelArea > 1e-12f;
+    return c;
+}
+
+// Projects a world point onto the raster. Returns false when outside the
+// frustum. cosTheta is measured against the optical axis.
+SR_INL bool projectToPixel(const CameraProj& proj, Vec3 pWorld, float& px, float& py, float& cosTheta,
+                           float& dist2) {
+    const Vec3 pc = transformPoint(proj.worldToCam, pWorld);
+    if (pc.z >= -1e-5f) return false;  // behind the pinhole
+    dist2 = lengthSquared(pc);
+    cosTheta = -pc.z / sqrtf(srMax(1e-12f, dist2));
+    const float sx = pc.x * (proj.focal / -pc.z);
+    const float sy = pc.y * (proj.focal / -pc.z);
+    px = (sx / proj.sensorW + 0.5f) * proj.resX;
+    py = (0.5f - sy / proj.sensorH) * proj.resY;
+    return px >= 0.0f && px < proj.resX && py >= 0.0f && py < proj.resY;
+}
+
+// Solid-angle pdf of the camera generating a ray toward direction with cosTheta
+// (uniform sampling over the pixel; matches generateCameraRay's density).
+SR_INL float cameraPdfOmega(const CameraProj& proj, float cosTheta) {
+    const float c = srMax(1e-4f, cosTheta);
+    return (proj.focal * proj.focal) / (proj.pixelArea * c * c * c);
+}
+
+// --------------------------------------------------------------------------
 // Subpath generation
 // --------------------------------------------------------------------------
 
@@ -143,7 +196,9 @@ SR_INL bool startLightPath(const SceneView& scene, Rng& rng, Vert& v0, Vec3& emi
         v0.pdfFwd = selectPdf;
         emitDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
         pdfDirSa = kInv4Pi;
-        v0.beta = l.emittedRadiance() / srMax(1e-12f, v0.pdfFwd);
+        // Throughput folds BOTH the position and the direction pdf (I / (p_A·p_ω));
+        // there is no cosine at a point emitter.
+        v0.beta = l.emittedRadiance() / srMax(1e-12f, v0.pdfFwd * pdfDirSa);
         return true;
     }
 
@@ -188,8 +243,7 @@ struct WalkConfig {
 #endif
 };
 
-// Extend a subpath by BSDF sampling. `path[count-1]` must be a surface vertex
-// (or the walk starts from `origin`/`dir` for the first segment).
+// Extend a subpath by BSDF sampling.
 template <typename Tracer>
 SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Vert* path, int count,
                       Vec3 origin, Vec3 dir, float pdfDirSa, int maxVerts, const WalkConfig& cfg) {
@@ -346,6 +400,7 @@ struct MisOverride {
     float lightLastRev = -1.0f; // pdfRev of light[s-1]
     float lightPrevRev = -1.0f; // pdfRev of light[s-2]
     bool lightOriginDelta = false;
+    bool splatStrategy = false;  // t=1 light tracing is being sampled this pass
 };
 
 SR_INL float misWeight(const Vert* eye, int t, const Vert* light, int s, const MisOverride& ov) {
@@ -353,7 +408,9 @@ SR_INL float misWeight(const Vert* eye, int t, const Vert* light, int s, const M
 
     float sumRi = 0.0f;
 
-    // Eye side: hypothetical strategies where eye[i..t-1] came from the light side.
+    // Eye side: hypothetical strategies where eye[i..t-1] came from the light side
+    // (i == 1 corresponds to the light-tracing splat strategy t' = 1 — counted
+    // only when splats are actually being rendered).
     {
         float ri = 1.0f;
         for (int i = t - 1; i >= 1; --i) {
@@ -361,9 +418,9 @@ SR_INL float misWeight(const Vert* eye, int t, const Vert* light, int s, const M
             if (i == t - 1 && ov.eyeLastRev >= 0.0f) rev = ov.eyeLastRev;
             if (i == t - 2 && ov.eyePrevRev >= 0.0f) rev = ov.eyePrevRev;
             ri *= remap0(rev) / remap0(eye[i].pdfFwd);
-            if (i == 1) break;  // t'=1 (light tracing splat) is never sampled — skip
+            if (i == 1 && !ov.splatStrategy) break;  // t'=1 not sampled — skip its term
             const bool curDelta = eye[i].delta;
-            const bool prevDelta = eye[i - 1].delta;
+            const bool prevDelta = i >= 1 && eye[i - 1].delta;
             if (!curDelta && !prevDelta) sumRi += ri;
         }
     }
@@ -408,6 +465,9 @@ SR_INL bool connectionVisible(const SceneView& scene, const Tracer& tracer, Vec3
 
 }  // namespace bdpt
 
+// `splatFb` enables the t=1 light-tracing strategy (thread-safe splats; pass the
+// active framebuffer). Splats assume a pinhole / thin-lens-center camera and are
+// skipped when the projection is unavailable.
 template <typename Tracer>
 inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
                               Rng& rng
@@ -415,13 +475,18 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                               ,
                               PathGuiding::ThreadState* guiding = nullptr
 #endif
-) {
+                              ,
+                              Framebuffer* splatFb = nullptr) {
     using namespace bdpt;
     const RenderSettingsData& settings = scene.settings;
     int maxVerts = settings.maxDepth + 1;
     if (maxVerts > kMaxVerts) maxVerts = kMaxVerts;
     if (maxVerts < 2) maxVerts = 2;
     const bool causticsOn = settings.caustics != 0;
+
+    const CameraProj camProj = buildCameraProj(scene);
+    const bool doSplats = splatFb != nullptr && camProj.valid;
+    if (doSplats) splatFb->addSplatPath();
 
     Vert eye[kMaxVerts];
     Vert light[kMaxVerts];
@@ -457,9 +522,63 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 #if SOLSTICE_HAVE_OPENPGL
     eyeCfg.guiding = guiding;
 #endif
-    const int nEye = randomWalk(scene, tracer, rng, eye, 1, origin, direction, 1.0f, maxVerts, eyeCfg);
+    // The camera ray density matters now that t=1 is a real strategy.
+    float camPdfSa = 1.0f;
+    if (camProj.valid) {
+        const Vec3 dc = transformVector(camProj.worldToCam, direction);
+        camPdfSa = cameraPdfOmega(camProj, srMax(1e-4f, -dc.z));
+    }
+    const int nEye = randomWalk(scene, tracer, rng, eye, 1, origin, direction, camPdfSa, maxVerts, eyeCfg);
 
     Vec3 L(0.0f);
+
+    // ---- t = 1: splat light-subpath vertices onto the camera (light tracing).
+    // This is what carries caustics from small lights: the specular chain is
+    // sampled from the light with delta refractions, and the final connection
+    // (diffuse vertex → camera) is benign.
+    if (doSplats && nLight >= 2) {
+        for (int s = 2; s <= nLight; ++s) {
+            const Vert& v = light[s - 1];
+            if (v.type != VType::Surface || !v.connectable) continue;
+            // Caustics off: light→specular-chain→diffuse splats are the caustic
+            // family; drop them to match the dark-shadow look.
+            if (!causticsOn) {
+                bool specSeen = false;
+                for (int i = 1; i < s - 1; ++i)
+                    if (light[i].delta) specSeen = true;
+                if (specSeen) continue;
+            }
+            float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
+            if (!projectToPixel(camProj, v.p, px, py, cosTheta, dist2)) continue;
+            if (dist2 < 1e-8f) continue;
+            const Vec3 toCam = normalize(camProj.camPos - v.p);
+            const Vec3 f = bsdfF(v.mat, v.ns, v.wo, toCam);
+            if (isBlack(f)) continue;
+            if (!connectionVisible(scene, tracer, v.p, v.ng, camProj.camPos, -1)) continue;
+
+            const float pdfOmega = cameraPdfOmega(camProj, cosTheta);
+            const float cosV = fabsf(dot(v.ns, toCam));
+            Vec3 c = v.beta * f * (cosV * pdfOmega / dist2);
+
+            // MIS against the t >= 2 strategies for the same path.
+            MisOverride ov;
+            ov.splatStrategy = true;
+            ov.lightOriginDelta = lightOriginDelta;
+            ov.lightLastRev = toAreaPdf(pdfOmega, camProj.camPos, v.p, v.ns);
+            if (s >= 2)
+                ov.lightPrevRev = toAreaPdf(bsdfPdfSa(v.mat, v.ns, toCam, normalize(light[s - 2].p - v.p)),
+                                            v.p, light[s - 2].p,
+                                            light[s - 2].type == VType::Surface ? light[s - 2].ns
+                                                                                : light[s - 2].ng);
+            Vert camVert = eye[0];
+            camVert.p = camProj.camPos;
+            const float w = misWeight(&camVert, 1, light, s, ov);
+            c = c * w;
+            if (s > 2) c = clampContribution(c, settings.clampIndirect);
+            if (!isFinite(c)) continue;
+            splatFb->addSplat(int(px), int(py), c);
+        }
+    }
 
     // ---- s = 0: eye path hit an emitter / the environment ----
     for (int t = 2; t <= nEye; ++t) {
@@ -503,7 +622,8 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             break;
         }
 
-        // Finite light hit: full BDPT MIS.
+        // Finite light hit: full BDPT MIS (the t'=1 splat strategy now appears in
+        // the eye-side sum, which is what keeps small-light caustic fireflies down).
         const Vec3 lightN = l.type == kLightSphere ? v.ng : areaLightNormal(l);
         const Vec3 wi = -v.wo;  // direction of travel into the light
         Vec3 Le = areaLightEmission(scene, l, wi, lightN);
@@ -518,47 +638,9 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             }
             if (sawDiffuseThenSpec) break;
         }
-        // Caustics on: paths of the form connectable-anchor → delta-transmissive
-        // chain → light are covered by the manifold s=1 connections below.
-        // Suppress the noisy BSDF copy exactly when the same seed set finds the
-        // branch this path took (mirrors the Path Tracer's suppression rule).
-        if (causticsOn && t >= 4) {
-            int j = t - 2;
-            int chainLen = 0;
-            while (j >= 1 && eye[j].type == VType::Surface && eye[j].delta &&
-                   mnee::isCausticCaster(eye[j].mat) && chainLen <= mnee::kMaxChain) {
-                ++chainLen;
-                --j;
-            }
-            if (chainLen >= 1 && chainLen <= mnee::kMaxChain && j >= 1 &&
-                eye[j].type == VType::Surface && eye[j].connectable) {
-                const Vert& anchor = eye[j];
-                const Vec3 anchorDir = normalize(eye[j + 1].p - anchor.p);
-                Vec3 seg = v.p - anchor.p;
-                const float segLen = length(seg);
-                if (segLen > 1e-5f) {
-                    seg = seg / segLen;
-                    const Vec3 o = offsetRayOrigin(anchor.p, anchor.ng, seg);
-                    RayHit sh;
-                    if (tracer.intersect(o, seg, segLen * (1.0f - 1e-3f), sh)) {
-                        SurfaceInteraction ssi;
-                        if (buildSurfaceInteraction(scene, sh, o, seg, ssi) && ssi.lightIndex < 0) {
-                            Material smat = ssi.materialIndex >= 0 && ssi.materialIndex < scene.materialCount
-                                                ? scene.materials[ssi.materialIndex]
-                                                : defaultMaterial();
-                            smat = evaluateTexturedMaterial(scene, smat, ssi.uv, ssi.ns, ssi.pObject,
-                                                            ssi.nObject, ssi.uvFilterWidth);
-                            if (mnee::isCausticCaster(smat) &&
-                                mnee::branchCovered(scene, tracer, anchor.p, anchor.ns, v.lightIndex, v.p,
-                                                    ssi.instanceIndex, anchorDir))
-                                break;  // manifold-covered — suppress
-                        }
-                    }
-                }
-            }
-        }
 
         MisOverride ov;
+        ov.splatStrategy = doSplats;
         ov.lightOriginDelta = false;
         ov.eyeLastRev = pdfLightOrigin(scene, l, v.lightIndex);
         const Vec3 emitToPrev = normalize(eye[t - 2].p - v.p);
@@ -666,53 +748,9 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         if (isBlack(Le)) continue;
 
         const Vec3 f = bsdfF(E.mat, E.ns, E.wo, wi);
-        if (isBlack(f) && !causticsOn) continue;
-
-        if (l.shadowEnable && !connectionVisible(scene, tracer, E.p, E.ng, Ls.p, li)) {
-            // Blocked. If the first blocker is a delta-transmissive caustic caster,
-            // connect through the glass with the multi-seed manifold estimator
-            // (weight 1 — no other BDPT strategy samples delta chains; the s=0
-            // BSDF copies of covered branches are suppressed above).
-            if (!causticsOn) continue;
-            Vec3 segD = Ls.p - E.p;
-            const float segLen = length(segD);
-            if (segLen < 1e-5f) continue;
-            segD = segD / segLen;
-            const Vec3 o = offsetRayOrigin(E.p, E.ng, segD);
-            RayHit sh;
-            if (!tracer.intersect(o, segD, segLen * (1.0f - 1e-3f), sh)) continue;
-            SurfaceInteraction bsi;
-            if (!buildSurfaceInteraction(scene, sh, o, segD, bsi)) continue;
-            if (bsi.lightIndex >= 0) continue;
-            Material bmat = bsi.materialIndex >= 0 && bsi.materialIndex < scene.materialCount
-                                ? scene.materials[bsi.materialIndex]
-                                : defaultMaterial();
-            bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject, bsi.nObject,
-                                            bsi.uvFilterWidth);
-            if (!mnee::isCausticCaster(bmat)) continue;
-            // mnee conventions: Le = radiance (area lights) / intensity (point),
-            // pdfArea in area measure without light selection.
-            Vec3 LeM;
-            float pdfAreaM = 1.0f;
-            if (l.type == kLightPoint) {
-                LeM = l.emittedRadiance();
-                pdfAreaM = 1.0f;
-            } else {
-                LeM = lightRadiance(l);
-                pdfAreaM = Ls.pdfFwd / srMax(1e-12f, selectPdf);
-            }
-            const mnee::MneeResult mr =
-                mnee::manifoldConnect(scene, tracer, E.p, E.ns, E.wo, E.mat, li, Ls.p, Ls.ns, LeM,
-                                      pdfAreaM, selectPdf, bsi.instanceIndex);
-            if (mr.solved && !isBlack(mr.contribution)) {
-                Vec3 c = E.beta * mr.contribution;
-                c = clampContribution(c, settings.clampIndirect > 0.0f ? settings.clampIndirect * 4.0f
-                                                                       : 0.0f);
-                if (isFinite(c)) L += c;
-            }
-            continue;
-        }
         if (isBlack(f)) continue;
+
+        if (l.shadowEnable && !connectionVisible(scene, tracer, E.p, E.ng, Ls.p, li)) continue;
 
         Vec3 c;
         if (l.type == kLightPoint) {
@@ -725,6 +763,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 
         // MIS overrides for this strategy.
         MisOverride ov;
+        ov.splatStrategy = doSplats;
         ov.lightOriginDelta = l.type == kLightPoint;
         // Light vertex generated from the eye side: bsdf at E toward L.
         ov.lightLastRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, E.wo, wi), E.p, Ls.p, Ls.ns);
@@ -783,6 +822,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (!connectionVisible(scene, tracer, E.p, E.ng, Lv.p, -1)) continue;
 
             MisOverride ov;
+            ov.splatStrategy = doSplats;
             ov.lightOriginDelta = lightOriginDelta;
             ov.lightLastRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, E.wo, d), E.p, Lv.p, Lv.ns);
             ov.eyeLastRev = toAreaPdf(bsdfPdfSa(Lv.mat, Lv.ns, Lv.wo, -d), Lv.p, E.p, E.ns);

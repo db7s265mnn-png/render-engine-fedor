@@ -295,9 +295,11 @@ struct RenderSettingsData {
     float aoDistance = 1.0f;
     int pathGuiding = 0;           // OpenPGL on CPU (Embree); ignored on OptiX
     // Enable caustic light transport (specular→diffuse). Path Tracer uses MNEE for
-    // refractive caustics; BDPT handles them bidirectionally. Off = dark glass shadows.
+    // refractive caustics; BDPT regularizes indirect specular vertices so caustics
+    // arrive through its standard connections. Off = dark glass shadows.
     int caustics = 1;
-    float pad3 = 0.0f;
+    // Progressive pass index (set per sample by the CPU backend).
+    int progressiveSample = 0;
 };
 
 // ---------------------------------------------------------------------------
