@@ -560,6 +560,110 @@ void testCausticsGlassSphere() {
                 sumPointBdpt, pointRatio);
 }
 
+// Camera looks straight down through a glass sphere at the floor. Light-tracing
+// splats cannot reach those pixels (floor→camera occluded by glass). BDPT must
+// upgrade s=1 to MNEE after the specular eye prefix so caustic energy under the
+// glass is visible through refraction — matching PT+MNEE.
+void testBdptCausticThroughRefraction() {
+    std::printf("bdpt-caustic-through-refraction\n");
+
+    auto buildScene = [](int integrator, int caustics) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-3, 0, -3), Vec3(3, 0, -3), Vec3(3, 0, 3), Vec3(-3, 0, 3)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+        floor->validate();
+        const int floorMesh = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.8f);
+        floorMat.roughness = 0.95f;
+        floorMat.specular = 0.0f;
+        const int floorIdx = scene->addMaterial(floorMat);
+        InstanceData floorInst;
+        floorInst.meshIndex = floorMesh;
+        floorInst.materialIndex = floorIdx;
+        scene->instances.push_back(floorInst);
+
+        MeshPtr ball = makeSphereMesh(0.85f, 48, 24);
+        const int ballMesh = scene->addMesh(ball);
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.roughness = 0.0f;
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.specular = 1.0f;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData ballInst;
+        ballInst.xform = Mat4::translate(Vec3(0.0f, 0.9f, 0.0f));
+        ballInst.meshIndex = ballMesh;
+        ballInst.materialIndex = glassIdx;
+        scene->instances.push_back(ballInst);
+
+        LightData light;
+        light.type = kLightRect;
+        light.width = 0.8f;
+        light.height = 0.8f;
+        light.intensity = 60.0f;
+        light.normalize = 1;
+        light.visibleCamera = 0;
+        // Overhead light offset so the camera-invisible proxy is not on the
+        // primary ray (BDPT must still skip such proxies — covered here too).
+        light.xform = Mat4::translate(Vec3(0.4f, 4.0f, 0.4f)) * Mat4::rotateX(-90.0f);
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 64;
+        scene->settings.resolutionY = 64;
+        scene->settings.samplesPerPixel = 64;
+        scene->settings.maxDepth = 8;
+        scene->settings.integrator = integrator;
+        scene->settings.caustics = caustics;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampIndirect = 0.0f;
+        scene->settings.lightSamples = 2;
+        // Top-down: primary hits are glass over the silhouette center.
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(0.0f, 4.2f, 0.0f), Vec3(0.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, -1.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto renderCenter = [&](int integrator, int caustics, bool& finiteOut) -> double {
+        RenderSession session;
+        session.setScene(buildScene(integrator, caustics));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        const int x0 = img.width() / 4;
+        const int x1 = (3 * img.width()) / 4;
+        const int y0 = img.height() / 4;
+        const int y1 = (3 * img.height()) / 4;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        return sum;
+    };
+
+    bool finBdptOn = true, finBdptOff = true, finPtOn = true;
+    const double sumBdptOn = renderCenter(kIntegratorBdpt, 1, finBdptOn);
+    const double sumBdptOff = renderCenter(kIntegratorBdpt, 0, finBdptOff);
+    const double sumPtOn = renderCenter(kIntegratorPathTracer, 1, finPtOn);
+    check(finBdptOn && finBdptOff && finPtOn, "through-refraction renders are finite");
+    check(sumBdptOn > sumBdptOff * 1.2, "BDPT MNEE lights floor seen through glass");
+    check(sumPtOn > sumBdptOff * 1.2, "PT MNEE lights floor seen through glass");
+    const double ratio = sumPtOn > 0.0 ? sumBdptOn / sumPtOn : 0.0;
+    check(ratio > 0.55 && ratio < 1.8, "BDPT and PT through-glass caustic energy agree");
+    std::printf("  bdptOn=%.1f bdptOff=%.1f ptOn=%.1f ratio=%.3f\n", sumBdptOn, sumBdptOff, sumPtOn, ratio);
+}
+
 // Rough (but still tightly focusing) glass must converge like smooth glass: the
 // caustic family belongs to light tracing, otherwise the eye path has to stumble
 // onto a small light through the chain and the render is all fireflies.
@@ -2299,6 +2403,12 @@ int main() {
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
+    if (getenv("SOL_ONLY_THROUGH_REFR")) {
+        registerBuiltinNodes();
+        testBdptCausticThroughRefraction();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     testMath();
     testSampling();
     testBsdf();
@@ -2310,6 +2420,7 @@ int main() {
     testEnvironment();
     testRender();
     testCausticsGlassSphere();
+    testBdptCausticThroughRefraction();
     testRoughGlassCaustics();
     testRefractionSparkleClamp();
     testSplatAccumulationPrecision();

@@ -5,15 +5,19 @@
 // Strategies: t = 1 light-tracing splats onto the camera (the workhorse for
 // caustics from small lights: light → delta glass chain → diffuse → camera),
 // s = 0 (eye path hits an emitter), s = 1 (light resampled toward the eye
-// vertex, NEE-like), s >= 2 (surface↔surface connections), all t >= 2.
-// Dome / distant lights contribute via s ∈ {0,1} with the power heuristic
-// (no light subpath from them). Optional OpenPGL guiding mixes into eye-path
-// BSDF sampling; the mixture pdf is the true forward pdf so MIS stays valid.
+// vertex, NEE-like — upgraded to MNEE when the eye arrived through glass and
+// the shadow hits a delta dielectric, so caustics under refractive objects
+// are visible through refraction), s >= 2 (surface↔surface connections),
+// all t >= 2. Dome / distant lights contribute via s ∈ {0,1} with the power
+// heuristic (no light subpath from them). Optional OpenPGL guiding mixes into
+// eye-path BSDF sampling; the mixture pdf is the true forward pdf so MIS stays
+// valid.
 #pragma once
 
 #include "core/rng.h"
 #include "render/framebuffer.h"
 #include "render/integrator.h"
+#include "render/integrator_mnee.h"
 #include "render/lights.h"
 #include "render/shading.h"
 #include "solstice_config.h"
@@ -284,6 +288,14 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
 
         if (si.lightIndex >= 0) {
             if (cfg.eyePath) {
+                // Match the path tracer: camera-invisible light proxies are skipped on
+                // the primary ray so the eye can see the scene behind them.
+                const InstanceData& inst = scene.instances[si.instanceIndex];
+                if (count == 1 && !inst.visibleCamera) {
+                    origin = offsetRayOrigin(si.p, si.ng, dir);
+                    if (++passThrough > 16) break;
+                    continue;
+                }
                 Vert v{};
                 v.type = VType::Light;
                 v.lightIndex = si.lightIndex;
@@ -802,6 +814,75 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         const float dist = sqrtf(dist2);
         const Vec3 wi = toL / dist;
 
+        // Peek the shadow segment: clear, delta-glass (MNEE candidate), or blocked.
+        bool clearPath = true;
+        bool glassPath = false;
+        int blockerInstance = -1;
+        if (l.shadowEnable) {
+            const Vec3 o = offsetRayOrigin(E.p, E.ng, wi);
+            RayHit sh;
+            if (tracer.intersect(o, wi, dist * (1.0f - 1e-3f), sh)) {
+                SurfaceInteraction bsi;
+                clearPath = false;
+                if (buildSurfaceInteraction(scene, sh, o, wi, bsi)) {
+                    if (bsi.lightIndex == li) {
+                        clearPath = true;
+                    } else if (bsi.lightIndex < 0 && causticsOn && lightContributesCaustics(l)) {
+                        Material bmat = bsi.materialIndex >= 0 && bsi.materialIndex < scene.materialCount
+                                            ? scene.materials[bsi.materialIndex]
+                                            : defaultMaterial();
+                        bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject, bsi.nObject,
+                                                        bsi.uvFilterWidth);
+                        glassPath = mnee::isCausticCaster(bmat);
+                        blockerInstance = bsi.instanceIndex;
+                    }
+                }
+            }
+        }
+
+        // Eye arrived through near-specular glass/mirror: LT cannot splat the
+        // floor under that glass (camera↔floor occluded), so MNEE owns the family.
+        bool eyeThroughSpec = false;
+        for (int i = 1; i <= t - 2; ++i) {
+            if (eye[i].type == VType::Surface && eye[i].nearSpec) {
+                eyeThroughSpec = true;
+                break;
+            }
+        }
+
+        if (clearPath) {
+            // fall through to the regular BDPT s=1 connection below
+        } else {
+            // Glass blocks the shadow segment. When the eye arrived through
+            // near-specular glass, light-tracing cannot splat these pixels
+            // (floor→camera occluded) — MNEE owns that family. On open floor
+            // the same glass block is already handled by t=1 splats; skip MNEE
+            // there to avoid double-counting.
+            if (!(glassPath && eyeThroughSpec)) continue;
+            // Radiance / intensity as expected by manifoldConnect (not /r²).
+            const Vec3 LeMnee =
+                l.type == kLightPoint ? l.emittedRadiance() : lightRadiance(l);
+            if (isBlack(LeMnee)) continue;
+            const mnee::MneeResult mr =
+                mnee::manifoldConnect(scene, tracer, E.p, E.ns, E.wo, E.mat, li, Ls.p, lightN, LeMnee,
+                                      pdfPosArea, selectPdf, blockerInstance, heroChannel);
+            if (!mr.solved || isBlack(mr.contribution)) continue;
+            Vec3 c = E.beta * mr.contribution;
+            // Same headroom as PT+MNEE: caustics keep more energy than diffuse indirect.
+            c = clampContribution(c, settings.clampIndirect > 0.0f ? settings.clampIndirect * 4.0f : 0.0f);
+            if (settings.causticClamp > 0.0f) c = clampContribution(c, settings.causticClamp);
+            if (!isFinite(c)) continue;
+            L += c;
+#if SOLSTICE_HAVE_OPENPGL
+            if (guiding && guiding->active() && !isBlack(E.beta)) {
+                const Vec3 local(c.x / srMax(1e-8f, E.beta.x), c.y / srMax(1e-8f, E.beta.y),
+                                 c.z / srMax(1e-8f, E.beta.z));
+                guiding->addScattered(local);
+            }
+#endif
+            continue;
+        }
+
         Vec3 Le(0.0f);
         if (l.type == kLightPoint) {
             Le = l.emittedRadiance() / dist2;  // radiant intensity → irradiance factor
@@ -816,8 +897,6 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 
         const Vec3 f = bsdfF(E.mat, E.ng, E.ns, E.wo, wi);
         if (isBlack(f)) continue;
-
-        if (l.shadowEnable && !connectionVisible(scene, tracer, E.p, E.ng, Ls.p, li)) continue;
 
         Vec3 c;
         if (l.type == kLightPoint) {

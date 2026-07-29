@@ -684,8 +684,9 @@ public:
                                          0)
                          .withGroup("Engine")
                          .withTooltip("Path Tracer: unidirectional + MNEE refractive caustics.\n"
-                                      "BDPT: bidirectional connections (better caustics / interiors, "
-                                      "CPU only — OptiX falls back to Path Tracer).\n"
+                                      "BDPT: light-tracing caustics on open surfaces; MNEE when the "
+                                      "camera looks through glass at a caustic (CPU only — OptiX "
+                                      "falls back to Path Tracer).\n"
                                       "The log reports which caustics mode is active."));
         addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
