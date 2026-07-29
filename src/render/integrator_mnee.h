@@ -416,6 +416,39 @@ SR_INL Vec3 traceRadianceMnee(const SceneView& scene, const Tracer& tracer, Vec3
                                : defaultMaterial();
         Material mat =
             evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+
+        if (mat.transmission <= 0.0f && mat.doubleSided && dot(si.ns, -direction) < 0.0f) {
+            si.ns = -si.ns;
+            si.ng = -si.ng;
+        }
+
+        // Emissive surfaces.
+        if (mat.emissionStrength > 0.0f && !isBlack(mat.emissionColor)) {
+            const bool frontFacing = dot(si.ns, -direction) > 0.0f;
+            if (frontFacing || mat.doubleSided)
+                radiance += throughput * mat.emissionColor * mat.emissionStrength;
+        }
+
+        // Stochastic opacity / cutout.
+        if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
+            origin = offsetRayOrigin(si.p, si.ng, direction);
+            ++passThrough;
+            if (passThrough > 32) break;
+            continue;
+        }
+
+        if (settings.integrator == kIntegratorAmbientOcclusion) {
+            const Frame frame(dot(si.ns, -direction) < 0.0f ? -si.ns : si.ns);
+            const Vec3 wi = frame.toWorld(sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat()));
+            const Vec3 aoOrigin = offsetRayOrigin(si.p, si.ng, wi);
+            const float dist = settings.aoDistance > 0.0f ? settings.aoDistance : kFloatMax;
+            const float visibility = tracer.occluded(aoOrigin, wi, dist) ? 0.0f : 1.0f;
+            radiance += throughput * Vec3(visibility);
+            break;
+        }
+
+        if (depth >= maxDepth) break;
+
         const Frame frame(si.ns);
         const Vec3 wo = -direction;
         const LobeWeights lw = computeLobes(mat);

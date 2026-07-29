@@ -583,20 +583,39 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 
     Vec3 luminance(0.0f);
 
-    // (s=0) eye path hit emitter / environment.
+    // (s=0) eye path hit emitter / environment / emissive material.
     for (int t = 2; t <= tCount; ++t) {
-        if (eye[t - 1].kind != VertKind::Light) continue;
-        Vec3 c = emissionOnEyePath(scene, eye, t);
-        if (isBlack(c)) continue;
-        float mis = (t == 2) ? 1.0f : misWeight(0, t);
-        c = c * mis;
-        if (t > 2) c = clampContribution(c, scene.settings.clampIndirect);
-        luminance += c;
+        const Vertex& v = eye[t - 1];
+        if (v.kind == VertKind::Light) {
+            Vec3 c = emissionOnEyePath(scene, eye, t);
+            if (isBlack(c)) continue;
+            float mis = (t == 2) ? 1.0f : misWeight(0, t);
+            c = c * mis;
+            if (t > 2) c = clampContribution(c, scene.settings.clampIndirect);
+            luminance += c;
 #if SOLSTICE_HAVE_OPENPGL
-        if (guiding && guiding->active() && t == tCount)
-            guiding->recordEmission(c, mis);
+            if (guiding && guiding->active()) guiding->recordEmission(c, mis);
 #endif
-        break;  // only the terminal emitter vertex
+            break;
+        }
+        if (v.kind == VertKind::Surface && v.mat.emissionStrength > 0.0f &&
+            !isBlack(v.mat.emissionColor)) {
+            // Mesh emission: throughput to this vertex times Le (same as unidirectional PT).
+            Vec3 Le = v.mat.emissionColor * v.mat.emissionStrength;
+            Vec3 c = v.beta * Le;
+            float mis = (t == 2) ? 1.0f : misWeight(0, t);
+            c = c * mis;
+            if (t > 2) c = clampContribution(c, scene.settings.clampIndirect);
+            luminance += c;
+#if SOLSTICE_HAVE_OPENPGL
+            if (guiding && guiding->active()) guiding->recordEmission(Le, mis);
+#endif
+            // Keep walking strategies for non-emissive connections; emission itself is added once.
+            // For pure emitters we can stop considering longer s=0 prefixes from deeper hits.
+            if (computeLobes(v.mat).diffuse < 1e-4f && computeLobes(v.mat).specular < 1e-4f &&
+                computeLobes(v.mat).transmission < 1e-4f)
+                break;
+        }
     }
 
     // Connect (s,t) strategies. Skip s=1 when t path already used unidirectional-style
