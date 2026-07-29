@@ -15,6 +15,10 @@ namespace sol {
 
 constexpr float kMinAlpha = 1.0e-3f;
 constexpr float kDeltaAlpha = 2.0e-3f;
+// Vertices at or below this GGX alpha (roughness ≈ 0.22) still focus light tightly
+// enough that a caustic behaves like a specular chain: BSDF-sampling the tiny light
+// from the eye side is hopeless, so those chains are routed to light tracing.
+constexpr float kCausticAlpha = 5.0e-2f;
 
 struct BsdfSample {
     Vec3 weight{0.0f, 0.0f, 0.0f};  // f * cos / pdf
@@ -500,6 +504,13 @@ SR_INL SR_HD LobeWeights computeLobes(const Material& mat) {
     return lw;
 }
 
+// Purely specular / transmissive vertex whose lobe is still tight enough that the
+// caustics it casts have to be delivered by light tracing rather than by the eye
+// path stumbling onto the light. True delta lobes are a subset of this.
+SR_INL SR_HD bool isNearSpecularLobe(const LobeWeights& lw) {
+    return lw.alpha <= kCausticAlpha && lw.diffuse < 1e-3f;
+}
+
 // Evaluate the BSDF for a pair of directions expressed in the local shading
 // frame (z = shading normal). Delta lobes return zero.
 SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
@@ -642,8 +653,11 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
         h = sampleGgxVndf(woUp, lw.alpha, u1, u2);
         if (wo.z < 0.0f) h = -h;
     }
+    // h is flipped onto wo's side, so cosThetaI is positive and the Fresnel term
+    // must use the side-relative eta — passing lw.eta here would evaluate the
+    // air→glass interface for rays leaving the medium and never reach TIR.
     const float dotOH = dot(wo, h);
-    const float fr = fresnelDielectric(dotOH, lw.eta);
+    const float fr = fresnelDielectric(dotOH, eta);
 
     // Inside + Internal Reflections off: skip Fresnel reflection. TIR still
     // reflects — refraction is impossible (Arnold keeps critical-angle TIR).

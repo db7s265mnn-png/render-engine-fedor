@@ -187,6 +187,43 @@ void testBsdf() {
     }
     check(specularHits == 0, "specular=0 never samples a specular bounce");
 
+    // Past the critical angle an interior ray has nowhere to refract to, so every
+    // sample must come back as a valid total internal reflection. Evaluating the
+    // Fresnel term with the outside eta silently killed these paths instead.
+    Material glassDelta = glass;
+    glassDelta.roughness = 0.0f;
+    const float critAngle = std::asin(1.0f / 1.5f);
+    const float insideTheta = critAngle + 0.2f;
+    const Vec3 woBeyondCritical(std::sin(insideTheta), 0.0f, -std::cos(insideTheta));
+    int tirValid = 0;
+    int tirRefracted = 0;
+    for (int i = 0; i < 500; ++i) {
+        const BsdfSample sample = bsdfSampleLocal(glassDelta, woBeyondCritical, 0.99f, rng.nextFloat(),
+                                                  rng.nextFloat(), rng.nextFloat());
+        if (sample.pdf <= 0.0f) continue;
+        if (sample.transmitted) ++tirRefracted;
+        else if (sample.wi.z < 0.0f) ++tirValid;
+    }
+    check(tirValid == 500, "beyond the critical angle every interior sample reflects");
+    check(tirRefracted == 0, "no refraction escapes past the critical angle");
+
+    // Below the critical angle the reflect/refract split must follow the glass→air
+    // Fresnel term. Using the air→glass eta here biases the split (and the pdf that
+    // the eval side reports for the very same sample).
+    const float insideCos = std::cos(radians(30.0f));
+    const Vec3 woInside30(std::sin(radians(30.0f)), 0.0f, -insideCos);
+    const float expectedFr = fresnelDielectric(insideCos, 1.0f / 1.5f);
+    int reflected30 = 0;
+    const int trials30 = 20000;
+    for (int i = 0; i < trials30; ++i) {
+        const BsdfSample sample = bsdfSampleLocal(glassDelta, woInside30, 0.99f, rng.nextFloat(),
+                                                  rng.nextFloat(), rng.nextFloat());
+        if (sample.pdf <= 0.0f) continue;
+        if (!sample.transmitted) ++reflected30;
+    }
+    const float measuredFr = float(reflected30) / float(trials30);
+    checkNear(measuredFr, expectedFr, 0.008f, "interior Fresnel split uses the glass→air eta");
+
     // Arnold Advanced → Internal Reflections: from inside, disable Fresnel
     // reflections (keep TIR). Exterior behaviour unchanged.
     Material glassIR = glass;
@@ -520,6 +557,114 @@ void testCausticsGlassSphere() {
     check(pointRatio > 0.8 && pointRatio < 1.25, "BDPT and PT point-light caustics agree");
     std::printf("  pointOn=%.1f pointOff=%.1f pointBDPT=%.1f ratio=%.3f\n", sumPointOn, sumPointOff,
                 sumPointBdpt, pointRatio);
+}
+
+// Rough (but still tightly focusing) glass must converge like smooth glass: the
+// caustic family belongs to light tracing, otherwise the eye path has to stumble
+// onto a small light through the chain and the render is all fireflies.
+void testRoughGlassCaustics() {
+    std::printf("rough-glass-caustics\n");
+
+    auto buildScene = [](int integrator, float roughness) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+        floor->validate();
+        const int floorMesh = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.75f);
+        floorMat.roughness = 0.9f;
+        floorMat.specular = 0.0f;
+        const int floorIdx = scene->addMaterial(floorMat);
+        InstanceData floorInst;
+        floorInst.meshIndex = floorMesh;
+        floorInst.materialIndex = floorIdx;
+        scene->instances.push_back(floorInst);
+
+        MeshPtr ball = makeSphereMesh(0.7f, 48, 24);
+        const int ballMesh = scene->addMesh(ball);
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.roughness = roughness;
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.specular = 1.0f;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData ballInst;
+        ballInst.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+        ballInst.meshIndex = ballMesh;
+        ballInst.materialIndex = glassIdx;
+        scene->instances.push_back(ballInst);
+
+        // Small light: the whole point is that BSDF sampling cannot find it.
+        LightData light;
+        light.type = kLightRect;
+        light.width = 0.2f;
+        light.height = 0.2f;
+        light.intensity = 900.0f;
+        light.normalize = 1;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.0f, 4.0f, 0.0f)) * Mat4::rotateX(-90.0f);
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 72;
+        scene->settings.resolutionY = 54;
+        scene->settings.samplesPerPixel = 32;
+        scene->settings.maxDepth = 8;
+        scene->settings.integrator = integrator;
+        scene->settings.caustics = 1;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampIndirect = 0.0f;  // unbiased: fireflies stay visible
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    // Peak-to-mean luminance: a converged caustic has a smooth falloff, while an
+    // unresolved one is a handful of enormous pixels over a black floor.
+    auto render = [&](int integrator, float roughness, double& peakOverMean) -> double {
+        RenderSession session;
+        session.setScene(buildScene(integrator, roughness));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        double peak = 0.0;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) {
+                const double l = double(luminance(img.rgb(x, y)));
+                sum += l;
+                if (l > peak) peak = l;
+            }
+        const double mean = sum / double(img.width() * img.height());
+        peakOverMean = mean > 1e-9 ? peak / mean : 0.0;
+        return sum;
+    };
+
+    double peakSmooth = 0.0, peakRough = 0.0, peakPtRough = 0.0;
+    const double sumSmooth = render(kIntegratorBdpt, 0.0f, peakSmooth);
+    const double sumRough = render(kIntegratorBdpt, 0.1f, peakRough);
+    const double sumPtRough = render(kIntegratorPathTracer, 0.1f, peakPtRough);
+    std::printf("  bdpt smooth sum=%.1f peak/mean=%.1f | rough(0.1) sum=%.1f peak/mean=%.1f\n", sumSmooth,
+                peakSmooth, sumRough, peakRough);
+    std::printf("  pt rough(0.1) sum=%.1f peak/mean=%.1f\n", sumPtRough, peakPtRough);
+
+    check(sumSmooth > 0.0 && sumRough > 0.0, "rough and smooth glass both transport light");
+    // Roughening the glass slightly must not blow the estimator up: the caustic
+    // spreads a little, so total energy stays close and the peak stays bounded.
+    const double ratio = sumRough / sumSmooth;
+    check(ratio > 0.6 && ratio < 1.6, "rough glass keeps the caustic energy of smooth glass");
+    check(peakRough < peakSmooth * 3.0 + 30.0, "rough glass does not degenerate into fireflies");
+    // BDPT routes rough caustics through light tracing while the plain path tracer
+    // BSDF-samples them; the two must still agree on the transported energy.
+    const double ptRatio = sumPtRough > 0.0 ? sumRough / sumPtRough : 0.0;
+    check(ptRatio > 0.7 && ptRatio < 1.4, "BDPT and PT agree on rough glass energy");
 }
 
 // Chromatic dispersion + thin-film iridescence sanity.
@@ -2032,6 +2177,7 @@ int main() {
     testEnvironment();
     testRender();
     testCausticsGlassSphere();
+    testRoughGlassCaustics();
     testDispersionAndThinFilm();
     testIntegratorSwitchStress();
     testInstanceTransform();

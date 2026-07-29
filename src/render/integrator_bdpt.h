@@ -42,6 +42,10 @@ struct Vert {
     VType type = VType::Surface;
     bool delta = false;       // delta BSDF vertex (or delta light origin)
     bool connectable = true;  // has a non-delta lobe to connect through
+    // Specular or near-specular (low-roughness glass / mirror). Drives the caustic
+    // family partition: `delta` alone would drop rough glass back onto the s=0
+    // strategy, which cannot find a small light through the chain.
+    bool nearSpec = false;
 };
 
 SR_INL float remap0(float f) { return f > 0.0f ? f : 1.0f; }
@@ -316,6 +320,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
             const LobeWeights lw = computeLobes(mat);
             v.delta = lw.delta && lw.diffuse < 1e-4f;
             v.connectable = !v.delta;
+            v.nearSpec = v.delta || isNearSpecularLobe(lw);
         }
         path[count++] = v;
         if (count >= maxVerts) break;
@@ -552,12 +557,12 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (v.type != VType::Surface || !v.connectable) continue;
             // Caustics off: light→specular-chain→diffuse splats are the caustic
             // family; drop them to match the dark-shadow look.
-            bool lightPrefixDelta = false;
+            bool lightPrefixCaustic = false;
             for (int i = 1; i < s - 1; ++i)
-                if (light[i].delta) lightPrefixDelta = true;
+                if (light[i].nearSpec) lightPrefixCaustic = true;
             if (!causticsOn) {
-                if (lightPrefixDelta) continue;
-            } else if (lightPrefixDelta && light[0].lightIndex >= 0 &&
+                if (lightPrefixCaustic) continue;
+            } else if (lightPrefixCaustic && light[0].lightIndex >= 0 &&
                        !lightContributesCaustics(scene.lights[light[0].lightIndex])) {
                 // Per-light Contribute to Caustics off.
                 continue;
@@ -579,7 +584,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             // handed to this strategy (family partition) — weight it fully.
             MisOverride ov;
             ov.splatStrategy = true;
-            ov.s0Sampled = !(causticsOn && lightPrefixDelta);
+            ov.s0Sampled = !(causticsOn && lightPrefixCaustic);
             ov.lightOriginDelta = lightOriginDelta;
             ov.lightLastRev = toAreaPdf(pdfOmega, camProj.camPos, v.p, v.ns);
             if (s >= 2)
@@ -629,7 +634,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             bool sawDiffuseThenSpec = false;
             bool diffuseSeen = false;
             for (int i = 1; i < t - 1; ++i) {
-                if (!eye[i].delta) diffuseSeen = true;
+                if (!eye[i].nearSpec) diffuseSeen = true;
                 else if (diffuseSeen) sawDiffuseThenSpec = true;
             }
             if (sawDiffuseThenSpec && (!causticsOn || !lightContributesCaustics(l))) break;
@@ -665,20 +670,20 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         const Vec3 wi = -v.wo;  // direction of travel into the light
         Vec3 Le = areaLightEmission(scene, l, wi, lightN);
         if (isBlack(Le)) break;
-        // Caustic family partition: diffuse → delta chain → area light cannot be
-        // weighted by formal Veach MIS (the delta-chain lens Jacobian is not in
+        // Caustic family partition: diffuse → specular chain → area light cannot be
+        // weighted usefully by formal Veach MIS (the chain's lens Jacobian is not in
         // the pdf bookkeeping), so hitting a tiny light through glass stays a
         // firefly no matter the sample count. When light tracing is active, that
         // family is delivered exclusively by t=1 splats — drop the noisy s=0 copy.
-        // Kept when the camera-adjacent vertex is delta (SDS: splats cannot see it).
+        // Kept when the camera-adjacent vertex is specular (SDS: splats cannot see it).
         if (causticsOn && doSplats && t >= 4) {
             int j = t - 2;
             int chainLen = 0;
-            while (j >= 1 && eye[j].type == VType::Surface && eye[j].delta) {
+            while (j >= 1 && eye[j].type == VType::Surface && eye[j].nearSpec) {
                 ++chainLen;
                 --j;
             }
-            if (chainLen >= 1 && j >= 1 && !eye[j].delta && !eye[1].delta) break;
+            if (chainLen >= 1 && j >= 1 && !eye[j].nearSpec && !eye[1].nearSpec) break;
         }
 
         MisOverride ov;
@@ -840,18 +845,18 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             const Vert& Lv = light[s - 1];
             if (Lv.type != VType::Surface || !Lv.connectable) continue;
 
-            bool lightPrefixDelta = false;
+            bool lightPrefixCaustic = false;
             for (int i = 1; i < s - 1; ++i)
-                if (light[i].delta) lightPrefixDelta = true;
+                if (light[i].nearSpec) lightPrefixCaustic = true;
             // Caustics off: skip connections whose eye side has diffuse→specular chains.
             if (!causticsOn) {
                 bool diffuseSeen = false, chainAfterDiffuse = false;
                 for (int i = 1; i < t; ++i) {
-                    if (!eye[i].delta) diffuseSeen = true;
+                    if (!eye[i].nearSpec) diffuseSeen = true;
                     else if (diffuseSeen) chainAfterDiffuse = true;
                 }
                 if (chainAfterDiffuse) continue;
-            } else if (lightPrefixDelta && light[0].lightIndex >= 0 &&
+            } else if (lightPrefixCaustic && light[0].lightIndex >= 0 &&
                        !lightContributesCaustics(scene.lights[light[0].lightIndex])) {
                 continue;
             }
@@ -871,7 +876,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 
             MisOverride ov;
             ov.splatStrategy = doSplats;
-            ov.s0Sampled = !(causticsOn && doSplats && lightPrefixDelta);
+            ov.s0Sampled = !(causticsOn && doSplats && lightPrefixCaustic);
             ov.lightOriginDelta = lightOriginDelta;
             ov.lightLastRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, E.wo, d), E.p, Lv.p, Lv.ns);
             ov.eyeLastRev = toAreaPdf(bsdfPdfSa(Lv.mat, Lv.ns, Lv.wo, -d), Lv.p, E.p, E.ns);

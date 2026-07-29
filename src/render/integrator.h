@@ -786,9 +786,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         direction = wiWorld;
         bsdfPdf = bs.pdf;
         specularBounce = bs.specular;
-        if (settings.caustics == 0 && bs.specular && sawNonSpecular) suppressCausticLight = true;
-        if (bs.specular && sawNonSpecular) causticSuffix = true;
-        if (!bs.specular) {
+        // Caustic bookkeeping follows the near-specular classification (same as BDPT)
+        // so low-roughness glass counts as a caustic chain, not as diffuse transport.
+        const bool causticBounce = bs.specular || isNearSpecularLobe(lw);
+        if (settings.caustics == 0 && causticBounce && sawNonSpecular) suppressCausticLight = true;
+        if (causticBounce && sawNonSpecular) causticSuffix = true;
+        if (!causticBounce) {
             sawNonSpecular = true;
             causticSuffix = false;
         }
