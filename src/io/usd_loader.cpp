@@ -8,6 +8,13 @@
 
 #include "core/log.h"
 #include "io/alembic_loader.h"
+#include "solstice_config.h"
+
+#if SOLSTICE_HAVE_TINYUSDZ
+#include "tinyusdz.hh"
+#include "pprinter.hh"
+#include "value-pprint.hh"
+#endif
 
 namespace sol {
 namespace {
@@ -31,6 +38,16 @@ bool isUsdaText(const std::string& data) {
     if (data.size() >= 5 && data.compare(0, 5, "#usda") == 0) return true;
     if (data.find("def ") != std::string::npos || data.find("over ") != std::string::npos) return true;
     return false;
+}
+
+bool isUsdcBinary(const std::string& data) {
+    return data.size() >= 8 && data.compare(0, 8, "PXR-USDC") == 0;
+}
+
+bool isUsdzArchive(const std::string& data) {
+    // ZIP local file header (USDZ is a zip package).
+    return data.size() >= 4 && data[0] == 'P' && data[1] == 'K' &&
+           (unsigned char)data[2] <= 0x05;
 }
 
 bool parseFloatList(const std::string& text, std::vector<float>& values) {
@@ -366,6 +383,41 @@ void parseUsda(const std::string& data, UsdContents& out, const UsdLoadOptions& 
 
 bool usdSupportAvailable() { return true; }
 
+#if SOLSTICE_HAVE_TINYUSDZ
+namespace {
+
+bool loadUsdViaTinyusdz(const std::string& filePath, const UsdLoadOptions& options, UsdContents& out,
+                        std::string& error) {
+    tinyusdz::Stage stage;
+    std::string warn;
+    std::string err;
+    if (!tinyusdz::LoadUSDFromFile(filePath, &stage, &warn, &err)) {
+        error = err.empty() ? ("TinyUSDZ failed to load " + filePath) : err;
+        return false;
+    }
+    if (!warn.empty()) logInfo("USD: TinyUSDZ warn: " + warn);
+
+    // ExportToString() can omit mesh topology; to_string() dumps full USDA.
+    std::string usda = tinyusdz::to_string(stage);
+    if (usda.empty()) {
+        error = "TinyUSDZ produced empty USDA for " + filePath;
+        return false;
+    }
+
+    out = UsdContents{};
+    parseUsda(usda, out, options);
+    out.archiveInfo = "USDC/USDZ via TinyUSDZ " + filePath;
+    logInfo("USD: loaded " + std::to_string(out.prims.size()) + " prims from binary USD " + filePath);
+    if (out.prims.empty()) {
+        error = "no supported geometry, camera or light prims found in " + filePath;
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+#endif
+
 bool loadUsd(const std::string& filePath, const UsdLoadOptions& options, UsdContents& out, std::string& error) {
     std::string data;
     if (!readFileText(filePath, data)) {
@@ -373,25 +425,35 @@ bool loadUsd(const std::string& filePath, const UsdLoadOptions& options, UsdCont
         return false;
     }
 
-    if (data.size() >= 8 && data.compare(0, 8, "PXR-USDC") == 0) {
-        error = "binary USDC is not supported yet; export the scene as USDA (.usda) text";
+    // Prefer magic-number detection so binary crates are never misread as USDA.
+    if (isUsdcBinary(data) || isUsdzArchive(data)) {
+#if SOLSTICE_HAVE_TINYUSDZ
+        return loadUsdViaTinyusdz(filePath, options, out, error);
+#else
+        error = "binary USD (.usdc/.usdz) support requires TinyUSDZ; rebuild with SOLSTICE_ENABLE_TINYUSDZ=ON";
         return false;
+#endif
     }
 
-    if (!isUsdaText(data)) {
-        error = "unrecognized USD file format (expected USDA text)";
-        return false;
+    if (isUsdaText(data)) {
+        out = UsdContents{};
+        parseUsda(data, out, options);
+        out.archiveInfo = "USDA " + filePath;
+        logInfo("USD: loaded " + std::to_string(out.prims.size()) + " prims from " + filePath);
+        if (out.prims.empty()) {
+            error = "no supported geometry, camera or light prims found in " + filePath;
+            return false;
+        }
+        return true;
     }
 
-    out = UsdContents{};
-    parseUsda(data, out, options);
-    out.archiveInfo = "USDA " + filePath;
-    logInfo("USD: loaded " + std::to_string(out.prims.size()) + " prims from " + filePath);
-    if (out.prims.empty()) {
-        error = "no supported geometry, camera or light prims found in " + filePath;
-        return false;
-    }
-    return true;
+#if SOLSTICE_HAVE_TINYUSDZ
+    // Some exporters write crate USD without a clear USDA header; try TinyUSDZ.
+    return loadUsdViaTinyusdz(filePath, options, out, error);
+#else
+    error = "unrecognized USD file format (expected USDA text or USDC binary)";
+    return false;
+#endif
 }
 
 }  // namespace sol

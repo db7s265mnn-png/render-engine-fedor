@@ -128,11 +128,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     createMenus();
     createToolBar();
 
-    statusLabel_ = new QLabel("Ready");
-    backendLabel_ = new QLabel("CPU / Embree 4");
-    statusBar()->addWidget(statusLabel_, 1);
-    statusBar()->addPermanentWidget(backendLabel_);
-
     cookTimer_ = new QTimer(this);
     cookTimer_->setSingleShot(true);
     connect(cookTimer_, &QTimer::timeout, this, &MainWindow::onCookTimeout);
@@ -332,15 +327,10 @@ void MainWindow::createMenus() {
     editMenu->addAction("Frame Network", QKeySequence("Ctrl+F"), this, [this] { networkView_->frameAll(); });
     editMenu->addAction("Lay Out Selection", QKeySequence("Ctrl+L"), this,
                         [this] { networkView_->layoutSelectionVertically(); });
-
-    QMenu* renderMenu = menuBar()->addMenu("&Render");
-    renderMenu->addAction(renderAction_);
-    renderMenu->addAction(stopAction_);
-    renderMenu->addAction(iprAction_);
-    renderMenu->addSeparator();
-    renderMenu->addAction("Look Through Camera Node", QKeySequence("Ctrl+Shift+C"), this,
-                          &MainWindow::onLookThroughCameraNode);
-    renderMenu->addAction("Copy View To Camera Node", this, &MainWindow::onCopyViewToCameraNode);
+    editMenu->addSeparator();
+    editMenu->addAction("Look Through Camera Node", QKeySequence("Ctrl+Shift+C"), this,
+                        &MainWindow::onLookThroughCameraNode);
+    editMenu->addAction("Copy View To Camera Node", this, &MainWindow::onCopyViewToCameraNode);
 
     QMenu* helpMenu = menuBar()->addMenu("&Help");
     helpMenu->addAction("Keyboard Shortcuts", this, &MainWindow::onShowShortcuts);
@@ -983,27 +973,8 @@ void MainWindow::updateWindowTitle() {
 
 void MainWindow::updateStatusBar() {
     const RenderProgress progress = session_.progress();
-    QString text;
-    if (scene_) {
-        text = QString("%1 x %2   |   %3 triangles   |   %4 lights")
-                   .arg(scene_->settings.resolutionX)
-                   .arg(scene_->settings.resolutionY)
-                   .arg(scene_->totalTriangles())
-                   .arg(scene_->lights.size());
-    }
-    if (progress.samplesTarget > 0) {
-        text += QString("   |   %1 / %2 samples").arg(progress.samplesDone).arg(progress.samplesTarget);
-        if (progress.samplesPerSecond > 0.0)
-            text += QString(" (%1 spp/s)").arg(progress.samplesPerSecond, 0, 'f', 2);
-    }
-    if (session_.isRendering()) text += "   |   rendering";
-    statusLabel_->setText(text);
-
-    if (!progress.backendName.empty()) backendLabel_->setText(QString::fromStdString(progress.backendName));
-
     QString overlay = QString("%1 / %2 spp").arg(progress.samplesDone).arg(progress.samplesTarget);
     if (progress.elapsedSeconds > 0.0) overlay += QString("   %1 s").arg(progress.elapsedSeconds, 0, 'f', 1);
-    if (!progress.backendName.empty()) overlay += "   " + QString::fromStdString(progress.backendName);
     renderView_->setStatusText(overlay);
 }
 

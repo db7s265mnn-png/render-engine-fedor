@@ -645,9 +645,8 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             c = c * w;
             if (s > 2) c = clampContribution(c, settings.clampIndirect);
             if (!isFinite(c)) continue;
-            if (dispersion && dispersion->heroChannel >= 0 &&
-                (dispersion->mode == kDispersionHero ||
-                 (dispersion->mode == kDispersionOptimized && dispersion->used) ||
+            if (dispersion && dispersion->heroChannel >= 0 && dispersion->used &&
+                (dispersion->mode == kDispersionHero || dispersion->mode == kDispersionOptimized ||
                  dispersion->mode == kDispersionSpectral3)) {
                 // Hero-channel discipline: deposit only the sampled channel, ×3.
                 const int ch = dispersion->heroChannel;

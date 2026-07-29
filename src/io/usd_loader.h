@@ -1,4 +1,4 @@
-// USD scene import (USDA text and USDC binary via a lightweight reader).
+// USD scene import (USDA text; USDC/USDZ via TinyUSDZ when available).
 #pragma once
 
 #include <string>

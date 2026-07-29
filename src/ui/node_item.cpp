@@ -40,7 +40,7 @@ QColor NodeItem::headerColor() const {
 }
 
 QRectF NodeItem::boundingRect() const {
-    QRectF bounds = bodyRect().adjusted(-8.0, -8.0, 9.0, 10.0);
+    QRectF bounds = bodyRect().adjusted(-10.0, -10.0, 11.0, 12.0);
     bounds = bounds.united(labelRect().adjusted(0.0, -3.0, 4.0, 3.0));
     for (int i = 0; i < node_->inputCount(); ++i) {
         const QPointF port = inputPortPosition(i) - pos();
@@ -168,15 +168,22 @@ void NodeItem::paint(QPainter* painter, const QStyleOptionGraphicsItem*, QWidget
     const bool isBypassed = node_->isBypassed();
     const QPainterPath clip = bodyPath();
 
-    // Soft display halo behind the tile (Houdini-style cook/display cue).
+    // Display halo: rounded-rect contour with uniform stroke thickness.
     if (isDisplay) {
+        const QColor flag = theme::displayFlag();
+        constexpr qreal kHaloPad = 5.0;
+        constexpr qreal kHaloStroke = 2.5;
+        const QRectF halo = body.adjusted(-kHaloPad, -kHaloPad, kHaloPad, kHaloPad);
+        const qreal radius = kCornerRadius + 2.0;
         painter->setPen(Qt::NoPen);
-        painter->setBrush(QColor(theme::displayFlag().red(), theme::displayFlag().green(),
-                                 theme::displayFlag().blue(), 38));
-        painter->drawEllipse(body.center(), body.width() * 0.72, body.height() * 0.78);
-        painter->setBrush(QColor(theme::displayFlag().red(), theme::displayFlag().green(),
-                                 theme::displayFlag().blue(), 22));
-        painter->drawEllipse(body.center(), body.width() * 0.92, body.height() * 0.98);
+        painter->setBrush(QColor(flag.red(), flag.green(), flag.blue(), 32));
+        painter->drawRoundedRect(halo, radius, radius);
+        QPen haloPen(QColor(flag.red(), flag.green(), flag.blue(), 200), kHaloStroke);
+        haloPen.setJoinStyle(Qt::MiterJoin);
+        haloPen.setCosmetic(false);
+        painter->setBrush(Qt::NoBrush);
+        painter->setPen(haloPen);
+        painter->drawRoundedRect(halo, radius, radius);
     }
 
     // Drop shadow.

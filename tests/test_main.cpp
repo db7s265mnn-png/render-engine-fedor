@@ -3,6 +3,7 @@
 #include <functional>
 #include <utility>
 #include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "io/alembic_loader.h"
 #include "io/image_io.h"
 #include "io/materialx_graph.h"
+#include "io/usd_loader.h"
 #include "nodes/node_graph.h"
 #include "nodes/node_registry.h"
 #include "nodes/stage.h"
@@ -2616,6 +2618,57 @@ void testTxMipmaps() {
 #endif
 }
 
+void testBinaryUsdLoad() {
+    std::printf("binary-usd-usdc\n");
+#if SOLSTICE_HAVE_TINYUSDZ
+    const char* candidates[] = {
+        "tests/fixtures/suzanne.usdc",
+        "../tests/fixtures/suzanne.usdc",
+        "../../tests/fixtures/suzanne.usdc",
+        "/workspace/tests/fixtures/suzanne.usdc",
+    };
+    std::string path;
+    for (const char* c : candidates) {
+        std::ifstream in(c, std::ios::binary);
+        if (in) {
+            path = c;
+            break;
+        }
+    }
+    if (path.empty()) {
+        std::printf("  skip (fixture missing)\n");
+        return;
+    }
+
+    {
+        std::ifstream in(path, std::ios::binary);
+        char magic[8] = {};
+        in.read(magic, 8);
+        check(std::string(magic, 8) == "PXR-USDC", "usdc magic");
+    }
+
+    sol::UsdContents out;
+    std::string err;
+    sol::UsdLoadOptions opt;
+    const bool ok = sol::loadUsd(path, opt, out, err);
+    check(ok, "load usdc");
+    if (!ok) std::printf("  err=%s\n", err.c_str());
+    check(!out.prims.empty(), "usdc has prims");
+    int meshPrims = 0;
+    int tris = 0;
+    for (const sol::UsdPrim& p : out.prims) {
+        if (p.type != sol::UsdPrim::Type::Mesh || !p.mesh) continue;
+        ++meshPrims;
+        tris += int(p.mesh->triangleCount());
+    }
+    check(meshPrims >= 1, "usdc mesh prim");
+    check(tris > 100, "usdc mesh triangles");
+    std::printf("  prims=%zu meshes=%d tris=%d\n", out.prims.size(), meshPrims, tris);
+#else
+    std::printf("  skip (TinyUSDZ disabled)\n");
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -2660,6 +2713,7 @@ int main() {
     testMaterialXKarmaArnoldWirings();
     testMaterialXRaySwitchCaustics();
     testMaterialXUdimCubeAsset();
+    testBinaryUsdLoad();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

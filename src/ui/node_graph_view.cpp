@@ -858,15 +858,6 @@ void NodeGraphView::contextMenuEvent(QContextMenuEvent* event) {
 
 void NodeGraphView::drawForeground(QPainter* painter, const QRectF& rect) {
     QGraphicsView::drawForeground(painter, rect);
-    // Hint bar in the corner of the viewport.
-    painter->resetTransform();
-    QFont font = painter->font();
-    font.setPointSizeF(8.0);
-    painter->setFont(font);
-    painter->setPen(theme::textDim());
-    painter->drawText(QRect(8, height() - 22, width() - 16, 18), Qt::AlignLeft,
-                      "Tab: add   F: frame   Ctrl+C/V: copy/paste   MMB/Alt+LMB/Space+LMB: pan   "
-                      "Wheel: zoom   D: display   B: bypass   Del: delete");
 }
 
 }  // namespace sol

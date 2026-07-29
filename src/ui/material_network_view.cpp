@@ -2012,24 +2012,14 @@ void MaterialNetworkGraphView::drawBackground(QPainter* painter, const QRectF& r
 
 void MaterialNetworkGraphView::drawForeground(QPainter* painter, const QRectF& rect) {
     QGraphicsView::drawForeground(painter, rect);
+    if (materialNode_) return;
     painter->resetTransform();
-
     QFont font = painter->font();
-    if (!materialNode_) {
-        font.setPointSizeF(11.0);
-        painter->setFont(font);
-        painter->setPen(theme::textDim());
-        painter->drawText(QRect(0, 0, width(), height()), Qt::AlignCenter,
-                          "Double-click a material container to edit its MaterialX graph");
-        return;
-    }
-
-    font.setPointSizeF(8.0);
+    font.setPointSizeF(11.0);
     painter->setFont(font);
     painter->setPen(theme::textDim());
-    painter->drawText(QRect(8, height() - 22, width() - 16, 18), Qt::AlignLeft,
-                      "Tab: add   F: frame   ↑: up   MMB/Alt+LMB/Space+LMB: pan   Wheel: zoom   Del: delete   "
-                      "image: file");
+    painter->drawText(QRect(0, 0, width(), height()), Qt::AlignCenter,
+                      "Double-click a material container to edit its MaterialX graph");
 }
 
 void MaterialNetworkGraphView::emitSelectionChanged() { emit selectionChanged(); }

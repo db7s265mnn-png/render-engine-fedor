@@ -352,7 +352,8 @@ public:
                     if (!generateRay(rCh, ch, origin, direction, lensTau)) continue;
                     Vec3 r = traceOnce(rCh, origin, direction, &ctx);
                     r = r * std::max(0.0f, lensTau);
-                    radiance = radiance + heroMask(r, ch) * (1.0f / 3.0f);
+                    if (ctx.used) r = heroMask(r, ch);
+                    radiance = radiance + r * (1.0f / 3.0f);
                 }
             } else {
                 const int chromaticChannel = pickHeroChannel(rng);
@@ -365,11 +366,11 @@ public:
                 radiance = radiance * std::max(0.0f, lensTau);
 
                 if (chromaticChannel >= 0) {
+                    // Hero + Optimized: mask only if this path actually hit dispersing
+                    // media (lazy mask). Fake never masks.
                     const bool doMask =
-                        dispersionMode == kDispersionHero ||
-                        (dispersionMode == kDispersionOptimized && ctx.used);
-                    // Fake: never mask. Optimized without dispersing hits: full RGB
-                    // (fixes ray_switch: camera-only Abbe must not tint shadows).
+                        (dispersionMode == kDispersionHero || dispersionMode == kDispersionOptimized) &&
+                        ctx.used;
                     if (doMask) radiance = heroMask(radiance, chromaticChannel);
                 }
             }

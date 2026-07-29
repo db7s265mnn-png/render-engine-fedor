@@ -91,9 +91,6 @@ private:
 
     QTimer* cookTimer_ = nullptr;
     QTimer* refreshTimer_ = nullptr;
-    QLabel* statusLabel_ = nullptr;
-    QLabel* backendLabel_ = nullptr;
-
     QAction* renderAction_ = nullptr;
     QAction* stopAction_ = nullptr;
     QAction* iprAction_ = nullptr;
