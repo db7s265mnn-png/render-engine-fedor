@@ -70,13 +70,17 @@ SR_INL float geometryTerm(Vec3 a, Vec3 na, Vec3 b, Vec3 nb) {
 }
 
 // Solid-angle BSDF pdf for wo→wi at a surface vertex (both world-space).
-SR_INL float bsdfPdfSa(const Material& mat, Vec3 ns, Vec3 woW, Vec3 wiW) {
+// ng is taken alongside ns so a connection the geometry cannot support evaluates
+// to zero instead of leaking through the surface (see shadingNormalConsistent).
+SR_INL float bsdfPdfSa(const Material& mat, Vec3 ng, Vec3 ns, Vec3 woW, Vec3 wiW) {
+    if (!shadingNormalConsistent(ng, ns, woW, wiW)) return 0.0f;
     const Frame frame(ns);
     const BsdfEval e = bsdfEvalLocal(mat, frame.toLocal(woW), frame.toLocal(wiW));
     return srIsFinite(e.pdf) ? e.pdf : 0.0f;
 }
 
-SR_INL Vec3 bsdfF(const Material& mat, Vec3 ns, Vec3 woW, Vec3 wiW) {
+SR_INL Vec3 bsdfF(const Material& mat, Vec3 ng, Vec3 ns, Vec3 woW, Vec3 wiW) {
+    if (!shadingNormalConsistent(ng, ns, woW, wiW)) return Vec3(0.0f);
     const Frame frame(ns);
     const BsdfEval e = bsdfEvalLocal(mat, frame.toLocal(woW), frame.toLocal(wiW));
     return isFinite(e.f) ? e.f : Vec3(0.0f);
@@ -373,9 +377,12 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
 #endif
         }
 
+        // The shading normal may have promised a bounce the geometry cannot carry.
+        if (!shadingNormalConsistent(cur.ng, cur.ns, cur.wo, wiWorld)) break;
+
         // Reverse pdf of the segment we just travelled (for MIS).
         {
-            const float revSa = bs.specular ? 0.0f : bsdfPdfSa(cur.mat, cur.ns, wiWorld, cur.wo);
+            const float revSa = bs.specular ? 0.0f : bsdfPdfSa(cur.mat, cur.ng, cur.ns, wiWorld, cur.wo);
             prev.pdfRev = toAreaPdf(revSa, cur.p, prev.p, prev.type == VType::Surface ? prev.ns : prev.ng);
         }
 
@@ -571,7 +578,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (!projectToPixel(camProj, v.p, px, py, cosTheta, dist2)) continue;
             if (dist2 < 1e-8f) continue;
             const Vec3 toCam = normalize(camProj.camPos - v.p);
-            const Vec3 f = bsdfF(v.mat, v.ns, v.wo, toCam);
+            const Vec3 f = bsdfF(v.mat, v.ng, v.ns, v.wo, toCam);
             if (isBlack(f)) continue;
             if (!connectionVisible(scene, tracer, v.p, v.ng, camProj.camPos, -1)) continue;
 
@@ -588,7 +595,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             ov.lightOriginDelta = lightOriginDelta;
             ov.lightLastRev = toAreaPdf(pdfOmega, camProj.camPos, v.p, v.ns);
             if (s >= 2)
-                ov.lightPrevRev = toAreaPdf(bsdfPdfSa(v.mat, v.ns, toCam, normalize(light[s - 2].p - v.p)),
+                ov.lightPrevRev = toAreaPdf(bsdfPdfSa(v.mat, v.ng, v.ns, toCam, normalize(light[s - 2].p - v.p)),
                                             v.p, light[s - 2].p,
                                             light[s - 2].type == VType::Surface ? light[s - 2].ns
                                                                                 : light[s - 2].ng);
@@ -676,7 +683,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         // firefly no matter the sample count. When light tracing is active, that
         // family is delivered exclusively by t=1 splats — drop the noisy s=0 copy.
         // Kept when the camera-adjacent vertex is specular (SDS: splats cannot see it).
-        if (causticsOn && doSplats && t >= 4) {
+        if (causticsOn && t >= 4) {
             int j = t - 2;
             int chainLen = 0;
             while (j >= 1 && eye[j].type == VType::Surface && eye[j].nearSpec) {
@@ -724,9 +731,9 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                 visibility = shadowVisibility(scene, tracer, o, ls.wi, 1.0e8f);
             }
             if (visibility <= 1e-5f) continue;
-            const Vec3 f = bsdfF(E.mat, E.ns, E.wo, ls.wi);
+            const Vec3 f = bsdfF(E.mat, E.ng, E.ns, E.wo, ls.wi);
             if (isBlack(f)) continue;
-            const float bsdfPdf = ls.delta ? 0.0f : bsdfPdfSa(E.mat, E.ns, E.wo, ls.wi);
+            const float bsdfPdf = ls.delta ? 0.0f : bsdfPdfSa(E.mat, E.ng, E.ns, E.wo, ls.wi);
             const float lightPdf = ls.pdf * selectPdf;
             const float w = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdf);
             Vec3 c = E.beta * f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf);
@@ -794,7 +801,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         }
         if (isBlack(Le)) continue;
 
-        const Vec3 f = bsdfF(E.mat, E.ns, E.wo, wi);
+        const Vec3 f = bsdfF(E.mat, E.ng, E.ns, E.wo, wi);
         if (isBlack(f)) continue;
 
         if (l.shadowEnable && !connectionVisible(scene, tracer, E.p, E.ng, Ls.p, li)) continue;
@@ -813,12 +820,12 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         ov.splatStrategy = doSplats;
         ov.lightOriginDelta = l.type == kLightPoint;
         // Light vertex generated from the eye side: bsdf at E toward L.
-        ov.lightLastRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, E.wo, wi), E.p, Ls.p, Ls.ns);
+        ov.lightLastRev = toAreaPdf(bsdfPdfSa(E.mat, E.ng, E.ns, E.wo, wi), E.p, Ls.p, Ls.ns);
         // Eye vertex generated from the light: emission dir pdf.
         ov.eyeLastRev = toAreaPdf(pdfLightDirSa(l, lightN, -wi), Ls.p, E.p, E.ns);
         // Eye prev regenerated by bsdf at E arriving from L.
         if (t >= 3)
-            ov.eyePrevRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, wi, normalize(eye[t - 2].p - E.p)), E.p,
+            ov.eyePrevRev = toAreaPdf(bsdfPdfSa(E.mat, E.ng, E.ns, wi, normalize(eye[t - 2].p - E.p)), E.p,
                                       eye[t - 2].p,
                                       eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
         Vert lightArr[1] = {Ls};
@@ -866,9 +873,9 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (dist2 < 1e-10f) continue;
             d = d * (1.0f / sqrtf(dist2));
 
-            const Vec3 fE = bsdfF(E.mat, E.ns, E.wo, d);
+            const Vec3 fE = bsdfF(E.mat, E.ng, E.ns, E.wo, d);
             if (isBlack(fE)) continue;
-            const Vec3 fL = bsdfF(Lv.mat, Lv.ns, Lv.wo, -d);
+            const Vec3 fL = bsdfF(Lv.mat, Lv.ng, Lv.ns, Lv.wo, -d);
             if (isBlack(fL)) continue;
             const float G = geometryTerm(E.p, E.ns, Lv.p, Lv.ns);
             if (G <= 0.0f) continue;
@@ -878,15 +885,15 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             ov.splatStrategy = doSplats;
             ov.s0Sampled = !(causticsOn && doSplats && lightPrefixCaustic);
             ov.lightOriginDelta = lightOriginDelta;
-            ov.lightLastRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, E.wo, d), E.p, Lv.p, Lv.ns);
-            ov.eyeLastRev = toAreaPdf(bsdfPdfSa(Lv.mat, Lv.ns, Lv.wo, -d), Lv.p, E.p, E.ns);
+            ov.lightLastRev = toAreaPdf(bsdfPdfSa(E.mat, E.ng, E.ns, E.wo, d), E.p, Lv.p, Lv.ns);
+            ov.eyeLastRev = toAreaPdf(bsdfPdfSa(Lv.mat, Lv.ng, Lv.ns, Lv.wo, -d), Lv.p, E.p, E.ns);
             if (t >= 3)
-                ov.eyePrevRev = toAreaPdf(bsdfPdfSa(E.mat, E.ns, d, normalize(eye[t - 2].p - E.p)), E.p,
+                ov.eyePrevRev = toAreaPdf(bsdfPdfSa(E.mat, E.ng, E.ns, d, normalize(eye[t - 2].p - E.p)), E.p,
                                           eye[t - 2].p,
                                           eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
             if (s >= 2)
                 ov.lightPrevRev =
-                    toAreaPdf(bsdfPdfSa(Lv.mat, Lv.ns, -d, normalize(light[s - 2].p - Lv.p)), Lv.p,
+                    toAreaPdf(bsdfPdfSa(Lv.mat, Lv.ng, Lv.ns, -d, normalize(light[s - 2].p - Lv.p)), Lv.p,
                               light[s - 2].p,
                               light[s - 2].type == VType::Surface ? light[s - 2].ns : light[s - 2].ng);
 

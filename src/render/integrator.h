@@ -254,6 +254,9 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     LightSample ls;
     if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) return result;
     if (ls.pdf <= 0.0f || isBlack(ls.radiance)) return result;
+    // The shading normal may claim the light is visible from a side the geometry
+    // does not expose; such a shadow ray starts inside the surface.
+    if (!shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) return result;
 
     float visibility = 1.0f;
     if (scene.lights[lightIndex].shadowEnable) {
@@ -773,6 +776,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         }
 
         const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
+        if (!shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) break;
 #if !defined(__CUDACC__)
         if (guiding && guiding->active())
             guiding->recordBounce(si.ns, wiWorld, bs.pdf, weight, bs.specular, mat.roughness, lw.eta,

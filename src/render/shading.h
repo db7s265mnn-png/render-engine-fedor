@@ -511,6 +511,17 @@ SR_INL SR_HD bool isNearSpecularLobe(const LobeWeights& lw) {
     return lw.alpha <= kCausticAlpha && lw.diffuse < 1e-3f;
 }
 
+// Interpolated shading normals disagree with the geometry near silhouettes and on
+// intricate meshes. When the two normals disagree about whether a direction pair is
+// a reflection or a transmission, the BSDF describes transport the geometry cannot
+// carry: the ray starts on the wrong side of the surface, so it can skip a thin
+// feature entirely and arrive somewhere it never should. Those samples are dropped.
+SR_INL SR_HD bool shadingNormalConsistent(Vec3 ng, Vec3 ns, Vec3 wo, Vec3 wi) {
+    const float shading = dot(ns, wo) * dot(ns, wi);
+    const float geometric = dot(ng, wo) * dot(ng, wi);
+    return (shading > 0.0f) == (geometric > 0.0f);
+}
+
 // Evaluate the BSDF for a pair of directions expressed in the local shading
 // frame (z = shading normal). Delta lobes return zero.
 SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {

@@ -729,6 +729,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         visibility = shadowVisibility(scene, tracer, o, lsam.wi, 1.0e8f);
                     }
                     if (visibility <= 1e-5f) continue;
+                    if (!shadingNormalConsistent(si.ng, si.ns, wo, lsam.wi)) continue;
                     const Vec3 wiL = frame.toLocal(lsam.wi);
                     const BsdfEval be = bsdfEvalLocal(mat, frame.toLocal(wo), wiL);
                     if (be.pdf <= 0.0f || isBlack(be.f)) continue;
@@ -795,6 +796,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         cosL = fabsf(cosL);
                         if (cosL <= 1e-6f) continue;
                     }
+                    if (!shadingNormalConsistent(si.ng, si.ns, wo, wi)) continue;
                     const Vec3 wiLocal = frame.toLocal(wi);
                     const BsdfEval be = bsdfEvalLocal(mat, frame.toLocal(wo), wiLocal);
                     if (be.pdf <= 0.0f || isBlack(be.f)) continue;
@@ -916,6 +918,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         }
 
         const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
+        if (!shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) break;
 #if !defined(__CUDACC__)
         if (guiding && guiding->active())
             guiding->recordBounce(si.ns, wiWorld, bs.pdf, weight, bs.specular, mat.roughness, lw.eta, 1.0f);
