@@ -31,6 +31,8 @@ struct MaterialXEvalResult {
     std::shared_ptr<Image> normalTexture;
     std::shared_ptr<Image> bumpTexture;
     std::shared_ptr<Image> subsurfaceTexture;
+    std::shared_ptr<Image> specularColorTexture;
+    std::shared_ptr<Image> transmissionColorTexture;
     // Shade-time procedural graphs (noise / math / triplanar). Indices on `material.*Proc`
     // are local to `procedurals`. Image leaves store local indices into `proceduralImages`.
     std::vector<ProceduralNode> procedurals;

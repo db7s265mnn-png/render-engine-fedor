@@ -690,7 +690,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 radiance += throughput * mat.emissionColor * mat.emissionStrength;
         }
 
-        if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
+        if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
             origin = offsetRayOrigin(si.p, si.ng, direction);
             ++passThrough;
             if (passThrough > 32) break;

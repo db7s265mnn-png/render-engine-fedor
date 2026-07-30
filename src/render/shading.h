@@ -300,22 +300,15 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
     };
 
     mat.baseColor = sampleRgbSlot(base.baseColorProc, base.baseColorTex, base.baseColor);
-    if (base.baseColorProc >= 0 || base.baseColorTex >= 0)
-        mat.baseColor = mat.baseColor * vmax(Vec3(0.0f), base.baseColor);
+    // Texture / procedural fully replaces the authored constant (Arnold map semantics).
     mat.roughness = sampleScalarSlot(base.roughnessProc, base.roughnessTex, base.roughness);
-    if (base.roughnessProc >= 0 || base.roughnessTex >= 0)
-        mat.roughness = saturatef(mat.roughness * base.roughness);
     mat.metallic = sampleScalarSlot(base.metallicProc, base.metallicTex, base.metallic);
-    if (base.metallicProc >= 0 || base.metallicTex >= 0)
-        mat.metallic = saturatef(mat.metallic * base.metallic);
     mat.opacity = sampleScalarSlot(base.opacityProc, base.opacityTex, base.opacity);
-    if (base.opacityProc >= 0 || base.opacityTex >= 0) mat.opacity = saturatef(mat.opacity * base.opacity);
     mat.emissionColor = sampleRgbSlot(base.emissionProc, base.emissionTex, base.emissionColor);
-    if (base.emissionProc >= 0 || base.emissionTex >= 0)
-        mat.emissionColor = mat.emissionColor * vmax(Vec3(0.0f), base.emissionColor);
     mat.subsurfaceColor = sampleRgbSlot(base.subsurfaceProc, base.subsurfaceTex, base.subsurfaceColor);
-    if (base.subsurfaceProc >= 0 || base.subsurfaceTex >= 0)
-        mat.subsurfaceColor = mat.subsurfaceColor * vmax(Vec3(0.0f), base.subsurfaceColor);
+    mat.specularColor = sampleRgbSlot(base.specularColorProc, base.specularColorTex, base.specularColor);
+    mat.transmissionColor =
+        sampleRgbSlot(base.transmissionColorProc, base.transmissionColorTex, base.transmissionColor);
 
     const float nScale = srIsFinite(base.normalScale) ? base.normalScale : 1.0f;
     if (base.bumpProc >= 0 || (base.bumpTex >= 0 && base.bumpTex < scene.textureCount && scene.textures)) {
@@ -515,13 +508,17 @@ SR_INL SR_HD LobeWeights computeLobes(const Material& mat) {
     lw.delta = lw.alpha <= kDeltaAlpha;
     lw.eta = srMax(1.01f, mat.ior);
     const Vec3 base = vmax(Vec3(0.0f), mat.baseColor);
+    const Vec3 specularColor = vmax(Vec3(0.0f), mat.specularColor);
+    const Vec3 transmissionColor = vmax(Vec3(0.0f), mat.transmissionColor);
     // Standard Surface: diffuse = base * base_color (SSS is mixed separately in the integrator).
     const float baseWeight = srMax(0.0f, mat.baseWeight);
     // Specular = 0 must fully kill dielectric reflections (artist expectation).
+    // Arnold: dielectric F0 = 0.08 * specular * specular_color; metals use base_color.
     const float dielectricF0 = 0.08f * specularControl;
-    lw.f0 = lerp(Vec3(dielectricF0), base, metallic);
+    lw.f0 = lerp(Vec3(dielectricF0) * specularColor, base, metallic);
     lw.diffuseAlbedo = base * (baseWeight * (1.0f - metallic) * (1.0f - transmission));
-    lw.transmissionTint = base;
+    // Arnold transmission_color tints refraction — not base_color.
+    lw.transmissionTint = transmissionColor;
 
     // The transmission lobe already contains its own Fresnel reflection, so the
     // opaque specular lobe is faded out as transmission increases.

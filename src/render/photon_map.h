@@ -212,7 +212,7 @@ private:
             Material mat = materialForCausticTransport(scene, si.materialIndex);
             mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
 
-            if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
+            if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
                 o = offsetRayOrigin(si.p, si.ng, d);
                 continue;
             }

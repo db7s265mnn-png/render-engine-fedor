@@ -37,6 +37,8 @@ struct StagePrim {
     std::shared_ptr<Image> normalTexture;
     std::shared_ptr<Image> bumpTexture;
     std::shared_ptr<Image> subsurfaceTexture;
+    std::shared_ptr<Image> specularColorTexture;
+    std::shared_ptr<Image> transmissionColorTexture;
     // Shade-time procedurals compiled from MaterialX (local indices on material.*Proc).
     std::vector<ProceduralNode> procedurals;
     std::vector<std::shared_ptr<Image>> proceduralImages;

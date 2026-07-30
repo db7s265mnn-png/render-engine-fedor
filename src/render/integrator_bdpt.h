@@ -320,7 +320,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         applyDispersion(mat, cfg.dispersion);
 
         // Stochastic cutout — pass through without creating a vertex.
-        if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
+        if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
             origin = offsetRayOrigin(si.p, si.ng, dir);
             if (++passThrough > 16) break;
             continue;

@@ -133,11 +133,37 @@ bool subtreeProcedural(const mx::NodePtr& node, int depth) {
     return false;
 }
 
-Vec4 readVec4(const mx::NodePtr& node, const std::string& name, Vec4 fallback) {
+Vec4 readVec4Authored(const mx::NodePtr& node, const std::string& name, Vec4 fallback) {
     float vals[4] = {fallback.x, fallback.y, fallback.z, fallback.w};
     const std::string raw = inputValueString(node, name);
     if (!raw.empty()) parseFloats(raw, vals, 4);
     return Vec4(vals[0], vals[1], vals[2], vals[3]);
+}
+
+// Resolve Constant/Uniform wired into any input. A float Constant broadcasts to XYZ
+// (parseFloats 1-component rule) so Constant→triplanar.scale / color / vector works.
+bool tryReadConnectedConstant(const mx::NodePtr& node, const std::string& name, Vec4& out) {
+    mx::NodePtr child = connected(node, name);
+    for (int hop = 0; child && hop < 8; ++hop) {
+        const std::string cat = normalizeCategory(child->getCategory());
+        if (cat == "constant" || cat == "uniform") {
+            out = readVec4Authored(child, "value", out);
+            return true;
+        }
+        // Pass through trivial convert / swizzle wrappers if present.
+        if (cat == "convert" || cat == "dotproduct" || cat == "extract") break;
+        mx::NodePtr next = connected(child, "in");
+        if (!next) next = connected(child, "in1");
+        if (!next) break;
+        child = next;
+    }
+    return false;
+}
+
+Vec4 readVec4(const mx::NodePtr& node, const std::string& name, Vec4 fallback) {
+    Vec4 out = fallback;
+    if (tryReadConnectedConstant(node, name, out)) return out;
+    return readVec4Authored(node, name, fallback);
 }
 
 float readFloat(const mx::NodePtr& node, const std::string& name, float fallback) {
@@ -235,7 +261,10 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
         result = pushNode(state, n);
     } else if (cat == "constant" || cat == "uniform") {
         n.op = kProcConst;
-        n.p0 = readVec4(node, "value", Vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        // Authored value only — do not recurse into connected-constant resolution.
+        n.p0 = readVec4Authored(node, "value", Vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        // Float constants already store broadcast XYZ via parseFloats; keep channels
+        // so procAsChannels also splat-broadcasts at eval time.
         result = pushNode(state, n);
     } else if (cat == "place2d") {
         // MaterialX / Karma UV placement. rotate2d aliases here with scale=1.

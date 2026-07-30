@@ -738,8 +738,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 radiance += throughput * mat.emissionColor * mat.emissionStrength;
         }
 
-        // Stochastic opacity / cutout.
-        if (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity) {
+        // Arnold presence / opacity: kills ALL lobes including specular & transmission.
+        // opacity = 0 → always pass through; partial → stochastic cutout.
+        if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
             origin = offsetRayOrigin(si.p, si.ng, direction);
             ++passThrough;
             if (passThrough > 32) break;

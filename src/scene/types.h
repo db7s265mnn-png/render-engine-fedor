@@ -34,6 +34,10 @@ struct Material {
     float specular = 0.5f;       // dielectric specular level (0..1 -> F0 0..0.08)
     float transmission = 0.0f;   // 0 = opaque, 1 = glass
 
+    // Arnold standard_surface: separate specular / transmission tints.
+    Vec3 specularColor{1.0f, 1.0f, 1.0f};
+    Vec3 transmissionColor{1.0f, 1.0f, 1.0f};
+
     Vec3 emissionColor{0.0f, 0.0f, 0.0f};
     float emissionStrength = 0.0f;
 
@@ -66,6 +70,9 @@ struct Material {
     int emissionTex = -1;
     int normalTex = -1;
     int subsurfaceTex = -1;
+    int specularColorTex = -1;
+
+    int transmissionColorTex = -1;
     // Indices into SceneView::procedurals (-1 = none). Procedurals win over textures.
     int baseColorProc = -1;
 
@@ -76,11 +83,12 @@ struct Material {
 
     int normalProc = -1;
     int subsurfaceProc = -1;
+    int specularColorProc = -1;
+    int transmissionColorProc = -1;
     // Fake shadow control for transmissive surfaces when render-settings caustics
     // are OFF: 1 = fully opaque shadow, 0 = fully open. With caustics ON shadow
     // rays treat glass as opaque and light arrives via MNEE / BDPT instead.
     float shadowOpacity = 1.0f;
-    int _padMat0 = 0;
 
     // MaterialX normalmap.scale / bump.scale (tangent XY strength).
     float normalScale = 1.0f;

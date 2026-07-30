@@ -286,9 +286,14 @@ QString fallbackDefaultDocument() {
         "  <standard_surface name=\"standard_surface1\" type=\"surfaceshader\" xpos=\"0\" ypos=\"0\">\n"
         "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\"/>\n"
         "    <input name=\"base\" type=\"float\" value=\"0.8\"/>\n"
+        "    <input name=\"specular\" type=\"float\" value=\"0.5\"/>\n"
+        "    <input name=\"specular_color\" type=\"color3\" value=\"1, 1, 1\"/>\n"
         "    <input name=\"specular_roughness\" type=\"float\" value=\"0.35\"/>\n"
         "    <input name=\"metalness\" type=\"float\" value=\"0\"/>\n"
+        "    <input name=\"transmission\" type=\"float\" value=\"0\"/>\n"
+        "    <input name=\"transmission_color\" type=\"color3\" value=\"1, 1, 1\"/>\n"
         "    <input name=\"subsurface_scale\" type=\"float\" value=\"1\"/>\n"
+        "    <input name=\"opacity\" type=\"color3\" value=\"1, 1, 1\"/>\n"
         "  </standard_surface>\n"
         "  <surfacematerial name=\"surface\" type=\"material\" xpos=\"4\" ypos=\"0\">\n"
         "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
@@ -720,12 +725,13 @@ QStringList MaterialNetworkGraphView::canonicalInputOrder(const QString& categor
     if (category == "standard_surface") {
         return {QStringLiteral("base_color"),
                 QStringLiteral("base"),
-                QStringLiteral("specular_roughness"),
-                QStringLiteral("metalness"),
                 QStringLiteral("specular"),
+                QStringLiteral("specular_color"),
+                QStringLiteral("specular_roughness"),
                 QStringLiteral("specular_IOR"),
+                QStringLiteral("metalness"),
                 QStringLiteral("transmission"),
-                QStringLiteral("opacity"),
+                QStringLiteral("transmission_color"),
                 QStringLiteral("shadow_opacity"),
                 QStringLiteral("contribute_caustics"),
                 QStringLiteral("dispersion_abbe"),
@@ -738,7 +744,8 @@ QStringList MaterialNetworkGraphView::canonicalInputOrder(const QString& categor
                 QStringLiteral("subsurface"),
                 QStringLiteral("subsurface_color"),
                 QStringLiteral("subsurface_radius"),
-                QStringLiteral("subsurface_scale")};
+                QStringLiteral("subsurface_scale"),
+                QStringLiteral("opacity")};
     }
     if (category == "ray_switch_shader" || category == "ray_switch") {
         return {QStringLiteral("camera"),
@@ -801,12 +808,13 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         static const QVector<MtlxInput> kDefaults = {
             {"base_color", "color3", "0.8, 0.8, 0.8", {}},
             {"base", "float", "0.8", {}},
-            {"specular_roughness", "float", "0.35", {}},
-            {"metalness", "float", "0", {}},
             {"specular", "float", "0.5", {}},
+            {"specular_color", "color3", "1, 1, 1", {}},
+            {"specular_roughness", "float", "0.35", {}},
             {"specular_IOR", "float", "1.5", {}},
+            {"metalness", "float", "0", {}},
             {"transmission", "float", "0", {}},
-            {"opacity", "color3", "1, 1, 1", {}},
+            {"transmission_color", "color3", "1, 1, 1", {}},
             {"shadow_opacity", "float", "1", {}},
             {"contribute_caustics", "boolean", "true", {}},
             {"dispersion_abbe", "float", "0", {}},
@@ -820,6 +828,7 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
             {"subsurface_color", "color3", "1, 0.75, 0.55", {}},
             {"subsurface_radius", "color3", "1, 0.35, 0.2", {}},
             {"subsurface_scale", "float", "1", {}},
+            {"opacity", "color3", "1, 1, 1", {}},
         };
         if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
             const QString signature = type.isEmpty() ? entry->type : type;

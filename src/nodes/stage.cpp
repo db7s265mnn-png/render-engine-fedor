@@ -108,6 +108,8 @@ ScenePtr Stage::toScene() const {
                 material.normalTex = scene->addTexture(prim.normalTexture);
                 material.bumpTex = scene->addTexture(prim.bumpTexture);
                 material.subsurfaceTex = scene->addTexture(prim.subsurfaceTexture);
+                material.specularColorTex = scene->addTexture(prim.specularColorTexture);
+                material.transmissionColorTex = scene->addTexture(prim.transmissionColorTexture);
 
                 // Append shade-time procedurals; remap local child / texture indices.
                 if (!prim.procedurals.empty()) {
@@ -164,6 +166,8 @@ ScenePtr Stage::toScene() const {
                     remapRoot(material.normalProc);
                     remapRoot(material.subsurfaceProc);
                     remapRoot(material.bumpProc);
+                    remapRoot(material.specularColorProc);
+                    remapRoot(material.transmissionColorProc);
                     auto clampRoot = [&](int& idx) {
                         if (idx >= int(scene->procedurals.size())) idx = -1;
                     };
@@ -175,6 +179,8 @@ ScenePtr Stage::toScene() const {
                     clampRoot(material.normalProc);
                     clampRoot(material.subsurfaceProc);
                     clampRoot(material.bumpProc);
+                    clampRoot(material.specularColorProc);
+                    clampRoot(material.transmissionColorProc);
                 }
 
                 // Ray-switch branches: add as separate Materials, rewrite local → scene indices.

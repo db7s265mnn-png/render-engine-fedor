@@ -2276,6 +2276,112 @@ void testMaterialXKarmaArnoldWirings() {
     }
 }
 
+void testMaterialXArnoldMapsAndConstants() {
+    std::printf("materialx-arnold-maps-constants\n");
+    if (!materialXAvailable()) {
+        std::printf("  skip\n");
+        return;
+    }
+
+    // Constant float → triplanar.scale must bake (broadcast XYZ).
+    {
+        const QString xml = QStringLiteral(
+            "<?xml version=\"1.0\"?>\n"
+            "<materialx version=\"1.38\">\n"
+            "  <constant name=\"c1\" type=\"float\">\n"
+            "    <input name=\"value\" type=\"float\" value=\"2.5\"/>\n"
+            "  </constant>\n"
+            "  <triplanarprojection name=\"tri1\" type=\"color3\">\n"
+            "    <input name=\"scale\" type=\"vector3\" nodename=\"c1\"/>\n"
+            "    <input name=\"default\" type=\"color3\" value=\"0.2, 0.5, 0.8\"/>\n"
+            "  </triplanarprojection>\n"
+            "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+            "    <input name=\"base_color\" type=\"color3\" nodename=\"tri1\"/>\n"
+            "  </standard_surface>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n");
+        MaterialXEvalResult eval = evaluateMaterialXDocument(xml, QString());
+        check(eval.ok && eval.material.baseColorProc >= 0, "constant→triplanar.scale compiles");
+        const int root = eval.material.baseColorProc;
+        check(root >= 0 && root < int(eval.procedurals.size()) &&
+                  eval.procedurals[size_t(root)].op == kProcTriplanar,
+              "root is triplanar");
+        const ProceduralNode& tri = eval.procedurals[size_t(root)];
+        check(std::fabs(tri.p1.x - 2.5f) < 1e-4f && std::fabs(tri.p1.y - 2.5f) < 1e-4f &&
+                  std::fabs(tri.p1.z - 2.5f) < 1e-4f,
+              "float Constant broadcasts into triplanar scale XYZ");
+        std::printf("  constant→scale ok scale=(%.2f,%.2f,%.2f)\n", tri.p1.x, tri.p1.y, tri.p1.z);
+    }
+
+    // Map into roughness fully replaces constant (no multiply by leftover 0.4).
+    {
+        const QString xml = QStringLiteral(
+            "<?xml version=\"1.0\"?>\n"
+            "<materialx version=\"1.38\">\n"
+            "  <constant name=\"c1\" type=\"float\">\n"
+            "    <input name=\"value\" type=\"float\" value=\"0.75\"/>\n"
+            "  </constant>\n"
+            "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+            "    <input name=\"specular_roughness\" type=\"float\" nodename=\"c1\"/>\n"
+            "  </standard_surface>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n");
+        MaterialXEvalResult eval = evaluateMaterialXDocument(xml, QString());
+        check(eval.ok && eval.material.roughnessProc >= 0, "constant→roughness compiles");
+        Stage stage;
+        StagePrim prim;
+        prim.type = PrimType::Mesh;
+        prim.path = "/geo";
+        prim.mesh = makeBoxMesh(Vec3(1.0f));
+        prim.mesh->validate();
+        prim.material = eval.material;
+        prim.materialAssigned = true;
+        prim.procedurals = eval.procedurals;
+        prim.proceduralImages = eval.proceduralImages;
+        stage.prims.push_back(prim);
+        auto scene = stage.toScene();
+        SceneView view = scene->view();
+        Vec3 ns(0, 1, 0);
+        Material m = evaluateTexturedMaterial(view, view.materials[0], Vec2(0.5f), ns, Vec3(0, 1, 0),
+                                              Vec3(0, 1, 0), 0.01f);
+        check(std::fabs(m.roughness - 0.75f) < 1e-3f, "roughness map replaces constant (no ×0.4)");
+        std::printf("  map-replace roughness=%.3f\n", m.roughness);
+    }
+
+    // transmission_color tints refraction, not base_color.
+    {
+        Material mat;
+        mat.baseColor = Vec3(1.0f, 0.0f, 0.0f);
+        mat.transmissionColor = Vec3(0.0f, 1.0f, 0.0f);
+        mat.transmission = 1.0f;
+        mat.baseWeight = 0.0f;
+        mat.specular = 1.0f;
+        mat.metallic = 0.0f;
+        LobeWeights lw = computeLobes(mat);
+        check(lw.transmissionTint.y > 0.9f && lw.transmissionTint.x < 0.1f,
+              "transmission_color drives refraction tint");
+        std::printf("  transmission_color tint=(%.2f,%.2f,%.2f)\n", lw.transmissionTint.x,
+                    lw.transmissionTint.y, lw.transmissionTint.z);
+    }
+
+    // specular_color tints dielectric F0.
+    {
+        Material mat;
+        mat.baseColor = Vec3(1.0f, 1.0f, 1.0f);
+        mat.specular = 1.0f;
+        mat.specularColor = Vec3(1.0f, 0.0f, 0.0f);
+        mat.metallic = 0.0f;
+        mat.transmission = 0.0f;
+        LobeWeights lw = computeLobes(mat);
+        check(lw.f0.x > lw.f0.y && lw.f0.x > lw.f0.z, "specular_color tints dielectric F0");
+        std::printf("  specular_color f0=(%.3f,%.3f,%.3f)\n", lw.f0.x, lw.f0.y, lw.f0.z);
+    }
+}
+
 void testMaterialXRaySwitchCaustics() {
     std::printf("materialx-ray-switch-caustics\n");
 #if !SOLSTICE_HAVE_MATERIALX
@@ -2869,6 +2975,7 @@ int main() {
     testMaterialXBumpAndNormalMap();
     testMaterialXNoiseAndTriplanar();
     testMaterialXKarmaArnoldWirings();
+    testMaterialXArnoldMapsAndConstants();
     testMaterialXRaySwitchCaustics();
     testMaterialXUdimCubeAsset();
     testBdptShadersAndSss();

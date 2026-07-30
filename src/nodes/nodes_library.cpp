@@ -439,6 +439,8 @@ public:
             sanitizeProc(evaluated.material.normalProc);
             sanitizeProc(evaluated.material.subsurfaceProc);
             sanitizeProc(evaluated.material.bumpProc);
+            sanitizeProc(evaluated.material.specularColorProc);
+            sanitizeProc(evaluated.material.transmissionColorProc);
 
             const QString pattern = stringValue("pattern", "*");
             for (StagePrim& prim : stage.prims) {
@@ -456,6 +458,8 @@ public:
                 prim.normalTexture = evaluated.normalTexture;
                 prim.bumpTexture = evaluated.bumpTexture;
                 prim.subsurfaceTexture = evaluated.subsurfaceTexture;
+                prim.specularColorTexture = evaluated.specularColorTexture;
+                prim.transmissionColorTexture = evaluated.transmissionColorTexture;
                 prim.procedurals = evaluated.procedurals;
                 prim.proceduralImages = evaluated.proceduralImages;
             }

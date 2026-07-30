@@ -252,12 +252,19 @@ mx::NodePtr findImageNode(mx::NodePtr node) {
 
 void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     auto setColor = [&](const char* name, Vec3& dst) {
-        if (resolveConnectedNode(ss, name)) return;  // textured — keep default tint
+        // Connected map/proc fully replaces the constant — leave identity tint.
+        if (resolveConnectedNode(ss, name)) {
+            dst = Vec3(1.0f);
+            return;
+        }
         Vec3 v;
         if (parseColor3(inputValueString(ss, name), v)) dst = v;
     };
     auto setFloat = [&](const char* name, float& dst) {
-        if (resolveConnectedNode(ss, name)) return;
+        if (resolveConnectedNode(ss, name)) {
+            dst = 1.0f;
+            return;
+        }
         float v = 0;
         if (parseFloat(inputValueString(ss, name), v)) dst = v;
     };
@@ -270,15 +277,18 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     setFloat("specular_roughness", material.roughness);
     setFloat("metalness", material.metallic);
     setFloat("specular", material.specular);
+    setColor("specular_color", material.specularColor);
     setFloat("specular_IOR", material.ior);
     setFloat("transmission", material.transmission);
+    setColor("transmission_color", material.transmissionColor);
     material.roughness = saturatef(material.roughness);
     material.metallic = saturatef(material.metallic);
     material.specular = saturatef(material.specular);
     material.ior = clampf(material.ior, 0.0f, 5.0f);
     material.transmission = saturatef(material.transmission);
     {
-        // MaterialX opacity is color3; use average as scalar cutout weight.
+        // MaterialX opacity is color3; use average as scalar cutout / presence weight.
+        // Arnold: opacity kills ALL shading including specular (integrator cutout).
         if (!resolveConnectedNode(ss, "opacity")) {
             Vec3 opacityColor(1.0f);
             const std::string raw = inputValueString(ss, "opacity");
@@ -288,6 +298,8 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
                 float opacityF = 1.0f;
                 if (parseFloat(raw, opacityF)) material.opacity = opacityF;
             }
+        } else {
+            material.opacity = 1.0f;  // map/proc replaces
         }
     }
     // Fake-caustics style: how opaque a cast shadow is (1=black shadow, 0=none).
@@ -588,24 +600,27 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
     add("standard_surface", "surfaceshader", "PBR / Shading",
         {{"base_color", "color3", "0.8, 0.8, 0.8"},
          {"base", "float", "0.8"},
-         {"specular_roughness", "float", "0.35"},
-         {"metalness", "float", "0"},
          {"specular", "float", "0.5"},
+         {"specular_color", "color3", "1, 1, 1"},
+         {"specular_roughness", "float", "0.35"},
          {"specular_IOR", "float", "1.5"},
+         {"metalness", "float", "0"},
          {"transmission", "float", "0"},
-         {"opacity", "color3", "1, 1, 1"},
+         {"transmission_color", "color3", "1, 1, 1"},
          {"shadow_opacity", "float", "1"},
          {"contribute_caustics", "boolean", "true"},
          {"dispersion_abbe", "float", "0"},
          {"thin_film_thickness", "float", "0"},
          {"thin_film_IOR", "float", "1.4"},
+         {"internal_reflections", "boolean", "true"},
          {"emission", "float", "0"},
          {"emission_color", "color3", "1, 1, 1"},
          {"normal", "vector3", {}},
          {"subsurface", "float", "0"},
          {"subsurface_color", "color3", "1, 0.75, 0.55"},
          {"subsurface_radius", "color3", "1, 0.35, 0.2"},
-         {"subsurface_scale", "float", "1"}});
+         {"subsurface_scale", "float", "1"},
+         {"opacity", "color3", "1, 1, 1"}});
     add("triplanarprojection", "color3", "Texture",
         {{"file", "filename", {}},
          {"input_per_axis", "boolean", "false"},
@@ -1045,6 +1060,8 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         bindSlot("base_color", result.baseColorTexture, result.material.baseColorProc);
         bindSlot("specular_roughness", result.roughnessTexture, result.material.roughnessProc);
         bindSlot("metalness", result.metallicTexture, result.material.metallicProc);
+        bindSlot("specular_color", result.specularColorTexture, result.material.specularColorProc);
+        bindSlot("transmission_color", result.transmissionColorTexture, result.material.transmissionColorProc);
         bindSlot("opacity", result.opacityTexture, result.material.opacityProc);
         bindSlot("emission_color", result.emissionTexture, result.material.emissionProc);
         bindSlot("normal", result.normalTexture, result.material.normalProc, true);
@@ -1057,6 +1074,8 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         sanitize(result.material.baseColorProc);
         sanitize(result.material.roughnessProc);
         sanitize(result.material.metallicProc);
+        sanitize(result.material.specularColorProc);
+        sanitize(result.material.transmissionColorProc);
         sanitize(result.material.opacityProc);
         sanitize(result.material.emissionProc);
         sanitize(result.material.normalProc);
