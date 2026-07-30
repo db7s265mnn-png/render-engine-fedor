@@ -1888,6 +1888,128 @@ void testTriplanarDisplacementArtifacts() {
         std::printf("  ground ydelta=%.3f\n", ymax - ymin);
         check(ymax - ymin > 0.03f, "ground smooth triplanar relief");
     }
+
+    // Arnold Pref: after displace, beauty triplanar must sample cage Pref/Nref —
+    // evaluating at displaced P/N flips axis weights and re-projects the map.
+    {
+        QTemporaryDir tmp;
+        check(tmp.isValid(), "tmpdir pref");
+        const QString texPath = tmp.filePath("axis.png");
+        {
+            // Strong XY contrast so X vs Y projection reads clearly.
+            QImage img(64, 64, QImage::Format_RGB32);
+            for (int y = 0; y < 64; ++y)
+                for (int x = 0; x < 64; ++x) {
+                    const int v = ((x / 8) + (y / 8)) % 2 ? 220 : 40;
+                    img.setPixel(x, y, qRgb(v, v / 2, 30));
+                }
+            check(img.save(texPath), "write axis tex");
+        }
+        const QString xml = QStringLiteral(
+            "<?xml version=\"1.0\"?>\n"
+            "<materialx version=\"1.38\">\n"
+            "  <triplanarprojection name=\"tri1\" type=\"color3\">\n"
+            "    <input name=\"file\" type=\"filename\" value=\"%1\"/>\n"
+            "    <input name=\"scale\" type=\"vector3\" value=\"0.5, 0.5, 0.5\"/>\n"
+            "    <input name=\"blend\" type=\"float\" value=\"8\"/>\n"
+            "  </triplanarprojection>\n"
+            "  <displacement name=\"disp1\" type=\"float\">\n"
+            "    <input name=\"displacement\" type=\"float\" nodename=\"tri1\"/>\n"
+            "    <input name=\"scale\" type=\"float\" value=\"0.55\"/>\n"
+            "    <input name=\"zero_value\" type=\"float\" value=\"0.5\"/>\n"
+            "    <input name=\"subdiv_iterations\" type=\"integer\" value=\"4\"/>\n"
+            "    <input name=\"autobump\" type=\"boolean\" value=\"false\"/>\n"
+            "  </displacement>\n"
+            "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+            "    <input name=\"base_color\" type=\"color3\" nodename=\"tri1\"/>\n"
+            "  </standard_surface>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+            "    <input name=\"displacementshader\" type=\"displacementshader\" nodename=\"disp1\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n").arg(texPath);
+        MaterialXEvalResult eval = evaluateMaterialXDocument(xml, tmp.path());
+        check(eval.ok && eval.material.baseColorProc >= 0, "pref triplanar graph ok");
+        check(eval.material.displacementProc >= 0, "pref displace graph ok");
+
+        Stage stage;
+        StagePrim prim;
+        prim.path = "/geo/sphere";
+        prim.type = PrimType::Mesh;
+        // Sphere: after displace, many verts have N ≠ Nref (axis flip risk).
+        prim.mesh = makeSphereMesh(1.0f, 32, 16);
+        prim.material = eval.material;
+        prim.procedurals = eval.procedurals;
+        prim.proceduralImages = eval.proceduralImages;
+        prim.materialAssigned = true;
+        stage.prims.push_back(prim);
+        ScenePtr cooked = stage.toScene();
+        check(cooked && !cooked->meshes.empty() && !cooked->materials.empty(), "pref cooked");
+        const Mesh& mesh = *cooked->meshes[0];
+        const Material& mat = cooked->materials[0];
+        check(mat.baseColorProc >= 0, "cooked baseColorProc");
+        check(!mesh.restPositions.empty() && mesh.restPositions.size() == mesh.positions.size(),
+              "restPositions stored (Pref)");
+        check(!mesh.restNormals.empty() && mesh.restNormals.size() == mesh.positions.size(),
+              "restNormals stored (Nref)");
+
+        float maxDelta = 0.0f;
+        for (size_t i = 0; i < mesh.positions.size(); ++i)
+            maxDelta = std::max(maxDelta, length(mesh.positions[i] - mesh.restPositions[i]));
+        std::printf("  Pref max |P-Pref|=%.4f verts=%zu\n", maxDelta, mesh.positions.size());
+        check(maxDelta > 0.01f, "mesh was displaced vs Pref cage");
+
+        // Find a vertex where displaced shading normal diverges from Pref (axis flip risk).
+        int best = -1;
+        float bestDot = 1.0f;
+        for (size_t i = 0; i < mesh.positions.size(); ++i) {
+            if (length(mesh.positions[i] - mesh.restPositions[i]) < 1e-4f) continue;
+            if (mesh.normals.size() != mesh.positions.size()) continue;
+            const Vec3 n = normalize(mesh.normals[i]);
+            const Vec3 nr = normalize(mesh.restNormals[i]);
+            const float d = std::fabs(dot(n, nr));
+            if (d < bestDot) {
+                bestDot = d;
+                best = int(i);
+            }
+        }
+        check(best >= 0, "found displaced Pref candidate");
+        if (best >= 0) {
+            const Vec3 p = mesh.positions[size_t(best)];
+            const Vec3 pref = mesh.restPositions[size_t(best)];
+            const Vec3 n = normalize(mesh.normals[size_t(best)]);
+            const Vec3 nref = normalize(mesh.restNormals[size_t(best)]);
+
+            SceneView view = cooked->view();
+            ProceduralCtx locked;
+            locked.pObject = p;
+            locked.nObject = n;
+            locked.pRef = pref;
+            locked.nRef = nref;
+            locked.hasPref = 1;
+            ProceduralCtx flipped;
+            flipped.pObject = p;
+            flipped.nObject = n;
+            flipped.hasPref = 0;
+            ProceduralCtx cage;
+            cage.pObject = pref;
+            cage.nObject = nref;
+            cage.hasPref = 0;
+
+            const Vec4 cLock = evalProceduralRoot(view, mat.baseColorProc, locked);
+            const Vec4 cFlip = evalProceduralRoot(view, mat.baseColorProc, flipped);
+            const Vec4 cCage = evalProceduralRoot(view, mat.baseColorProc, cage);
+            const float errLock =
+                std::fabs(cLock.x - cCage.x) + std::fabs(cLock.y - cCage.y) + std::fabs(cLock.z - cCage.z);
+            const float errFlip =
+                std::fabs(cFlip.x - cCage.x) + std::fabs(cFlip.y - cCage.y) + std::fabs(cFlip.z - cCage.z);
+            std::printf("  Pref lock err=%.4f  flipped err=%.4f  n·nref=%.3f\n", errLock, errFlip, bestDot);
+            check(errLock < 1e-4f, "Pref-locked triplanar matches cage projection");
+            // Displaced P/N must disagree with cage when the shading normal tilts.
+            check(bestDot < 0.999f, "displaced normal diverges from Nref");
+            check(errFlip > 1e-4f, "displaced P/N re-projects differently (artifact without Pref)");
+        }
+    }
 }
 
 void testDefaultGroundDisplacement() {

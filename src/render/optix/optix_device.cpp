@@ -208,16 +208,22 @@ public:
                     meshViews.push_back(view);
                     continue;
                 }
-                DeviceBuffer positions, normals, uvs, indices;
+                DeviceBuffer positions, normals, uvs, indices, restPositions, restNormals;
                 positions.upload(mesh->positions);
                 indices.upload(mesh->indices);
                 if (mesh->normals.size() == mesh->positions.size()) normals.upload(mesh->normals);
                 if (mesh->uvs.size() == mesh->positions.size()) uvs.upload(mesh->uvs);
+                if (mesh->restPositions.size() == mesh->positions.size() && !mesh->restPositions.empty())
+                    restPositions.upload(mesh->restPositions);
+                if (mesh->restNormals.size() == mesh->positions.size() && !mesh->restNormals.empty())
+                    restNormals.upload(mesh->restNormals);
 
                 view.positions = positions.as<const Vec3>();
                 view.normals = normals.as<const Vec3>();
                 view.uvs = uvs.as<const Vec2>();
                 view.indices = indices.as<const uint32_t>();
+                view.restPositions = restPositions.as<const Vec3>();
+                view.restNormals = restNormals.as<const Vec3>();
                 view.triangleCount = uint32_t(mesh->indices.size() / 3);
                 view.vertexCount = uint32_t(mesh->positions.size());
                 meshViews.push_back(view);
@@ -228,6 +234,8 @@ public:
                 geometryBuffers_.push_back(std::move(indices));
                 geometryBuffers_.push_back(std::move(normals));
                 geometryBuffers_.push_back(std::move(uvs));
+                geometryBuffers_.push_back(std::move(restPositions));
+                geometryBuffers_.push_back(std::move(restNormals));
             }
 
             // Top level instance acceleration structure.

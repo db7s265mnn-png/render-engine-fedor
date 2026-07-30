@@ -11,11 +11,24 @@ struct ProceduralCtx {
     Vec2 uv{0.0f, 0.0f};
     Vec3 pObject{0.0f, 0.0f, 0.0f};
     Vec3 nObject{0.0f, 0.0f, 1.0f};
+    // Arnold Pref / Nref — pre-displace cage. When hasPref!=0, triplanar / noise3d /
+    // position sample these so shading matches geometric displacement.
+    Vec3 pRef{0.0f, 0.0f, 0.0f};
+    Vec3 nRef{0.0f, 0.0f, 1.0f};
     float filterWidth = 0.0f;
     // Geometric displace / autobump: soften triplanar axis weights so height is
     // continuous across octahedral seams (hard blend + varying N → spikes).
     int forDisplacement = 0;
+    int hasPref = 0;
 };
+
+SR_INL SR_HD Vec3 procSampleP(const ProceduralCtx& ctx) {
+    return ctx.hasPref ? ctx.pRef : ctx.pObject;
+}
+
+SR_INL SR_HD Vec3 procSampleN(const ProceduralCtx& ctx) {
+    return ctx.hasPref ? ctx.nRef : ctx.nObject;
+}
 
 // ---------------------------------------------------------------------------
 // Noise primitives (MaterialX / OSL style ≈ -1..1)
@@ -302,12 +315,16 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
         case kProcUv:
             result = Vec4(ctx.uv.x, ctx.uv.y, 0.0f, 1.0f);
             break;
-        case kProcPosition:
-            result = Vec4(ctx.pObject.x, ctx.pObject.y, ctx.pObject.z, 1.0f);
+        case kProcPosition: {
+            const Vec3 p = procSampleP(ctx);
+            result = Vec4(p.x, p.y, p.z, 1.0f);
             break;
-        case kProcNormal:
-            result = Vec4(ctx.nObject.x, ctx.nObject.y, ctx.nObject.z, 1.0f);
+        }
+        case kProcNormal: {
+            const Vec3 nn = procSampleN(ctx);
+            result = Vec4(nn.x, nn.y, nn.z, 1.0f);
             break;
+        }
         case kProcNoise2d: {
             Vec2 tc = ctx.uv;
             if (n.in0 >= 0) {
@@ -326,7 +343,7 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             break;
         }
         case kProcNoise3d: {
-            Vec3 pos = ctx.pObject;
+            Vec3 pos = procSampleP(ctx);
             if (n.in0 >= 0) {
                 const Vec4 p = evalProceduralChild(scene, n.in0, ctx, depth, Vec4(pos.x, pos.y, pos.z, 1.0f));
                 pos = Vec3(p.x, p.y, p.z);
@@ -346,7 +363,7 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             break;
         }
         case kProcFractal: {
-            Vec3 pos = ctx.pObject;
+            Vec3 pos = procSampleP(ctx);
             if (n.in0 >= 0) {
                 const Vec4 p = evalProceduralChild(scene, n.in0, ctx, depth, Vec4(pos.x, pos.y, pos.z, 1.0f));
                 pos = Vec3(p.x, p.y, p.z);
@@ -387,7 +404,7 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             break;
         }
         case kProcCell3d: {
-            Vec3 pos = ctx.pObject;
+            Vec3 pos = procSampleP(ctx);
             if (n.in0 >= 0) {
                 const Vec4 p = evalProceduralChild(scene, n.in0, ctx, depth, Vec4(pos.x, pos.y, pos.z, 1.0f));
                 pos = Vec3(p.x, p.y, p.z);
@@ -460,7 +477,7 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             break;
         }
         case kProcUnified3d: {
-            Vec3 pos = ctx.pObject;
+            Vec3 pos = procSampleP(ctx);
             if (n.in0 >= 0) {
                 const Vec4 p = evalProceduralChild(scene, n.in0, ctx, depth, Vec4(pos.x, pos.y, pos.z, 1.0f));
                 pos = Vec3(p.x, p.y, p.z);
@@ -569,9 +586,10 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             // Arnold-style object-space triplanar: UV = (P + offset) / scale, optional rotate.
             // p0=default, p1=scale, p2=offset, s0=blend, s1=rotate degrees.
             // No lambdas — OptiX/CUDA device compile.
-            float nx = fabsf(ctx.nObject.x);
-            float ny = fabsf(ctx.nObject.y);
-            float nz = fabsf(ctx.nObject.z);
+            const Vec3 nSamp = procSampleN(ctx);
+            float nx = fabsf(nSamp.x);
+            float ny = fabsf(nSamp.y);
+            float nz = fabsf(nSamp.z);
             if (!srIsFinite(nx)) nx = 0.0f;
             if (!srIsFinite(ny)) ny = 0.0f;
             if (!srIsFinite(nz)) nz = 0.0f;
@@ -582,6 +600,8 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             // verts with slightly different N pick different projections → spikes.
             // Force a soft fixed blend for geometric / autobump height samples;
             // shading colour triplanar still uses the authored blend.
+            // Soften hard blends across octahedral seams during geo-displace /
+            // autobump so height stays continuous. Beauty albedo keeps authored blend.
             if (ctx.forDisplacement) blend = 1.0f;
             nx = powf(nx, blend);
             ny = powf(ny, blend);
@@ -609,9 +629,10 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             float ox = srIsFinite(n.p2.x) ? n.p2.x : 0.0f;
             float oy = srIsFinite(n.p2.y) ? n.p2.y : 0.0f;
             float oz = srIsFinite(n.p2.z) ? n.p2.z : 0.0f;
-            const float px = (ctx.pObject.x + ox) / sx;
-            const float py = (ctx.pObject.y + oy) / sy;
-            const float pz = (ctx.pObject.z + oz) / sz;
+            const Vec3 pSamp = procSampleP(ctx);
+            const float px = (pSamp.x + ox) / sx;
+            const float py = (pSamp.y + oy) / sy;
+            const float pz = (pSamp.z + oz) / sz;
             float rotDeg = n.s1;
             if (!srIsFinite(rotDeg)) rotDeg = 0.0f;
             // Keep rotation in a sane range so sin/cos stay finite.

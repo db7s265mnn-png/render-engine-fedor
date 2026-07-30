@@ -165,6 +165,10 @@ Vec3 sampleDisplacementVector(const SceneView& scene, const Material& mat, Vec2 
     ctx.uv = uv;
     ctx.pObject = p;
     ctx.nObject = n;
+    // Cage is Pref during vertex displace — mark it so shade-time Pref matches.
+    ctx.pRef = p;
+    ctx.nRef = n;
+    ctx.hasPref = 1;
     ctx.filterWidth = 0.0f;
     ctx.forDisplacement = 1;
 
@@ -360,6 +364,16 @@ MeshPtr applyArnoldDisplacement(const Mesh& src, const Material& mat, const Scen
         logInfo("displacement: subdivided " + std::to_string(done) + " levels → " +
                 std::to_string(out->triangleCount()) + " tris (requested=" +
                 std::to_string(requested) + ", targetEdge=" + std::to_string(targetEdge) + ")");
+    }
+
+    // Arnold Pref / Nref: lock triplanar & autobump to the cage before vertex offset.
+    out->restPositions = out->positions;
+    if (out->normals.size() == out->positions.size())
+        out->restNormals = out->normals;
+    else {
+        out->restNormals.clear();
+        out->computeNormalsIfMissing();
+        out->restNormals = out->normals;
     }
 
     displaceVertices(*out, mat, view);

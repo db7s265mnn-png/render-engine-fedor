@@ -209,6 +209,9 @@ struct MeshView {
     // Object-space AABB (for SMS seed cones around caustic casters).
     Vec3 boundsLo{0.0f, 0.0f, 0.0f};
     Vec3 boundsHi{0.0f, 0.0f, 0.0f};
+    // Pref / Nref (pre-displace cage). Null = same as positions/normals.
+    const Vec3* restPositions = nullptr;
+    const Vec3* restNormals = nullptr;
     // Deformation motion blur: packed positions [key * vertexCount + i], key in [0, motionKeyCount).
     // Key 0 usually aliases `positions`. Null / count 1 = static mesh.
     const Vec3* motionPositions = nullptr;

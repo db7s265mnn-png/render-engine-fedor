@@ -20,6 +20,10 @@ struct Mesh {
     Bounds3 bounds;
     // Arnold displacement bounds_padding — reapplied by computeBounds() after validate.
     float boundsPadding = 0.0f;
+    // Pref / Nref: subdivided cage before vertex displace (Arnold autobump / triplanar).
+    // Empty = no displacement was applied; shading falls back to positions/normals.
+    std::vector<Vec3> restPositions;
+    std::vector<Vec3> restNormals;
     // Deformation motion blur: positions for keys 1..N-1 (key 0 is `positions`).
     // Each entry must match `positions.size()` when used.
     std::vector<std::vector<Vec3>> motionPositions;

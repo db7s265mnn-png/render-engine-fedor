@@ -113,7 +113,7 @@ SR_INL ChainState traceChain(const SceneView& scene, const Tracer& tracer, Vec3 
             return st;
         }
         Material mat = materialForCausticTransport(scene, si.materialIndex);
-        mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+        mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
         applyDispersion(mat, dispersion);
         if (!isCausticCaster(mat)) return st;  // opaque blocker → fail
         if (k == kMaxChain) return st;
@@ -617,7 +617,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         if (buildSurfaceInteraction(scene, sh, o, seg, ssi) && ssi.lightIndex < 0) {
                             Material smat = materialForCausticTransport(scene, ssi.materialIndex);
                             smat = evaluateTexturedMaterial(scene, smat, ssi.uv, ssi.ns, ssi.pObject,
-                                                            ssi.nObject, ssi.uvFilterWidth);
+                                                            ssi.nObject, ssi.uvFilterWidth,
+                                                            ssi.pRef, ssi.nRef, ssi.hasPref);
                             if (mnee::isCausticCaster(smat)) {
                                 const mnee::BranchMatch bm =
                                     mnee::matchBranch(scene, tracer, anchorP, anchorN, si.lightIndex, si.p,
@@ -671,12 +672,12 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         // Arnold ray_switch by incoming ray type (camera rays → camera port only).
         Material baseMat = materialForRay(scene, si.materialIndex, rayKind);
         Material mat =
-            evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+            evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
         applyDispersion(mat, dispersion);
         // Glass classification for MNEE / caustic family uses caustic-transport ports.
         Material matCau = materialForCausticTransport(scene, si.materialIndex);
         matCau = evaluateTexturedMaterial(scene, matCau, si.uv, si.ns, si.pObject, si.nObject,
-                                          si.uvFilterWidth);
+                                          si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
         // No applyDispersion(matCau): camera-port Abbe must not mark shadow/LT paths.
 
         if (mat.transmission <= 0.0f && mat.doubleSided && dot(si.ns, -direction) < 0.0f) {
@@ -790,7 +791,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                                        lightContributesCaustics(l)) {
                                 Material bmat = materialForCausticTransport(scene, bsi.materialIndex);
                                 bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject,
-                                                                bsi.nObject, bsi.uvFilterWidth);
+                                                                bsi.nObject, bsi.uvFilterWidth,
+                                                                bsi.pRef, bsi.nRef, bsi.hasPref);
                                 glassPath = mnee::isCausticCaster(bmat);
                                 blockerInstance = bsi.instanceIndex;
                             }

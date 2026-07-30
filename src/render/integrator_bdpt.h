@@ -316,7 +316,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         Material mat =
             cfg.eyePath ? materialForRay(scene, si.materialIndex, rayKind)
                         : materialForCausticTransport(scene, si.materialIndex);
-        mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+        mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
         applyDispersion(mat, cfg.dispersion);
 
         // Stochastic cutout — pass through without creating a vertex.
@@ -910,7 +910,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                     } else if (bsi.lightIndex < 0 && causticsOn && lightContributesCaustics(l)) {
                         Material bmat = materialForCausticTransport(scene, bsi.materialIndex);
                         bmat = evaluateTexturedMaterial(scene, bmat, bsi.uv, bsi.ns, bsi.pObject, bsi.nObject,
-                                                        bsi.uvFilterWidth);
+                                                        bsi.uvFilterWidth, bsi.pRef, bsi.nRef, bsi.hasPref);
                         glassPath = mnee::isCausticCaster(bmat);
                         blockerInstance = bsi.instanceIndex;
                     }

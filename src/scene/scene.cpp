@@ -97,6 +97,10 @@ MeshView Mesh::view() const {
         v.boundsLo = bounds.lo;
         v.boundsHi = bounds.hi;
     }
+    v.restPositions =
+        (restPositions.size() == positions.size() && !restPositions.empty()) ? restPositions.data() : nullptr;
+    v.restNormals =
+        (restNormals.size() == positions.size() && !restNormals.empty()) ? restNormals.data() : nullptr;
     v.motionKeyCount = 1;
     v.motionPositions = nullptr;
     if (!motionPositions.empty() && !positions.empty()) {

@@ -263,13 +263,20 @@ SR_INL SR_HD float sampleTextureScalar(const SceneView& scene, int texIndex, Vec
 }
 
 // Apply MaterialX-style texture maps, shade-time procedurals, and normal mapping.
+// Pref / Nref (Arnold): when hasPref!=0, triplanar / noise3d / autobump sample the
+// pre-displace cage so beauty stays locked to geometric displacement.
 SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Material& base, Vec2 uv, Vec3& ns,
-                                               Vec3 pObject, Vec3 nObject, float uvFilterWidth = 0.0f) {
+                                               Vec3 pObject, Vec3 nObject, float uvFilterWidth = 0.0f,
+                                               Vec3 pRef = Vec3(0.0f), Vec3 nRef = Vec3(0.0f, 0.0f, 1.0f),
+                                               int hasPref = 0) {
     Material mat = base;
     ProceduralCtx ctx;
     ctx.uv = uv;
     ctx.pObject = pObject;
     ctx.nObject = nObject;
+    ctx.pRef = hasPref ? pRef : pObject;
+    ctx.nRef = hasPref ? nRef : nObject;
+    ctx.hasPref = hasPref ? 1 : 0;
     ctx.filterWidth = uvFilterWidth;
 
     auto sampleRgbSlot = [&](int proc, int tex, Vec3 fallback) -> Vec3 {
@@ -292,6 +299,11 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         ProceduralCtx hctx = ctx;
         hctx.uv = sampleUv;
         hctx.pObject = sampleP;
+        // Bump FD in object space: keep Pref locked to the sample point so
+        // triplanar blend stays on the cage while probing neighbourhood.
+        if (hctx.hasPref) {
+            hctx.pRef = sampleP;
+        }
         if (base.bumpProc >= 0) {
             const Vec4 c = evalProceduralRoot(scene, base.bumpProc, hctx);
             return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
@@ -324,7 +336,14 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
     auto sampleDispHeightAt = [&](Vec2 sampleUv, Vec3 sampleP) -> float {
         ProceduralCtx hctx = ctx;
         hctx.uv = sampleUv;
+        // Arnold autobump: evaluate the displacement shader at Pref (cage), not
+        // at the already-displaced P — otherwise triplanar axes flip with the
+        // new relief and compound the height.
         hctx.pObject = sampleP;
+        hctx.pRef = sampleP;
+        hctx.nObject = ctx.hasPref ? ctx.nRef : ctx.nObject;
+        hctx.nRef = hctx.nObject;
+        hctx.hasPref = 1;
         hctx.forDisplacement = 1;
         float h = base.displacementHeight;
         if (base.displacementProc >= 0) {
@@ -341,32 +360,36 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
     if (hasBump) {
         // MaterialX <bump>: finite-difference height → tangent-space normal.
         // UV FD covers noise2d/image; object-P FD covers triplanar/noise3d (Karma/Arnold).
+        // With Pref, probe the cage so triplanar axes do not flip with displaced N.
         float epsUv = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
         if (base.bumpTex >= 0 && base.bumpTex < scene.textureCount && scene.textures) {
             const TextureView& tex = scene.textures[base.bumpTex];
             if (tex.width > 1) epsUv = srMax(epsUv, 1.0f / float(tex.width));
         }
         epsUv = srMax(1e-5f, epsUv);
-        const float h = sampleHeightAt(uv, pObject);
+        const Vec3 bumpP = ctx.hasPref ? ctx.pRef : pObject;
+        const Vec3 bumpN = ctx.hasPref ? ctx.nRef : nObject;
+        const float h = sampleHeightAt(uv, bumpP);
         float dHu = 0.0f;
         float dHv = 0.0f;
         if (base.bumpProc >= 0) {
-            const float hu = sampleHeightAt(Vec2(uv.x + epsUv, uv.y), pObject);
-            const float hv = sampleHeightAt(Vec2(uv.x, uv.y + epsUv), pObject);
+            const float hu = sampleHeightAt(Vec2(uv.x + epsUv, uv.y), bumpP);
+            const float hv = sampleHeightAt(Vec2(uv.x, uv.y + epsUv), bumpP);
             dHu += (hu - h) / epsUv;
             dHv += (hv - h) / epsUv;
-            // Object-space FD in the shading tangent frame (triplanar / 3d noise).
-            const Frame frameP(ns);
+            // Object-space FD in the Pref/shading tangent frame (triplanar / 3d noise).
+            const Vec3 frameN = lengthSquared(bumpN) > 1e-12f ? normalize(bumpN) : ns;
+            const Frame frameP(frameN);
             float epsP = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0e-3f;
             // Prefer a world/object scale tied to filter width; clamp for stability.
             epsP = clampf(epsP, 1.0e-4f, 0.05f);
-            const float ht = sampleHeightAt(uv, pObject + frameP.t * epsP);
-            const float hb = sampleHeightAt(uv, pObject + frameP.b * epsP);
+            const float ht = sampleHeightAt(uv, bumpP + frameP.t * epsP);
+            const float hb = sampleHeightAt(uv, bumpP + frameP.b * epsP);
             dHu += (ht - h) / epsP;
             dHv += (hb - h) / epsP;
         } else {
-            const float hu = sampleHeightAt(Vec2(uv.x + epsUv, uv.y), pObject);
-            const float hv = sampleHeightAt(Vec2(uv.x, uv.y + epsUv), pObject);
+            const float hu = sampleHeightAt(Vec2(uv.x + epsUv, uv.y), bumpP);
+            const float hv = sampleHeightAt(Vec2(uv.x, uv.y + epsUv), bumpP);
             dHu = (hu - h) / epsUv;
             dHv = (hv - h) / epsUv;
         }
@@ -377,49 +400,40 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         ns = normalize(frame.toWorld(nMap));
         if (!srIsFinite(ns.x) || !srIsFinite(ns.y) || !srIsFinite(ns.z)) ns = frame.n;
     } else if (hasAutobump) {
-        // Arnold autobump: high-frequency residual from the displacement map as
-        // shade-time bump. Geometry already carries low/mid frequencies from
-        // subdiv+displace — keep this mild so N·L / shadingNormalConsistent
-        // do not collapse to black.
+        // Arnold autobump: residual high frequencies as shade-time bump. Sample the
+        // displacement shader at Pref (pre-displace cage) so triplanar axes stay
+        // locked — evaluating on displaced P would flip projections and compound.
         const Vec3 geoNs = ns;
         const float dispScale = srIsFinite(base.displacementScale) ? base.displacementScale : 1.0f;
-        const Frame frameP(geoNs);
-        // Prefer world-space slopes along the shading frame (correct units).
-        // UV FD alone treats dH/dUV * scale as a slope and over-tilts when UV
-        // spans a large surface or scale is in scene units.
+        const Vec3 pref = ctx.hasPref ? ctx.pRef : pObject;
+        const Vec3 nref = ctx.hasPref ? ctx.nRef : nObject;
+        const Frame frameP(lengthSquared(nref) > 1e-12f ? normalize(nref) : geoNs);
         float epsP = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0e-3f;
         epsP = clampf(epsP, 1.0e-4f, 0.05f);
-        const float h = sampleDispHeightAt(uv, pObject) * dispScale;
+        const float h = sampleDispHeightAt(uv, pref) * dispScale;
         float dHt = 0.0f;
         float dHb = 0.0f;
         if (base.displacementProc >= 0) {
-            // Procedurals (triplanar / noise3d) respond to P; UV-only maps need UV FD.
-            const float ht = sampleDispHeightAt(uv, pObject + frameP.t * epsP) * dispScale;
-            const float hb = sampleDispHeightAt(uv, pObject + frameP.b * epsP) * dispScale;
+            const float ht = sampleDispHeightAt(uv, pref + frameP.t * epsP) * dispScale;
+            const float hb = sampleDispHeightAt(uv, pref + frameP.b * epsP) * dispScale;
             dHt = (ht - h) / epsP;
             dHb = (hb - h) / epsP;
-            // Also mix UV FD for noise2d / place2d graphs (P-invariant).
             float epsUv = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
             epsUv = srMax(1e-5f, epsUv);
-            const float hu = sampleDispHeightAt(Vec2(uv.x + epsUv, uv.y), pObject) * dispScale;
-            const float hv = sampleDispHeightAt(Vec2(uv.x, uv.y + epsUv), pObject) * dispScale;
-            // Convert UV derivatives → world slopes with |dP/dUV| ≈ epsP/epsUv proxy
-            // when filter width is available; otherwise keep a gentle UV contribution.
+            const float hu = sampleDispHeightAt(Vec2(uv.x + epsUv, uv.y), pref) * dispScale;
+            const float hv = sampleDispHeightAt(Vec2(uv.x, uv.y + epsUv), pref) * dispScale;
             const float uvToWorld = epsP / epsUv;
             dHt += (hu - h) / epsUv / srMax(uvToWorld, 1e-4f);
             dHb += (hv - h) / epsUv / srMax(uvToWorld, 1e-4f);
         } else {
-            // Image height maps: UV FD → world slope via footprint estimate.
             float epsUv = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
             if (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures) {
                 const TextureView& tex = scene.textures[base.displacementTex];
                 if (tex.width > 1) epsUv = srMax(epsUv, 1.0f / float(tex.width));
             }
             epsUv = srMax(1e-5f, epsUv);
-            const float hu = sampleDispHeightAt(Vec2(uv.x + epsUv, uv.y), pObject) * dispScale;
-            const float hv = sampleDispHeightAt(Vec2(uv.x, uv.y + epsUv), pObject) * dispScale;
-            // uvFilterWidth ≈ worldPixel * |dUV/dP| → |dP/dUV| ≈ worldPixel/uvFilterWidth.
-            // Without an explicit pixel size, use epsP as the world step paired with epsUv.
+            const float hu = sampleDispHeightAt(Vec2(uv.x + epsUv, uv.y), pref) * dispScale;
+            const float hv = sampleDispHeightAt(Vec2(uv.x, uv.y + epsUv), pref) * dispScale;
             const float worldPerUv = epsP / epsUv;
             dHt = (hu - h) / epsUv / srMax(worldPerUv, 1e-4f);
             dHb = (hv - h) / epsUv / srMax(worldPerUv, 1e-4f);
@@ -440,7 +454,9 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         Vec3 nMap(bx, by, 1.0f);
         if (!srIsFinite(nMap.x) || !srIsFinite(nMap.y) || !srIsFinite(nMap.z)) nMap = Vec3(0.0f, 0.0f, 1.0f);
         nMap = normalize(nMap);
-        ns = normalize(frameP.toWorld(nMap));
+        // Apply residual in the geometric shading frame (post-displace).
+        const Frame frameShade(geoNs);
+        ns = normalize(frameShade.toWorld(nMap));
         if (!srIsFinite(ns.x) || !srIsFinite(ns.y) || !srIsFinite(ns.z)) ns = geoNs;
         if (dot(ns, geoNs) < 0.0f) ns = -ns;
     } else if (base.normalProc >= 0 ||

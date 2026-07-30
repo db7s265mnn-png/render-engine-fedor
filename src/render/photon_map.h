@@ -210,7 +210,7 @@ private:
             if (si.lightIndex >= 0) break;
 
             Material mat = materialForCausticTransport(scene, si.materialIndex);
-            mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth);
+            mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
 
             if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
                 o = offsetRayOrigin(si.p, si.ng, d);

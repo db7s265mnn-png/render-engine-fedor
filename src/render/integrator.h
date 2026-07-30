@@ -30,12 +30,16 @@ struct RayHit {
 struct SurfaceInteraction {
     Vec3 p{0.0f, 0.0f, 0.0f};
     Vec3 pObject{0.0f, 0.0f, 0.0f};
+    // Pref / Nref (object space, pre-displace cage). Equal to pObject/nObject when absent.
+    Vec3 pRef{0.0f, 0.0f, 0.0f};
+    Vec3 nRef{0.0f, 0.0f, 1.0f};
     Vec3 ng{0.0f, 0.0f, 1.0f};  // geometric normal (world)
     Vec3 ns{0.0f, 0.0f, 1.0f};  // shading normal (world)
     Vec3 nObject{0.0f, 0.0f, 1.0f};
     Vec2 uv{0.0f, 0.0f};
     // Approximate UV footprint diameter of one camera pixel at the hit (for mip LOD).
     float uvFilterWidth = 0.0f;
+    int hasPref = 0;
     int instanceIndex = -1;
     int materialIndex = -1;
     int lightIndex = -1;
@@ -220,21 +224,42 @@ SR_INL SR_HD bool buildSurfaceInteraction(const SceneView& scene, const RayHit& 
 
     const Vec3 pLocal = p0 * w + p1 * hit.u + p2 * hit.v;
     si.pObject = pLocal;
+    si.pRef = pLocal;
+    si.hasPref = 0;
     si.p = transformPoint(xform, pLocal);
     // The hit distance is authoritative for ray offsets.
     si.p = origin + dir * hit.t;
 
     Vec3 ngLocal = cross(p1 - p0, p2 - p0);
     si.nObject = lengthSquared(ngLocal) > 0.0f ? normalize(ngLocal) : Vec3(0.0f, 0.0f, 1.0f);
+    si.nRef = si.nObject;
     si.ng = normalize(transformNormalWithInverse(xformInv, ngLocal));
 
     if (mesh.normals) {
         const Vec3 nLocal = mesh.normals[i0] * w + mesh.normals[i1] * hit.u + mesh.normals[i2] * hit.v;
         si.nObject = lengthSquared(nLocal) > 0.0f ? normalize(nLocal) : si.nObject;
+        si.nRef = si.nObject;
         Vec3 ns = transformNormalWithInverse(xformInv, nLocal);
         si.ns = lengthSquared(ns) > 0.0f ? normalize(ns) : si.ng;
     } else {
         si.ns = si.ng;
+    }
+
+    // Arnold Pref: lock triplanar / noise / autobump to the pre-displace cage.
+    if (mesh.restPositions) {
+        const Vec3 r0 = mesh.restPositions[i0];
+        const Vec3 r1 = mesh.restPositions[i1];
+        const Vec3 r2 = mesh.restPositions[i2];
+        si.pRef = r0 * w + r1 * hit.u + r2 * hit.v;
+        si.hasPref = 1;
+        if (mesh.restNormals) {
+            const Vec3 rn = mesh.restNormals[i0] * w + mesh.restNormals[i1] * hit.u +
+                            mesh.restNormals[i2] * hit.v;
+            if (lengthSquared(rn) > 0.0f) si.nRef = normalize(rn);
+        } else {
+            const Vec3 rn = cross(r1 - r0, r2 - r0);
+            if (lengthSquared(rn) > 0.0f) si.nRef = normalize(rn);
+        }
     }
     if (mesh.uvs) {
         const Vec2 uv0 = mesh.uvs[i0], uv1 = mesh.uvs[i1], uv2 = mesh.uvs[i2];
@@ -721,7 +746,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         // Camera rays never use the Solstice caustics port.
         Material baseMat = materialForRay(scene, si.materialIndex, rayKind);
         Material mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject,
-                                                si.uvFilterWidth);
+                                                si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
         applyDispersion(mat, dispersion);
 
         // Two sided shading for opaque surfaces. Winding order varies between
