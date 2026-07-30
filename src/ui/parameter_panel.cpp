@@ -475,7 +475,7 @@ void ParameterPanel::rebuildLop() {
             if (!form) {
                 auto* box = new QGroupBox(group.isEmpty() ? QString("Parameters") : group);
                 form = new QFormLayout(box);
-                form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
                 form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
                 form->setRowWrapPolicy(QFormLayout::WrapLongRows);
                 contentLayout_->addWidget(box);
