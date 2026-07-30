@@ -14,8 +14,9 @@
 namespace sol {
 namespace {
 
-constexpr int kMaxSubdivIterations = 7;
-constexpr size_t kMaxDisplaceTriangles = 8000000;
+// Soft safety only — subdiv_iterations is no longer hard-capped. Mid-edge
+// splits are 4× tris per level, so this budget is what stops runaway values.
+constexpr size_t kMaxDisplaceTriangles = 64000000;
 
 struct EdgeKey {
     uint32_t a = 0;
@@ -308,16 +309,10 @@ MeshPtr applyArnoldDisplacement(const Mesh& src, const Material& mat, const Scen
 
     int requested = mat.subdivIterations;
     if (requested < 0) requested = 0;
-    // Arnold-style: iterations are a hard cap. Values like 30 are not useful as
-    // uniform mid-edge depth (4^n tris) — clamp the loop, drive density by edge
-    // length from the requested quality, and stop at a triangle budget.
-    int maxIter = requested;
-    if (maxIter > kMaxSubdivIterations) {
-        logWarning("displacement: subdiv_iterations " + std::to_string(requested) +
-                   " capped at " + std::to_string(kMaxSubdivIterations) +
-                   " (edge-length target still uses requested quality)");
-        maxIter = kMaxSubdivIterations;
-    }
+    // Honour authored subdiv_iterations fully. Density still early-outs when
+    // edges are short enough / height deltas are flat; the triangle budget is
+    // the only hard stop (4^n growth).
+    const int maxIter = requested;
 
     // Ensure cage normals before subdiv so midpoints interpolate something sensible.
     if (out->normals.size() != out->positions.size()) {
@@ -329,9 +324,10 @@ MeshPtr applyArnoldDisplacement(const Mesh& src, const Material& mat, const Scen
     const Vec3 ext = out->bounds.extent();
     const float size = std::max(ext.x, std::max(ext.y, ext.z));
     // Higher requested iterations → shorter target edges (more detail before displace).
-    const int qualityPow = std::min(std::max(requested, 0), 10);
+    // Use ldexp so large iteration counts stay well-defined (unlike 1<<n).
+    const int qualityPow = std::min(std::max(requested, 0), 30);
     const float targetEdge =
-        (size > 1e-8f) ? (size / float(8 * (1 << qualityPow))) : 0.0f;
+        (size > 1e-8f) ? (size / (8.0f * std::ldexp(1.0f, qualityPow))) : 0.0f;
 
     // Need the height map available while deciding how far to refine.
     std::vector<TextureView> textureViews;

@@ -104,7 +104,7 @@ struct Material {
     float displacementHeight = 0.0f;  // constant when no tex/proc
     float displacementBoundsPadding = 0.0f;
     float displacementZeroValue = 0.0f;
-    int subdivIterations = 0;   // mid-edge triangle splits (0..5); Arnold subdiv_iterations
+    int subdivIterations = 0;   // mid-edge triangle splits; Arnold subdiv_iterations
     int autobump = 1;           // high-frequency detail as bump after geo displace
     int displacementVector = 0; // 0 = along normal (float), 1 = vector displace
     int _padDisp = 0;

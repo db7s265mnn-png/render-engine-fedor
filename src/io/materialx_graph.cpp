@@ -1100,7 +1100,6 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
             else
                 result.material.subdivIterations = 3;
             if (result.material.subdivIterations < 0) result.material.subdivIterations = 0;
-            if (result.material.subdivIterations > 30) result.material.subdivIterations = 30;
 
             result.material.autobump = 1;
             {
