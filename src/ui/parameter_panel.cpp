@@ -533,7 +533,7 @@ void ParameterPanel::rebuildMaterialX() {
 
     auto* paramsBox = new QGroupBox("Parameters");
     auto* form = new QFormLayout(paramsBox);
-    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
 
     auto makeComponentRow = [this](int count, const QVector<double>& values, double sliderLo, double sliderHi,
                                    bool showSwatch, const QString& pickerTitle,
