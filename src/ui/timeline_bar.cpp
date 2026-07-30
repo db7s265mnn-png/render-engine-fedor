@@ -18,9 +18,15 @@
 namespace sol {
 namespace {
 
-constexpr int kRangeEditWidth = 52;
-constexpr qreal kPlayheadWidth = 40.0;
-constexpr qreal kPlayheadHeight = 16.0;
+// Shared chrome for start / playhead / end frame boxes.
+constexpr int kFrameBoxWidth = 40;
+constexpr int kFrameBoxHeight = 16;
+constexpr qreal kPlayheadWidth = qreal(kFrameBoxWidth);
+constexpr qreal kPlayheadHeight = qreal(kFrameBoxHeight);
+
+QColor frameBoxBg() { return QColor(0x1a, 0x1c, 0x20); }
+QColor frameBoxBorder() { return QColor(0x7a, 0x7e, 0x86); }
+QColor frameBoxText() { return QColor(0xd8, 0xda, 0xe0); }
 
 QIcon makeHoudiniTransportIcon(const QString& kind, int size = 18) {
     QPixmap pm(size, size);
@@ -93,7 +99,7 @@ QToolButton* makeTransportButton(QWidget* parent, const QString& kind, const QSt
 // ---------------------------------------------------------------------------
 
 TimelineScrubber::TimelineScrubber(QWidget* parent) : QWidget(parent) {
-    setMinimumHeight(22);
+    setFixedHeight(kFrameBoxHeight);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     setMouseTracking(true);
     setCursor(Qt::PointingHandCursor);
@@ -114,7 +120,10 @@ void TimelineScrubber::setFrame(int frame) {
 }
 
 QRectF TimelineScrubber::trackRect() const {
-    return QRectF(4.0, height() * 0.5 - 1.0, std::max(8.0, width() - 8.0), 2.0);
+    // Inset by half the playhead so the box stays inside the scrubber and docks
+    // flush against the start/end widgets at the range ends (no overlap).
+    const qreal inset = kPlayheadWidth * 0.5;
+    return QRectF(inset, height() * 0.5 - 1.0, std::max(8.0, width() - 2.0 * inset), 2.0);
 }
 
 qreal TimelineScrubber::xForFrame(int frame) const {
@@ -162,20 +171,17 @@ void TimelineScrubber::paintEvent(QPaintEvent*) {
         p.drawLine(QPointF(x, track.center().y() - h), QPointF(x, track.center().y() + h));
     }
 
-    // Playhead frame box — fixed width, grey border
+    // Playhead — same grey chrome as start/end boxes, no center stem.
     const QRectF head = playheadRect();
-    p.setPen(QPen(QColor(120, 124, 132), 1.0));
-    p.setBrush(QColor(12, 13, 15));
+    p.setPen(QPen(frameBoxBorder(), 1.0));
+    p.setBrush(frameBoxBg());
     p.drawRoundedRect(head, 2.0, 2.0);
-    const qreal cx = head.center().x();
-    p.setPen(QPen(QColor(220, 222, 226), 1.2));
-    p.drawLine(QPointF(cx, track.center().y() - 7.0), QPointF(cx, track.center().y() + 7.0));
 
     QFont frameFont = font();
     frameFont.setPointSizeF(9.0);
     frameFont.setBold(true);
     p.setFont(frameFont);
-    p.setPen(QColor(235, 237, 240));
+    p.setPen(frameBoxText());
     p.drawText(head, Qt::AlignCenter, QString::number(frame_));
 }
 
@@ -238,9 +244,9 @@ void TimelineScrubber::beginFrameEdit() {
     editor_->setAlignment(Qt::AlignCenter);
     editor_->setText(QString::number(frame_));
     editor_->setValidator(new QIntValidator(-999999, 999999, editor_));
-    editor_->setFixedSize(int(kPlayheadWidth), int(kPlayheadHeight) + 2);
+    editor_->setFixedSize(kFrameBoxWidth, kFrameBoxHeight + 2);
     editor_->setStyleSheet(
-        "QLineEdit { background: #0c0d0f; color: #ebebef; border: 1px solid #50aaff;"
+        "QLineEdit { background: #1a1c20; color: #d8dae0; border: 1px solid #50aaff;"
         " border-radius: 2px; padding: 0 2px; font-weight: 700; }");
     editor_->move(playheadRect().toRect().topLeft());
     editor_->selectAll();
@@ -282,7 +288,7 @@ void TimelineScrubber::cancelFrameEdit() {
 QLineEdit* TimelineBar::makeRangeEdit(const QString& tip) {
     auto* edit = new QLineEdit(this);
     edit->setAlignment(Qt::AlignCenter);
-    edit->setFixedSize(kRangeEditWidth, 20);
+    edit->setFixedSize(kFrameBoxWidth, kFrameBoxHeight);
     edit->setMaxLength(6);
     edit->setValidator(new QIntValidator(-999999, 999999, edit));
     edit->setToolTip(tip);
@@ -328,7 +334,7 @@ TimelineBar::TimelineBar(QWidget* parent) : QWidget(parent) {
 
     auto* scrubRow = new QHBoxLayout();
     scrubRow->setContentsMargins(0, 0, 0, 0);
-    scrubRow->setSpacing(6);
+    scrubRow->setSpacing(0);
 
     startEdit_ = makeRangeEdit(QStringLiteral("Start frame"));
     endEdit_ = makeRangeEdit(QStringLiteral("End frame"));

@@ -1,13 +1,88 @@
 #include "ui/theme.h"
 
 #include <QLocale>
+#include <QPainter>
 #include <QPalette>
+#include <QProxyStyle>
 #include <QStyleFactory>
+#include <QStyleOption>
 
 namespace sol {
+namespace {
+
+// Dock / splitter resize grips: three larger square dots in place of Fusion's
+// tiny speckles, keeping the same overall hit area.
+class SolsticeStyle : public QProxyStyle {
+public:
+    explicit SolsticeStyle(QStyle* base) : QProxyStyle(base) {}
+
+    int pixelMetric(PixelMetric metric, const QStyleOption* option = nullptr,
+                    const QWidget* widget = nullptr) const override {
+        if (metric == PM_DockWidgetSeparatorExtent || metric == PM_SplitterWidth) return 8;
+        return QProxyStyle::pixelMetric(metric, option, widget);
+    }
+
+    void drawPrimitive(PrimitiveElement element, const QStyleOption* option, QPainter* painter,
+                       const QWidget* widget = nullptr) const override {
+        if (element == PE_IndicatorDockWidgetResizeHandle) {
+            drawGrip(option, painter);
+            return;
+        }
+        QProxyStyle::drawPrimitive(element, option, painter, widget);
+    }
+
+    void drawControl(ControlElement element, const QStyleOption* option, QPainter* painter,
+                     const QWidget* widget = nullptr) const override {
+        if (element == CE_Splitter) {
+            drawGrip(option, painter);
+            return;
+        }
+        QProxyStyle::drawControl(element, option, painter, widget);
+    }
+
+private:
+    static void drawGrip(const QStyleOption* option, QPainter* painter) {
+        if (!option || !painter) return;
+        const QRect r = option->rect;
+        painter->fillRect(r, QColor(0x2e, 0x31, 0x36));
+
+        const bool horizontal = option->state & State_Horizontal;
+        constexpr int kDot = 3;
+        constexpr int kGap = 4;
+        constexpr int kCount = 3;
+        const int span = kCount * kDot + (kCount - 1) * kGap;
+        const QColor fill = (option->state & State_MouseOver) ? QColor(0xb0, 0xb4, 0xbc)
+                                                              : QColor(0x8a, 0x8e, 0x96);
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing, false);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(fill);
+
+        if (horizontal) {
+            // Separator runs left–right: three squares in a horizontal cluster.
+            const int x0 = r.center().x() - span / 2;
+            const int y0 = r.center().y() - kDot / 2;
+            for (int i = 0; i < kCount; ++i) {
+                painter->drawRect(x0 + i * (kDot + kGap), y0, kDot, kDot);
+            }
+        } else {
+            // Separator runs top–bottom: three squares stacked.
+            const int x0 = r.center().x() - kDot / 2;
+            const int y0 = r.center().y() - span / 2;
+            for (int i = 0; i < kCount; ++i) {
+                painter->drawRect(x0, y0 + i * (kDot + kGap), kDot, kDot);
+            }
+        }
+        painter->restore();
+    }
+};
+
+}  // namespace
 
 void applyDarkTheme(QApplication& application) {
-    application.setStyle(QStyleFactory::create("Fusion"));
+    auto* style = new SolsticeStyle(QStyleFactory::create("Fusion"));
+    application.setStyle(style);
     // Force '.' as the decimal separator in spin boxes and number formatting.
     QLocale::setDefault(QLocale::c());
 
@@ -37,6 +112,14 @@ void applyDarkTheme(QApplication& application) {
             padding: 0 10px;
             min-height: 34px;
             max-height: 34px;
+        }
+        QMainWindow::separator {
+            background: #2e3136;
+            width: 8px;
+            height: 8px;
+        }
+        QSplitter::handle {
+            background: #2e3136;
         }
         QGroupBox { border: 1px solid #3a3e44; border-radius: 3px; margin-top: 14px; padding-top: 6px; }
         QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #ffa82e; }
