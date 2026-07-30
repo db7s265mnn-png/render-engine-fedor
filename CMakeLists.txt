@@ -27,13 +27,37 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# Optimize for modern x86-64 (AVX2 / BMI1/BMI2 / FMA / …). Drops CPUs older than
+# roughly Haswell / Excavator / Zen 1 (~2013–2015). Embree still does its own
+# runtime ISA dispatch; this mainly accelerates our integrator / shading code.
+option(SOLSTICE_MODERN_CPU "Target x86-64-v3 (AVX2+); faster, not for ancient CPUs" ON)
+
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 if(MSVC)
-    add_compile_options(/W3 /MP /bigobj)
+    # Also true for clang-cl (MSVC-compatible driver).
+    add_compile_options(/W3 /bigobj)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        add_compile_options(/MP)
+    endif()
     add_compile_definitions(_USE_MATH_DEFINES NOMINMAX WIN32_LEAN_AND_MEAN)
-else()
+    if(SOLSTICE_MODERN_CPU)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            # clang-cl: forward -march to the Clang CC1.
+            add_compile_options(/clang:-march=x86-64-v3)
+        else()
+            add_compile_options(/arch:AVX2)
+        endif()
+    endif()
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)
+    if(SOLSTICE_MODERN_CPU)
+        add_compile_options(-march=x86-64-v3)
+    endif()
+endif()
+
+if(SOLSTICE_MODERN_CPU)
+    message(STATUS "CPU baseline: x86-64-v3 / AVX2 (SOLSTICE_MODERN_CPU=ON)")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -483,6 +507,7 @@ endif()
 
 message(STATUS "")
 message(STATUS "${SOLSTICE_APP_DISPLAY_NAME} ${PROJECT_VERSION}")
+message(STATUS "  Compiler        : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  Qt              : ${Qt6_VERSION}")
 message(STATUS "  Embree          : ${EMBREE_VERSION}")
 message(STATUS "  Alembic support : ${SOLSTICE_HAVE_ALEMBIC_01}")
@@ -492,6 +517,7 @@ message(STATUS "  MaterialX       : ${SOLSTICE_HAVE_MATERIALX_01}")
 message(STATUS "  OptiX backend   : ${SOLSTICE_HAVE_OPTIX_01}")
 message(STATUS "  OpenPGL guiding : ${SOLSTICE_HAVE_OPENPGL_01}")
 message(STATUS "  TinyUSDZ / USDC : ${SOLSTICE_HAVE_TINYUSDZ_01}")
+message(STATUS "  Modern CPU ISA  : ${SOLSTICE_MODERN_CPU}")
 message(STATUS "")
 
 # OBJ -> Alembic converter for shipping demo assets.

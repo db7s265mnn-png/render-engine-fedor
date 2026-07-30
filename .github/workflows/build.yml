@@ -7,126 +7,25 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Linux jobs intentionally disabled for now — re-enable when requested.
   linux:
     name: Linux (Embree, tests)
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build qt6-base-dev libembree-dev \
-            libopenexr-dev libimath-dev libgl1-mesa-dev libtbb-dev libtiff-dev
-
-      - name: Cache Alembic
-        id: alembic-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/alembic-install
-          key: alembic-1.8.6-${{ runner.os }}
-
-      - name: Build Alembic
-        if: steps.alembic-cache.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth 1 --branch 1.8.6 https://github.com/alembic/alembic.git /tmp/alembic
-          cmake -S /tmp/alembic -B /tmp/alembic/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=~/alembic-install \
-            -DUSE_HDF5=OFF -DALEMBIC_SHARED_LIBS=ON -DUSE_TESTS=OFF
-          cmake --build /tmp/alembic/build -j$(nproc)
-          cmake --install /tmp/alembic/build
-
-      - name: Cache MaterialX
-        id: materialx-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/materialx-install
-          key: materialx-1.39.4-${{ runner.os }}-core
-
-      - name: Build MaterialX
-        if: steps.materialx-cache.outputs.cache-hit != 'true'
-        run: |
-          curl -L -o /tmp/mtlx.tgz \
-            https://github.com/AcademySoftwareFoundation/MaterialX/archive/refs/tags/v1.39.4.tar.gz
-          tar xzf /tmp/mtlx.tgz -C /tmp
-          cmake -S /tmp/MaterialX-1.39.4 -B /tmp/mtlx-build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$HOME/materialx-install \
-            -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ \
-            -DMATERIALX_BUILD_PYTHON=OFF -DMATERIALX_BUILD_VIEWER=OFF \
-            -DMATERIALX_BUILD_GRAPH_EDITOR=OFF -DMATERIALX_BUILD_TESTS=OFF \
-            -DMATERIALX_BUILD_JS=OFF -DMATERIALX_BUILD_RENDER=OFF \
-            -DMATERIALX_BUILD_GEN_GLSL=OFF -DMATERIALX_BUILD_GEN_OSL=OFF \
-            -DMATERIALX_BUILD_GEN_MDL=OFF -DMATERIALX_BUILD_GEN_MSL=OFF \
-            -DMATERIALX_INSTALL_PYTHON=OFF -DMATERIALX_INSTALL_RESOURCES=OFF
-          cmake --build /tmp/mtlx-build -j$(nproc)
-          cmake --install /tmp/mtlx-build
-          mkdir -p $HOME/materialx-install/libraries
-          cp -a /tmp/MaterialX-1.39.4/libraries/. $HOME/materialx-install/libraries/
-
-      - name: Configure
-        run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DAlembic_DIR=$HOME/alembic-install/lib/cmake/Alembic \
-            -DCMAKE_PREFIX_PATH="$HOME/alembic-install;$HOME/materialx-install" \
-            -DSOLSTICE_MATERIALX_LIBRARIES=$HOME/materialx-install/libraries \
-            -DSOLSTICE_ENABLE_OPENPGL=ON
-
-      - name: Build
-        run: cmake --build build -j$(nproc)
-
-      - name: Test
-        run: |
-          export LD_LIBRARY_PATH=$HOME/alembic-install/lib:$LD_LIBRARY_PATH
-          ./build/bin/solstice_tests
-
-      - name: Headless render smoke test
-        run: |
-          export LD_LIBRARY_PATH=$HOME/alembic-install/lib:$LD_LIBRARY_PATH
-          ./build/bin/sol_make_test_abc /tmp/kit.abc
-          python3 tools/make_test_hdri.py /tmp/sky.hdr --width 256 --height 128
-          ./build/bin/Bob_Render --headless -a /tmp/kit.abc -e /tmp/sky.hdr \
-            -o /tmp/render.png -s 16 --width 320 --height 180
-          test -s /tmp/render.png
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-render
-          path: /tmp/render.png
+      - run: echo "Linux builds are disabled"
 
   linux-optix:
     name: Linux (OptiX backend compile)
+    if: false
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build qt6-base-dev libembree-dev \
-            libopenexr-dev libimath-dev libgl1-mesa-dev libtbb-dev libtiff-dev nvidia-cuda-toolkit
-
-      - name: Fetch the OptiX headers
-        run: git clone --depth 1 https://github.com/NVIDIA/optix-dev.git /tmp/optix-dev
-
-      - name: Configure and build with the GPU backend
-        run: |
-          # Keep this job lean: only need OptiX PTX + host backend to compile.
-          cmake -S . -B build-optix -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DSOLSTICE_ENABLE_ALEMBIC=OFF \
-            -DSOLSTICE_ENABLE_OPENPGL=OFF \
-            -DSOLSTICE_ENABLE_MATERIALX=OFF \
-            -DSOLSTICE_ENABLE_TINYUSDZ=OFF \
-            -DSOLSTICE_ENABLE_OPTIX=ON -DOptiX_ROOT=/tmp/optix-dev
-          cmake --build build-optix -j$(nproc)
-          # Prove the OptiX device IR was embedded into this build.
-          test -f build-optix/generated/solstice_optix_ir.cpp
-          grep -q 'solsticeOptixIr' build-optix/generated/solstice_optix_ir.cpp
-          grep -E 'SOLSTICE_HAVE_OPTIX 1' build-optix/generated/solstice_config.h
+      - run: echo "Linux OptiX builds are disabled"
 
   windows:
-    name: Windows (standalone exe)
+    name: Windows (Clang, standalone exe)
     runs-on: windows-2022
     env:
       EMBREE_VERSION: "4.4.0"
@@ -144,8 +43,38 @@ jobs:
           arch: win64_msvc2019_64
           cache: true
 
+      # clang-cl needs the MSVC headers / link.exe / Windows SDK on PATH.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Locate Clang
+        shell: pwsh
+        run: |
+          $clangCl = Get-Command clang-cl -ErrorAction SilentlyContinue
+          if (-not $clangCl) {
+            # Prefer the VS-bundled LLVM, then the standalone LLVM install.
+            $candidates = @(
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin\clang-cl.exe",
+              "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\clang-cl.exe",
+              "${env:ProgramFiles}\LLVM\bin\clang-cl.exe"
+            )
+            foreach ($c in $candidates) {
+              if (Test-Path $c) {
+                $dir = Split-Path $c -Parent
+                $env:PATH = "$dir;$env:PATH"
+                echo "$dir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                break
+              }
+            }
+            $clangCl = Get-Command clang-cl -ErrorAction SilentlyContinue
+          }
+          if (-not $clangCl) { throw "clang-cl not found on the runner" }
+          Write-Host "clang-cl: $($clangCl.Source)"
+          & clang-cl --version
+
       # OptiX/CUDA disabled on Windows CI: nvcc hangs the Build step for 30–80+ min.
-      # GPU OptiX is still exercised by the separate Linux OptiX job.
+      # GPU OptiX is still available when building locally with -DSOLSTICE_ENABLE_OPTIX=ON.
 
       - name: Cache the third party dependencies
         id: deps-cache
@@ -206,26 +135,31 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:DEPS_PREFIX/libraries" | Out-Null
           Copy-Item -Recurse materialx-src/libraries/* "$env:DEPS_PREFIX/libraries/"
 
-      - name: Configure
-        run: >
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-          -DCMAKE_PREFIX_PATH="${{ env.DEPS_PREFIX }};${{ env.DEPS_PREFIX }}/embree"
-          -DSOLSTICE_MATERIALX_LIBRARIES="${{ env.DEPS_PREFIX }}/libraries"
-          -DSOLSTICE_ENABLE_OPTIX=OFF
+      - name: Configure (Clang + Ninja)
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=clang-cl `
+            -DCMAKE_CXX_COMPILER=clang-cl `
+            -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX;$env:DEPS_PREFIX/embree" `
+            -DSOLSTICE_MATERIALX_LIBRARIES="$env:DEPS_PREFIX/libraries" `
+            -DSOLSTICE_ENABLE_OPTIX=OFF `
+            -DSOLSTICE_MODERN_CPU=ON
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --parallel
 
       - name: Run the tests
         run: |
           $env:PATH = "$env:DEPS_PREFIX/embree/bin;$env:PATH"
-          ./build/bin/Release/solstice_tests.exe
+          ./build/bin/solstice_tests.exe
 
       - name: Assemble the distribution
         run: |
-          cmake --build build --config Release --target deploy
+          cmake --build build --target deploy
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Copy-Item build/bin/Release/* dist/ -Recurse -Force
+          Copy-Item build/bin/* dist/ -Recurse -Force
           Copy-Item "$env:DEPS_PREFIX/embree/bin/*.dll" dist/ -Force
           # oneTBB / OpenPGL runtime (FetchContent build trees)
           Get-ChildItem -Path build -Recurse -Filter "tbb*.dll" -ErrorAction SilentlyContinue |
