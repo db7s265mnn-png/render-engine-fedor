@@ -18,6 +18,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QShortcut>
+#include <QDateTime>
 #include <QTimer>
 #include <QToolBar>
 #include <QVector3D>
@@ -860,16 +861,15 @@ void MainWindow::cookNow() {
         session_.stop();
         const Mat4 interactiveCam = builtScene->camera.cameraToWorld;
         attachMotionBlurKeys(graph_, context, *builtScene);
+        builtScene->camera.cameraToWorld = interactiveCam;
         if (cameraOverride_) {
-            // Free camera: geometry MB only.
-            builtScene->camera.cameraToWorld = interactiveCam;
+            // Free / tumbled viewport: geometry MB only — camera keys follow the live view.
+            // (Otherwise cameraToWorldAtTime ignores camera.cameraToWorld and orbit looks stuck.)
             if (!builtScene->cameraMotionXforms.empty())
                 std::fill(builtScene->cameraMotionXforms.begin(), builtScene->cameraMotionXforms.end(),
                           interactiveCam);
-        } else {
-            // Keep look-through / authored camera motion keys; center on the live view.
-            builtScene->camera.cameraToWorld = interactiveCam;
         }
+        // Looking through without override: keep authored cameraMotionXforms for camera MB.
         // Motion keys force a full rebuild; deformation buffers need HIGH quality.
         builtScene->fastRebuild = false;
     }
@@ -921,12 +921,36 @@ void MainWindow::onCameraMoved() {
         }
     }
     if (!scene_) return;
-    scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
+    const Mat4 camXform = renderView_->camera().toMatrix();
+    scene_->camera.cameraToWorld = camXform;
+    // Beauty rays sample cameraMotionXforms when MB is on. If those keys stay at the
+    // pre-orbit transform, tumble/pan/dolly appear completely broken.
+    if (!scene_->cameraMotionXforms.empty()) {
+        std::fill(scene_->cameraMotionXforms.begin(), scene_->cameraMotionXforms.end(), camXform);
+    }
     // Do not overwrite CameraData.focusDistance with the orbit radius — that broke DOF.
     // Re-assert lens from the look-through node so DOF survives tumble/IPR refresh.
     if (const Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
         applyLensFromCameraNode(cam, scene_->camera);
     }
+
+    // With motion blur, each IPR sample is expensive. Joining the render thread on every
+    // mouse-move freezes orbit — only push camera + restart IPR on a throttle / release.
+    const bool navigating = renderView_->isNavigating();
+    const bool heavyMb = scene_->settings.motionBlur != 0;
+    if (heavyMb && navigating) {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - lastMbNavIprRestartMs_ >= 80) {
+            lastMbNavIprRestartMs_ = now;
+            mbNavIprPending_ = false;
+            session_.updateSceneData();
+            if (iprAction_->isChecked()) session_.start();
+        } else {
+            mbNavIprPending_ = true;
+        }
+        return;
+    }
+    mbNavIprPending_ = false;
     session_.updateSceneData();
     if (iprAction_->isChecked()) session_.start();
 }
@@ -986,6 +1010,10 @@ void MainWindow::lookThroughCamera(const QString& cameraName) {
         statusBar()->showMessage("Free perspective (persp)", 2500);
         if (scene_) {
             scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
+            if (!scene_->cameraMotionXforms.empty()) {
+                std::fill(scene_->cameraMotionXforms.begin(), scene_->cameraMotionXforms.end(),
+                          scene_->camera.cameraToWorld);
+            }
             session_.updateSceneData();
             if (iprAction_->isChecked()) session_.start();
         }
@@ -1004,6 +1032,10 @@ void MainWindow::lookThroughCamera(const QString& cameraName) {
     if (scene_) {
         applyLensFromCameraNode(camera, scene_->camera);
         scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
+        if (!scene_->cameraMotionXforms.empty()) {
+            std::fill(scene_->cameraMotionXforms.begin(), scene_->cameraMotionXforms.end(),
+                      scene_->camera.cameraToWorld);
+        }
         session_.updateSceneData();
         if (iprAction_->isChecked()) session_.start();
     }

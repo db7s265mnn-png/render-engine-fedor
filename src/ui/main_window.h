@@ -110,6 +110,9 @@ private:
     QString lookThroughCameraName_;
     // Source LOP node name for viewport F / framing (survives Select-tool picks).
     QString selectedSourceNode_;
+    // Throttle IPR restarts while tumbling with motion blur enabled.
+    qint64 lastMbNavIprRestartMs_ = 0;
+    bool mbNavIprPending_ = false;
 };
 
 }  // namespace sol

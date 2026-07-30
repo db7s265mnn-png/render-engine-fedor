@@ -53,6 +53,7 @@ public:
     void setCamera(const ViewCamera& camera);
     bool navigationEnabled() const { return navigationEnabled_; }
     void setNavigationEnabled(bool enabled) { navigationEnabled_ = enabled; }
+    bool isNavigating() const { return mode_ == 1 || mode_ == 2 || mode_ == 3; }
 
     TransformTool transformTool() const { return transformTool_; }
     void setTransformTool(TransformTool tool);
