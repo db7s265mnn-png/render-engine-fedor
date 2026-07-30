@@ -165,6 +165,7 @@ Vec3 sampleDisplacementVector(const SceneView& scene, const Material& mat, Vec2 
     ctx.pObject = p;
     ctx.nObject = n;
     ctx.filterWidth = 0.0f;
+    ctx.forDisplacement = 1;
 
     Vec3 amount(0.0f);
     if (mat.displacementProc >= 0) {
@@ -198,10 +199,13 @@ float sampleHeightScalar(const SceneView& scene, const Material& mat, Vec2 uv, V
 
 // Largest |Δheight| across mesh edges — drives extra subdiv for 8K maps / strata.
 float meshMaxEdgeHeightDelta(const Mesh& mesh, const Material& mat, const SceneView& scene) {
-    if (mesh.uvs.size() != mesh.positions.size()) return 0.0f;
+    // Procedural displace (triplanar / noise3d) keys off P/N; UV maps need UVs.
+    const bool needsUv = mat.displacementProc < 0;
+    if (needsUv && mesh.uvs.size() != mesh.positions.size()) return 0.0f;
     float maxDh = 0.0f;
     const size_t n = mesh.positions.size();
     const bool hasN = mesh.normals.size() == n;
+    const bool hasU = mesh.uvs.size() == n;
     // Sparse sample: every Nth triangle keeps this O(tris) but cheaper for huge meshes.
     const size_t stride = mesh.indices.size() > 300000 ? 9 : 3;
     for (size_t t = 0; t + 2 < mesh.indices.size(); t += stride) {
@@ -213,7 +217,8 @@ float meshMaxEdgeHeightDelta(const Mesh& mesh, const Material& mat, const SceneV
                 continue;
             }
             const Vec3 nrm = hasN ? mesh.normals[idx[k]] : Vec3(0.0f, 1.0f, 0.0f);
-            h[k] = sampleHeightScalar(scene, mat, mesh.uvs[idx[k]], mesh.positions[idx[k]], nrm);
+            const Vec2 uv = hasU ? mesh.uvs[idx[k]] : Vec2(0.0f, 0.0f);
+            h[k] = sampleHeightScalar(scene, mat, uv, mesh.positions[idx[k]], nrm);
         }
         maxDh = std::max(maxDh, std::fabs(h[0] - h[1]));
         maxDh = std::max(maxDh, std::fabs(h[1] - h[2]));

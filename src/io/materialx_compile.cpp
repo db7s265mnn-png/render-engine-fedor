@@ -197,6 +197,7 @@ struct CompileState {
     std::vector<std::shared_ptr<Image>>* images = nullptr;
     std::map<const mx::Node*, int> cache;
     std::map<std::string, int> imageFileCache;
+    bool dataTextures = false;
 };
 
 // Named pushNode — Qt signal macro as an empty macro.
@@ -215,27 +216,31 @@ int compileConnected(const mx::NodePtr& node, const std::string& inputName, Comp
 
 int loadImageIndex(CompileState& state, const std::string& file) {
     if (file.empty()) return -1;
-    auto it = state.imageFileCache.find(file);
+    // Separate cache entries for colour (sRGB) vs data (linear) so a shared
+    // triplanar feeding albedo + displacement does not reuse the wrong decode.
+    const std::string cacheKey = (state.dataTextures ? std::string("data:") : std::string("color:")) + file;
+    auto it = state.imageFileCache.find(cacheKey);
     if (it != state.imageFileCache.end()) return it->second;
     std::string error;
     std::shared_ptr<Image> image;
     QString pattern;
     std::vector<int> discovered;
     const QString fileQ = QString::fromStdString(file);
+    const bool srgbColor = !state.dataTextures;
     if (resolveUdimPattern(fileQ, state.searchDirectory, pattern, discovered)) {
         std::vector<int> tiles = state.udimSet.empty() ? discovered : state.udimSet;
-        image = loadImageOrUdim(pattern, state.searchDirectory, error, tiles);
+        image = loadImageOrUdim(pattern, state.searchDirectory, error, tiles, srgbColor);
     } else {
-        image = loadImageOrUdim(fileQ, state.searchDirectory, error, state.udimSet);
+        image = loadImageOrUdim(fileQ, state.searchDirectory, error, state.udimSet, srgbColor);
     }
     if (!image) {
         if (!error.empty()) logWarning("MaterialX procedural image: " + error);
-        state.imageFileCache[file] = -1;
+        state.imageFileCache[cacheKey] = -1;
         return -1;
     }
     const int idx = int(state.images->size());
     state.images->push_back(image);
-    state.imageFileCache[file] = idx;
+    state.imageFileCache[cacheKey] = idx;
     return idx;
 }
 
@@ -543,7 +548,7 @@ bool materialXImageNeedsProceduralBind(mx::NodePtr node) { return imageNeedsProc
 
 int compileMaterialXNode(mx::NodePtr root, const QString& searchDirectory, const std::vector<int>& udimSet,
                          std::vector<ProceduralNode>& outNodes, std::vector<std::shared_ptr<Image>>& outImages,
-                         std::string& error) {
+                         std::string& error, bool dataTextures) {
     error.clear();
     if (!root) {
         error = "no node to compile";
@@ -559,6 +564,7 @@ int compileMaterialXNode(mx::NodePtr root, const QString& searchDirectory, const
         state.udimSet = udimSet;
         state.nodes = &outNodes;
         state.images = &outImages;
+        state.dataTextures = dataTextures;
         const int rootIndex = compileNode(root, state, 0);
         if (rootIndex < 0) {
             error = "procedural compile produced empty graph";

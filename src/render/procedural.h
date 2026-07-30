@@ -12,6 +12,9 @@ struct ProceduralCtx {
     Vec3 pObject{0.0f, 0.0f, 0.0f};
     Vec3 nObject{0.0f, 0.0f, 1.0f};
     float filterWidth = 0.0f;
+    // Geometric displace / autobump: soften triplanar axis weights so height is
+    // continuous across octahedral seams (hard blend + varying N → spikes).
+    int forDisplacement = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -575,6 +578,11 @@ SR_INL SR_HD Vec4 evalProceduralNode(const SceneView& scene, int index, const Pr
             float blend = n.s0;
             if (!srIsFinite(blend) || blend < 0.01f) blend = 0.01f;
             if (blend > 64.0f) blend = 64.0f;
+            // Displace samples height per-vertex. Hard axis blends make neighbouring
+            // verts with slightly different N pick different projections → spikes.
+            // Force a soft fixed blend for geometric / autobump height samples;
+            // shading colour triplanar still uses the authored blend.
+            if (ctx.forDisplacement) blend = 1.0f;
             nx = powf(nx, blend);
             ny = powf(ny, blend);
             nz = powf(nz, blend);

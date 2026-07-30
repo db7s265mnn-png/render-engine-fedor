@@ -27,10 +27,13 @@ bool materialXImageNeedsProceduralBind(MaterialX::NodePtr node);
 
 // Compile `root` into `outNodes`. Image leaves append to `outImages`; their
 // texture indices (stored on kProcImage/kProcTriplanar) are local to outImages.
+// When `dataTextures` is true, LDR maps load as linear (height / bump / normal) —
+// required for triplanar→displacement so sRGB decode does not warp heights.
 // Returns the root index into outNodes, or -1 on failure.
 int compileMaterialXNode(MaterialX::NodePtr root, const QString& searchDirectory,
                          const std::vector<int>& udimSet, std::vector<ProceduralNode>& outNodes,
-                         std::vector<std::shared_ptr<Image>>& outImages, std::string& error);
+                         std::vector<std::shared_ptr<Image>>& outImages, std::string& error,
+                         bool dataTextures = false);
 
 #endif
 

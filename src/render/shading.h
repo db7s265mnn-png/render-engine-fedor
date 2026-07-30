@@ -325,6 +325,7 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         ProceduralCtx hctx = ctx;
         hctx.uv = sampleUv;
         hctx.pObject = sampleP;
+        hctx.forDisplacement = 1;
         float h = base.displacementHeight;
         if (base.displacementProc >= 0) {
             const Vec4 c = evalProceduralRoot(scene, base.displacementProc, hctx);

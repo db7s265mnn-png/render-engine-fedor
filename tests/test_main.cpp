@@ -1716,6 +1716,180 @@ void testMaterialXBumpAndNormalMap() {
 
 
 
+
+void testTriplanarDisplacementArtifacts() {
+    std::printf("triplanar-displacement-artifacts\n");
+    if (!materialXAvailable()) {
+        std::printf("  skip (no MaterialX)\n");
+        return;
+    }
+
+    // Shared triplanar → albedo + displace must compile separate sRGB / linear graphs.
+    {
+        QTemporaryDir tmp;
+        check(tmp.isValid(), "tmpdir");
+        const QString texPath = tmp.filePath("tri_mid.png");
+        {
+            // Mid-grey 188 ≈ sRGB encode of ~0.5 linear. Data/raw load keeps ~0.737.
+            QImage img(16, 16, QImage::Format_RGB32);
+            img.fill(qRgb(188, 188, 188));
+            check(img.save(texPath), "write mid grey");
+        }
+        const QString xml = QStringLiteral(
+            "<?xml version=\"1.0\"?>\n"
+            "<materialx version=\"1.38\">\n"
+            "  <triplanarprojection name=\"tri1\" type=\"color3\">\n"
+            "    <input name=\"file\" type=\"filename\" value=\"%1\"/>\n"
+            "    <input name=\"blend\" type=\"float\" value=\"8\"/>\n"
+            "  </triplanarprojection>\n"
+            "  <displacement name=\"disp1\" type=\"float\">\n"
+            "    <input name=\"displacement\" type=\"float\" nodename=\"tri1\"/>\n"
+            "    <input name=\"scale\" type=\"float\" value=\"1\"/>\n"
+            "    <input name=\"zero_value\" type=\"float\" value=\"0\"/>\n"
+            "    <input name=\"subdiv_iterations\" type=\"integer\" value=\"0\"/>\n"
+            "    <input name=\"autobump\" type=\"boolean\" value=\"false\"/>\n"
+            "  </displacement>\n"
+            "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+            "    <input name=\"base_color\" type=\"color3\" nodename=\"tri1\"/>\n"
+            "  </standard_surface>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+            "    <input name=\"displacementshader\" type=\"displacementshader\" nodename=\"disp1\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n").arg(texPath);
+        MaterialXEvalResult eval = evaluateMaterialXDocument(xml, tmp.path());
+        check(eval.ok, "mid-grey triplanar evaluates");
+        check(eval.procedurals.size() >= 2, "separate colour/data graphs");
+        check(eval.material.displacementProc != eval.material.baseColorProc,
+              "displace graph is not the sRGB colour graph");
+
+        Scene scene;
+        for (const auto& img : eval.proceduralImages) scene.addTexture(img);
+        scene.procedurals = eval.procedurals;
+        std::vector<TextureView> tvs;
+        for (const auto& img : scene.textures) {
+            TextureView tv;
+            if (img && !img->empty()) {
+                tv.pixels = img->data();
+                tv.width = img->width();
+                tv.height = img->height();
+                tv.mipCount = 1;
+            }
+            tvs.push_back(tv);
+        }
+        SceneView view;
+        view.textures = tvs.data();
+        view.textureCount = int(tvs.size());
+        view.procedurals = scene.procedurals.data();
+        view.proceduralCount = int(scene.procedurals.size());
+        ProceduralCtx ctx;
+        ctx.pObject = Vec3(0.2f, 1.0f, 0.3f);
+        ctx.nObject = Vec3(0.f, 1.f, 0.f);
+        ctx.forDisplacement = 1;
+        const float h = evalProceduralRoot(view, eval.material.displacementProc, ctx).x;
+        std::printf("  linear height=%.3f (expect ~0.74 raw, not ~0.50 sRGB)\n", h);
+        check(h > 0.65f && h < 0.85f, "displace triplanar loads height as linear data");
+    }
+
+    // Smooth ramp + hard authored blend — displace softens blend to avoid spikes.
+    {
+        QTemporaryDir tmp;
+        check(tmp.isValid(), "tmpdir2");
+        const QString texPath = tmp.filePath("ramp.png");
+        {
+            QImage img(128, 128, QImage::Format_RGB32);
+            for (int y = 0; y < 128; ++y)
+                for (int x = 0; x < 128; ++x) {
+                    const int v =
+                        int(std::lround(255.0 * (0.5 + 0.5 * std::sin(x * 0.12) * std::cos(y * 0.12))));
+                    img.setPixel(x, y, qRgb(v, v, v));
+                }
+            check(img.save(texPath), "write ramp");
+        }
+        // Non-aligned scale so a subdivided grid does not land on identical wrapped UVs.
+        const QString triXml = QStringLiteral(
+            "<?xml version=\"1.0\"?>\n"
+            "<materialx version=\"1.38\">\n"
+            "  <triplanarprojection name=\"tri1\" type=\"color3\">\n"
+            "    <input name=\"file\" type=\"filename\" value=\"%1\"/>\n"
+            "    <input name=\"scale\" type=\"vector3\" value=\"0.37, 0.37, 0.37\"/>\n"
+            "    <input name=\"blend\" type=\"float\" value=\"16\"/>\n"
+            "  </triplanarprojection>\n"
+            "  <displacement name=\"disp1\" type=\"float\">\n"
+            "    <input name=\"displacement\" type=\"float\" nodename=\"tri1\"/>\n"
+            "    <input name=\"scale\" type=\"float\" value=\"0.12\"/>\n"
+            "    <input name=\"zero_value\" type=\"float\" value=\"0.5\"/>\n"
+            "    <input name=\"subdiv_iterations\" type=\"integer\" value=\"4\"/>\n"
+            "    <input name=\"autobump\" type=\"boolean\" value=\"false\"/>\n"
+            "  </displacement>\n"
+            "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+            "    <input name=\"base_color\" type=\"color3\" value=\"0.6, 0.6, 0.6\"/>\n"
+            "  </standard_surface>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+            "    <input name=\"displacementshader\" type=\"displacementshader\" nodename=\"disp1\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n").arg(texPath);
+        MaterialXEvalResult eval = evaluateMaterialXDocument(triXml, tmp.path());
+        check(eval.ok && eval.material.displacementProc >= 0, "smooth triplanar displace ok");
+
+        Stage stage;
+        StagePrim prim;
+        prim.path = "/geo/sphere";
+        prim.type = PrimType::Mesh;
+        prim.mesh = makeSphereMesh(1.0f, 48, 24);
+        prim.material = eval.material;
+        prim.procedurals = eval.procedurals;
+        prim.proceduralImages = eval.proceduralImages;
+        prim.materialAssigned = true;
+        stage.prims.push_back(prim);
+        ScenePtr cooked = stage.toScene();
+        check(cooked && !cooked->meshes.empty(), "cooked smooth tri");
+        const Mesh& m = *cooked->meshes[0];
+        std::vector<float> edges;
+        float maxEdge = 0.0f;
+        for (size_t ti = 0; ti + 2 < m.indices.size(); ti += 3) {
+            const Vec3& a = m.positions[m.indices[ti + 0]];
+            const Vec3& b = m.positions[m.indices[ti + 1]];
+            const Vec3& c = m.positions[m.indices[ti + 2]];
+            for (float e : {length(b - a), length(c - b), length(a - c)}) {
+                edges.push_back(e);
+                maxEdge = std::max(maxEdge, e);
+            }
+        }
+        std::sort(edges.begin(), edges.end());
+        const float median = edges[edges.size() / 2];
+        float rmin = 1e9f, rmax = 0.0f;
+        for (const Vec3& p : m.positions) {
+            rmin = std::min(rmin, length(p));
+            rmax = std::max(rmax, length(p));
+        }
+        std::printf("  smooth tris=%zu rdelta=%.3f edge ratio=%.2f\n", m.triangleCount(), rmax - rmin,
+                    maxEdge / std::max(1e-8f, median));
+        check(rmax - rmin > 0.03f, "smooth triplanar relief");
+        check(maxEdge < median * 10.0f, "hard-blend triplanar displace stays spike-free");
+
+        Stage stage2;
+        StagePrim g;
+        g.path = "/geo/ground";
+        g.type = PrimType::Mesh;
+        g.mesh = makeGridMesh(8.0f, 8.0f, 1, 1);
+        g.material = eval.material;
+        g.procedurals = eval.procedurals;
+        g.proceduralImages = eval.proceduralImages;
+        g.materialAssigned = true;
+        stage2.prims.push_back(g);
+        ScenePtr cooked2 = stage2.toScene();
+        float ymin = 1e9f, ymax = -1e9f;
+        for (const Vec3& p : cooked2->meshes[0]->positions) {
+            ymin = std::min(ymin, p.y);
+            ymax = std::max(ymax, p.y);
+        }
+        std::printf("  ground ydelta=%.3f\n", ymax - ymin);
+        check(ymax - ymin > 0.03f, "ground smooth triplanar relief");
+    }
+}
+
 void testDefaultGroundDisplacement() {
     std::printf("default-ground-displacement\n");
     const char* path = "/tmp/disp_tex/xccibbi_8K_Displacement.exr";
@@ -3371,6 +3545,7 @@ int main() {
     testMaterialXColorIntoFloatSlots();
     testMaterialXBumpAndNormalMap();
     testArnoldDisplacement();
+    testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();
     testRockDisplacementExr();
     testMaterialXNoiseAndTriplanar();

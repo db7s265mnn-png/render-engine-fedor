@@ -971,23 +971,28 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
             return fallback;
         };
 
-        // Reuse one compile when the same upstream node feeds multiple ports.
-        std::unordered_map<const mx::Node*, int> compiledRoots;
-        auto compileProc = [&](mx::NodePtr connected, int& procIndex, const char* inputName) {
+        // Reuse one compile when the same upstream node feeds multiple ports —
+        // but never share colour (sRGB) graphs with data (linear) graphs.
+        std::map<std::pair<const mx::Node*, bool>, int> compiledRoots;
+        auto compileProc = [&](mx::NodePtr connected, int& procIndex, const char* inputName,
+                               bool dataTextures = false) {
             if (!connected) return;
-            auto it = compiledRoots.find(connected.get());
+            const auto key = std::make_pair(connected.get(), dataTextures);
+            auto it = compiledRoots.find(key);
             if (it != compiledRoots.end()) {
                 procIndex = it->second;
                 return;
             }
             std::string compileError;
-            const int localRoot = compileMaterialXNode(connected, searchDirectory, udimSet, result.procedurals,
-                                                       result.proceduralImages, compileError);
+            const int localRoot =
+                compileMaterialXNode(connected, searchDirectory, udimSet, result.procedurals,
+                                     result.proceduralImages, compileError, dataTextures);
             if (localRoot >= 0) {
                 procIndex = localRoot;
-                compiledRoots[connected.get()] = localRoot;
+                compiledRoots[key] = localRoot;
                 logInfo(std::string("MaterialX: compiled ") + connected->getCategory() + " → " + inputName +
-                        " (shade-time procedural, " + std::to_string(result.procedurals.size()) + " ops)");
+                        (dataTextures ? " (data/linear textures, " : " (shade-time procedural, ") +
+                        std::to_string(result.procedurals.size()) + " ops)");
             } else if (!compileError.empty()) {
                 logWarning("MaterialX procedural (" + std::string(inputName) + "): " + compileError);
             }
@@ -1004,7 +1009,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
             // (texcoord/place2d/math) or uvtiling/uvoffset requires shade-time sampling.
             if (cat == "image" || cat == "tiledimage") {
                 if (materialXImageNeedsProceduralBind(connected)) {
-                    compileProc(connected, procIndex, inputName);
+                    compileProc(connected, procIndex, inputName, /*dataTextures=*/!srgbColor);
                 } else {
                     std::string texError;
                     slot = loadTextureFromImageNode(connected, searchDirectory, udimSet, texError, srgbColor);
@@ -1017,14 +1022,14 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                 mx::NodePtr inNode = resolveConnectedNode(connected, "in");
                 if (inNode && (inNode->getCategory() == "image" || inNode->getCategory() == "tiledimage") &&
                     materialXImageNeedsProceduralBind(inNode)) {
-                    compileProc(inNode, procIndex, inputName);
+                    compileProc(inNode, procIndex, inputName, true);
                     return;
                 }
                 if (mx::NodePtr image = findImageNode(connected)) {
                     // Prefer procedural when any upstream UV graph exists under the map.
                     if (materialXNodeIsProcedural(connected) &&
                         (materialXImageNeedsProceduralBind(image) || resolveConnectedNode(image, "texcoord"))) {
-                        compileProc(inNode ? inNode : connected, procIndex, inputName);
+                        compileProc(inNode ? inNode : connected, procIndex, inputName, true);
                         return;
                     }
                     std::string texError;
@@ -1034,7 +1039,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                 }
                 // Procedural/vector upstream of normalmap → compile as RGB tangent map.
                 if (materialXNodeIsProcedural(connected)) {
-                    compileProc(inNode ? inNode : connected, procIndex, inputName);
+                    compileProc(inNode ? inNode : connected, procIndex, inputName, true);
                 }
                 return;
             }
@@ -1044,7 +1049,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                 if (!height) height = resolveConnectedNode(connected, "in");
                 if (height && (height->getCategory() == "image" || height->getCategory() == "tiledimage")) {
                     if (materialXImageNeedsProceduralBind(height)) {
-                        compileProc(height, result.material.bumpProc, "bump.height");
+                        compileProc(height, result.material.bumpProc, "bump.height", true);
                     } else {
                         std::string texError;
                         result.bumpTexture =
@@ -1054,11 +1059,11 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                     return;
                 }
                 if (height && materialXNodeIsProcedural(height)) {
-                    compileProc(height, result.material.bumpProc, "bump.height");
+                    compileProc(height, result.material.bumpProc, "bump.height", true);
                     return;
                 }
                 if (materialXNodeIsProcedural(connected)) {
-                    compileProc(connected, result.material.bumpProc, "bump");
+                    compileProc(connected, result.material.bumpProc, "bump", true);
                 }
                 return;
             }
@@ -1121,7 +1126,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                 const std::string hcat = height->getCategory();
                 if (hcat == "image" || hcat == "tiledimage") {
                     if (materialXImageNeedsProceduralBind(height)) {
-                        compileProc(height, result.material.displacementProc, "displacement");
+                        compileProc(height, result.material.displacementProc, "displacement", true);
                     } else {
                         std::string texError;
                         result.displacementTexture =
@@ -1130,7 +1135,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                             logWarning("MaterialX: " + texError);
                     }
                 } else if (materialXNodeIsProcedural(height)) {
-                    compileProc(height, result.material.displacementProc, "displacement");
+                    compileProc(height, result.material.displacementProc, "displacement", true);
                 } else {
                     logWarning(std::string("MaterialX: unsupported displacement upstream '") + hcat + "'");
                 }
