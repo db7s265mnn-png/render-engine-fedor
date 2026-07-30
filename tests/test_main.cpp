@@ -1715,6 +1715,113 @@ void testMaterialXBumpAndNormalMap() {
 }
 
 
+
+void testDefaultGroundDisplacement() {
+    std::printf("default-ground-displacement\n");
+    const char* path = "/tmp/disp_tex/xccibbi_8K_Displacement.exr";
+    std::string err;
+    Image img;
+    if (!loadImage(path, img, err, /*srgbColor=*/false)) {
+        std::printf("  skip load: %s\n", err.c_str());
+        return;
+    }
+    auto tex = std::make_shared<Image>(img);
+    Material mat;
+    mat.displacementTex = 0;
+    mat.displacementScale = 0.35f;
+    mat.displacementZeroValue = 0.5f;
+    mat.subdivIterations = 6;
+    mat.displacementBoundsPadding = 0.2f;
+    mat.autobump = 1;
+    Scene scene;
+    check(scene.addTexture(tex) == 0, "tex0");
+
+    // Default buddha-scene ground: 40x40, 1 division (2 tris).
+    MeshPtr ground = makeGridMesh(40.0f, 40.0f, 1, 1);
+    check(ground->triangleCount() == 2, "default ground cage is 2 tris");
+    const float cageEdge = [&]() {
+        float m = 0.0f;
+        for (size_t t = 0; t + 2 < ground->indices.size(); t += 3) {
+            const Vec3& a = ground->positions[ground->indices[t]];
+            const Vec3& b = ground->positions[ground->indices[t+1]];
+            m = std::max(m, length(b - a));
+        }
+        return m;
+    }();
+    std::printf("  cage edge=%.3f tris=%zu\n", cageEdge, ground->triangleCount());
+
+    MeshPtr out = applyArnoldDisplacement(*ground, mat, scene);
+    float ymin = 1e9f, ymax = -1e9f;
+    for (const Vec3& p : out->positions) {
+        ymin = std::min(ymin, p.y);
+        ymax = std::max(ymax, p.y);
+    }
+    std::printf("  displaced tris=%zu y=[%.4f,%.4f] delta=%.4f boundsY=[%.4f,%.4f]\n",
+                out->triangleCount(), ymin, ymax, ymax - ymin, out->bounds.lo.y, out->bounds.hi.y);
+    check(out->triangleCount() > 1000, "ground got subdivided");
+    check(ymax - ymin > 0.15f, "ground shows visible height relief");
+
+    // Full MaterialX + Stage path like the UI.
+    if (!materialXAvailable()) {
+        std::printf("  skip mtlx\n");
+        return;
+    }
+    const QString exrPath = QStringLiteral("/tmp/disp_tex/xccibbi_8K_Displacement.exr");
+    const QString albPath = QStringLiteral("/tmp/disp_tex/albedo_1k.png");
+    const QString xml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <image name=\"alb\" type=\"color3\">\n"
+        "    <input name=\"file\" type=\"filename\" value=\"%1\"/>\n"
+        "  </image>\n"
+        "  <image name=\"h1\" type=\"color3\">\n"
+        "    <input name=\"file\" type=\"filename\" value=\"%2\"/>\n"
+        "  </image>\n"
+        "  <displacement name=\"disp1\" type=\"float\">\n"
+        "    <input name=\"displacement\" type=\"float\" nodename=\"h1\"/>\n"
+        "    <input name=\"scale\" type=\"float\" value=\"0.35\"/>\n"
+        "    <input name=\"zero_value\" type=\"float\" value=\"0.5\"/>\n"
+        "    <input name=\"subdiv_iterations\" type=\"integer\" value=\"6\"/>\n"
+        "    <input name=\"bounds_padding\" type=\"float\" value=\"0.2\"/>\n"
+        "    <input name=\"autobump\" type=\"boolean\" value=\"true\"/>\n"
+        "  </displacement>\n"
+        "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" nodename=\"alb\"/>\n"
+        "    <input name=\"specular_roughness\" type=\"float\" value=\"0.55\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+        "    <input name=\"displacementshader\" type=\"displacementshader\" nodename=\"disp1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n").arg(albPath, exrPath);
+    MaterialXEvalResult eval = evaluateMaterialXDocument(xml, QStringLiteral("/tmp/disp_tex"));
+    check(eval.ok, "mtlx ok");
+    Stage stage;
+    StagePrim prim;
+    prim.path = "/geo/ground";
+    prim.type = PrimType::Mesh;
+    prim.mesh = makeGridMesh(40.0f, 40.0f, 1, 1);
+    prim.material = eval.material;
+    prim.displacementTexture = eval.displacementTexture;
+    prim.baseColorTexture = eval.baseColorTexture;
+    prim.procedurals = eval.procedurals;
+    prim.proceduralImages = eval.proceduralImages;
+    prim.materialAssigned = true;
+    stage.prims.push_back(prim);
+    ScenePtr cooked = stage.toScene();
+    check(cooked && !cooked->meshes.empty(), "cooked ground");
+    ymin = 1e9f; ymax = -1e9f;
+    for (const Vec3& p : cooked->meshes[0]->positions) {
+        ymin = std::min(ymin, p.y);
+        ymax = std::max(ymax, p.y);
+    }
+    std::printf("  stage tris=%zu ydelta=%.4f matDispTex=%d proc=%d\n",
+                cooked->meshes[0]->triangleCount(), ymax - ymin,
+                cooked->materials.empty() ? -1 : cooked->materials[0].displacementTex,
+                cooked->materials.empty() ? -1 : cooked->materials[0].displacementProc);
+    check(ymax - ymin > 0.15f, "stage ground relief");
+}
+
 void testRockDisplacementExr() {
     std::printf("rock-displacement-exr\n");
     const char* path = "/tmp/disp_tex/xccibbi_8K_Displacement.exr";
@@ -3264,6 +3371,7 @@ int main() {
     testMaterialXColorIntoFloatSlots();
     testMaterialXBumpAndNormalMap();
     testArnoldDisplacement();
+    testDefaultGroundDisplacement();
     testRockDisplacementExr();
     testMaterialXNoiseAndTriplanar();
     testMaterialXKarmaArnoldWirings();

@@ -33,18 +33,32 @@ EdgeKey makeEdge(uint32_t i0, uint32_t i1) {
     return i0 < i1 ? EdgeKey{i0, i1} : EdgeKey{i1, i0};
 }
 
-// Interpolate UVs without averaging across the 0/1 wrap (sphere / cylinder seams).
-Vec2 midUvSeamSafe(Vec2 a, Vec2 b) {
+// Mid-edge UV. True wrap seams (cylinder / open UV cut) have a short 3D edge
+// with |Δu| or |Δv| > 0.5 — unwrap those so the midpoint stays on the seam.
+// Coarse grids/planes often span the whole UV island with ONE long edge
+// (Δu≈1 across the quad); treating that as a seam collapses every midpoint
+// toward 0 and displacement samples a single texel (flat floor).
+Vec2 midUvSeamSafe(Vec2 a, Vec2 b, Vec3 pa, Vec3 pb, float meshSize) {
     float u0 = a.x, u1 = b.x;
     float v0 = a.y, v1 = b.y;
-    if (u1 - u0 > 0.5f) u0 += 1.0f;
-    else if (u0 - u1 > 0.5f) u1 += 1.0f;
-    if (v1 - v0 > 0.5f) v0 += 1.0f;
-    else if (v0 - v1 > 0.5f) v1 += 1.0f;
+    const bool bigJump = (std::fabs(u1 - u0) > 0.5f) || (std::fabs(v1 - v0) > 0.5f);
+    const float edgeLen = length(pb - pa);
+    // Half the bbox size: long floor edges stay as plain averages; fine wrap
+    // edges on cylinders/spheres still unwrap.
+    const bool looksLikeWrapSeam =
+        bigJump && meshSize > 1e-8f && edgeLen <= 0.5f * meshSize;
+    if (looksLikeWrapSeam) {
+        if (u1 - u0 > 0.5f) u0 += 1.0f;
+        else if (u0 - u1 > 0.5f) u1 += 1.0f;
+        if (v1 - v0 > 0.5f) v0 += 1.0f;
+        else if (v0 - v1 > 0.5f) v1 += 1.0f;
+    }
     float u = 0.5f * (u0 + u1);
     float v = 0.5f * (v0 + v1);
-    u -= std::floor(u);
-    v -= std::floor(v);
+    if (looksLikeWrapSeam) {
+        u -= std::floor(u);
+        v -= std::floor(v);
+    }
     return Vec2(u, v);
 }
 
@@ -63,7 +77,7 @@ float meshMaxEdgeLength(const Mesh& mesh) {
     return maxLen;
 }
 
-void subdivideOnce(Mesh& mesh) {
+void subdivideOnce(Mesh& mesh, float meshSize) {
     if (mesh.indices.size() < 3 || mesh.positions.empty()) return;
 
     const size_t oldVertCount = mesh.positions.size();
@@ -90,7 +104,9 @@ void subdivideOnce(Mesh& mesh) {
             const float len = length(n);
             mesh.normals.push_back(len > 1e-8f ? n / len : mesh.normals[i0]);
         }
-        if (hasUvs) mesh.uvs.push_back(midUvSeamSafe(mesh.uvs[i0], mesh.uvs[i1]));
+        if (hasUvs)
+            mesh.uvs.push_back(midUvSeamSafe(mesh.uvs[i0], mesh.uvs[i1], mesh.positions[i0],
+                                             mesh.positions[i1], meshSize));
         for (std::vector<Vec3>& keyPositions : mesh.motionPositions)
             keyPositions.push_back((keyPositions[i0] + keyPositions[i1]) * 0.5f);
         midpoint.emplace(key, mid);
@@ -337,7 +353,7 @@ MeshPtr applyArnoldDisplacement(const Mesh& src, const Material& mat, const Scen
             const float maxDh = meshMaxEdgeHeightDelta(*out, mat, view);
             if (maxEdge <= targetEdge && maxDh < heightEps) break;
         }
-        subdivideOnce(*out);
+        subdivideOnce(*out, size);
     }
     if (requested > 0) {
         logInfo("displacement: subdivided " + std::to_string(done) + " levels → " +
