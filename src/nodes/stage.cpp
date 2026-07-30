@@ -4,6 +4,8 @@
 #include <map>
 #include <vector>
 
+#include "scene/displace.h"
+
 namespace sol {
 
 QString StagePrim::typeName() const {
@@ -91,14 +93,6 @@ ScenePtr Stage::toScene() const {
         switch (prim.type) {
             case PrimType::Mesh: {
                 if (!prim.mesh || prim.mesh->indices.empty()) break;
-                int meshIndex = -1;
-                auto it = meshIndexCache.find(prim.mesh.get());
-                if (it != meshIndexCache.end()) {
-                    meshIndex = it->second;
-                } else {
-                    meshIndex = scene->addMesh(prim.mesh);
-                    meshIndexCache[prim.mesh.get()] = meshIndex;
-                }
                 Material material = prim.material;
                 material.baseColorTex = scene->addTexture(prim.baseColorTexture);
                 material.roughnessTex = scene->addTexture(prim.roughnessTexture);
@@ -107,6 +101,7 @@ ScenePtr Stage::toScene() const {
                 material.emissionTex = scene->addTexture(prim.emissionTexture);
                 material.normalTex = scene->addTexture(prim.normalTexture);
                 material.bumpTex = scene->addTexture(prim.bumpTexture);
+                material.displacementTex = scene->addTexture(prim.displacementTexture);
                 material.subsurfaceTex = scene->addTexture(prim.subsurfaceTexture);
                 material.specularColorTex = scene->addTexture(prim.specularColorTexture);
                 material.transmissionColorTex = scene->addTexture(prim.transmissionColorTexture);
@@ -166,6 +161,7 @@ ScenePtr Stage::toScene() const {
                     remapRoot(material.normalProc);
                     remapRoot(material.subsurfaceProc);
                     remapRoot(material.bumpProc);
+                    remapRoot(material.displacementProc);
                     remapRoot(material.specularColorProc);
                     remapRoot(material.transmissionColorProc);
                     auto clampRoot = [&](int& idx) {
@@ -179,8 +175,25 @@ ScenePtr Stage::toScene() const {
                     clampRoot(material.normalProc);
                     clampRoot(material.subsurfaceProc);
                     clampRoot(material.bumpProc);
+                    clampRoot(material.displacementProc);
                     clampRoot(material.specularColorProc);
                     clampRoot(material.transmissionColorProc);
+                }
+
+                // Arnold-style displacement mutates a mesh copy — do not share the cage cache.
+                int meshIndex = -1;
+                MeshPtr renderMesh = prim.mesh;
+                if (materialHasGeometricDisplacement(material)) {
+                    renderMesh = applyArnoldDisplacement(*prim.mesh, material, *scene);
+                    meshIndex = scene->addMesh(renderMesh);
+                } else {
+                    auto it = meshIndexCache.find(prim.mesh.get());
+                    if (it != meshIndexCache.end()) {
+                        meshIndex = it->second;
+                    } else {
+                        meshIndex = scene->addMesh(prim.mesh);
+                        meshIndexCache[prim.mesh.get()] = meshIndex;
+                    }
                 }
 
                 // Ray-switch branches: add as separate Materials, rewrite local → scene indices.
@@ -219,8 +232,8 @@ ScenePtr Stage::toScene() const {
                 record.type = prim.typeName().toStdString();
                 record.sourceNode = prim.sourceNode.toStdString();
                 record.instanceIndex = int(scene->instances.size()) - 1;
-                record.pointCount = static_cast<long long>(prim.mesh->positions.size());
-                record.triangleCount = static_cast<long long>(prim.mesh->triangleCount());
+                record.pointCount = static_cast<long long>(renderMesh->positions.size());
+                record.triangleCount = static_cast<long long>(renderMesh->triangleCount());
                 scene->prims.push_back(record);
                 break;
             }

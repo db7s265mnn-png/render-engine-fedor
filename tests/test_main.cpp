@@ -29,6 +29,7 @@
 #include "render/render_session.h"
 #include "render/shading.h"
 #include "scene/scene.h"
+#include "scene/displace.h"
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_TIFF
@@ -1710,6 +1711,123 @@ void testMaterialXBumpAndNormalMap() {
     std::printf("  normalmap ok scale=%.2f\n", eval.material.normalScale);
 }
 
+void testArnoldDisplacement() {
+    std::printf("arnold-displacement\n");
+    if (!materialXAvailable()) {
+        std::printf("  skip (no MaterialX)\n");
+        return;
+    }
+
+    // Constant height displacement (no texture) — subdiv + offset along N.
+    const QString constXml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <displacement name=\"disp1\" type=\"float\">\n"
+        "    <input name=\"displacement\" type=\"float\" value=\"0.25\"/>\n"
+        "    <input name=\"scale\" type=\"float\" value=\"2\"/>\n"
+        "    <input name=\"subdiv_iterations\" type=\"integer\" value=\"1\"/>\n"
+        "    <input name=\"bounds_padding\" type=\"float\" value=\"0.1\"/>\n"
+        "    <input name=\"autobump\" type=\"boolean\" value=\"true\"/>\n"
+        "    <input name=\"zero_value\" type=\"float\" value=\"0\"/>\n"
+        "  </displacement>\n"
+        "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+        "    <input name=\"displacementshader\" type=\"displacementshader\" nodename=\"disp1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n");
+    MaterialXEvalResult eval = evaluateMaterialXDocument(constXml, QString());
+    check(eval.ok, "displacement evaluates");
+    check(std::fabs(eval.material.displacementHeight - 0.25f) < 1e-4f, "displacement height");
+    check(std::fabs(eval.material.displacementScale - 2.0f) < 1e-4f, "displacement scale");
+    check(eval.material.subdivIterations == 1, "subdiv_iterations");
+    check(std::fabs(eval.material.displacementBoundsPadding - 0.1f) < 1e-4f, "bounds_padding");
+    check(eval.material.autobump == 1, "autobump on");
+    check(materialHasGeometricDisplacement(eval.material), "has geometric displacement");
+
+    MeshPtr grid = makeGridMesh(2.0f, 2.0f, 1, 1);
+    check(grid && grid->triangleCount() == 2, "grid cage");
+    const size_t cageTris = grid->triangleCount();
+    const float cageMaxY = [&]() {
+        float m = -1e9f;
+        for (const Vec3& p : grid->positions) m = std::max(m, p.y);
+        return m;
+    }();
+
+    Scene scene;
+    MeshPtr displaced = applyArnoldDisplacement(*grid, eval.material, scene);
+    check(displaced != nullptr, "displaced mesh");
+    check(displaced->triangleCount() == cageTris * 4, "one subdiv → 4x triangles");
+    float maxY = -1e9f;
+    for (const Vec3& p : displaced->positions) maxY = std::max(maxY, p.y);
+    // Grid normals point +Y; height 0.25 * scale 2 = 0.5 along N.
+    check(maxY > cageMaxY + 0.4f, "vertices displaced along normal");
+    check(displaced->bounds.hi.y >= maxY, "bounds cover displaced verts");
+    check(displaced->bounds.hi.y >= maxY + 0.05f, "bounds_padding expands AABB");
+    std::printf("  const disp tris %zu→%zu maxY %.3f→%.3f\n", cageTris, displaced->triangleCount(), cageMaxY,
+                maxY);
+
+    // Height map displacement through Stage::toScene.
+    QTemporaryDir tmp;
+    check(tmp.isValid(), "temp dir");
+    const QString heightPath = tmp.filePath("disp_height.png");
+    {
+        QImage img(32, 32, QImage::Format_RGB32);
+        for (int y = 0; y < 32; ++y)
+            for (int x = 0; x < 32; ++x) {
+                const int v = (x + y) % 2 == 0 ? 255 : 0;
+                img.setPixel(x, y, qRgb(v, v, v));
+            }
+        check(img.save(heightPath), "write height png");
+    }
+    const QString mapXml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <image name=\"h1\" type=\"float\">\n"
+        "    <input name=\"file\" type=\"filename\" value=\"%1\"/>\n"
+        "  </image>\n"
+        "  <displacement name=\"disp1\" type=\"float\">\n"
+        "    <input name=\"displacement\" type=\"float\" nodename=\"h1\"/>\n"
+        "    <input name=\"scale\" type=\"float\" value=\"0.2\"/>\n"
+        "    <input name=\"subdiv_iterations\" type=\"integer\" value=\"2\"/>\n"
+        "    <input name=\"autobump\" type=\"boolean\" value=\"false\"/>\n"
+        "  </displacement>\n"
+        "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" value=\"0.7, 0.7, 0.7\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+        "    <input name=\"displacementshader\" type=\"displacementshader\" nodename=\"disp1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n").arg(heightPath);
+    eval = evaluateMaterialXDocument(mapXml, tmp.path());
+    check(eval.ok, "map displacement evaluates");
+    check(eval.displacementTexture != nullptr, "displacement binds height texture");
+    check(eval.material.subdivIterations == 2, "map subdiv=2");
+    check(eval.material.autobump == 0, "autobump off");
+
+    Stage stage;
+    StagePrim prim;
+    prim.path = "/geo/grid";
+    prim.type = PrimType::Mesh;
+    prim.mesh = makeGridMesh(1.0f, 1.0f, 2, 2);
+    prim.material = eval.material;
+    prim.displacementTexture = eval.displacementTexture;
+    prim.materialAssigned = true;
+    stage.prims.push_back(prim);
+    ScenePtr cooked = stage.toScene();
+    check(cooked && !cooked->meshes.empty(), "stage cooks displaced scene");
+    const MeshPtr& outMesh = cooked->meshes[0];
+    check(outMesh->triangleCount() == 8 * 16, "subdiv 2 → 16x tris (8 cage tris)");
+    check(!cooked->materials.empty(), "material present");
+    check(cooked->materials[0].displacementTex >= 0, "scene displacement tex index");
+    check(cooked->materials[0].autobump == 0, "autobump preserved");
+    std::printf("  map disp cageTris=8 → %zu tex=%d\n", outMesh->triangleCount(),
+                cooked->materials[0].displacementTex);
+}
+
 void testMaterialXNoiseAndTriplanar() {
     std::printf("materialx-noise-triplanar\n");
     if (!materialXAvailable()) {
@@ -2973,6 +3091,7 @@ int main() {
     testMaterialXTypeMismatchConnect();
     testMaterialXColorIntoFloatSlots();
     testMaterialXBumpAndNormalMap();
+    testArnoldDisplacement();
     testMaterialXNoiseAndTriplanar();
     testMaterialXKarmaArnoldWirings();
     testMaterialXArnoldMapsAndConstants();

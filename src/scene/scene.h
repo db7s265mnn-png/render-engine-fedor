@@ -18,6 +18,8 @@ struct Mesh {
     std::vector<Vec2> uvs;
     std::vector<uint32_t> indices;
     Bounds3 bounds;
+    // Arnold displacement bounds_padding — reapplied by computeBounds() after validate.
+    float boundsPadding = 0.0f;
     // Deformation motion blur: positions for keys 1..N-1 (key 0 is `positions`).
     // Each entry must match `positions.size()` when used.
     std::vector<std::vector<Vec3>> motionPositions;

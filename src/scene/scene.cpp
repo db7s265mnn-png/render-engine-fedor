@@ -12,6 +12,10 @@ namespace sol {
 void Mesh::computeBounds() {
     bounds = Bounds3();
     for (const Vec3& p : positions) bounds.extend(p);
+    if (boundsPadding > 0.0f && bounds.valid()) {
+        bounds.lo = bounds.lo - Vec3(boundsPadding);
+        bounds.hi = bounds.hi + Vec3(boundsPadding);
+    }
 }
 
 void Mesh::computeNormalsIfMissing() {

@@ -311,7 +311,31 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         sampleRgbSlot(base.transmissionColorProc, base.transmissionColorTex, base.transmissionColor);
 
     const float nScale = srIsFinite(base.normalScale) ? base.normalScale : 1.0f;
-    if (base.bumpProc >= 0 || (base.bumpTex >= 0 && base.bumpTex < scene.textureCount && scene.textures)) {
+    const bool hasBump =
+        base.bumpProc >= 0 || (base.bumpTex >= 0 && base.bumpTex < scene.textureCount && scene.textures);
+    const bool hasAutobump =
+        base.autobump != 0 &&
+        (base.displacementProc >= 0 ||
+         (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures) ||
+         (fabsf(base.displacementHeight * base.displacementScale) > 1.0e-8f));
+
+    auto sampleDispHeightAt = [&](Vec2 sampleUv, Vec3 sampleP) -> float {
+        ProceduralCtx hctx = ctx;
+        hctx.uv = sampleUv;
+        hctx.pObject = sampleP;
+        if (base.displacementProc >= 0) {
+            const Vec4 c = evalProceduralRoot(scene, base.displacementProc, hctx);
+            return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+        }
+        if (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures) {
+            const TextureView& tex = scene.textures[base.displacementTex];
+            const Vec4 c = sampleTextureRGBALod(tex, sampleUv, textureLodFromFilterWidth(tex, uvFilterWidth));
+            return c.x;
+        }
+        return base.displacementHeight;
+    };
+
+    if (hasBump) {
         // MaterialX <bump>: finite-difference height → tangent-space normal.
         // UV FD covers noise2d/image; object-P FD covers triplanar/noise3d (Karma/Arnold).
         float epsUv = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
@@ -344,6 +368,43 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
             dHv = (hv - h) / epsUv;
         }
         Vec3 nMap(-dHu * nScale, -dHv * nScale, 1.0f);
+        if (!srIsFinite(nMap.x) || !srIsFinite(nMap.y) || !srIsFinite(nMap.z)) nMap = Vec3(0.0f, 0.0f, 1.0f);
+        nMap = normalize(nMap);
+        const Frame frame(ns);
+        ns = normalize(frame.toWorld(nMap));
+        if (!srIsFinite(ns.x) || !srIsFinite(ns.y) || !srIsFinite(ns.z)) ns = frame.n;
+    } else if (hasAutobump) {
+        // Arnold autobump: residual high-frequency detail from the displacement
+        // map as shade-time bump (after geometric subdiv+displace).
+        const float dispScale = srIsFinite(base.displacementScale) ? base.displacementScale : 1.0f;
+        float epsUv = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
+        if (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures) {
+            const TextureView& tex = scene.textures[base.displacementTex];
+            if (tex.width > 1) epsUv = srMax(epsUv, 1.0f / float(tex.width));
+        }
+        epsUv = srMax(1e-5f, epsUv);
+        const float h = sampleDispHeightAt(uv, pObject);
+        float dHu = 0.0f;
+        float dHv = 0.0f;
+        if (base.displacementProc >= 0) {
+            const float hu = sampleDispHeightAt(Vec2(uv.x + epsUv, uv.y), pObject);
+            const float hv = sampleDispHeightAt(Vec2(uv.x, uv.y + epsUv), pObject);
+            dHu += (hu - h) / epsUv;
+            dHv += (hv - h) / epsUv;
+            const Frame frameP(ns);
+            float epsP = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0e-3f;
+            epsP = clampf(epsP, 1.0e-4f, 0.05f);
+            const float ht = sampleDispHeightAt(uv, pObject + frameP.t * epsP);
+            const float hb = sampleDispHeightAt(uv, pObject + frameP.b * epsP);
+            dHu += (ht - h) / epsP;
+            dHv += (hb - h) / epsP;
+        } else {
+            const float hu = sampleDispHeightAt(Vec2(uv.x + epsUv, uv.y), pObject);
+            const float hv = sampleDispHeightAt(Vec2(uv.x, uv.y + epsUv), pObject);
+            dHu = (hu - h) / epsUv;
+            dHv = (hv - h) / epsUv;
+        }
+        Vec3 nMap(-dHu * dispScale, -dHv * dispScale, 1.0f);
         if (!srIsFinite(nMap.x) || !srIsFinite(nMap.y) || !srIsFinite(nMap.z)) nMap = Vec3(0.0f, 0.0f, 1.0f);
         nMap = normalize(nMap);
         const Frame frame(ns);

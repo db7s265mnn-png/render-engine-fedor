@@ -207,8 +207,8 @@ bool isKnownMaterialXCategory(const QString& category) {
     return category == "standard_surface" || category == "ray_switch_shader" || category == "ray_switch" ||
            category == "surfacematerial" || category == "image" ||
            category == "constant" || category == "multiply" || category == "mix" || category == "normalmap" ||
-           category == "bump" || category == "tiledimage" || category == "add" || category == "texcoord" ||
-           category == "triplanarprojection";
+           category == "bump" || category == "displacement" || category == "tiledimage" || category == "add" ||
+           category == "texcoord" || category == "triplanarprojection";
 }
 
 QColor colorForCategory(const QString& category) {
@@ -217,6 +217,7 @@ QColor colorForCategory(const QString& category) {
     if (category == "ray_switch_shader" || category == "ray_switch") return QColor(72, 140, 160);
     if (category == "surfacematerial") return QColor(126, 82, 170);
     if (category == "normalmap" || category == "bump") return QColor(96, 101, 108);
+    if (category == "displacement") return QColor(180, 110, 70);
     const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category);
     if (entry) {
         if (entry->group.startsWith("PBR")) return QColor(189, 116, 45);
@@ -252,6 +253,9 @@ bool materialXTypesConnectable(const QString& sourceType, const QString& destTyp
     if ((isColorish(s) || isVectorish(s)) && (isFloatish(d) || isColorish(d) || isVectorish(d))) return true;
     if (s == "surfaceshader" && d == "surfaceshader") return true;
     if (s == "material" && d == "material") return true;
+    if (d == "displacementshader" &&
+        (s == "displacementshader" || s == "float" || s == "vector3" || s == "color3"))
+        return true;
     return false;
 }
 
@@ -275,6 +279,9 @@ int connectionScore(const QString& sourceType, const QString& destName, const QS
     }
     if (s == "float" && (d.startsWith("color") || d.startsWith("vector"))) score -= 10;
     if ((s.startsWith("vector") || s.startsWith("color")) && n == "normal") score += 40;
+    if (n == "displacementshader" &&
+        (s == "float" || s == "vector3" || s == "color3" || s == "displacementshader"))
+        score += 80;
     if (!occupied) score += 5;
     return score;
 }
@@ -306,6 +313,7 @@ QPointF defaultLayoutForCategory(const QString& category, int ordinal) {
     if (category == "standard_surface") return QPointF(0.0, 0.0);
     if (category == "image") return QPointF(-4.0, qreal(ordinal) * 1.2);
     if (category == "normalmap" || category == "bump") return QPointF(-2.0, qreal(ordinal) * 1.2);
+    if (category == "displacement") return QPointF(2.0, qreal(ordinal) * 1.2 + 1.5);
     return QPointF(-2.5, qreal(ordinal) * 1.2);
 }
 
@@ -796,6 +804,7 @@ QString MaterialNetworkGraphView::defaultTypeForCategory(const QString& category
     if (category == "surfacematerial") return "material";
     if (category == "normalmap") return "vector3";
     if (category == "bump") return "vector3";
+    if (category == "displacement") return "float";
     if (category == "texcoord") return "vector2";
     return "color3";
 }
@@ -904,6 +913,51 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         return out;
     }
 
+    if (category == "surfacematerial") {
+        QVector<MtlxInput> out = {
+            {"surfaceshader", "surfaceshader", {}, {}},
+            {"displacementshader", "displacementshader", {}, {}},
+        };
+        if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
+            const QString signature = type.isEmpty() ? entry->type : type;
+            QHash<QString, MaterialXNodeInputDef> byName;
+            for (const MaterialXNodeInputDef& def : entry->inputsFor(signature)) byName.insert(def.name, def);
+            for (MtlxInput& input : out) {
+                const auto it = byName.constFind(input.name);
+                if (it == byName.constEnd()) continue;
+                input.type = it->type.isEmpty() ? input.type : it->type;
+            }
+        }
+        return out;
+    }
+
+    if (category == "displacement") {
+        // MaterialX ND_displacement_* + Arnold-style Solstice extras.
+        const QString t = (type == "vector3") ? QString("vector3") : QString("float");
+        QVector<MtlxInput> out;
+        if (t == "vector3")
+            out.push_back({"displacement", "vector3", "0, 0, 0", {}});
+        else
+            out.push_back({"displacement", "float", "0", {}});
+        out.push_back({"scale", "float", "1", {}});
+        out.push_back({"bounds_padding", "float", "0", {}});
+        out.push_back({"subdiv_iterations", "integer", "2", {}});
+        out.push_back({"autobump", "boolean", "true", {}});
+        out.push_back({"zero_value", "float", "0", {}});
+        if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
+            const QString signature = type.isEmpty() ? entry->type : type;
+            QHash<QString, MaterialXNodeInputDef> byName;
+            for (const MaterialXNodeInputDef& def : entry->inputsFor(signature)) byName.insert(def.name, def);
+            for (MtlxInput& input : out) {
+                const auto it = byName.constFind(input.name);
+                if (it == byName.constEnd()) continue;
+                input.type = it->type.isEmpty() ? input.type : it->type;
+                if (input.value.isEmpty() && !it->value.isEmpty()) input.value = it->value;
+            }
+        }
+        return out;
+    }
+
     if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
         const QString signature = type.isEmpty() ? entry->type : type;
         for (const MaterialXNodeInputDef& def : entry->inputsFor(signature)) {
@@ -931,8 +985,20 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
     } else if (category == "bump") {
         inputs.push_back({"height", "float", "0", {}});
         inputs.push_back({"scale", "float", "1", {}});
+    } else if (category == "displacement") {
+        const QString t = type.isEmpty() ? QString("float") : type;
+        if (t == "vector3")
+            inputs.push_back({"displacement", "vector3", "0, 0, 0", {}});
+        else
+            inputs.push_back({"displacement", "float", "0", {}});
+        inputs.push_back({"scale", "float", "1", {}});
+        inputs.push_back({"bounds_padding", "float", "0", {}});
+        inputs.push_back({"subdiv_iterations", "integer", "2", {}});
+        inputs.push_back({"autobump", "boolean", "true", {}});
+        inputs.push_back({"zero_value", "float", "0", {}});
     } else if (category == "surfacematerial") {
         inputs.push_back({"surfaceshader", "surfaceshader", {}, {}});
+        inputs.push_back({"displacementshader", "displacementshader", {}, {}});
     }
     return inputs;
 }

@@ -586,6 +586,21 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
     add("bump", "vector3", "Geometric",
         {{"height", "float", "0"}, {"scale", "float", "1"}, {"normal", "vector3", {}}, {"tangent", "vector3", {}},
          {"bitangent", "vector3", {}}});
+    // Arnold-style geometric displacement (MaterialX ND_displacement_* + Solstice extras).
+    add("displacement", "float", "PBR / Shading",
+        {{"displacement", "float", "0"},
+         {"scale", "float", "1"},
+         {"bounds_padding", "float", "0"},
+         {"subdiv_iterations", "integer", "2"},
+         {"autobump", "boolean", "true"},
+         {"zero_value", "float", "0"}});
+    add("displacement", "vector3", "PBR / Shading",
+        {{"displacement", "vector3", "0, 0, 0"},
+         {"scale", "float", "1"},
+         {"bounds_padding", "float", "0"},
+         {"subdiv_iterations", "integer", "2"},
+         {"autobump", "boolean", "true"},
+         {"zero_value", "float", "0"}});
     add("texcoord", "vector2", "Geometric", {{"index", "integer", "0"}});
     add("place2d", "vector2", "Geometric",
         {{"texcoord", "vector2", {}},
@@ -632,7 +647,8 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"offset", "vector3", "0, 0, 0"},
          {"blend", "float", "0.1"},
          {"default", "color3", "0.2, 0.5, 0.8"}});
-    add("surfacematerial", "material", "PBR / Shading", {{"surfaceshader", "surfaceshader", {}}});
+    add("surfacematerial", "material", "PBR / Shading",
+        {{"surfaceshader", "surfaceshader", {}}, {"displacementshader", "displacementshader", {}}});
     // Arnold-like ray switch (surfaceshader). Incoming ray type selects the port
     // (camera / shadow / specular_transmission / …). Solstice `caustics` is only
     // for photon / MNEE / BDPT light-tracing — never for camera rays.
@@ -1067,6 +1083,76 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         bindSlot("normal", result.normalTexture, result.material.normalProc, true);
         bindSlot("subsurface_color", result.subsurfaceTexture, result.material.subsurfaceProc);
 
+        // MaterialX surfacematerial.displacementshader → Arnold-style geo displace.
+        mx::NodePtr dispNode = surface ? resolveConnectedNode(surface, "displacementshader") : nullptr;
+        if (dispNode && dispNode->getCategory() == "displacement") {
+            result.material.displacementScale = readNodeFloat(dispNode, "scale", 1.0f);
+            result.material.displacementBoundsPadding = readNodeFloat(dispNode, "bounds_padding", 0.0f);
+            result.material.displacementZeroValue = readNodeFloat(dispNode, "zero_value", 0.0f);
+            float subdivF = 2.0f;
+            if (parseFloat(inputValueString(dispNode, "subdiv_iterations"), subdivF))
+                result.material.subdivIterations = int(std::lround(subdivF));
+            else
+                result.material.subdivIterations = 2;
+            if (result.material.subdivIterations < 0) result.material.subdivIterations = 0;
+            if (result.material.subdivIterations > 5) result.material.subdivIterations = 5;
+
+            result.material.autobump = 1;
+            {
+                const std::string raw = inputValueString(dispNode, "autobump");
+                if (!raw.empty()) {
+                    if (raw == "false" || raw == "0" || raw == "False")
+                        result.material.autobump = 0;
+                    else if (raw == "true" || raw == "1" || raw == "True")
+                        result.material.autobump = 1;
+                    else {
+                        float v = 1.0f;
+                        if (parseFloat(raw, v)) result.material.autobump = v > 0.5f ? 1 : 0;
+                    }
+                }
+            }
+
+            const std::string dispType = dispNode->getType();
+            result.material.displacementVector =
+                (dispType == "vector3" || dispType == "vector3f" || dispType == "color3") ? 1 : 0;
+
+            mx::NodePtr height = resolveConnectedNode(dispNode, "displacement");
+            if (height) {
+                const std::string hcat = height->getCategory();
+                if (hcat == "image" || hcat == "tiledimage") {
+                    if (materialXImageNeedsProceduralBind(height)) {
+                        compileProc(height, result.material.displacementProc, "displacement");
+                    } else {
+                        std::string texError;
+                        result.displacementTexture =
+                            loadTextureFromImageNode(height, searchDirectory, udimSet, texError, false);
+                        if (!result.displacementTexture && !texError.empty())
+                            logWarning("MaterialX: " + texError);
+                    }
+                } else if (materialXNodeIsProcedural(height)) {
+                    compileProc(height, result.material.displacementProc, "displacement");
+                } else {
+                    logWarning(std::string("MaterialX: unsupported displacement upstream '") + hcat + "'");
+                }
+            } else {
+                // Constant height on the displacement node (always along normal).
+                result.material.displacementVector = 0;
+                float h = 0.0f;
+                if (parseFloat(inputValueString(dispNode, "displacement"), h)) {
+                    result.material.displacementHeight = h;
+                } else {
+                    Vec3 v(0.0f);
+                    if (parseColor3(inputValueString(dispNode, "displacement"), v))
+                        result.material.displacementHeight =
+                            0.2126f * v.x + 0.7152f * v.y + 0.0722f * v.z;
+                }
+            }
+            logInfo("MaterialX: displacement shader (subdiv=" +
+                    std::to_string(result.material.subdivIterations) +
+                    ", scale=" + std::to_string(result.material.displacementScale) +
+                    ", autobump=" + std::to_string(result.material.autobump) + ")");
+        }
+
         // Drop dangling roots if a compile failed mid-way.
         auto sanitize = [&](int& idx) {
             if (idx >= 0 && idx >= int(result.procedurals.size())) idx = -1;
@@ -1081,6 +1167,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         sanitize(result.material.normalProc);
         sanitize(result.material.subsurfaceProc);
         sanitize(result.material.bumpProc);
+        sanitize(result.material.displacementProc);
 
         result.ok = true;
         return result;

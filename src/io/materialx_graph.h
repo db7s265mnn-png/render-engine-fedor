@@ -30,6 +30,7 @@ struct MaterialXEvalResult {
     std::shared_ptr<Image> emissionTexture;
     std::shared_ptr<Image> normalTexture;
     std::shared_ptr<Image> bumpTexture;
+    std::shared_ptr<Image> displacementTexture;
     std::shared_ptr<Image> subsurfaceTexture;
     std::shared_ptr<Image> specularColorTexture;
     std::shared_ptr<Image> transmissionColorTexture;

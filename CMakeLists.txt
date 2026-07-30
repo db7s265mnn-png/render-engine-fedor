@@ -305,6 +305,7 @@ set(SOLSTICE_LIB_SOURCES
     src/core/image.cpp
     src/core/log.cpp
     src/scene/scene.cpp
+    src/scene/displace.cpp
     src/io/image_io.cpp
     src/io/alembic_loader.cpp
     src/io/usd_loader.cpp
@@ -339,6 +340,7 @@ set(SOLSTICE_LIB_HEADERS
     src/core/thread_pool.h
     src/scene/types.h
     src/scene/scene.h
+    src/scene/displace.h
     src/io/image_io.h
     src/io/alembic_loader.h
     src/io/usd_loader.h

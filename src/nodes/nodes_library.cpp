@@ -439,6 +439,7 @@ public:
             sanitizeProc(evaluated.material.normalProc);
             sanitizeProc(evaluated.material.subsurfaceProc);
             sanitizeProc(evaluated.material.bumpProc);
+            sanitizeProc(evaluated.material.displacementProc);
             sanitizeProc(evaluated.material.specularColorProc);
             sanitizeProc(evaluated.material.transmissionColorProc);
 
@@ -457,6 +458,7 @@ public:
                 prim.emissionTexture = evaluated.emissionTexture;
                 prim.normalTexture = evaluated.normalTexture;
                 prim.bumpTexture = evaluated.bumpTexture;
+                prim.displacementTexture = evaluated.displacementTexture;
                 prim.subsurfaceTexture = evaluated.subsurfaceTexture;
                 prim.specularColorTexture = evaluated.specularColorTexture;
                 prim.transmissionColorTexture = evaluated.transmissionColorTexture;

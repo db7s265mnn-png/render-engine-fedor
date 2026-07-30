@@ -95,7 +95,19 @@ struct Material {
     // Height-field bump (MaterialX <bump>). When set, wins over normalTex/normalProc.
     int bumpTex = -1;
     int bumpProc = -1;
-    int _padBump = 0;
+
+    // Arnold-style geometric displacement (MaterialX <displacement> on surfacematerial).
+    // Subdivide cage → offset vertices → pad AABB. Autobump adds residual shade normals.
+    int displacementTex = -1;
+    int displacementProc = -1;
+    float displacementScale = 1.0f;
+    float displacementHeight = 0.0f;  // constant when no tex/proc
+    float displacementBoundsPadding = 0.0f;
+    float displacementZeroValue = 0.0f;
+    int subdivIterations = 0;   // mid-edge triangle splits (0..5); Arnold subdiv_iterations
+    int autobump = 1;           // high-frequency detail as bump after geo displace
+    int displacementVector = 0; // 0 = along normal (float), 1 = vector displace
+    int _padDisp = 0;
 
     // Chromatic dispersion of the transmission lobe (Abbe number, Arnold-style
     // `dispersion_abbe`): 0 = off; typical glass 20–60, lower = stronger rainbow.
