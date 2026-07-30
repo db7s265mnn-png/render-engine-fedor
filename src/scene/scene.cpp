@@ -407,8 +407,8 @@ MeshPtr makeGridMesh(float sizeX, float sizeZ, int divisionsX, int divisionsZ) {
             const uint32_t i1 = uint32_t(z * stride + x + 1);
             const uint32_t i2 = uint32_t((z + 1) * stride + x + 1);
             const uint32_t i3 = uint32_t((z + 1) * stride + x);
-            mesh->indices.insert(mesh->indices.end(), {i0, i1, i2});
-            mesh->indices.insert(mesh->indices.end(), {i0, i2, i3});
+            mesh->indices.insert(mesh->indices.end(), {i0, i2, i1});
+            mesh->indices.insert(mesh->indices.end(), {i0, i3, i2});
         }
     }
     mesh->validate();

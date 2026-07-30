@@ -1766,8 +1766,14 @@ void testArnoldDisplacement() {
     check(maxY > cageMaxY + 0.4f, "vertices displaced along normal");
     check(displaced->bounds.hi.y >= maxY, "bounds cover displaced verts");
     check(displaced->bounds.hi.y >= maxY + 0.05f, "bounds_padding expands AABB");
-    std::printf("  const disp tris %zu→%zu maxY %.3f→%.3f\n", cageTris, displaced->triangleCount(), cageMaxY,
-                maxY);
+    // Authored grid normals are +Y; winding alone would give -Y — displace must
+    // preserve the outward hemisphere or shading goes black.
+    float avgNy = 0.0f;
+    for (const Vec3& n : displaced->normals) avgNy += n.y;
+    avgNy /= float(std::max<size_t>(1, displaced->normals.size()));
+    check(avgNy > 0.5f, "displaced normals stay outward (+Y)");
+    std::printf("  const disp tris %zu→%zu maxY %.3f→%.3f avgNy=%.3f\n", cageTris,
+                displaced->triangleCount(), cageMaxY, maxY, avgNy);
 
     // Height map displacement through Stage::toScene.
     QTemporaryDir tmp;

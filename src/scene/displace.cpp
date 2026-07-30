@@ -149,6 +149,10 @@ void displaceVertices(Mesh& mesh, const Material& mat, const SceneView& scene) {
     }
     const bool hasUvs = mesh.uvs.size() == mesh.positions.size();
     const size_t n = mesh.positions.size();
+    // Keep pre-displace normals to reorient after recompute — winding often
+    // disagrees with authored / interpolated outward normals (e.g. grid +Y vs
+    // cross-product -Y), which makes the whole surface shade nearly black.
+    const std::vector<Vec3> orientRef = mesh.normals;
 
     std::vector<Vec3> offsets(n, Vec3(0.0f));
     for (size_t i = 0; i < n; ++i) {
@@ -167,9 +171,15 @@ void displaceVertices(Mesh& mesh, const Material& mat, const SceneView& scene) {
         for (size_t i = 0; i < n; ++i) keyPositions[i] += offsets[i];
     }
 
-    // Rebuild smooth normals on the displaced surface.
+    // Rebuild smooth normals on the displaced surface, then flip any that ended
+    // up on the opposite hemisphere from the pre-displace reference.
     mesh.normals.clear();
     mesh.computeNormalsIfMissing();
+    if (mesh.normals.size() == orientRef.size()) {
+        for (size_t i = 0; i < mesh.normals.size(); ++i) {
+            if (dot(mesh.normals[i], orientRef[i]) < 0.0f) mesh.normals[i] = -mesh.normals[i];
+        }
+    }
 }
 
 }  // namespace

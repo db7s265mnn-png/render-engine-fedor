@@ -313,26 +313,28 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
     const float nScale = srIsFinite(base.normalScale) ? base.normalScale : 1.0f;
     const bool hasBump =
         base.bumpProc >= 0 || (base.bumpTex >= 0 && base.bumpTex < scene.textureCount && scene.textures);
+    // Autobump only when there is real high-frequency content (map/proc). Constant
+    // height has zero FD and must not enable this path. Geometric displace already
+    // rebuilt vertex normals — autobump is residual shade detail only.
     const bool hasAutobump =
-        base.autobump != 0 &&
+        base.autobump != 0 && !hasBump &&
         (base.displacementProc >= 0 ||
-         (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures) ||
-         (fabsf(base.displacementHeight * base.displacementScale) > 1.0e-8f));
+         (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures));
 
     auto sampleDispHeightAt = [&](Vec2 sampleUv, Vec3 sampleP) -> float {
         ProceduralCtx hctx = ctx;
         hctx.uv = sampleUv;
         hctx.pObject = sampleP;
+        float h = base.displacementHeight;
         if (base.displacementProc >= 0) {
             const Vec4 c = evalProceduralRoot(scene, base.displacementProc, hctx);
-            return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
-        }
-        if (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures) {
+            h = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+        } else if (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures) {
             const TextureView& tex = scene.textures[base.displacementTex];
             const Vec4 c = sampleTextureRGBALod(tex, sampleUv, textureLodFromFilterWidth(tex, uvFilterWidth));
-            return c.x;
+            h = c.x;
         }
-        return base.displacementHeight;
+        return (h - base.displacementZeroValue);
     };
 
     if (hasBump) {
@@ -374,42 +376,72 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         ns = normalize(frame.toWorld(nMap));
         if (!srIsFinite(ns.x) || !srIsFinite(ns.y) || !srIsFinite(ns.z)) ns = frame.n;
     } else if (hasAutobump) {
-        // Arnold autobump: residual high-frequency detail from the displacement
-        // map as shade-time bump (after geometric subdiv+displace).
+        // Arnold autobump: high-frequency residual from the displacement map as
+        // shade-time bump. Geometry already carries low/mid frequencies from
+        // subdiv+displace — keep this mild so N·L / shadingNormalConsistent
+        // do not collapse to black.
+        const Vec3 geoNs = ns;
         const float dispScale = srIsFinite(base.displacementScale) ? base.displacementScale : 1.0f;
-        float epsUv = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
-        if (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures) {
-            const TextureView& tex = scene.textures[base.displacementTex];
-            if (tex.width > 1) epsUv = srMax(epsUv, 1.0f / float(tex.width));
-        }
-        epsUv = srMax(1e-5f, epsUv);
-        const float h = sampleDispHeightAt(uv, pObject);
-        float dHu = 0.0f;
-        float dHv = 0.0f;
+        const Frame frameP(geoNs);
+        // Prefer world-space slopes along the shading frame (correct units).
+        // UV FD alone treats dH/dUV * scale as a slope and over-tilts when UV
+        // spans a large surface or scale is in scene units.
+        float epsP = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0e-3f;
+        epsP = clampf(epsP, 1.0e-4f, 0.05f);
+        const float h = sampleDispHeightAt(uv, pObject) * dispScale;
+        float dHt = 0.0f;
+        float dHb = 0.0f;
         if (base.displacementProc >= 0) {
-            const float hu = sampleDispHeightAt(Vec2(uv.x + epsUv, uv.y), pObject);
-            const float hv = sampleDispHeightAt(Vec2(uv.x, uv.y + epsUv), pObject);
-            dHu += (hu - h) / epsUv;
-            dHv += (hv - h) / epsUv;
-            const Frame frameP(ns);
-            float epsP = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0e-3f;
-            epsP = clampf(epsP, 1.0e-4f, 0.05f);
-            const float ht = sampleDispHeightAt(uv, pObject + frameP.t * epsP);
-            const float hb = sampleDispHeightAt(uv, pObject + frameP.b * epsP);
-            dHu += (ht - h) / epsP;
-            dHv += (hb - h) / epsP;
+            // Procedurals (triplanar / noise3d) respond to P; UV-only maps need UV FD.
+            const float ht = sampleDispHeightAt(uv, pObject + frameP.t * epsP) * dispScale;
+            const float hb = sampleDispHeightAt(uv, pObject + frameP.b * epsP) * dispScale;
+            dHt = (ht - h) / epsP;
+            dHb = (hb - h) / epsP;
+            // Also mix UV FD for noise2d / place2d graphs (P-invariant).
+            float epsUv = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
+            epsUv = srMax(1e-5f, epsUv);
+            const float hu = sampleDispHeightAt(Vec2(uv.x + epsUv, uv.y), pObject) * dispScale;
+            const float hv = sampleDispHeightAt(Vec2(uv.x, uv.y + epsUv), pObject) * dispScale;
+            // Convert UV derivatives → world slopes with |dP/dUV| ≈ epsP/epsUv proxy
+            // when filter width is available; otherwise keep a gentle UV contribution.
+            const float uvToWorld = epsP / epsUv;
+            dHt += (hu - h) / epsUv / srMax(uvToWorld, 1e-4f);
+            dHb += (hv - h) / epsUv / srMax(uvToWorld, 1e-4f);
         } else {
-            const float hu = sampleDispHeightAt(Vec2(uv.x + epsUv, uv.y), pObject);
-            const float hv = sampleDispHeightAt(Vec2(uv.x, uv.y + epsUv), pObject);
-            dHu = (hu - h) / epsUv;
-            dHv = (hv - h) / epsUv;
+            // Image height maps: UV FD → world slope via footprint estimate.
+            float epsUv = uvFilterWidth > 1e-6f ? uvFilterWidth : 1.0f / 512.0f;
+            if (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures) {
+                const TextureView& tex = scene.textures[base.displacementTex];
+                if (tex.width > 1) epsUv = srMax(epsUv, 1.0f / float(tex.width));
+            }
+            epsUv = srMax(1e-5f, epsUv);
+            const float hu = sampleDispHeightAt(Vec2(uv.x + epsUv, uv.y), pObject) * dispScale;
+            const float hv = sampleDispHeightAt(Vec2(uv.x, uv.y + epsUv), pObject) * dispScale;
+            // uvFilterWidth ≈ worldPixel * |dUV/dP| → |dP/dUV| ≈ worldPixel/uvFilterWidth.
+            // Without an explicit pixel size, use epsP as the world step paired with epsUv.
+            const float worldPerUv = epsP / epsUv;
+            dHt = (hu - h) / epsUv / srMax(worldPerUv, 1e-4f);
+            dHb = (hv - h) / epsUv / srMax(worldPerUv, 1e-4f);
         }
-        Vec3 nMap(-dHu * dispScale, -dHv * dispScale, 1.0f);
+        // Residual weight: subdiv already captured mid frequencies.
+        const float residual =
+            1.0f / float(1 + srMax(0, base.subdivIterations));
+        float bx = -dHt * residual;
+        float by = -dHb * residual;
+        // Clamp slope so shading normals stay within ~60° of the geometric normal
+        // (avoids black NEE from shadingNormalConsistent / tiny N·L).
+        const float xy = sqrtf(bx * bx + by * by);
+        const float maxXy = 1.7320508f;  // tan(60°)
+        if (xy > maxXy) {
+            bx *= maxXy / xy;
+            by *= maxXy / xy;
+        }
+        Vec3 nMap(bx, by, 1.0f);
         if (!srIsFinite(nMap.x) || !srIsFinite(nMap.y) || !srIsFinite(nMap.z)) nMap = Vec3(0.0f, 0.0f, 1.0f);
         nMap = normalize(nMap);
-        const Frame frame(ns);
-        ns = normalize(frame.toWorld(nMap));
-        if (!srIsFinite(ns.x) || !srIsFinite(ns.y) || !srIsFinite(ns.z)) ns = frame.n;
+        ns = normalize(frameP.toWorld(nMap));
+        if (!srIsFinite(ns.x) || !srIsFinite(ns.y) || !srIsFinite(ns.z)) ns = geoNs;
+        if (dot(ns, geoNs) < 0.0f) ns = -ns;
     } else if (base.normalProc >= 0 ||
                (base.normalTex >= 0 && base.normalTex < scene.textureCount && scene.textures)) {
         // MaterialX <normalmap> / image→normal: tangent-space RGB normal map.
