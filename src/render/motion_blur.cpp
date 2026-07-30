@@ -10,6 +10,11 @@
 namespace sol {
 namespace {
 
+Mat4 cameraWorldFromPrim(const StagePrim& prim) {
+    // Stage::toScene assigns camera.cameraToWorld = prim.xform.
+    return prim.xform;
+}
+
 }  // namespace
 
 void attachMotionBlurKeys(NodeGraph& graph, const CookContext& centerContext, Scene& scene) {
@@ -32,26 +37,35 @@ void attachMotionBlurKeys(NodeGraph& graph, const CookContext& centerContext, Sc
     scene.camera.shutterOpen = 0.0f;
     scene.camera.shutterClose = 1.0f;
 
-    // Map prim path -> instance / mesh for the center scene.
+    // Never mutate Mesh objects still owned by the node-graph cache.
+    for (MeshPtr& mesh : scene.meshes) {
+        if (mesh && mesh.use_count() > 1) mesh = std::make_shared<Mesh>(*mesh);
+        if (mesh) mesh->motionPositions.clear();
+    }
+
     std::unordered_map<std::string, int> pathToInstance;
     std::unordered_map<std::string, int> pathToMesh;
-    for (const PrimRecord& prim : scene.prims) {
-        if (prim.instanceIndex >= 0) pathToInstance[prim.path] = prim.instanceIndex;
-    }
-    // Prefer matching by instance's mesh via prim records that carry mesh geometry.
     for (const PrimRecord& prim : scene.prims) {
         if (prim.instanceIndex < 0) continue;
         const int instIdx = prim.instanceIndex;
         if (instIdx < 0 || instIdx >= int(scene.instances.size())) continue;
+        pathToInstance[prim.path] = instIdx;
         const int meshIdx = scene.instances[size_t(instIdx)].meshIndex;
-        if (meshIdx >= 0) pathToMesh[prim.path] = meshIdx;
+        if (meshIdx >= 0 && meshIdx < int(scene.meshes.size())) pathToMesh[prim.path] = meshIdx;
     }
 
     const int instanceCount = int(scene.instances.size());
-    scene.motionXforms.assign(size_t(instanceCount) * size_t(keys), Mat4::identity());
-    scene.cameraMotionXforms.assign(size_t(keys), scene.camera.cameraToWorld);
+    try {
+        scene.motionXforms.assign(size_t(instanceCount) * size_t(keys), Mat4::identity());
+        scene.cameraMotionXforms.assign(size_t(keys), scene.camera.cameraToWorld);
+    } catch (const std::bad_alloc&) {
+        logError("Motion blur: out of memory allocating transform keys; disabling");
+        scene.settings.motionBlur = 0;
+        scene.motionXforms.clear();
+        scene.cameraMotionXforms.clear();
+        return;
+    }
 
-    // Seed key slots with the center-frame transforms (stable if a key cook fails).
     for (int i = 0; i < instanceCount; ++i) {
         for (int k = 0; k < keys; ++k)
             scene.motionXforms[size_t(i) * size_t(keys) + size_t(k)] = scene.instances[size_t(i)].xform;
@@ -59,61 +73,113 @@ void attachMotionBlurKeys(NodeGraph& graph, const CookContext& centerContext, Sc
         scene.instances[size_t(i)].motionKeyCount = keys;
     }
 
-    // Deformation slots (lazy — only allocated when topology matches).
+    bool needsResample = false;
+    for (const NodePtr& node : graph.nodes()) {
+        if (node && node->dependsOnTime()) {
+            needsResample = true;
+            break;
+        }
+    }
+    // Also resample Alembic/USD on the first MB enable while cache is still unknown.
+    if (!needsResample) {
+        for (const NodePtr& node : graph.nodes()) {
+            if (!node) continue;
+            const QString type = node->typeName();
+            if (type == QLatin1String("alembic") || type == QLatin1String("usd")) {
+                needsResample = true;
+                break;
+            }
+        }
+    }
+
+    if (!needsResample) {
+        // Nothing moves with time — keep duplicated center keys and return.
+        logInfo("Motion blur: no time-dependent geometry; using static shutter keys");
+        scene.refreshMeshViews();
+        return;
+    }
+
     std::vector<std::vector<std::vector<Vec3>>> meshKeyPositions(scene.meshes.size());
+    const QString renderCameraPath;  // empty → first authored camera in each key stage
 
     for (int k = 0; k < keys; ++k) {
-        const double t = (keys == 1) ? centerContext.time
-                                     : openTime + (closeTime - openTime) * (double(k) / double(keys - 1));
+        const double t =
+            openTime + (closeTime - openTime) * (double(k) / double(std::max(1, keys - 1)));
         CookContext ctx = centerContext;
         ctx.time = t;
-        ctx.frame = 1 + int(std::lround(t * centerContext.fps));
+        ctx.frame = 1 + int(std::lround(t * std::max(1e-6, centerContext.fps)));
         ctx.hasSuggestedRange = false;
         ctx.warnings.clear();
         ctx.errors.clear();
 
-        graph.markTimeDependentDirty();
-        StagePtr stage = graph.cookDisplay(ctx);
+        for (const NodePtr& node : graph.nodes()) {
+            if (!node) continue;
+            const QString type = node->typeName();
+            if (type == QLatin1String("alembic") || type == QLatin1String("usd") || node->dependsOnTime())
+                graph.markDirty(node.get());
+        }
+
+        StagePtr stage;
+        try {
+            stage = graph.cookDisplay(ctx);
+        } catch (const std::bad_alloc&) {
+            logError("Motion blur: out of memory while cooking shutter key " + std::to_string(k));
+            scene.settings.motionBlur = 0;
+            scene.motionXforms.clear();
+            scene.cameraMotionXforms.clear();
+            for (MeshPtr& mesh : scene.meshes) {
+                if (mesh) mesh->motionPositions.clear();
+            }
+            for (InstanceData& inst : scene.instances) {
+                inst.motionKeyCount = 1;
+                inst.motionKeyOffset = 0;
+            }
+            return;
+        }
         if (!stage) continue;
-        ScenePtr keyScene = stage->toScene();
-        if (!keyScene) continue;
 
-        // Camera at this shutter sample.
-        scene.cameraMotionXforms[size_t(k)] = keyScene->camera.cameraToWorld;
+        // Camera key from stage (same rule as Stage::toScene).
+        bool gotCamera = false;
+        for (const StagePrim& prim : stage->prims) {
+            if (prim.type != PrimType::Camera) continue;
+            const bool selected = renderCameraPath.isEmpty() ? !gotCamera : (prim.path == renderCameraPath);
+            if (!selected) continue;
+            scene.cameraMotionXforms[size_t(k)] = cameraWorldFromPrim(prim);
+            gotCamera = true;
+        }
 
-        // Match instances / meshes by prim path.
-        for (const PrimRecord& prim : keyScene->prims) {
-            if (prim.instanceIndex < 0) continue;
-            auto instIt = pathToInstance.find(prim.path);
+        for (const StagePrim& prim : stage->prims) {
+            if (prim.type != PrimType::Mesh || !prim.mesh) continue;
+            const std::string path = prim.path.toStdString();
+            auto instIt = pathToInstance.find(path);
             if (instIt == pathToInstance.end()) continue;
             const int dstInst = instIt->second;
-            const int srcInst = prim.instanceIndex;
-            if (srcInst < 0 || srcInst >= int(keyScene->instances.size())) continue;
             if (dstInst < 0 || dstInst >= instanceCount) continue;
 
-            const Mat4 xform = keyScene->instances[size_t(srcInst)].xform;
-            scene.motionXforms[size_t(dstInst) * size_t(keys) + size_t(k)] = xform;
+            scene.motionXforms[size_t(dstInst) * size_t(keys) + size_t(k)] = prim.xform;
 
-            // Deformation: copy positions when topology matches.
-            auto meshIt = pathToMesh.find(prim.path);
+            auto meshIt = pathToMesh.find(path);
             if (meshIt == pathToMesh.end()) continue;
             const int dstMesh = meshIt->second;
-            const int srcMesh = keyScene->instances[size_t(srcInst)].meshIndex;
             if (dstMesh < 0 || dstMesh >= int(scene.meshes.size())) continue;
-            if (srcMesh < 0 || srcMesh >= int(keyScene->meshes.size())) continue;
-            const MeshPtr& src = keyScene->meshes[size_t(srcMesh)];
             const MeshPtr& dst = scene.meshes[size_t(dstMesh)];
-            if (!src || !dst) continue;
-            if (src->positions.size() != dst->positions.size() || src->indices.size() != dst->indices.size())
+            if (!dst) continue;
+            if (prim.mesh->positions.size() != dst->positions.size() ||
+                prim.mesh->indices.size() != dst->indices.size())
                 continue;
 
-            if (meshKeyPositions[size_t(dstMesh)].empty())
-                meshKeyPositions[size_t(dstMesh)].assign(size_t(keys), std::vector<Vec3>());
-            meshKeyPositions[size_t(dstMesh)][size_t(k)] = src->positions;
+            try {
+                if (meshKeyPositions[size_t(dstMesh)].empty())
+                    meshKeyPositions[size_t(dstMesh)].assign(size_t(keys), std::vector<Vec3>());
+                meshKeyPositions[size_t(dstMesh)][size_t(k)] = prim.mesh->positions;
+            } catch (const std::bad_alloc&) {
+                logError("Motion blur: out of memory copying deformation key; "
+                         "falling back to transform blur only");
+                meshKeyPositions[size_t(dstMesh)].clear();
+            }
         }
     }
 
-    // Attach deformation keys onto center meshes (key 0 = current positions).
     for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
         auto& keyPos = meshKeyPositions[mi];
         if (keyPos.empty()) continue;
@@ -127,22 +193,26 @@ void attachMotionBlurKeys(NodeGraph& graph, const CookContext& centerContext, Sc
             }
         }
         if (!complete) continue;
-        // Replace center positions with key 0 sample; store remaining keys as motion.
-        mesh->positions = std::move(keyPos[0]);
-        mesh->motionPositions.clear();
-        mesh->motionPositions.reserve(size_t(keys - 1));
-        for (int k = 1; k < keys; ++k) mesh->motionPositions.push_back(std::move(keyPos[size_t(k)]));
-        mesh->computeBounds();
+        try {
+            mesh->positions = std::move(keyPos[0]);
+            mesh->motionPositions.clear();
+            mesh->motionPositions.reserve(size_t(keys - 1));
+            for (int k = 1; k < keys; ++k) mesh->motionPositions.push_back(std::move(keyPos[size_t(k)]));
+            mesh->computeBounds();
+        } catch (const std::bad_alloc&) {
+            logError("Motion blur: out of memory installing deformation keys");
+            mesh->motionPositions.clear();
+        }
     }
 
-    // Keep InstanceData.xform as shutter-center (middle key) for non-MB code paths.
     if (keys >= 2) {
         const int mid = keys / 2;
         for (int i = 0; i < instanceCount; ++i) {
             scene.instances[size_t(i)].xform = scene.motionXforms[size_t(i) * size_t(keys) + size_t(mid)];
             scene.instances[size_t(i)].xformInv = inverse(scene.instances[size_t(i)].xform);
         }
-        scene.camera.cameraToWorld = scene.cameraMotionXforms[size_t(mid)];
+        if (size_t(mid) < scene.cameraMotionXforms.size())
+            scene.camera.cameraToWorld = scene.cameraMotionXforms[size_t(mid)];
     }
 
     logInfo("Motion blur: " + std::to_string(keys) + " keys, shutter length " +

@@ -793,17 +793,18 @@ void MainWindow::cookNow() {
         }
     }
 
-    scene_ = stage_->toScene();
-    if (scene_) scene_->fastRebuild = timelineInteractive;
+    ScenePtr builtScene = stage_->toScene();
+    if (!builtScene) return;
+    builtScene->fastRebuild = timelineInteractive;
 
     if (Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
         // Looking through: transform + full thin-lens params from that camera node.
         applyCameraNodeToView(cam);
-        applyLensFromCameraNode(cam, scene_->camera);
-        scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
+        applyLensFromCameraNode(cam, builtScene->camera);
+        builtScene->camera.cameraToWorld = renderView_->camera().toMatrix();
     } else if (cameraOverride_) {
         // Free persp — keep authored DOF focusDistance; only override the transform.
-        scene_->camera.cameraToWorld = renderView_->camera().toMatrix();
+        builtScene->camera.cameraToWorld = renderView_->camera().toMatrix();
     } else {
         float frameDistance = renderView_->camera().distance;
         if (Node* camNode = findCameraNode()) {
@@ -811,33 +812,39 @@ void MainWindow::cookNow() {
                 const Vec3 eye = camNode->vec3Value("eye", Vec3(6.0f, 4.0f, 9.0f));
                 const Vec3 target = camNode->vec3Value("target", Vec3(0.0f, 1.0f, 0.0f));
                 frameDistance = std::max(0.05f, length(eye - target));
-            } else if (scene_->camera.focusDistance > 0.0f) {
-                frameDistance = scene_->camera.focusDistance;
+            } else if (builtScene->camera.focusDistance > 0.0f) {
+                frameDistance = builtScene->camera.focusDistance;
             }
-        } else if (scene_->camera.focusDistance > 0.0f) {
-            frameDistance = scene_->camera.focusDistance;
-        } else if (scene_->bounds().valid()) {
-            frameDistance = std::max(1.0f, scene_->bounds().radius() * 2.0f);
+        } else if (builtScene->camera.focusDistance > 0.0f) {
+            frameDistance = builtScene->camera.focusDistance;
+        } else if (builtScene->bounds().valid()) {
+            frameDistance = std::max(1.0f, builtScene->bounds().radius() * 2.0f);
         }
-        renderView_->camera().setFromMatrix(scene_->camera.cameraToWorld, frameDistance);
+        renderView_->camera().setFromMatrix(builtScene->camera.cameraToWorld, frameDistance);
     }
 
-    if (scene_ && scene_->settings.motionBlur) {
-        const Mat4 interactiveCam = scene_->camera.cameraToWorld;
-        attachMotionBlurKeys(graph_, context, *scene_);
+    if (builtScene->settings.motionBlur) {
+        // Stop IPR before the multi-key Alembic cooks — they can take a while on
+        // large caches, and must not mutate a Scene still visible to the UI/render tick.
+        session_.stop();
+        const Mat4 interactiveCam = builtScene->camera.cameraToWorld;
+        attachMotionBlurKeys(graph_, context, *builtScene);
         if (cameraOverride_) {
             // Free camera: geometry MB only.
-            scene_->camera.cameraToWorld = interactiveCam;
-            if (!scene_->cameraMotionXforms.empty())
-                std::fill(scene_->cameraMotionXforms.begin(), scene_->cameraMotionXforms.end(), interactiveCam);
+            builtScene->camera.cameraToWorld = interactiveCam;
+            if (!builtScene->cameraMotionXforms.empty())
+                std::fill(builtScene->cameraMotionXforms.begin(), builtScene->cameraMotionXforms.end(),
+                          interactiveCam);
         } else {
             // Keep look-through / authored camera motion keys; center on the live view.
-            scene_->camera.cameraToWorld = interactiveCam;
+            builtScene->camera.cameraToWorld = interactiveCam;
         }
         // Motion keys force a full rebuild; deformation buffers need HIGH quality.
-        scene_->fastRebuild = false;
+        builtScene->fastRebuild = false;
     }
 
+    // Publish only after motion keys are fully installed.
+    scene_ = builtScene;
     renderView_->setResolution(scene_->settings.resolutionX, scene_->settings.resolutionY);
 
     session_.setScene(scene_);
