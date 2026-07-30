@@ -941,9 +941,9 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
             out.push_back({"displacement", "float", "0", {}});
         out.push_back({"scale", "float", "1", {}});
         out.push_back({"bounds_padding", "float", "0", {}});
-        out.push_back({"subdiv_iterations", "integer", "2", {}});
+        out.push_back({"subdiv_iterations", "integer", "3", {}});
         out.push_back({"autobump", "boolean", "true", {}});
-        out.push_back({"zero_value", "float", "0", {}});
+        out.push_back({"zero_value", "float", "0.5", {}});
         if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
             const QString signature = type.isEmpty() ? entry->type : type;
             QHash<QString, MaterialXNodeInputDef> byName;
@@ -993,9 +993,9 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
             inputs.push_back({"displacement", "float", "0", {}});
         inputs.push_back({"scale", "float", "1", {}});
         inputs.push_back({"bounds_padding", "float", "0", {}});
-        inputs.push_back({"subdiv_iterations", "integer", "2", {}});
+        inputs.push_back({"subdiv_iterations", "integer", "3", {}});
         inputs.push_back({"autobump", "boolean", "true", {}});
-        inputs.push_back({"zero_value", "float", "0", {}});
+        inputs.push_back({"zero_value", "float", "0.5", {}});
     } else if (category == "surfacematerial") {
         inputs.push_back({"surfaceshader", "surfaceshader", {}, {}});
         inputs.push_back({"displacementshader", "displacementshader", {}, {}});

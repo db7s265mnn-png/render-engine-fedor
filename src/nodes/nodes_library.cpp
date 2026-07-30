@@ -267,7 +267,7 @@ public:
         switch (shape_) {
             case Shape::Sphere:
                 addParameter(Parameter::makeFloat("radius", "Radius", 1.0, 0.001, 100.0, false));
-                addParameter(Parameter::makeInt("segments", "Segments", 64, 4, 512));
+                addParameter(Parameter::makeInt("segments", "Segments", 96, 4, 512));
                 break;
             case Shape::Grid:
                 addParameter(Parameter::makeFloat("sizex", "Size X", 10.0, 0.001, 1000.0, false));

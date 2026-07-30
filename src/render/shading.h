@@ -328,7 +328,7 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         float h = base.displacementHeight;
         if (base.displacementProc >= 0) {
             const Vec4 c = evalProceduralRoot(scene, base.displacementProc, hctx);
-            h = 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+            h = c.x;  // mono height in R (see displace.cpp)
         } else if (base.displacementTex >= 0 && base.displacementTex < scene.textureCount && scene.textures) {
             const TextureView& tex = scene.textures[base.displacementTex];
             const Vec4 c = sampleTextureRGBALod(tex, sampleUv, textureLodFromFilterWidth(tex, uvFilterWidth));

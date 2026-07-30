@@ -14,7 +14,8 @@
 namespace sol {
 namespace {
 
-constexpr int kMaxSubdivIterations = 5;
+constexpr int kMaxSubdivIterations = 7;
+constexpr size_t kMaxDisplaceTriangles = 8000000;
 
 struct EdgeKey {
     uint32_t a = 0;
@@ -30,6 +31,36 @@ struct EdgeKeyHash {
 
 EdgeKey makeEdge(uint32_t i0, uint32_t i1) {
     return i0 < i1 ? EdgeKey{i0, i1} : EdgeKey{i1, i0};
+}
+
+// Interpolate UVs without averaging across the 0/1 wrap (sphere / cylinder seams).
+Vec2 midUvSeamSafe(Vec2 a, Vec2 b) {
+    float u0 = a.x, u1 = b.x;
+    float v0 = a.y, v1 = b.y;
+    if (u1 - u0 > 0.5f) u0 += 1.0f;
+    else if (u0 - u1 > 0.5f) u1 += 1.0f;
+    if (v1 - v0 > 0.5f) v0 += 1.0f;
+    else if (v0 - v1 > 0.5f) v1 += 1.0f;
+    float u = 0.5f * (u0 + u1);
+    float v = 0.5f * (v0 + v1);
+    u -= std::floor(u);
+    v -= std::floor(v);
+    return Vec2(u, v);
+}
+
+float meshMaxEdgeLength(const Mesh& mesh) {
+    float maxLen = 0.0f;
+    const size_t n = mesh.positions.size();
+    for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+        const uint32_t i0 = mesh.indices[t + 0];
+        const uint32_t i1 = mesh.indices[t + 1];
+        const uint32_t i2 = mesh.indices[t + 2];
+        if (i0 >= n || i1 >= n || i2 >= n) continue;
+        maxLen = std::max(maxLen, length(mesh.positions[i1] - mesh.positions[i0]));
+        maxLen = std::max(maxLen, length(mesh.positions[i2] - mesh.positions[i1]));
+        maxLen = std::max(maxLen, length(mesh.positions[i0] - mesh.positions[i2]));
+    }
+    return maxLen;
 }
 
 void subdivideOnce(Mesh& mesh) {
@@ -59,7 +90,7 @@ void subdivideOnce(Mesh& mesh) {
             const float len = length(n);
             mesh.normals.push_back(len > 1e-8f ? n / len : mesh.normals[i0]);
         }
-        if (hasUvs) mesh.uvs.push_back((mesh.uvs[i0] + mesh.uvs[i1]) * 0.5f);
+        if (hasUvs) mesh.uvs.push_back(midUvSeamSafe(mesh.uvs[i0], mesh.uvs[i1]));
         for (std::vector<Vec3>& keyPositions : mesh.motionPositions)
             keyPositions.push_back((keyPositions[i0] + keyPositions[i1]) * 0.5f);
         midpoint.emplace(key, mid);
@@ -125,7 +156,10 @@ Vec3 sampleDisplacementVector(const SceneView& scene, const Material& mat, Vec2 
         if (mat.displacementVector)
             amount = Vec3(c.x, c.y, c.z);
         else
-            amount = Vec3(0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z);
+            // Arnold/MaterialX mono height lives in R. Do NOT use luminance — many
+            // EXR displacement maps store height only in R (G=B=0); luminance
+            // would shrink relief by ~0.21x and look almost flat with banding.
+            amount = Vec3(c.x);
     } else if (mat.displacementTex >= 0 && mat.displacementTex < scene.textureCount && scene.textures) {
         const TextureView& tex = scene.textures[mat.displacementTex];
         const Vec4 c = sampleTextureRGBA(tex, uv);
@@ -141,6 +175,37 @@ Vec3 sampleDisplacementVector(const SceneView& scene, const Material& mat, Vec2 
     return amount * mat.displacementScale;
 }
 
+float sampleHeightScalar(const SceneView& scene, const Material& mat, Vec2 uv, Vec3 p, Vec3 n) {
+    const float scale = std::fabs(mat.displacementScale) > 1e-12f ? mat.displacementScale : 1.0f;
+    return sampleDisplacementVector(scene, mat, uv, p, n).x / scale;
+}
+
+// Largest |Δheight| across mesh edges — drives extra subdiv for 8K maps / strata.
+float meshMaxEdgeHeightDelta(const Mesh& mesh, const Material& mat, const SceneView& scene) {
+    if (mesh.uvs.size() != mesh.positions.size()) return 0.0f;
+    float maxDh = 0.0f;
+    const size_t n = mesh.positions.size();
+    const bool hasN = mesh.normals.size() == n;
+    // Sparse sample: every Nth triangle keeps this O(tris) but cheaper for huge meshes.
+    const size_t stride = mesh.indices.size() > 300000 ? 9 : 3;
+    for (size_t t = 0; t + 2 < mesh.indices.size(); t += stride) {
+        const uint32_t idx[3] = {mesh.indices[t + 0], mesh.indices[t + 1], mesh.indices[t + 2]};
+        float h[3];
+        for (int k = 0; k < 3; ++k) {
+            if (idx[k] >= n) {
+                h[k] = 0.0f;
+                continue;
+            }
+            const Vec3 nrm = hasN ? mesh.normals[idx[k]] : Vec3(0.0f, 1.0f, 0.0f);
+            h[k] = sampleHeightScalar(scene, mat, mesh.uvs[idx[k]], mesh.positions[idx[k]], nrm);
+        }
+        maxDh = std::max(maxDh, std::fabs(h[0] - h[1]));
+        maxDh = std::max(maxDh, std::fabs(h[1] - h[2]));
+        maxDh = std::max(maxDh, std::fabs(h[2] - h[0]));
+    }
+    return maxDh;
+}
+
 void displaceVertices(Mesh& mesh, const Material& mat, const SceneView& scene) {
     if (mesh.positions.empty()) return;
     if (mesh.normals.size() != mesh.positions.size()) {
@@ -154,15 +219,46 @@ void displaceVertices(Mesh& mesh, const Material& mat, const SceneView& scene) {
     // cross-product -Y), which makes the whole surface shade nearly black.
     const std::vector<Vec3> orientRef = mesh.normals;
 
+    // Weld by position so sphere poles / UV seams share one offset. Otherwise
+    // different UVs on coincident verts explode into floating shards.
+    struct PositionHash {
+        size_t operator()(const Vec3& p) const {
+            auto q = [](float v) { return int64_t(std::llround(double(v) * 100000.0)); };
+            const size_t h1 = std::hash<int64_t>()(q(p.x));
+            const size_t h2 = std::hash<int64_t>()(q(p.y));
+            const size_t h3 = std::hash<int64_t>()(q(p.z));
+            return h1 ^ (h2 * 0x9e3779b97f4a7c15ULL) ^ (h3 * 0xc2b2ae3d27d4eb4fULL);
+        }
+    };
+    struct PositionEqual {
+        bool operator()(const Vec3& a, const Vec3& b) const {
+            auto q = [](float v) { return int64_t(std::llround(double(v) * 100000.0)); };
+            return q(a.x) == q(b.x) && q(a.y) == q(b.y) && q(a.z) == q(b.z);
+        }
+    };
+    std::unordered_map<Vec3, std::vector<uint32_t>, PositionHash, PositionEqual> groups;
+    groups.reserve(n);
+    for (size_t i = 0; i < n; ++i) groups[mesh.positions[i]].push_back(uint32_t(i));
+
     std::vector<Vec3> offsets(n, Vec3(0.0f));
-    for (size_t i = 0; i < n; ++i) {
-        const Vec2 uv = hasUvs ? mesh.uvs[i] : Vec2(0.0f, 0.0f);
-        const Vec3 nrm = mesh.normals[i];
-        const Vec3 sample = sampleDisplacementVector(scene, mat, uv, mesh.positions[i], nrm);
-        if (mat.displacementVector)
-            offsets[i] = sample;
-        else
-            offsets[i] = nrm * sample.x;
+    for (const auto& entry : groups) {
+        const std::vector<uint32_t>& ids = entry.second;
+        Vec3 avgN(0.0f);
+        Vec2 avgUv(0.0f);
+        Vec3 avgP(0.0f);
+        for (uint32_t id : ids) {
+            avgN = avgN + mesh.normals[id];
+            avgP = avgP + mesh.positions[id];
+            if (hasUvs) avgUv = avgUv + mesh.uvs[id];
+        }
+        const float inv = 1.0f / float(ids.size());
+        avgP = avgP * inv;
+        avgUv = avgUv * inv;
+        const float nlen = length(avgN);
+        avgN = nlen > 1e-8f ? avgN / nlen : Vec3(0.0f, 1.0f, 0.0f);
+        const Vec3 sample = sampleDisplacementVector(scene, mat, avgUv, avgP, avgN);
+        const Vec3 off = mat.displacementVector ? sample : avgN * sample.x;
+        for (uint32_t id : ids) offsets[id] = off;
     }
 
     for (size_t i = 0; i < n; ++i) mesh.positions[i] += offsets[i];
@@ -189,12 +285,17 @@ MeshPtr applyArnoldDisplacement(const Mesh& src, const Material& mat, const Scen
     out->name = src.name.empty() ? "displaced" : src.name + "_disp";
     out->motionPositionsPacked_.clear();
 
-    int iterations = mat.subdivIterations;
-    if (iterations < 0) iterations = 0;
-    if (iterations > kMaxSubdivIterations) {
-        logWarning("displacement: clamping subdiv_iterations " + std::to_string(iterations) + " → " +
-                   std::to_string(kMaxSubdivIterations));
-        iterations = kMaxSubdivIterations;
+    int requested = mat.subdivIterations;
+    if (requested < 0) requested = 0;
+    // Arnold-style: iterations are a hard cap. Values like 30 are not useful as
+    // uniform mid-edge depth (4^n tris) — clamp the loop, drive density by edge
+    // length from the requested quality, and stop at a triangle budget.
+    int maxIter = requested;
+    if (maxIter > kMaxSubdivIterations) {
+        logWarning("displacement: subdiv_iterations " + std::to_string(requested) +
+                   " capped at " + std::to_string(kMaxSubdivIterations) +
+                   " (edge-length target still uses requested quality)");
+        maxIter = kMaxSubdivIterations;
     }
 
     // Ensure cage normals before subdiv so midpoints interpolate something sensible.
@@ -203,10 +304,47 @@ MeshPtr applyArnoldDisplacement(const Mesh& src, const Material& mat, const Scen
         out->computeNormalsIfMissing();
     }
 
-    for (int i = 0; i < iterations; ++i) subdivideOnce(*out);
+    out->computeBounds();
+    const Vec3 ext = out->bounds.extent();
+    const float size = std::max(ext.x, std::max(ext.y, ext.z));
+    // Higher requested iterations → shorter target edges (more detail before displace).
+    const int qualityPow = std::min(std::max(requested, 0), 10);
+    const float targetEdge =
+        (size > 1e-8f) ? (size / float(8 * (1 << qualityPow))) : 0.0f;
 
+    // Need the height map available while deciding how far to refine.
     std::vector<TextureView> textureViews;
     const SceneView view = makeDisplaceSceneView(scene, textureViews);
+    if (mat.displacementTex >= 0 &&
+        (mat.displacementTex >= view.textureCount || !view.textures ||
+         !view.textures[mat.displacementTex].valid())) {
+        logWarning("displacement: texture index " + std::to_string(mat.displacementTex) +
+                   " is missing/empty — vertices will not pick up the height map");
+    }
+
+    // Keep subdividing while edges still span large height jumps (8K strata) or
+    // remain longer than the quality target — stops terrace banding.
+    const float heightEps = 1.0f / 192.0f;
+    int done = 0;
+    for (; done < maxIter; ++done) {
+        if (out->triangleCount() * 4 > kMaxDisplaceTriangles) {
+            logWarning("displacement: stopping subdiv at " + std::to_string(done) +
+                       " levels (triangle budget " + std::to_string(kMaxDisplaceTriangles) + ")");
+            break;
+        }
+        if (done >= 2) {
+            const float maxEdge = meshMaxEdgeLength(*out);
+            const float maxDh = meshMaxEdgeHeightDelta(*out, mat, view);
+            if (maxEdge <= targetEdge && maxDh < heightEps) break;
+        }
+        subdivideOnce(*out);
+    }
+    if (requested > 0) {
+        logInfo("displacement: subdivided " + std::to_string(done) + " levels → " +
+                std::to_string(out->triangleCount()) + " tris (requested=" +
+                std::to_string(requested) + ", targetEdge=" + std::to_string(targetEdge) + ")");
+    }
+
     displaceVertices(*out, mat, view);
 
     out->computeBounds();

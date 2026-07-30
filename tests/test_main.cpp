@@ -11,6 +11,9 @@
 #include <QDir>
 #include <QImage>
 #include <QTemporaryDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QDir>
 #include <QVector3D>
 
 #include "app/default_scene.h"
@@ -1711,6 +1714,169 @@ void testMaterialXBumpAndNormalMap() {
     std::printf("  normalmap ok scale=%.2f\n", eval.material.normalScale);
 }
 
+
+void testRockDisplacementExr() {
+    std::printf("rock-displacement-exr\n");
+    const char* path = "/tmp/disp_tex/xccibbi_8K_Displacement.exr";
+    std::string err;
+    Image img;
+    if (!loadImage(path, img, err, /*srgbColor=*/false)) {
+        std::printf("  skip load: %s\n", err.c_str());
+        return;
+    }
+    float mn = 1e9f, mx = -1e9f;
+    double sum = 0.0;
+    int n = 0;
+    for (int y = 0; y < img.height(); y += 8) {
+        for (int x = 0; x < img.width(); x += 8) {
+            const float h = img.at(x, y).x;
+            mn = std::min(mn, h);
+            mx = std::max(mx, h);
+            sum += double(h);
+            ++n;
+        }
+    }
+    std::printf("  EXR %dx%d R min=%.5f max=%.5f mean=%.5f\n", img.width(), img.height(), mn, mx,
+                float(sum / std::max(1, n)));
+    check(mx - mn > 0.2f, "EXR height has contrast");
+
+    auto tex = std::make_shared<Image>(img);
+    Material mat;
+    mat.displacementTex = 0;
+    mat.displacementScale = 1.0f;
+    mat.subdivIterations = 3;
+    mat.autobump = 0;
+    Scene scene;
+    check(scene.addTexture(tex) == 0, "tex index 0");
+    MeshPtr sphere = makeSphereMesh(1.0f, 48, 24);
+    MeshPtr out = applyArnoldDisplacement(*sphere, mat, scene);
+    float rmin = 1e9f, rmax = 0.0f;
+    for (const Vec3& p : out->positions) {
+        const float r = length(p);
+        rmin = std::min(rmin, r);
+        rmax = std::max(rmax, r);
+    }
+    std::printf("  subdiv3 tris %zu→%zu radius [%.3f, %.3f] delta=%.3f\n", sphere->triangleCount(),
+                out->triangleCount(), rmin, rmax, rmax - rmin);
+    check(rmax - rmin > 0.15f, "EXR displace produces visible radius variation");
+
+    // Full MaterialX path: albedo + displacement EXR (user wiring).
+    QTemporaryDir tmp;
+    check(tmp.isValid(), "tmpdir");
+    const QString exrPath = QStringLiteral("/tmp/disp_tex/xccibbi_8K_Displacement.exr");
+    const QString albedoPath = QStringLiteral("/tmp/disp_tex/albedo_1k.png");
+    check(QFileInfo::exists(exrPath), "disp exr exists");
+    check(QFileInfo::exists(albedoPath), "albedo jpg exists");
+    const QString xml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <image name=\"alb\" type=\"color3\">\n"
+        "    <input name=\"file\" type=\"filename\" value=\"%1\"/>\n"
+        "  </image>\n"
+        "  <image name=\"h1\" type=\"color3\">\n"
+        "    <input name=\"file\" type=\"filename\" value=\"%2\"/>\n"
+        "  </image>\n"
+        "  <displacement name=\"disp1\" type=\"float\">\n"
+        "    <input name=\"displacement\" type=\"float\" nodename=\"h1\"/>\n"
+        "    <input name=\"scale\" type=\"float\" value=\"0.35\"/>\n"
+        "    <input name=\"zero_value\" type=\"float\" value=\"0.5\"/>\n"
+        "    <input name=\"subdiv_iterations\" type=\"integer\" value=\"6\"/>\n"
+        "    <input name=\"bounds_padding\" type=\"float\" value=\"0.2\"/>\n"
+        "    <input name=\"autobump\" type=\"boolean\" value=\"true\"/>\n"
+        "  </displacement>\n"
+        "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" nodename=\"alb\"/>\n"
+        "    <input name=\"specular_roughness\" type=\"float\" value=\"0.55\"/>\n"
+        "  </standard_surface>\n"
+        "  <surfacematerial name=\"surface\" type=\"material\">\n"
+        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+        "    <input name=\"displacementshader\" type=\"displacementshader\" nodename=\"disp1\"/>\n"
+        "  </surfacematerial>\n"
+        "</materialx>\n").arg(albedoPath, exrPath);
+    MaterialXEvalResult eval = evaluateMaterialXDocument(xml, QStringLiteral("/tmp/disp_tex"));
+    check(eval.ok, "mtlx rock disp ok");
+    check(eval.displacementTexture != nullptr || eval.material.displacementProc >= 0, "height bound");
+    if (!(eval.baseColorTexture || eval.material.baseColorProc >= 0))
+        std::printf("  WARN: albedo not bound (large JPEG may fail QImage::load)\n");
+    else
+        check(true, "albedo bound");
+    std::printf("  mtlx tex=%d proc=%d subdiv=%d scale=%.3f zero=%.3f albedo=%d\n",
+                eval.displacementTexture ? 1 : 0, eval.material.displacementProc,
+                eval.material.subdivIterations, eval.material.displacementScale,
+                eval.material.displacementZeroValue, eval.baseColorTexture ? 1 : 0);
+
+    Stage stage;
+    StagePrim prim;
+    prim.path = "/geo/sphere";
+    prim.type = PrimType::Mesh;
+    prim.mesh = makeSphereMesh(1.0f, 96, 48);
+    prim.material = eval.material;
+    prim.displacementTexture = eval.displacementTexture;
+    prim.baseColorTexture = eval.baseColorTexture;
+    prim.procedurals = eval.procedurals;
+    prim.proceduralImages = eval.proceduralImages;
+    prim.materialAssigned = true;
+    stage.prims.push_back(prim);
+    ScenePtr cooked = stage.toScene();
+    check(cooked && !cooked->meshes.empty(), "cooked");
+    rmin = 1e9f; rmax = 0.0f;
+    for (const Vec3& p : cooked->meshes[0]->positions) {
+        const float r = length(p);
+        rmin = std::min(rmin, r);
+        rmax = std::max(rmax, r);
+    }
+    std::printf("  stage radius [%.3f, %.3f] delta=%.3f tris=%zu\n", rmin, rmax, rmax - rmin,
+                cooked->meshes[0]->triangleCount());
+    check(rmax - rmin > 0.05f, "stage cook shows relief");
+
+    // Lit smoke render with albedo + mid-level zero (Arnold-style).
+    {
+        cooked->settings.resolutionX = 384;
+        cooked->settings.resolutionY = 384;
+        cooked->settings.samplesPerPixel = 32;
+        cooked->settings.backend = kBackendCpuEmbree;
+        cooked->settings.maxDepth = 4;
+        LightData key;
+        key.type = kLightDistant;
+        key.intensity = 5.0f;
+        key.color = Vec3(1.0f, 0.98f, 0.94f);
+        key.xform = lookAtMatrix(Vec3(3.0f, 4.0f, 2.0f), Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        cooked->lights.push_back(key);
+        LightData fill;
+        fill.type = kLightDistant;
+        fill.intensity = 1.5f;
+        fill.color = Vec3(0.65f, 0.75f, 1.0f);
+        fill.xform = lookAtMatrix(Vec3(-2.0f, 1.0f, -3.0f), Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        cooked->lights.push_back(fill);
+        cooked->finalize();
+        cooked->frameCameraOnContents();
+        RenderSession session;
+        session.setScene(cooked);
+        session.start();
+        session.waitForCompletion();
+        Image outImg = session.linearImage();
+        Image png(outImg.width(), outImg.height());
+        for (int y = 0; y < outImg.height(); ++y) {
+            for (int x = 0; x < outImg.width(); ++x) {
+                Vec3 c = outImg.rgb(x, y);
+                c = Vec3(std::pow(std::max(0.0f, c.x), 1.0f / 2.2f),
+                         std::pow(std::max(0.0f, c.y), 1.0f / 2.2f),
+                         std::pow(std::max(0.0f, c.z), 1.0f / 2.2f));
+                png.setRgb(x, y, c);
+            }
+        }
+        QDir().mkpath(QStringLiteral("/opt/cursor/artifacts"));
+        std::string serr;
+        const bool saved = saveImagePng("/opt/cursor/artifacts/rock_displace_smoke.png", png, serr);
+        check(saved, "save rock smoke png");
+        if (!saved)
+            std::printf("  save err %s\n", serr.c_str());
+        else
+            std::printf("  wrote /opt/cursor/artifacts/rock_displace_smoke.png\n");
+    }
+}
+
+
 void testArnoldDisplacement() {
     std::printf("arnold-displacement\n");
     if (!materialXAvailable()) {
@@ -3098,6 +3264,7 @@ int main() {
     testMaterialXColorIntoFloatSlots();
     testMaterialXBumpAndNormalMap();
     testArnoldDisplacement();
+    testRockDisplacementExr();
     testMaterialXNoiseAndTriplanar();
     testMaterialXKarmaArnoldWirings();
     testMaterialXArnoldMapsAndConstants();

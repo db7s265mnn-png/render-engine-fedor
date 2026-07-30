@@ -591,16 +591,16 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
         {{"displacement", "float", "0"},
          {"scale", "float", "1"},
          {"bounds_padding", "float", "0"},
-         {"subdiv_iterations", "integer", "2"},
+         {"subdiv_iterations", "integer", "3"},
          {"autobump", "boolean", "true"},
-         {"zero_value", "float", "0"}});
+         {"zero_value", "float", "0.5"}});
     add("displacement", "vector3", "PBR / Shading",
         {{"displacement", "vector3", "0, 0, 0"},
          {"scale", "float", "1"},
          {"bounds_padding", "float", "0"},
-         {"subdiv_iterations", "integer", "2"},
+         {"subdiv_iterations", "integer", "3"},
          {"autobump", "boolean", "true"},
-         {"zero_value", "float", "0"}});
+         {"zero_value", "float", "0.5"}});
     add("texcoord", "vector2", "Geometric", {{"index", "integer", "0"}});
     add("place2d", "vector2", "Geometric",
         {{"texcoord", "vector2", {}},
@@ -1088,14 +1088,14 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         if (dispNode && dispNode->getCategory() == "displacement") {
             result.material.displacementScale = readNodeFloat(dispNode, "scale", 1.0f);
             result.material.displacementBoundsPadding = readNodeFloat(dispNode, "bounds_padding", 0.0f);
-            result.material.displacementZeroValue = readNodeFloat(dispNode, "zero_value", 0.0f);
+            result.material.displacementZeroValue = readNodeFloat(dispNode, "zero_value", 0.5f);
             float subdivF = 2.0f;
             if (parseFloat(inputValueString(dispNode, "subdiv_iterations"), subdivF))
                 result.material.subdivIterations = int(std::lround(subdivF));
             else
-                result.material.subdivIterations = 2;
+                result.material.subdivIterations = 3;
             if (result.material.subdivIterations < 0) result.material.subdivIterations = 0;
-            if (result.material.subdivIterations > 5) result.material.subdivIterations = 5;
+            if (result.material.subdivIterations > 30) result.material.subdivIterations = 30;
 
             result.material.autobump = 1;
             {
