@@ -36,6 +36,20 @@ protected:
             event->accept();
             return;
         }
+        if (event->key() == Qt::Key_F) {
+            if (auto* panel = qobject_cast<SceneGraphPanel*>(parentWidget())) {
+                panel->requestFrameSelected();
+                event->accept();
+                return;
+            }
+        }
+        if (event->key() == Qt::Key_H || event->key() == Qt::Key_Home) {
+            if (auto* panel = qobject_cast<SceneGraphPanel*>(parentWidget())) {
+                panel->requestFrameAll();
+                event->accept();
+                return;
+            }
+        }
         QTreeWidget::keyPressEvent(event);
     }
 

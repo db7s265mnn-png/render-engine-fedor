@@ -76,6 +76,11 @@ public:
     std::vector<Mat4> motionXforms;
     std::vector<Mat4> cameraMotionXforms;
 
+    // Shutter-center instance transforms for viewport interaction (pick / frame /
+    // tumble pivot). Empty when motion blur is off — then use InstanceData::xform.
+    // Beauty Embree still consumes motionXforms; this buffer ignores shutter keys.
+    std::vector<Mat4> pickXforms;
+
     int addMesh(MeshPtr mesh);
     int addMaterial(const Material& material);
     int addEnvMap(std::shared_ptr<EnvironmentMap> env);

@@ -9,7 +9,10 @@
 namespace sol {
 
 struct AlembicLoadOptions {
-    double time = 0.0;            // seconds; snapped to the nearest sample
+    // Seconds. Animated properties are linearly interpolated between the floor/ceil
+    // samples (Arnold/Houdini-style). Nearest-sample snapping is intentionally avoided
+    // so sub-frame shutter times produce real motion for motion blur.
+    double time = 0.0;
     bool useSubdivision = false;  // ISubD is loaded as its polygon cage
     bool importNormals = true;
     bool importUvs = true;

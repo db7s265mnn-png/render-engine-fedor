@@ -23,11 +23,15 @@ public:
     QString selectedSourceNode() const;
     // Highlight a prim authored by sourceNode (or clear when empty). Does not emit itemSelected.
     void selectBySourceNode(const QString& sourceNode);
+    void requestFrameSelected() { emit frameSelectedRequested(); }
+    void requestFrameAll() { emit frameAllRequested(); }
 
 signals:
     // Fired when the user picks a prim or material container.
     // sourceNode is the authoring LOP node name when available.
     void itemSelected(const QString& path, const QString& sourceNode);
+    void frameSelectedRequested();
+    void frameAllRequested();
 
 private:
     void emitCurrentSelection();

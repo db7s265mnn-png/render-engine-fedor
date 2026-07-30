@@ -810,8 +810,9 @@ public:
                                       "shutter. 2 = open+close; higher = smoother blur."));
         addParameter(Parameter::makeFloat("shutterlength", "Shutter Length", 0.5, 0.0, 2.0, false)
                          .withGroup("Motion Blur")
-                         .withTooltip("Shutter open duration as a fraction of a frame "
-                                      "(Arnold-style, default 0.5). Centered on the current frame."));
+                         .withTooltip("Shutter open duration in frames (Arnold-style, centered on "
+                                      "the current frame). Default 0.5 ≈ 180° shutter / ~1/48 s at "
+                                      "24 fps (close to 1/50). Open=-Length/2, Close=+Length/2."));
         addParameter(Parameter::makeMenu("tonemap", "Tone Map", {"None", "Reinhard", "ACES"}, 2).withGroup("Film"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -8.0, 8.0).withGroup("Film"));
         addParameter(Parameter::makeFloat("gamma", "Gamma", 2.2, 1.0, 4.0).withGroup("Film"));

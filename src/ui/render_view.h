@@ -178,6 +178,7 @@ private:
     QWidget* chromeBar_ = nullptr;
     QWidget* toolStrip_ = nullptr;
     QToolButton* cameraMenuButton_ = nullptr;
+    QToolButton* homeButton_ = nullptr;
     QToolButton* selectButton_ = nullptr;
     QToolButton* translateButton_ = nullptr;
     QToolButton* rotateButton_ = nullptr;

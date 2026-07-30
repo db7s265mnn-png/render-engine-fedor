@@ -15,6 +15,7 @@ namespace {
 struct PickCache {
     std::mutex mutex;
     const Scene* sceneKey = nullptr;
+    ScenePickMode mode = ScenePickMode::Interactive;
     RTCDevice device = nullptr;
     RTCScene topScene = nullptr;
     std::vector<RTCScene> meshScenes;
@@ -43,14 +44,40 @@ PickCache& pickCache() {
     return cache;
 }
 
-bool ensurePickScene(const ScenePtr& scene) {
+const Mat4& instancePickXform(const Scene& scene, size_t instanceIndex) {
+    if (instanceIndex < scene.pickXforms.size()) return scene.pickXforms[instanceIndex];
+    return scene.instances[instanceIndex].xform;
+}
+
+// Interactive picks use shutter-center geometry: lerp open→close when MB keys exist.
+void fillPickVertices(const Mesh& mesh, float* vertices) {
+    const size_t vertexCount = mesh.positions.size();
+    if (mesh.motionPositions.empty()) {
+        std::memcpy(vertices, mesh.positions.data(), vertexCount * 3 * sizeof(float));
+        return;
+    }
+    const std::vector<Vec3>& last = mesh.motionPositions.back();
+    if (last.size() != vertexCount) {
+        std::memcpy(vertices, mesh.positions.data(), vertexCount * 3 * sizeof(float));
+        return;
+    }
+    for (size_t i = 0; i < vertexCount; ++i) {
+        const Vec3 p = lerp(mesh.positions[i], last[i], 0.5f);
+        vertices[i * 3 + 0] = p.x;
+        vertices[i * 3 + 1] = p.y;
+        vertices[i * 3 + 2] = p.z;
+    }
+}
+
+bool ensurePickScene(const ScenePtr& scene, ScenePickMode mode) {
     PickCache& cache = pickCache();
-    if (cache.sceneKey == scene.get() && cache.topScene) return true;
+    if (cache.sceneKey == scene.get() && cache.topScene && cache.mode == mode) return true;
     cache.clear();
     if (!scene || scene->instances.empty()) return false;
 
     cache.device = rtcNewDevice("verbose=0");
     if (!cache.device) return false;
+    cache.mode = mode;
 
     cache.meshScenes.assign(scene->meshes.size(), nullptr);
     for (size_t i = 0; i < scene->meshes.size(); ++i) {
@@ -69,7 +96,10 @@ bool ensurePickScene(const ScenePtr& scene) {
             rtcReleaseScene(meshScene);
             continue;
         }
-        std::memcpy(vertices, mesh->positions.data(), vertexCount * 3 * sizeof(float));
+        if (mode == ScenePickMode::Interactive)
+            fillPickVertices(*mesh, vertices);
+        else
+            std::memcpy(vertices, mesh->positions.data(), vertexCount * 3 * sizeof(float));
         std::memcpy(indices, mesh->indices.data(), triCount * 3 * sizeof(uint32_t));
         rtcCommitGeometry(geom);
         rtcAttachGeometry(meshScene, geom);
@@ -88,7 +118,9 @@ bool ensurePickScene(const ScenePtr& scene) {
         RTCGeometry instGeom = rtcNewGeometry(cache.device, RTC_GEOMETRY_TYPE_INSTANCE);
         rtcSetGeometryInstancedScene(instGeom, meshScene);
         rtcSetGeometryTimeStepCount(instGeom, 1);
-        rtcSetGeometryTransform(instGeom, 0, RTC_FORMAT_FLOAT3X4_ROW_MAJOR, inst.xform.m);
+        const Mat4& xform =
+            mode == ScenePickMode::Interactive ? instancePickXform(*scene, i) : inst.xform;
+        rtcSetGeometryTransform(instGeom, 0, RTC_FORMAT_FLOAT3X4_ROW_MAJOR, xform.m);
         rtcCommitGeometry(instGeom);
         rtcAttachGeometryByID(cache.topScene, instGeom, static_cast<unsigned int>(i));
         rtcReleaseGeometry(instGeom);
@@ -99,27 +131,31 @@ bool ensurePickScene(const ScenePtr& scene) {
 }
 
 bool generatePickRay(const CameraData& camera, float px, float py, int resolutionX, int resolutionY,
-                     Vec3& origin, Vec3& direction) {
+                     ScenePickMode mode, Vec3& origin, Vec3& direction) {
+    CameraData cam = camera;
+    // Interactive navigation / select / focus always use a pinhole ray so lens
+    // effects and shutter sampling cannot skew the hit.
+    if (mode == ScenePickMode::Interactive) {
+        cam.opticalModel = 0;
+        cam.fStop = 0.0f;
+    }
+
     SceneView view{};
-    view.camera = camera;
+    view.camera = cam;
     view.settings.resolutionX = std::max(1, resolutionX);
     view.settings.resolutionY = std::max(1, resolutionY);
 
-    // Match the beauty camera: polynomial optics when that model is active, otherwise
-    // thin-lens / pinhole. Focus Pick previously always used thin-lens rays, so clicks
-    // missed what the Embree poly-optics image showed.
-    if (camera.opticalModel == 1) {
+    if (mode == ScenePickMode::Beauty && cam.opticalModel == 1) {
         PolynomialOpticsCamera lens;
-        lens.prepare(camera);
+        lens.prepare(cam);
         if (!lens.active) {
             generateCameraRay(view, px, py, 0.5f, 0.5f, origin, direction);
             return true;
         }
         Rng rng(0xC0FFEEu, 0xF0CALu);
         float tau = 1.0f;
-        if (!generatePolynomialOpticsRay(lens, camera, px, py, resolutionX, resolutionY, 0.5f, 0.5f, rng,
+        if (!generatePolynomialOpticsRay(lens, cam, px, py, resolutionX, resolutionY, 0.5f, 0.5f, rng,
                                          origin, direction, -1.0f, &tau)) {
-            // Centre aperture vignetted — fall back to thin lens so the click still works.
             generateCameraRay(view, px, py, 0.5f, 0.5f, origin, direction);
         }
         return true;
@@ -131,18 +167,18 @@ bool generatePickRay(const CameraData& camera, float px, float py, int resolutio
 }  // namespace
 
 bool pickSceneSurface(const ScenePtr& scene, const CameraData& camera, int resolutionX, int resolutionY,
-                      float u, float v, Vec3& hitPoint, int* instanceIndexOut) {
+                      float u, float v, Vec3& hitPoint, int* instanceIndexOut, ScenePickMode mode) {
     if (instanceIndexOut) *instanceIndexOut = -1;
     if (!scene || scene->instances.empty()) return false;
 
     PickCache& cache = pickCache();
     std::lock_guard<std::mutex> lock(cache.mutex);
-    if (!ensurePickScene(scene)) return false;
+    if (!ensurePickScene(scene, mode)) return false;
 
     const float px = u * float(std::max(1, resolutionX));
     const float py = v * float(std::max(1, resolutionY));
     Vec3 origin, direction;
-    generatePickRay(camera, px, py, resolutionX, resolutionY, origin, direction);
+    generatePickRay(camera, px, py, resolutionX, resolutionY, mode, origin, direction);
 
     RTCRayHit rayhit{};
     rayhit.ray.org_x = origin.x;

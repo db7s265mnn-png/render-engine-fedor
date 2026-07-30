@@ -58,11 +58,15 @@ void attachMotionBlurKeys(NodeGraph& graph, const CookContext& centerContext, Sc
     try {
         scene.motionXforms.assign(size_t(instanceCount) * size_t(keys), Mat4::identity());
         scene.cameraMotionXforms.assign(size_t(keys), scene.camera.cameraToWorld);
+        // Snapshot shutter-center xforms before key cooks mutate geometry.
+        scene.pickXforms.resize(size_t(instanceCount));
+        for (int i = 0; i < instanceCount; ++i) scene.pickXforms[size_t(i)] = scene.instances[size_t(i)].xform;
     } catch (const std::bad_alloc&) {
         logError("Motion blur: out of memory allocating transform keys; disabling");
         scene.settings.motionBlur = 0;
         scene.motionXforms.clear();
         scene.cameraMotionXforms.clear();
+        scene.pickXforms.clear();
         return;
     }
 
@@ -127,6 +131,7 @@ void attachMotionBlurKeys(NodeGraph& graph, const CookContext& centerContext, Sc
             scene.settings.motionBlur = 0;
             scene.motionXforms.clear();
             scene.cameraMotionXforms.clear();
+            scene.pickXforms.clear();
             for (MeshPtr& mesh : scene.meshes) {
                 if (mesh) mesh->motionPositions.clear();
             }
@@ -193,26 +198,29 @@ void attachMotionBlurKeys(NodeGraph& graph, const CookContext& centerContext, Sc
             }
         }
         if (!complete) continue;
+        // Keep shutter-center bounds for framing / UI even after key0 becomes open.
+        const Bounds3 centerBounds = mesh->bounds;
         try {
             mesh->positions = std::move(keyPos[0]);
             mesh->motionPositions.clear();
             mesh->motionPositions.reserve(size_t(keys - 1));
             for (int k = 1; k < keys; ++k) mesh->motionPositions.push_back(std::move(keyPos[size_t(k)]));
-            mesh->computeBounds();
+            if (centerBounds.valid())
+                mesh->bounds = centerBounds;
+            else
+                mesh->computeBounds();
         } catch (const std::bad_alloc&) {
             logError("Motion blur: out of memory installing deformation keys");
             mesh->motionPositions.clear();
         }
     }
 
-    if (keys >= 2) {
-        const int mid = keys / 2;
-        for (int i = 0; i < instanceCount; ++i) {
-            scene.instances[size_t(i)].xform = scene.motionXforms[size_t(i) * size_t(keys) + size_t(mid)];
-            scene.instances[size_t(i)].xformInv = inverse(scene.instances[size_t(i)].xform);
-        }
-        if (size_t(mid) < scene.cameraMotionXforms.size())
-            scene.camera.cameraToWorld = scene.cameraMotionXforms[size_t(mid)];
+    // Keep InstanceData::xform at shutter center for picks / gizmos / framing.
+    // Embree beauty still uses motionXforms when motionKeyCount > 1.
+    for (int i = 0; i < instanceCount; ++i) {
+        if (size_t(i) < scene.pickXforms.size())
+            scene.instances[size_t(i)].xform = scene.pickXforms[size_t(i)];
+        scene.instances[size_t(i)].xformInv = inverse(scene.instances[size_t(i)].xform);
     }
 
     logInfo("Motion blur: " + std::to_string(keys) + " keys, shutter length " +

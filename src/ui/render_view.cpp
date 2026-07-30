@@ -260,6 +260,17 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     stripLayout->addWidget(cameraMenuButton_);
     rebuildCameraMenu();
 
+    homeButton_ = new QToolButton(toolStrip_);
+    homeButton_->setText(QStringLiteral("Home"));
+    homeButton_->setToolTip(QStringLiteral("Home — frame all geometry (H)"));
+    homeButton_->setAutoRaise(true);
+    homeButton_->setStyleSheet(
+        "QToolButton { min-width: 44px; font-size: 10px; font-weight: 600; "
+        "background: #3a3e44; border: 1px solid #4a4f57; color: #e8eaed; }"
+        "QToolButton:hover { background: #474c54; }");
+    stripLayout->addWidget(homeButton_);
+    connect(homeButton_, &QToolButton::clicked, this, [this] { frameAll(); });
+
     auto* camSep = new QWidget(toolStrip_);
     camSep->setFixedWidth(1);
     camSep->setStyleSheet("background: rgba(255,255,255,40);");
@@ -998,6 +1009,9 @@ void RenderView::mousePressEvent(QMouseEvent* event) {
         QWidget::mousePressEvent(event);
         return;
     }
+
+    // Keep viewport shortcuts (F / H) working after chrome / dock focus changes.
+    setFocus(Qt::MouseFocusReason);
 
     const bool alt = event->modifiers() & Qt::AltModifier;
     // Orbit / tumble: Alt+LMB (Houdini) or plain RMB.

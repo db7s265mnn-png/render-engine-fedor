@@ -108,6 +108,8 @@ private:
     bool renderRequested_ = false;
     // Empty = free persp; otherwise Scene Network camera node name (look-through).
     QString lookThroughCameraName_;
+    // Source LOP node name for viewport F / framing (survives Select-tool picks).
+    QString selectedSourceNode_;
 };
 
 }  // namespace sol

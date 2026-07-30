@@ -17,6 +17,7 @@
 #include <QMouseEvent>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QShortcut>
 #include <QTimer>
 #include <QToolBar>
 #include <QVector3D>
@@ -140,6 +141,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     setCentralWidget(central);
 
+    // Viewport framing shortcuts work anywhere in the central column (viewport +
+    // timeline), without stealing F/H from Scene/Material Network docks.
+    auto* frameSelectedShortcut = new QShortcut(QKeySequence(Qt::Key_F), central);
+    frameSelectedShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(frameSelectedShortcut, &QShortcut::activated, renderView_, &RenderView::frameSelection);
+    auto* frameAllShortcut = new QShortcut(QKeySequence(Qt::Key_H), central);
+    frameAllShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(frameAllShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
+    auto* homeShortcut = new QShortcut(QKeySequence(Qt::Key_Home), central);
+    homeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(homeShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
+
     createActions();
     createDocks();
     createMenus();
@@ -185,11 +198,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (!scene_ || scene_->instances.empty()) return false;
         CameraData camera = scene_->camera;
         camera.cameraToWorld = renderView_->camera().toMatrix();
-        // Thin-lens Focus Pick uses a pinhole ray. Polynomial Optics keeps its
-        // prescription so the click matches the rendered image.
-        if (camera.opticalModel != 1) camera.fStop = 0.0f;
+        // Interactive pick path: pinhole + shutter-center geometry (see ScenePickMode).
         return pickSceneSurface(scene_, camera, scene_->settings.resolutionX, scene_->settings.resolutionY, u, v,
-                                hit);
+                                hit, nullptr, ScenePickMode::Interactive);
     });
 
     renderView_->setObjectPickCallback([this](float u, float v, QString& sourceNode) -> bool {
@@ -197,11 +208,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         if (!scene_ || scene_->instances.empty()) return false;
         CameraData camera = scene_->camera;
         camera.cameraToWorld = renderView_->camera().toMatrix();
-        camera.fStop = 0.0f;
         Vec3 hit;
         int instanceIndex = -1;
         if (!pickSceneSurface(scene_, camera, scene_->settings.resolutionX, scene_->settings.resolutionY, u, v,
-                              hit, &instanceIndex))
+                              hit, &instanceIndex, ScenePickMode::Interactive))
             return false;
         if (instanceIndex < 0 || instanceIndex >= int(scene_->instances.size())) return false;
         for (const PrimRecord& prim : scene_->prims) {
@@ -219,9 +229,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     });
     renderView_->setSelectionBoundsCallback([this](Bounds3& out) -> bool {
         if (!scene_) return false;
-        Node* target = renderView_->transformTarget();
-        if (!target) return false;
-        const std::string source = target->name().toStdString();
+        QString sourceName = selectedSourceNode_;
+        if (sourceName.isEmpty() && renderView_->transformTarget())
+            sourceName = renderView_->transformTarget()->name();
+        if (sourceName.isEmpty()) return false;
+        const std::string source = sourceName.toStdString();
         Bounds3 bounds;
         bool found = false;
         for (const PrimRecord& prim : scene_->prims) {
@@ -231,16 +243,22 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
             if (inst.meshIndex < 0 || inst.meshIndex >= int(scene_->meshes.size())) continue;
             const MeshPtr& mesh = scene_->meshes[size_t(inst.meshIndex)];
             if (!mesh || !mesh->bounds.valid()) continue;
-            bounds.extend(transformBounds(inst.xform, mesh->bounds));
+            const Mat4& xform = size_t(prim.instanceIndex) < scene_->pickXforms.size()
+                                    ? scene_->pickXforms[size_t(prim.instanceIndex)]
+                                    : inst.xform;
+            bounds.extend(transformBounds(xform, mesh->bounds));
             found = true;
         }
         if (!found) {
-            // Transformable node without cooked geo — frame its translate origin.
-            if (Parameter* t = target->findParameter("translate")) {
-                const Vec3 p = t->toVec3();
-                bounds.extend(p - Vec3(0.25f));
-                bounds.extend(p + Vec3(0.25f));
-                found = true;
+            Node* target = graph_.findNode(sourceName);
+            if (!target) target = renderView_->transformTarget();
+            if (target) {
+                if (Parameter* t = target->findParameter("translate")) {
+                    const Vec3 p = t->toVec3();
+                    bounds.extend(p - Vec3(0.25f));
+                    bounds.extend(p + Vec3(0.25f));
+                    found = true;
+                }
             }
         }
         if (!found) return false;
@@ -448,6 +466,7 @@ void MainWindow::createDocks() {
     materialNetworkView_->setGraph(&graph_);
 
     auto syncTransformTarget = [this](Node* node) {
+        selectedSourceNode_ = node ? node->name() : QString();
         renderView_->setTransformTarget(node && node->findParameter("translate") ? node : nullptr);
     };
 
@@ -461,10 +480,12 @@ void MainWindow::createDocks() {
     connect(renderView_, &RenderView::objectSelected, this,
             [this, selectNodeForEditing](const QString& sourceNode) {
                 if (sourceNode.isEmpty()) {
+                    selectedSourceNode_.clear();
                     selectNodeForEditing(nullptr, false);
                     statusBar()->showMessage("Selection cleared", 1500);
                     return;
                 }
+                selectedSourceNode_ = sourceNode;
                 if (Node* node = graph_.findNode(sourceNode)) {
                     selectNodeForEditing(node, false);
                     statusBar()->showMessage("Selected " + sourceNode, 2000);
@@ -538,8 +559,15 @@ void MainWindow::createDocks() {
             [this, selectNodeForEditing](const QString& path, const QString& sourceNode) {
                 Q_UNUSED(path);
                 if (sourceNode.isEmpty()) return;
+                selectedSourceNode_ = sourceNode;
                 if (Node* node = graph_.findNode(sourceNode)) selectNodeForEditing(node, false);
             });
+    connect(sceneGraphPanel_, &SceneGraphPanel::frameSelectedRequested, this, [this] {
+        renderView_->frameSelection();
+    });
+    connect(sceneGraphPanel_, &SceneGraphPanel::frameAllRequested, this, [this] {
+        renderView_->frameAll();
+    });
     connect(parameterPanel_, &ParameterPanel::parameterEdited, this,
             [this](Node*, const QString&) {
                 if (renderView_->isGizmoDragging()) return;
@@ -596,6 +624,7 @@ void MainWindow::newScene() {
     parameterPanel_->clearSelection();
     materialNetworkView_->goUp();
     renderView_->setTransformTarget(nullptr);
+    selectedSourceNode_.clear();
     cameraOverride_ = false;
     lookThroughCameraName_.clear();
     renderView_->clearImage();
@@ -613,6 +642,7 @@ void MainWindow::newSceneFromAlembic(const QString& alembicPath, const QString& 
     parameterPanel_->clearSelection();
     materialNetworkView_->goUp();
     renderView_->setTransformTarget(nullptr);
+    selectedSourceNode_.clear();
     cameraOverride_ = false;
     lookThroughCameraName_.clear();
     renderView_->clearImage();
@@ -634,6 +664,7 @@ bool MainWindow::openScene(const QString& path) {
     parameterPanel_->clearSelection();
     materialNetworkView_->goUp();
     renderView_->setTransformTarget(nullptr);
+    selectedSourceNode_.clear();
     cameraOverride_ = false;
     lookThroughCameraName_.clear();
     updateWindowTitle();
@@ -1135,7 +1166,8 @@ void MainWindow::onShowShortcuts() {
                              "  LMB on gizmo  transform (IPR restarts on release)\n"
                              "  Focus Pick    camera Lens → click geo to set DOF focus\n"
                              "  Cam menu      look through a camera (nav edits that camera)\n"
-                             "  Alt + LMB     tumble (pivot on geometry under cursor)\n"
+                             "  Home button   frame all (same as H)\n"
+                             "  Alt + LMB     tumble (pivot on raw geometry, ignores MB/lens)\n"
                              "  RMB           tumble / orbit\n"
                              "  MMB           pan\n"
                              "  Alt + RMB     dolly\n"
