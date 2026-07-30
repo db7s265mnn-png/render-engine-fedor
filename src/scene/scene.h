@@ -18,6 +18,11 @@ struct Mesh {
     std::vector<Vec2> uvs;
     std::vector<uint32_t> indices;
     Bounds3 bounds;
+    // Deformation motion blur: positions for keys 1..N-1 (key 0 is `positions`).
+    // Each entry must match `positions.size()` when used.
+    std::vector<std::vector<Vec3>> motionPositions;
+    // Flat packed copy of all keys for MeshView (key0 = positions, then motionPositions...).
+    mutable std::vector<Vec3> motionPositionsPacked_;
 
     size_t triangleCount() const { return indices.size() / 3; }
     void computeBounds();
@@ -67,6 +72,10 @@ public:
     // Timeline scrub / playback: prefer a fast accel rebuild over final quality.
     bool fastRebuild = false;
 
+    // Motion blur storage (filled by attachMotionBlurKeys).
+    std::vector<Mat4> motionXforms;
+    std::vector<Mat4> cameraMotionXforms;
+
     int addMesh(MeshPtr mesh);
     int addMaterial(const Material& material);
     int addEnvMap(std::shared_ptr<EnvironmentMap> env);
@@ -75,6 +84,9 @@ public:
     // Generates renderable proxy geometry for area lights, recomputes bounds
     // and prepares the flat arrays consumed by SceneView.
     void finalize();
+
+    // Rebuild MeshView table after mutating mesh motion buffers.
+    void refreshMeshViews();
 
     SceneView view() const;
     Bounds3 bounds() const { return bounds_; }

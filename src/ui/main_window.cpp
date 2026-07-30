@@ -20,6 +20,7 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QVector3D>
+#include <algorithm>
 
 #include "app/default_scene.h"
 #include "app/document.h"
@@ -28,6 +29,8 @@
 #include "io/image_io.h"
 #include "nodes/node_registry.h"
 #include "nodes/node.h"
+#include "render/motion_blur.h"
+#include "render/render_session.h"
 #include "render/scene_picker.h"
 #include "scene/scene.h"
 #include "solstice_config.h"
@@ -818,6 +821,23 @@ void MainWindow::cookNow() {
         }
         renderView_->camera().setFromMatrix(scene_->camera.cameraToWorld, frameDistance);
     }
+
+    if (scene_ && scene_->settings.motionBlur) {
+        const Mat4 interactiveCam = scene_->camera.cameraToWorld;
+        attachMotionBlurKeys(graph_, context, *scene_);
+        if (cameraOverride_) {
+            // Free camera: geometry MB only.
+            scene_->camera.cameraToWorld = interactiveCam;
+            if (!scene_->cameraMotionXforms.empty())
+                std::fill(scene_->cameraMotionXforms.begin(), scene_->cameraMotionXforms.end(), interactiveCam);
+        } else {
+            // Keep look-through / authored camera motion keys; center on the live view.
+            scene_->camera.cameraToWorld = interactiveCam;
+        }
+        // Motion keys force a full rebuild; deformation buffers need HIGH quality.
+        scene_->fastRebuild = false;
+    }
+
     renderView_->setResolution(scene_->settings.resolutionX, scene_->settings.resolutionY);
 
     session_.setScene(scene_);
@@ -1117,7 +1137,8 @@ void MainWindow::onShowShortcuts() {
                              "  1 scene unit = 1 metre (Houdini MKS)\n"
                              "  angles in degrees, focal length in millimetres\n\n"
                              "Timeline (under viewport)\n"
-                             "  |<<  /  ▶■  /  >>|   start, play/stop, end\n"
+                             "  Start / End boxes    fixed range widgets (editable)\n"
+                             "  |<<  /  ▶■  /  >>|   under scrubber (centered)\n"
                              "  Scrubber playhead    current frame (double-click to type)\n"
                              "  Frame → time         Alembic & USD sample time\n\n"
                              "General\n"

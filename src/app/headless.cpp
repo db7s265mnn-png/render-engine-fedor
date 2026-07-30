@@ -10,6 +10,7 @@
 #include "core/log.h"
 #include "io/image_io.h"
 #include "nodes/node_registry.h"
+#include "render/motion_blur.h"
 #include "render/render_session.h"
 
 namespace sol {
@@ -58,6 +59,8 @@ int runHeadless(const HeadlessOptions& options) {
     if (options.samples > 0) scene->settings.samplesPerPixel = options.samples;
     if (options.backend >= 0) scene->settings.backend = options.backend;
     if (options.threads >= 0) scene->settings.threads = options.threads;
+
+    if (scene->settings.motionBlur) attachMotionBlurKeys(graph, context, *scene);
 
     std::fprintf(stderr, "Rendering %dx%d, %d spp, %zu triangles, %zu lights\n", scene->settings.resolutionX,
                  scene->settings.resolutionY, scene->settings.samplesPerPixel, scene->totalTriangles(),

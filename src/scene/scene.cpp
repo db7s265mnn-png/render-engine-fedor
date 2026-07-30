@@ -93,6 +93,29 @@ MeshView Mesh::view() const {
         v.boundsLo = bounds.lo;
         v.boundsHi = bounds.hi;
     }
+    v.motionKeyCount = 1;
+    v.motionPositions = nullptr;
+    if (!motionPositions.empty() && !positions.empty()) {
+        const size_t keyCount = motionPositions.size() + 1;
+        const size_t vertexCount = positions.size();
+        bool ok = true;
+        for (const auto& key : motionPositions) {
+            if (key.size() != vertexCount) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) {
+            motionPositionsPacked_.resize(keyCount * vertexCount);
+            std::copy(positions.begin(), positions.end(), motionPositionsPacked_.begin());
+            for (size_t k = 0; k < motionPositions.size(); ++k) {
+                std::copy(motionPositions[k].begin(), motionPositions[k].end(),
+                          motionPositionsPacked_.begin() + (k + 1) * vertexCount);
+            }
+            v.motionPositions = motionPositionsPacked_.data();
+            v.motionKeyCount = int(keyCount);
+        }
+    }
     return v;
 }
 
@@ -261,6 +284,12 @@ void Scene::finalize() {
     }
 }
 
+void Scene::refreshMeshViews() {
+    meshViews_.clear();
+    meshViews_.reserve(meshes.size());
+    for (const MeshPtr& mesh : meshes) meshViews_.push_back(mesh ? mesh->view() : MeshView());
+}
+
 SceneView Scene::view() const {
     SceneView v;
     v.meshes = meshViews_.data();
@@ -288,6 +317,9 @@ SceneView Scene::view() const {
     v.camera = camera;
     v.settings = settings;
     v.worldBounds = bounds_;
+    v.motionXforms = motionXforms.empty() ? nullptr : motionXforms.data();
+    v.cameraMotionXforms = cameraMotionXforms.empty() ? nullptr : cameraMotionXforms.data();
+    v.cameraMotionKeyCount = cameraMotionXforms.empty() ? 1 : int(cameraMotionXforms.size());
     return v;
 }
 

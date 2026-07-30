@@ -290,6 +290,7 @@ set(SOLSTICE_LIB_SOURCES
     src/render/framebuffer.cpp
     src/render/render_session.cpp
     src/render/scene_picker.cpp
+    src/render/motion_blur.cpp
     src/render/cpu/embree_device.cpp
     src/render/cpu/polynomial_optics.cpp
     src/render/cpu/path_guiding.cpp

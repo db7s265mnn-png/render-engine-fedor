@@ -800,6 +800,18 @@ public:
                          .withTooltip("Learn incident radiance while rendering and guide BSDF "
                                       "samples (CPU / Embree). Kicks in after the first training "
                                       "passes; helps indirect-heavy scenes."));
+        addParameter(Parameter::makeBool("motionblur", "Enable Motion Blur", false)
+                         .withGroup("Motion Blur")
+                         .withTooltip("Camera and geometry motion blur across the shutter "
+                                      "(CPU / Embree). Uses the timeline frame as shutter center."));
+        addParameter(Parameter::makeInt("motionkeys", "Motion Keys", 2, 2, 8)
+                         .withGroup("Motion Blur")
+                         .withTooltip("Number of transform / deformation samples across the "
+                                      "shutter. 2 = open+close; higher = smoother blur."));
+        addParameter(Parameter::makeFloat("shutterlength", "Shutter Length", 0.5, 0.0, 2.0, false)
+                         .withGroup("Motion Blur")
+                         .withTooltip("Shutter open duration as a fraction of a frame "
+                                      "(Arnold-style, default 0.5). Centered on the current frame."));
         addParameter(Parameter::makeMenu("tonemap", "Tone Map", {"None", "Reinhard", "ACES"}, 2).withGroup("Film"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -8.0, 8.0).withGroup("Film"));
         addParameter(Parameter::makeFloat("gamma", "Gamma", 2.2, 1.0, 4.0).withGroup("Film"));
@@ -829,6 +841,9 @@ public:
         settings.dispersionMaxInterfaces = std::max(1, intValue("dispersionmaxiface", 2));
         settings.photonCount = std::max(1000, intValue("photoncount", 100000));
         settings.photonRadius = float(floatValue("photonradius", 0.08));
+        settings.motionBlur = boolValue("motionblur", false) ? 1 : 0;
+        settings.motionKeys = std::clamp(intValue("motionkeys", 2), 2, 8);
+        settings.shutterLength = float(floatValue("shutterlength", 0.5));
         settings.toneMapper = intValue("tonemap", 2);
         settings.exposure = float(floatValue("exposure", 0.0));
         settings.gamma = float(floatValue("gamma", 2.2));

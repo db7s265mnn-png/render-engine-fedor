@@ -32,6 +32,7 @@ void embreeErrorCallback(void* /*userPtr*/, RTCError code, const char* message) 
 // Adapter that lets the shared integrator trace against an Embree scene.
 struct EmbreeTracer {
     RTCScene scene = nullptr;
+    float time = 0.0f;
 
     bool intersect(Vec3 origin, Vec3 dir, float tMax, RayHit& out) const {
         RTCRayHit rayhit{};
@@ -43,6 +44,7 @@ struct EmbreeTracer {
         rayhit.ray.dir_z = dir.z;
         rayhit.ray.tnear = 0.0f;
         rayhit.ray.tfar = tMax;
+        rayhit.ray.time = time;
         rayhit.ray.mask = unsigned(kVisAll);
         rayhit.ray.flags = 0;
         rayhit.hit.geomID = RTC_INVALID_GEOMETRY_ID;
@@ -53,6 +55,7 @@ struct EmbreeTracer {
         out.primIndex = rayhit.hit.primID;
         out.u = rayhit.hit.u;
         out.v = rayhit.hit.v;
+        out.time = time;
         const unsigned int instID = rayhit.hit.instID[0];
         out.instanceIndex = instID == RTC_INVALID_GEOMETRY_ID ? int(rayhit.hit.geomID) : int(instID);
         return true;
@@ -68,6 +71,7 @@ struct EmbreeTracer {
         ray.dir_z = dir.z;
         ray.tnear = 0.0f;
         ray.tfar = tMax;
+        ray.time = time;
         // Shadow rays skip light proxies that have self-shadows disabled.
         ray.mask = unsigned(kVisShadow);
         rtcOccluded1(scene, &ray, nullptr);
@@ -126,18 +130,41 @@ public:
 
             const size_t vertexCount = mesh->positions.size();
             const size_t triCount = mesh->indices.size() / 3;
-            // Embree owns these buffers so it can apply the required padding.
-            float* vertices = static_cast<float*>(rtcSetNewGeometryBuffer(
-                geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT3, 3 * sizeof(float), vertexCount));
+            int timeSteps = 1;
+            if (!mesh->motionPositions.empty()) {
+                bool ok = true;
+                for (const auto& key : mesh->motionPositions) {
+                    if (key.size() != vertexCount) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) timeSteps = int(mesh->motionPositions.size()) + 1;
+            }
+            rtcSetGeometryTimeStepCount(geom, timeSteps);
+
+            for (int t = 0; t < timeSteps; ++t) {
+                float* vertices = static_cast<float*>(rtcSetNewGeometryBuffer(
+                    geom, RTC_BUFFER_TYPE_VERTEX, unsigned(t), RTC_FORMAT_FLOAT3, 3 * sizeof(float),
+                    vertexCount));
+                if (!vertices) {
+                    error = "failed to allocate Embree geometry buffers";
+                    rtcReleaseGeometry(geom);
+                    rtcReleaseScene(meshScene);
+                    return false;
+                }
+                const Vec3* src = (t == 0) ? mesh->positions.data() : mesh->motionPositions[size_t(t - 1)].data();
+                std::memcpy(vertices, src, vertexCount * 3 * sizeof(float));
+            }
+
             uint32_t* indices = static_cast<uint32_t*>(rtcSetNewGeometryBuffer(
                 geom, RTC_BUFFER_TYPE_INDEX, 0, RTC_FORMAT_UINT3, 3 * sizeof(uint32_t), triCount));
-            if (!vertices || !indices) {
+            if (!indices) {
                 error = "failed to allocate Embree geometry buffers";
                 rtcReleaseGeometry(geom);
                 rtcReleaseScene(meshScene);
                 return false;
             }
-            std::memcpy(vertices, mesh->positions.data(), vertexCount * 3 * sizeof(float));
             std::memcpy(indices, mesh->indices.data(), triCount * 3 * sizeof(uint32_t));
 
             rtcCommitGeometry(geom);
@@ -157,10 +184,22 @@ public:
             if (!meshScene) continue;
             RTCGeometry instGeom = rtcNewGeometry(device_, RTC_GEOMETRY_TYPE_INSTANCE);
             rtcSetGeometryInstancedScene(instGeom, meshScene);
-            rtcSetGeometryTimeStepCount(instGeom, 1);
-            // Our matrices are row major with column vectors, so the first
-            // twelve floats are exactly Embree's 3x4 row major affine layout.
-            rtcSetGeometryTransform(instGeom, 0, RTC_FORMAT_FLOAT3X4_ROW_MAJOR, inst.xform.m);
+
+            const int keyCount = std::max(1, inst.motionKeyCount);
+            const bool hasMotion = keyCount > 1 && !scene_->motionXforms.empty() &&
+                                   inst.motionKeyOffset >= 0 &&
+                                   inst.motionKeyOffset + keyCount <= int(scene_->motionXforms.size());
+            rtcSetGeometryTimeStepCount(instGeom, hasMotion ? keyCount : 1);
+            if (hasMotion) {
+                for (int k = 0; k < keyCount; ++k) {
+                    const Mat4& xform = scene_->motionXforms[size_t(inst.motionKeyOffset + k)];
+                    rtcSetGeometryTransform(instGeom, unsigned(k), RTC_FORMAT_FLOAT3X4_ROW_MAJOR, xform.m);
+                }
+            } else {
+                // Our matrices are row major with column vectors, so the first
+                // twelve floats are exactly Embree's 3x4 row major affine layout.
+                rtcSetGeometryTransform(instGeom, 0, RTC_FORMAT_FLOAT3X4_ROW_MAJOR, inst.xform.m);
+            }
             rtcSetGeometryMask(instGeom, unsigned(inst.visibilityMask));
             rtcCommitGeometry(instGeom);
             // Geometry ids match instance indices so hits map back directly.
@@ -197,7 +236,6 @@ public:
         const int tilesY = (height + tileSize - 1) / tileSize;
         const int tileCount = tilesX * tilesY;
 
-        EmbreeTracer tracer{topScene_};
         SceneView scene = view_;  // local copy: carries the progressive pass index
         scene.settings.progressiveSample = sampleIndex;
         const uint32_t frameSeed = uint32_t(settings.seed) * 9781u + uint32_t(sampleIndex) * 6271u;
@@ -223,7 +261,9 @@ public:
             // Rebuild each progressive pass (independent estimate averaged in the FB).
             const uint32_t photonSeed =
                 hashCombine(uint32_t(settings.seed) * 9176u, uint32_t(sampleIndex) * 2654435761u);
-            photonMap_.build(scene, tracer, srMax(0, settings.photonCount), photonSeed);
+            EmbreeTracer photonTracer{topScene_};
+            photonTracer.time = scene.settings.motionBlur ? 0.5f : 0.0f;
+            photonMap_.build(scene, photonTracer, srMax(0, settings.photonCount), photonSeed);
             photonPtr = photonMap_.empty() ? nullptr : &photonMap_;
         } else {
             photonMap_.clear();
@@ -248,6 +288,7 @@ public:
         const int dispersionMaxIfaces = srMax(1, settings.dispersionMaxInterfaces);
 
         auto shadePixel = [&](int x, int y, int threadId) {
+            EmbreeTracer tracer{topScene_};
             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
             Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
             float jx = 0.5f, jy = 0.5f;
@@ -256,8 +297,8 @@ public:
             blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
 
             // Light-tracing splats assume the pinhole/thin-lens projection —
-            // polynomial optics rays bypass it, so splats are disabled there.
-            const bool allowSplats = !polyOptics_.active;
+            // polynomial optics rays and camera motion blur bypass it.
+            const bool allowSplats = !polyOptics_.active && scene.settings.motionBlur == 0;
             auto splatFbFor = [&](DispersionContext*) -> Framebuffer* {
                 return allowSplats ? &fb : nullptr;
             };
@@ -320,17 +361,20 @@ public:
                 return radiance;
             };
 
-            auto generateRay = [&](Rng& r, int chromaticChannel, Vec3& o, Vec3& d, float& tau) -> bool {
+            auto generateRay = [&](Rng& r, int chromaticChannel, Vec3& o, Vec3& d, float& tau,
+                                   float shutterTime) -> bool {
                 tau = 1.0f;
+                tracer.time = shutterTime;
                 if (polyOptics_.active) {
                     float wavelengthNm = -1.0f;
                     if (chromaticChannel >= 0 && scene.camera.chromaticAberration != 0)
                         wavelengthNm = chromaticWavelengthNm(chromaticChannel);
-                    return generatePolynomialOpticsRay(polyOptics_, scene.camera, float(x) + jx,
-                                                       float(y) + jy, width, height, lensU, lensV, r, o, d,
-                                                       wavelengthNm, &tau);
+                    CameraData cam = scene.camera;
+                    cam.cameraToWorld = cameraToWorldAtTime(scene, shutterTime);
+                    return generatePolynomialOpticsRay(polyOptics_, cam, float(x) + jx, float(y) + jy, width,
+                                                       height, lensU, lensV, r, o, d, wavelengthNm, &tau);
                 }
-                generateCameraRay(scene, float(x) + jx, float(y) + jy, lensU, lensV, o, d);
+                generateCameraRay(scene, float(x) + jx, float(y) + jy, lensU, lensV, o, d, shutterTime);
                 return true;
             };
 
@@ -341,6 +385,11 @@ public:
                 else if (ch == 1) out.y = h;
                 else out.z = h;
                 return out;
+            };
+
+            auto sampleShutter = [&](Rng& r) -> float {
+                if (scene.settings.motionBlur == 0) return 0.0f;
+                return r.nextFloat();
             };
 
             Vec3 radiance(0.0f);
@@ -354,7 +403,8 @@ public:
                     Rng rCh(hashCombine(pixelIndex, frameSeed ^ uint32_t(ch + 1)),
                             hashUint(pixelIndex ^ (frameSeed * 2654435761u) ^ uint32_t(0x9e3779b9u * (ch + 1))));
                     DispersionContext ctx = makeDispCtx(ch);
-                    if (!generateRay(rCh, ch, origin, direction, lensTau)) continue;
+                    const float shutterTime = sampleShutter(rCh);
+                    if (!generateRay(rCh, ch, origin, direction, lensTau, shutterTime)) continue;
                     Vec3 r = traceOnce(rCh, origin, direction, &ctx);
                     r = r * std::max(0.0f, lensTau);
                     if (ctx.used) r = heroMask(r, ch);
@@ -363,7 +413,8 @@ public:
             } else {
                 const int chromaticChannel = pickHeroChannel(rng);
                 DispersionContext ctx = makeDispCtx(chromaticChannel);
-                if (!generateRay(rng, chromaticChannel, origin, direction, lensTau)) {
+                const float shutterTime = sampleShutter(rng);
+                if (!generateRay(rng, chromaticChannel, origin, direction, lensTau, shutterTime)) {
                     fb.addSample(x, y, Vec3(0.0f));
                     return;
                 }

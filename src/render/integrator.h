@@ -24,6 +24,7 @@ struct RayHit {
     uint32_t primIndex = 0;
     float u = 0.0f;
     float v = 0.0f;
+    float time = 0.0f;  // shutter time in [0,1] when motion blur is active
 };
 
 struct SurfaceInteraction {
@@ -134,6 +135,69 @@ SR_INL SR_HD Vec3 channelMask(int ch, float value) {
     return ch == 0 ? Vec3(value, 0.0f, 0.0f) : (ch == 1 ? Vec3(0.0f, value, 0.0f) : Vec3(0.0f, 0.0f, value));
 }
 
+SR_INL SR_HD Mat4 lerpMat4(const Mat4& a, const Mat4& b, float t) {
+    Mat4 r;
+    const float u = 1.0f - t;
+    for (int i = 0; i < 16; ++i) r.m[i] = a.m[i] * u + b.m[i] * t;
+    return r;
+}
+
+SR_INL SR_HD void sampleMotionKeys(int keyCount, float time, int& i0, int& i1, float& frac) {
+    if (keyCount <= 1) {
+        i0 = i1 = 0;
+        frac = 0.0f;
+        return;
+    }
+    const float t = saturatef(time) * float(keyCount - 1);
+    i0 = int(t);
+    if (i0 >= keyCount - 1) {
+        i0 = keyCount - 1;
+        i1 = i0;
+        frac = 0.0f;
+        return;
+    }
+    i1 = i0 + 1;
+    frac = t - float(i0);
+}
+
+SR_INL SR_HD void instanceXformAtTime(const SceneView& scene, const InstanceData& inst, float time, Mat4& xform,
+                                      Mat4& xformInv) {
+    if (inst.motionKeyCount <= 1 || !scene.motionXforms) {
+        xform = inst.xform;
+        xformInv = inst.xformInv;
+        return;
+    }
+    int i0 = 0, i1 = 0;
+    float frac = 0.0f;
+    sampleMotionKeys(inst.motionKeyCount, time, i0, i1, frac);
+    const Mat4& a = scene.motionXforms[inst.motionKeyOffset + i0];
+    const Mat4& b = scene.motionXforms[inst.motionKeyOffset + i1];
+    xform = (i0 == i1) ? a : lerpMat4(a, b, frac);
+    xformInv = inverse(xform);
+}
+
+SR_INL SR_HD Mat4 cameraToWorldAtTime(const SceneView& scene, float time) {
+    if (scene.cameraMotionKeyCount <= 1 || !scene.cameraMotionXforms) return scene.camera.cameraToWorld;
+    int i0 = 0, i1 = 0;
+    float frac = 0.0f;
+    sampleMotionKeys(scene.cameraMotionKeyCount, time, i0, i1, frac);
+    const Mat4& a = scene.cameraMotionXforms[i0];
+    const Mat4& b = scene.cameraMotionXforms[i1];
+    return (i0 == i1) ? a : lerpMat4(a, b, frac);
+}
+
+SR_INL SR_HD Vec3 meshPositionAtTime(const MeshView& mesh, uint32_t vertexIndex, float time) {
+    if (!mesh.positions || vertexIndex >= mesh.vertexCount) return Vec3(0.0f);
+    if (mesh.motionKeyCount <= 1 || !mesh.motionPositions) return mesh.positions[vertexIndex];
+    int i0 = 0, i1 = 0;
+    float frac = 0.0f;
+    sampleMotionKeys(mesh.motionKeyCount, time, i0, i1, frac);
+    const Vec3 a = mesh.motionPositions[uint32_t(i0) * mesh.vertexCount + vertexIndex];
+    if (i0 == i1) return a;
+    const Vec3 b = mesh.motionPositions[uint32_t(i1) * mesh.vertexCount + vertexIndex];
+    return a * (1.0f - frac) + b * frac;
+}
+
 // Reconstruct shading attributes from a hit record.
 SR_INL SR_HD bool buildSurfaceInteraction(const SceneView& scene, const RayHit& hit, Vec3 origin, Vec3 dir,
                                           SurfaceInteraction& si) {
@@ -143,28 +207,31 @@ SR_INL SR_HD bool buildSurfaceInteraction(const SceneView& scene, const RayHit& 
     const MeshView& mesh = scene.meshes[inst.meshIndex];
     if (hit.primIndex >= mesh.triangleCount) return false;
 
+    Mat4 xform, xformInv;
+    instanceXformAtTime(scene, inst, hit.time, xform, xformInv);
+
     const uint32_t i0 = mesh.indices[hit.primIndex * 3 + 0];
     const uint32_t i1 = mesh.indices[hit.primIndex * 3 + 1];
     const uint32_t i2 = mesh.indices[hit.primIndex * 3 + 2];
-    const Vec3 p0 = mesh.positions[i0];
-    const Vec3 p1 = mesh.positions[i1];
-    const Vec3 p2 = mesh.positions[i2];
+    const Vec3 p0 = meshPositionAtTime(mesh, i0, hit.time);
+    const Vec3 p1 = meshPositionAtTime(mesh, i1, hit.time);
+    const Vec3 p2 = meshPositionAtTime(mesh, i2, hit.time);
     const float w = 1.0f - hit.u - hit.v;
 
     const Vec3 pLocal = p0 * w + p1 * hit.u + p2 * hit.v;
     si.pObject = pLocal;
-    si.p = transformPoint(inst.xform, pLocal);
+    si.p = transformPoint(xform, pLocal);
     // The hit distance is authoritative for ray offsets.
     si.p = origin + dir * hit.t;
 
     Vec3 ngLocal = cross(p1 - p0, p2 - p0);
     si.nObject = lengthSquared(ngLocal) > 0.0f ? normalize(ngLocal) : Vec3(0.0f, 0.0f, 1.0f);
-    si.ng = normalize(transformNormalWithInverse(inst.xformInv, ngLocal));
+    si.ng = normalize(transformNormalWithInverse(xformInv, ngLocal));
 
     if (mesh.normals) {
         const Vec3 nLocal = mesh.normals[i0] * w + mesh.normals[i1] * hit.u + mesh.normals[i2] * hit.v;
         si.nObject = lengthSquared(nLocal) > 0.0f ? normalize(nLocal) : si.nObject;
-        Vec3 ns = transformNormalWithInverse(inst.xformInv, nLocal);
+        Vec3 ns = transformNormalWithInverse(xformInv, nLocal);
         si.ns = lengthSquared(ns) > 0.0f ? normalize(ns) : si.ng;
     } else {
         si.ns = si.ng;
@@ -174,8 +241,8 @@ SR_INL SR_HD bool buildSurfaceInteraction(const SceneView& scene, const RayHit& 
         si.uv = Vec2(uv0.x * w + uv1.x * hit.u + uv2.x * hit.v, uv0.y * w + uv1.y * hit.u + uv2.y * hit.v);
 
         // Pixel footprint → UV filter width for .tx / mip LOD.
-        const Vec3 e1w = transformVector(inst.xform, p1 - p0);
-        const Vec3 e2w = transformVector(inst.xform, p2 - p0);
+        const Vec3 e1w = transformVector(xform, p1 - p0);
+        const Vec3 e2w = transformVector(xform, p2 - p0);
         const Vec2 d1 = uv1 - uv0;
         const Vec2 d2 = uv2 - uv0;
         const float lenE1 = length(e1w);
@@ -378,8 +445,9 @@ SR_INL SssWalkResult sampleSssRandomWalk(const SceneView& scene, const Tracer& t
 // Camera
 // ---------------------------------------------------------------------------
 SR_INL SR_HD void generateCameraRay(const SceneView& scene, float pixelX, float pixelY, float lensU, float lensV,
-                                    Vec3& origin, Vec3& direction) {
+                                    Vec3& origin, Vec3& direction, float shutterTime = 0.0f) {
     const CameraData& cam = scene.camera;
+    const Mat4 cameraToWorld = cameraToWorldAtTime(scene, shutterTime);
     const float resX = float(srMax(1, scene.settings.resolutionX));
     const float resY = float(srMax(1, scene.settings.resolutionY));
     const float sensorHeight = cam.sensorWidth * (resY / resX);
@@ -399,8 +467,8 @@ SR_INL SR_HD void generateCameraRay(const SceneView& scene, float pixelX, float 
         dirCam = normalize(focusPoint - originCam);
     }
 
-    origin = transformPoint(cam.cameraToWorld, originCam);
-    direction = normalize(transformVector(cam.cameraToWorld, dirCam));
+    origin = transformPoint(cameraToWorld, originCam);
+    direction = normalize(transformVector(cameraToWorld, dirCam));
 }
 
 // ---------------------------------------------------------------------------

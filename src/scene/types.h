@@ -189,6 +189,10 @@ struct MeshView {
     // Object-space AABB (for SMS seed cones around caustic casters).
     Vec3 boundsLo{0.0f, 0.0f, 0.0f};
     Vec3 boundsHi{0.0f, 0.0f, 0.0f};
+    // Deformation motion blur: packed positions [key * vertexCount + i], key in [0, motionKeyCount).
+    // Key 0 usually aliases `positions`. Null / count 1 = static mesh.
+    const Vec3* motionPositions = nullptr;
+    int motionKeyCount = 1;
 };
 
 // Visibility bits for primary vs shadow rays (Embree mask / OptiX visibilityMask).
@@ -197,7 +201,7 @@ constexpr int kVisPrimary = 0x2;
 constexpr int kVisAll = kVisShadow | kVisPrimary;
 
 struct InstanceData {
-    Mat4 xform;      // object -> world
+    Mat4 xform;      // object -> world (shutter center / key 0)
     Mat4 xformInv;   // world -> object
     int meshIndex = -1;
     int materialIndex = -1;
@@ -206,6 +210,9 @@ struct InstanceData {
     // Embree/OptiX visibility: shadow rays use kVisShadow only so area-light
     // proxies can opt out of casting self-shadows via kVisPrimary alone.
     int visibilityMask = kVisAll;
+    // Transform motion blur: indices into SceneView::motionXforms.
+    int motionKeyOffset = 0;
+    int motionKeyCount = 1;
 };
 
 // ---------------------------------------------------------------------------
@@ -289,8 +296,8 @@ struct CameraData {
     // so longitudinal/lateral chromatic aberration appears as coloured fringing.
     int chromaticAberration = 0;
 
-    float shutterOpen = 0.0f;
-    float shutterClose = 0.0f;
+    float shutterOpen = 0.0f;   // normalized shutter time at open (usually 0)
+    float shutterClose = 0.0f;  // normalized shutter time at close (usually 1 when MB on)
     float nearClip = 0.001f;
     float farClip = 1e7f;
 };
@@ -375,6 +382,11 @@ struct RenderSettingsData {
     int dispersionMode = kDispersionHero;
     // Optimized mode: max dispersing glass interfaces that change IOR (enter+exit = 2).
     int dispersionMaxInterfaces = 2;
+
+    // Arnold-style motion blur (CPU / Embree). Shutter is centered on the frame.
+    int motionBlur = 0;
+    int motionKeys = 2;            // transform / deformation samples across the shutter
+    float shutterLength = 0.5f;    // fraction of a frame (Arnold default 0.5)
 };
 
 // ---------------------------------------------------------------------------
@@ -403,6 +415,11 @@ struct SceneView {
     CameraData camera;
     RenderSettingsData settings;
     Bounds3 worldBounds;
+
+    // Motion blur keys (host pointers; Embree reads them when building / shading).
+    const Mat4* motionXforms = nullptr;        // packed: instance keys via InstanceData offsets
+    const Mat4* cameraMotionXforms = nullptr;  // camera keys across shutter [0,1]
+    int cameraMotionKeyCount = 1;
 };
 
 }  // namespace sol
