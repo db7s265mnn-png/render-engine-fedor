@@ -2494,6 +2494,72 @@ void testTessellationTriangleBudget() {
     std::printf("  cage=%zu → tess=%zu (6 levels, ceiling 200M)\n", cageTris, out->triangleCount());
 }
 
+void testScreenAdaptiveTessellation() {
+    std::printf("screen-adaptive-tessellation\n");
+    // Spatial edge dicing: close camera densifies more than a far one.
+    auto makeUnitTri = [](float dicingQuality) {
+        auto m = std::make_shared<Mesh>();
+        m->positions = {Vec3(0, 0, 0), Vec3(4, 0, 0), Vec3(0, 4, 0)};
+        m->indices = {0, 1, 2};
+        m->computeNormalsIfMissing();
+        m->computeBounds();
+        m->subdivType = kSubdivLinear;
+        m->subdivIterations = 8;
+        m->dicingQuality = dicingQuality;  // target edge px = 1/quality
+        return m;
+    };
+
+    Material mat;
+    mat.displacementHeight = 0.01f;
+    mat.displacementScale = 1.0f;
+    mat.displacementZeroValue = 0.0f;
+
+    // target ≈ 8 px — far camera should stop after a couple of splits.
+    constexpr float kQuality = 0.125f;
+
+    Scene nearScene;
+    nearScene.settings.screenAdaptive = 1;
+    nearScene.settings.frustumCull = 0;
+    nearScene.settings.resolutionX = 640;
+    nearScene.settings.resolutionY = 360;
+    nearScene.camera.focalLength = 50.0f;
+    nearScene.camera.sensorWidth = 36.0f;
+    nearScene.camera.cameraToWorld = lookAtMatrix(Vec3(2, 2, 5), Vec3(1, 1, 0), Vec3(0, 1, 0));
+    nearScene.cameraAuthored = true;
+    MeshPtr nearOut = tessDisplaceForTest(makeUnitTri(kQuality), mat, nearScene, 8);
+    check(nearOut != nullptr, "near adaptive mesh");
+    const size_t nearTris = nearOut->triangleCount();
+
+    Scene farScene;
+    farScene.settings.screenAdaptive = 1;
+    farScene.settings.frustumCull = 0;
+    farScene.settings.resolutionX = 640;
+    farScene.settings.resolutionY = 360;
+    farScene.camera.focalLength = 50.0f;
+    farScene.camera.sensorWidth = 36.0f;
+    farScene.camera.cameraToWorld = lookAtMatrix(Vec3(2, 2, 400), Vec3(1, 1, 0), Vec3(0, 1, 0));
+    farScene.cameraAuthored = true;
+    MeshPtr farOut = tessDisplaceForTest(makeUnitTri(kQuality), mat, farScene, 8);
+    check(farOut != nullptr, "far adaptive mesh");
+    const size_t farTris = farOut->triangleCount();
+
+    Scene uniformScene;
+    uniformScene.settings.screenAdaptive = 0;
+    uniformScene.settings.frustumCull = 0;
+    MeshPtr uniOut = tessDisplaceForTest(makeUnitTri(kQuality), mat, uniformScene, 8);
+    check(uniOut != nullptr, "uniform mesh");
+    const size_t uniTris = uniOut->triangleCount();
+
+    check(nearTris > farTris, "near camera densifies more than far under Screen Adaptive");
+    check(farTris < uniTris, "far adaptive stays coarser than uniform 8");
+    check(nearTris > 1, "near adaptive actually subdivided");
+    const std::string fa = tessellationFingerprint(nearScene);
+    nearScene.settings.screenAdaptive = 0;
+    const std::string fb = tessellationFingerprint(nearScene);
+    check(fa != fb, "fingerprint changes when Screen Adaptive toggles");
+    std::printf("  adaptive near=%zu far=%zu uniform8=%zu\n", nearTris, farTris, uniTris);
+}
+
 void testMaterialXNoiseAndTriplanar() {
     std::printf("materialx-noise-triplanar\n");
     if (!materialXAvailable()) {
@@ -3759,6 +3825,7 @@ int main() {
     testMaterialXBumpAndNormalMap();
     testArnoldDisplacement();
     testTessellationTriangleBudget();
+    testScreenAdaptiveTessellation();
     testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();
     testRockDisplacementExr();

@@ -834,8 +834,11 @@ public:
                          .withTooltip("Screen-space margin as a percent of resolution width/height."));
         addParameter(Parameter::makeBool("screenadaptive", "Screen Adaptive", false)
                          .withGroup("Subdivision")
-                         .withTooltip("Dice by projected edge length (Karma-like dicing quality). "
-                                      "When off, Subdiv Iterations is uniform."));
+                         .withTooltip("Dice by projected edge length (Karma-like): only long "
+                                      "screen-space edges split. Subdiv Iterations is the max "
+                                      "cap. When off, Iterations is a uniform level count. "
+                                      "Uses each mesh's Dicing Quality (1 ≈ 1 micropoly/pixel). "
+                                      "Re-tessellates on Start (or automatically while Start is armed)."));
         addParameter(Parameter::makeMenu("dicingcamera", "Dicing Camera",
                                          {"Render Camera", "Custom"}, 0)
                          .withGroup("Subdivision")

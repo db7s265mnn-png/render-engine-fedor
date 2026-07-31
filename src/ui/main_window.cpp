@@ -889,13 +889,28 @@ void MainWindow::cookNow() {
     }
 
     // Publish only after motion keys are fully installed.
-    if (!renderRequested_) applyTessellationCache(*builtScene);
+    const std::string tessKey = tessellationFingerprint(*builtScene);
+    bool needTess = renderRequested_;
+    if (!needTess && !tessCache_.empty() && tessKey != tessCacheFingerprint_) {
+        // Screen Adaptive / Subdiv Type / Iterations / frustum / etc. changed —
+        // cached densify is stale. Re-dice immediately while Start is armed;
+        // otherwise drop the cache so the viewport shows cages until Start.
+        tessCache_.clear();
+        tessCacheFingerprint_.clear();
+        if (renderArmed()) {
+            needTess = true;
+            statusBar()->showMessage("Subdivision settings changed — re-tessellating", 2500);
+        }
+    }
+
+    if (!needTess) applyTessellationCache(*builtScene);
     else {
         // Drop *everything* from the previous render before densifying: device
         // BVH, session scene, framebuffer, display hold, and last tess cache /
         // UI scene (often the same heavy meshes).
         session_.discardPreviousRender();
         tessCache_.clear();
+        tessCacheFingerprint_.clear();
         scene_.reset();
         const CameraData diceCam = [&]() {
             CameraData cam = builtScene->camera;
@@ -911,15 +926,19 @@ void MainWindow::cookNow() {
             return cam;
         }();
         try {
+            // Fingerprint authored cages before meshes are replaced.
+            tessCacheFingerprint_ = tessellationFingerprint(*builtScene);
             tessellateSceneForRender(*builtScene, diceCam);
             storeTessellationCache(*builtScene);
         } catch (const std::bad_alloc&) {
+            tessCacheFingerprint_.clear();
             logError("Render tessellation ran out of memory — using undisplaced cages");
             appMessageBox(this, QStringLiteral("Render"),
                           QStringLiteral("Tessellation ran out of memory.\n"
                                          "Lower Subdiv Iterations on the mesh and try again."),
                           QMessageBox::Ok);
         } catch (const std::exception& ex) {
+            tessCacheFingerprint_.clear();
             logError(std::string("Render tessellation failed: ") + ex.what());
             appMessageBox(this, QStringLiteral("Render"),
                           QStringLiteral("Tessellation failed:\n%1").arg(ex.what()),
@@ -934,8 +953,8 @@ void MainWindow::cookNow() {
     updateStatusBar();
     if (!timelineInteractive) refreshViewportCameraMenu();
 
-    if (renderRequested_) {
-        setRenderArmed(true);
+    if (renderRequested_ || needTess) {
+        if (renderRequested_ || renderArmed()) setRenderArmed(true);
         restartRender();
     } else if (iprAction_->isChecked() && renderArmed()) {
         restartRender();
@@ -968,6 +987,26 @@ void MainWindow::storeTessellationCache(const Scene& scene) {
         if (inst.meshIndex < 0 || size_t(inst.meshIndex) >= scene.meshes.size()) continue;
         tessCache_.push_back({prim.path, scene.meshes[size_t(inst.meshIndex)]});
     }
+}
+
+void MainWindow::onStartRender() {
+    setRenderArmed(true);
+    // Tear down the previous render immediately on the button press so cook /
+    // tessellation do not compete with a live BVH + accumulated framebuffer.
+    session_.discardPreviousRender();
+    tessCache_.clear();
+    tessCacheFingerprint_.clear();
+    scene_.reset();
+    renderRequested_ = true;
+    cookNow();
+}
+
+void MainWindow::onStopRender() {
+    setRenderArmed(false);
+    renderRequested_ = false;
+    session_.stop();
+    statusBar()->showMessage("Render stopped — press Start to render again", 4000);
+    updateStatusBar();
 }
 
 CameraData MainWindow::resolveDicingCamera(const Scene& scene) const {
@@ -1003,25 +1042,6 @@ void MainWindow::setRenderArmed(bool armed) {
     const QSignalBlocker blockStop(stopAction_);
     renderAction_->setChecked(armed);
     stopAction_->setChecked(!armed);
-}
-
-void MainWindow::onStartRender() {
-    setRenderArmed(true);
-    // Tear down the previous render immediately on the button press so cook /
-    // tessellation do not compete with a live BVH + accumulated framebuffer.
-    session_.discardPreviousRender();
-    tessCache_.clear();
-    scene_.reset();
-    renderRequested_ = true;
-    cookNow();
-}
-
-void MainWindow::onStopRender() {
-    setRenderArmed(false);
-    renderRequested_ = false;
-    session_.stop();
-    statusBar()->showMessage("Render stopped — press Start to render again", 4000);
-    updateStatusBar();
 }
 
 void MainWindow::onRenderTick() {

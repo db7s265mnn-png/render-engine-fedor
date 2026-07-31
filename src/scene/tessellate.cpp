@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <new>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -224,6 +225,127 @@ void subdivideLinearOnce(Mesh& mesh) {
     mesh.motionPositionsPacked_.clear();
 }
 
+// Split only edges that exceed `targetPx` in screen space (and force midpoints
+// on shared edges so neighbors stay watertight). True spatial dicing — unlike
+// uniform 1→4 on the whole mesh when only the longest edge is large.
+bool subdivideLinearScreenAdaptiveOnce(Mesh& mesh, const Mat4& objToWorld, const Mat4& worldToCam,
+                                       const CameraData& cam, float aspect, int resX, int resY,
+                                       float targetPx) {
+    const size_t triCount = mesh.indices.size() / 3;
+    if (triCount == 0) return false;
+    const size_t nPos = mesh.positions.size();
+    const bool hasN = mesh.normals.size() == nPos;
+    const bool hasUv = mesh.uvs.size() == nPos;
+
+    struct EdgeKey {
+        uint32_t a, b;
+        bool operator==(const EdgeKey& o) const { return a == o.a && b == o.b; }
+    };
+    struct EdgeHash {
+        size_t operator()(const EdgeKey& e) const {
+            return (size_t(e.a) * 0x9e3779b97f4a7c15ULL) ^ size_t(e.b);
+        }
+    };
+
+    std::unordered_map<EdgeKey, uint32_t, EdgeHash> mid;
+    mid.reserve(triCount);
+    auto edgeKey = [](uint32_t a, uint32_t b) {
+        return EdgeKey{std::min(a, b), std::max(a, b)};
+    };
+
+    // Mark edges that are too long on screen.
+    std::unordered_map<EdgeKey, char, EdgeHash> longEdge;
+    longEdge.reserve(triCount * 2);
+    for (size_t t = 0; t < triCount; ++t) {
+        const uint32_t i0 = mesh.indices[t * 3 + 0];
+        const uint32_t i1 = mesh.indices[t * 3 + 1];
+        const uint32_t i2 = mesh.indices[t * 3 + 2];
+        if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
+        const float e01 =
+            screenEdgePixels(mesh.positions[i0], mesh.positions[i1], objToWorld, worldToCam, cam, aspect,
+                             resX, resY);
+        const float e12 =
+            screenEdgePixels(mesh.positions[i1], mesh.positions[i2], objToWorld, worldToCam, cam, aspect,
+                             resX, resY);
+        const float e20 =
+            screenEdgePixels(mesh.positions[i2], mesh.positions[i0], objToWorld, worldToCam, cam, aspect,
+                             resX, resY);
+        if (e01 > targetPx) longEdge[edgeKey(i0, i1)] = 1;
+        if (e12 > targetPx) longEdge[edgeKey(i1, i2)] = 1;
+        if (e20 > targetPx) longEdge[edgeKey(i2, i0)] = 1;
+    }
+    if (longEdge.empty()) return false;
+
+    auto midpoint = [&](uint32_t i0, uint32_t i1) -> uint32_t {
+        EdgeKey key = edgeKey(i0, i1);
+        const auto it = mid.find(key);
+        if (it != mid.end()) return it->second;
+        const Vec3 p = (mesh.positions[i0] + mesh.positions[i1]) * 0.5f;
+        const uint32_t id = uint32_t(mesh.positions.size());
+        mesh.positions.push_back(p);
+        if (hasN) {
+            Vec3 n = mesh.normals[i0] + mesh.normals[i1];
+            const float len = length(n);
+            mesh.normals.push_back(len > 1e-8f ? n / len : mesh.normals[i0]);
+        }
+        if (hasUv) mesh.uvs.push_back((mesh.uvs[i0] + mesh.uvs[i1]) * 0.5f);
+        mid.emplace(key, id);
+        return id;
+    };
+
+    auto isLong = [&](uint32_t a, uint32_t b) { return longEdge.find(edgeKey(a, b)) != longEdge.end(); };
+
+    std::vector<uint32_t> newIdx;
+    newIdx.reserve(triCount * 12);
+    for (size_t t = 0; t < triCount; ++t) {
+        const uint32_t i0 = mesh.indices[t * 3 + 0];
+        const uint32_t i1 = mesh.indices[t * 3 + 1];
+        const uint32_t i2 = mesh.indices[t * 3 + 2];
+        if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
+        const bool b01 = isLong(i0, i1);
+        const bool b12 = isLong(i1, i2);
+        const bool b20 = isLong(i2, i0);
+        const int bits = (b01 ? 1 : 0) | (b12 ? 2 : 0) | (b20 ? 4 : 0);
+        if (bits == 0) {
+            newIdx.insert(newIdx.end(), {i0, i1, i2});
+            continue;
+        }
+        const uint32_t m01 = b01 ? midpoint(i0, i1) : 0;
+        const uint32_t m12 = b12 ? midpoint(i1, i2) : 0;
+        const uint32_t m20 = b20 ? midpoint(i2, i0) : 0;
+        switch (bits) {
+            case 1:  // split i0-i1
+                newIdx.insert(newIdx.end(), {i0, m01, i2, m01, i1, i2});
+                break;
+            case 2:  // split i1-i2
+                newIdx.insert(newIdx.end(), {i0, i1, m12, i0, m12, i2});
+                break;
+            case 4:  // split i2-i0
+                newIdx.insert(newIdx.end(), {i0, i1, m20, m20, i1, i2});
+                break;
+            case 3:  // i0-i1, i1-i2
+                newIdx.insert(newIdx.end(), {i0, m01, i2, m01, i1, m12, m01, m12, i2});
+                break;
+            case 5:  // i0-i1, i2-i0
+                newIdx.insert(newIdx.end(), {i0, m01, m20, m01, i1, i2, m20, m01, i2});
+                break;
+            case 6:  // i1-i2, i2-i0
+                newIdx.insert(newIdx.end(), {i0, i1, m12, i0, m12, m20, m20, m12, i2});
+                break;
+            default:  // all three — classic 1→4
+                newIdx.insert(newIdx.end(),
+                              {i0, m01, m20, i1, m12, m01, i2, m20, m12, m01, m12, m20});
+                break;
+        }
+    }
+    mesh.indices.swap(newIdx);
+    mesh.restPositions.clear();
+    mesh.restNormals.clear();
+    mesh.motionPositions.clear();
+    mesh.motionPositionsPacked_.clear();
+    return true;
+}
+
 float maxScreenEdge(const Mesh& mesh, const Mat4& objToWorld, const Mat4& worldToCam,
                     const CameraData& cam, float aspect, int resX, int resY) {
     float m = 0.0f;
@@ -256,17 +378,27 @@ void refineLinear(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQual
     const float quality = std::max(1.0e-3f, dicingQuality);
     const float targetPx = 1.0f / quality;
 
+    if (screenAdaptive && diceInst) {
+        const float probe =
+            maxScreenEdge(mesh, diceInst->xform, worldToCam, cam, aspect, resX, resY);
+        if (!(probe > 0.0f)) {
+            logWarning("tessellate: screen adaptive projection failed — falling back to uniform");
+            screenAdaptive = false;
+        }
+    }
+
     for (int i = 0; i < maxIter; ++i) {
         if (mesh.triangleCount() * 4 > kMaxTessTriangles) {
             logWarning("tessellate: linear subdiv stopped at budget");
             break;
         }
         if (screenAdaptive && diceInst) {
-            const float maxPx =
-                maxScreenEdge(mesh, diceInst->xform, worldToCam, cam, aspect, resX, resY);
-            if (maxPx <= targetPx) break;
+            if (!subdivideLinearScreenAdaptiveOnce(mesh, diceInst->xform, worldToCam, cam, aspect, resX,
+                                                   resY, targetPx))
+                break;
+        } else {
+            subdivideLinearOnce(mesh);
         }
-        subdivideLinearOnce(mesh);
     }
 }
 
@@ -359,17 +491,23 @@ void refineCatclark(Mesh& mesh, int levels, bool screenAdaptive, float dicingQua
                     float aspect, int resX, int resY) {
     int useLevels = clampSubdivLevelsForBudget(levels, mesh.triangleCount());
     if (screenAdaptive && diceInst && useLevels > 0) {
-        // Estimate levels from bbox screen size vs dicing quality.
+        // Prefer true screen-adaptive linear splits for dicing. Catclark OSD is
+        // uniform-only; estimate a level count from screen size as a fallback.
         const float quality = std::max(1.0e-3f, dicingQuality);
         const float targetPx = 1.0f / quality;
         float maxPx = maxScreenEdge(mesh, diceInst->xform, worldToCam, cam, aspect, resX, resY);
-        int est = 0;
-        // Each level ≈ halves edges.
-        while (est < useLevels && maxPx > targetPx) {
-            maxPx *= 0.5f;
-            ++est;
+        if (!(maxPx > 0.0f)) {
+            logWarning("tessellate: screen adaptive projection failed — using uniform catclark");
+        } else {
+            // Triangle cages already fall back to linear adaptive in tessellateOne.
+            // For rare quad cages keep a level estimate for OSD.
+            int est = 0;
+            while (est < useLevels && maxPx > targetPx) {
+                maxPx *= 0.5f;
+                ++est;
+            }
+            useLevels = est;
         }
-        useLevels = est;
     }
     if (useLevels <= 0) return;
 
@@ -510,6 +648,61 @@ void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera) {
     // nullptr in SceneView → triplanar samples displaced P (seam artifacts).
     scene.finalize();
     logInfo("tessellate: render tessellation complete");
+}
+
+std::string tessellationFingerprint(const Scene& scene) {
+    const RenderSettingsData& rs = scene.settings;
+    std::string key;
+    key.reserve(256);
+    key += "fc=";
+    key += std::to_string(rs.frustumCull);
+    key += ";fp=";
+    key += std::to_string(rs.frustumPadding);
+    key += ";sa=";
+    key += std::to_string(rs.screenAdaptive);
+    key += ";dc=";
+    key += std::to_string(rs.dicingCameraMode);
+    key += ";rx=";
+    key += std::to_string(rs.resolutionX);
+    key += ";ry=";
+    key += std::to_string(rs.resolutionY);
+    key += ";";
+
+    for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
+        const MeshPtr& mesh = scene.meshes[mi];
+        if (!mesh) continue;
+        // Find a material that drives displacement for this mesh.
+        const Material* mat = nullptr;
+        for (const InstanceData& inst : scene.instances) {
+            if (inst.meshIndex != int(mi)) continue;
+            if (inst.materialIndex < 0 || size_t(inst.materialIndex) >= scene.materials.size()) continue;
+            mat = &scene.materials[size_t(inst.materialIndex)];
+            break;
+        }
+        if (!mat || !materialHasGeometricDisplacement(*mat)) continue;
+        key += "m";
+        key += std::to_string(mi);
+        key += ":st=";
+        key += std::to_string(mesh->subdivType);
+        key += ";si=";
+        key += std::to_string(mesh->subdivIterations);
+        key += ";dq=";
+        key += std::to_string(mesh->dicingQuality);
+        key += ";bp=";
+        key += std::to_string(mesh->boundsPadding);
+        key += ";dt=";
+        key += std::to_string(mat->displacementTex);
+        key += ";dp=";
+        key += std::to_string(mat->displacementProc);
+        key += ";dh=";
+        key += std::to_string(mat->displacementHeight);
+        key += ";ds=";
+        key += std::to_string(mat->displacementScale);
+        key += ";dz=";
+        key += std::to_string(mat->displacementZeroValue);
+        key += ";";
+    }
+    return key;
 }
 
 }  // namespace sol

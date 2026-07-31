@@ -6,6 +6,9 @@
 #include <QString>
 #include <QStringList>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "nodes/node_graph.h"
 #include "nodes/stage.h"
@@ -94,6 +97,8 @@ private:
     ScenePtr scene_;
     // Last Render tessellation, keyed by prim path — kept until the next Render.
     std::vector<std::pair<std::string, MeshPtr>> tessCache_;
+    // Fingerprint of authored tess inputs used to build tessCache_.
+    std::string tessCacheFingerprint_;
 
     NodeGraphView* networkView_ = nullptr;
     MaterialNetworkView* materialNetworkView_ = nullptr;
