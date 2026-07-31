@@ -161,7 +161,7 @@ void addTessellationParameters(Node& node) {
                                        "Catclark: OpenSubdiv Catmull-Clark (triangle cages "
                                        "fall back to Linear).\n"
                                        "Linear: mid-edge triangle splits."));
-    node.addParameter(Parameter::makeInt("subdiviterations", "Subdiv Iterations", 3, 0, 12)
+    node.addParameter(Parameter::makeInt("subdiviterations", "Subdiv Iterations", 3, 0, 100)
                           .withGroup("Subdivision")
                           .withTooltip("Uniform levels when Screen Adaptive is off; "
                                        "maximum cap when Screen Adaptive is on. "
@@ -178,7 +178,7 @@ void addTessellationParameters(Node& node) {
 
 void applyTessellationParameters(const Node& node, StagePrim& prim) {
     prim.subdivType = node.intValue("subdivtype", kSubdivCatclark);
-    prim.subdivIterations = std::clamp(node.intValue("subdiviterations", 3), 0, 12);
+    prim.subdivIterations = std::clamp(node.intValue("subdiviterations", 3), 0, 100);
     prim.dicingQuality = float(node.floatValue("dicingquality", 1.0));
     prim.boundsPadding = float(node.floatValue("boundspadding", 0.0));
 }

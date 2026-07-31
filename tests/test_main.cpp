@@ -2465,9 +2465,9 @@ void testArnoldDisplacement() {
 
 void testTessellationTriangleBudget() {
     std::printf("tessellation-triangle-budget\n");
-    // Safety ceiling is 200M tris — absurd iterations still clamp, but only there.
-    MeshPtr sphere = makeSphereMesh(1.0f, 64, 32);
-    check(sphere && sphere->triangleCount() > 1000, "dense sphere cage");
+    // Ceiling is 200M — densify past the old 4M soft-cap without clamping early.
+    MeshPtr sphere = makeSphereMesh(1.0f, 48, 24);
+    check(sphere && sphere->triangleCount() > 1000, "sphere cage");
     const size_t cageTris = sphere->triangleCount();
 
     Scene scene;
@@ -2476,15 +2476,13 @@ void testTessellationTriangleBudget() {
     mat.displacementScale = 1.0f;
     mat.displacementZeroValue = 0.0f;
     sphere->subdivType = kSubdivLinear;
-    sphere->subdivIterations = 12;
-    MeshPtr out = tessDisplaceForTest(sphere, mat, scene, 12);
+    sphere->subdivIterations = 6;  // ~cage*4^6 ≈ 9M on this cage (above old 4M cap)
+    MeshPtr out = tessDisplaceForTest(sphere, mat, scene, 6);
     check(out != nullptr, "budget tess produced a mesh");
-    check(out->triangleCount() > cageTris, "still densified some levels");
-    check(out->triangleCount() <= 200000000ull, "did not exceed 200M triangle ceiling");
-    // Unclamped 12 levels on this cage would exceed tens of billions of tris.
-    check(out->triangleCount() < cageTris * (1ull << 24), "far below unclamped 4^12 growth");
-    std::printf("  cage=%zu → tess=%zu (iterations requested 12, ceiling 200M)\n", cageTris,
-                out->triangleCount());
+    check(out->triangleCount() == cageTris * 4096ull, "full 6 linear levels under 200M ceiling");
+    check(out->triangleCount() > 4000000ull, "exceeds former 4M soft-cap");
+    check(out->triangleCount() <= 200000000ull, "under 200M triangle ceiling");
+    std::printf("  cage=%zu → tess=%zu (6 levels, ceiling 200M)\n", cageTris, out->triangleCount());
 }
 
 void testMaterialXNoiseAndTriplanar() {

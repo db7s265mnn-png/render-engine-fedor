@@ -19,6 +19,7 @@
 #include <QStatusBar>
 #include <QShortcut>
 #include <QDateTime>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QToolBar>
 #include <QVector3D>
@@ -279,18 +280,28 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 MainWindow::~MainWindow() { session_.stop(); }
 
 void MainWindow::createActions() {
-    renderAction_ = new QAction("Render", this);
+    auto* renderControlGroup = new QActionGroup(this);
+    renderControlGroup->setExclusive(true);
+
+    renderAction_ = new QAction("Start", this);
+    renderAction_->setCheckable(true);
+    renderAction_->setChecked(true);
     renderAction_->setShortcut(QKeySequence("F5"));
+    renderAction_->setToolTip("Start render (F5). Stays pressed while live/IPR restarts are allowed.");
+    renderControlGroup->addAction(renderAction_);
     connect(renderAction_, &QAction::triggered, this, &MainWindow::onStartRender);
 
     stopAction_ = new QAction("Stop", this);
+    stopAction_->setCheckable(true);
     stopAction_->setShortcut(QKeySequence("Esc"));
+    stopAction_->setToolTip("Stop render (Esc). Stays pressed — edits will not auto-restart until Start.");
+    renderControlGroup->addAction(stopAction_);
     connect(stopAction_, &QAction::triggered, this, &MainWindow::onStopRender);
 
     iprAction_ = new QAction("Interactive Rendering", this);
     iprAction_->setCheckable(true);
     iprAction_->setChecked(true);
-    iprAction_->setToolTip("Re-render automatically after every edit");
+    iprAction_->setToolTip("Re-render automatically after every edit (only while Start is pressed)");
 
     auto* transformGroup = new QActionGroup(this);
     transformGroup->setExclusive(true);
@@ -509,7 +520,7 @@ void MainWindow::createDocks() {
             applyLensFromCameraNode(camera, scene_->camera);
             scene_->camera.focusDistance = distanceMetres;
             session_.updateSceneData();
-            if (iprAction_->isChecked()) session_.start();
+            if (iprAction_->isChecked() && renderArmed()) session_.start();
         }
         if (parameterPanel_->node() == camera) parameterPanel_->refresh();
         parameterPanel_->setFocusPickActive(false);
@@ -923,7 +934,12 @@ void MainWindow::cookNow() {
     updateStatusBar();
     if (!timelineInteractive) refreshViewportCameraMenu();
 
-    if (iprAction_->isChecked() || renderRequested_) restartRender();
+    if (renderRequested_) {
+        setRenderArmed(true);
+        restartRender();
+    } else if (iprAction_->isChecked() && renderArmed()) {
+        restartRender();
+    }
 }
 
 void MainWindow::applyTessellationCache(Scene& scene) const {
@@ -972,7 +988,21 @@ void MainWindow::restartRender() {
     renderRequested_ = false;
 }
 
+bool MainWindow::renderArmed() const {
+    return renderAction_ && renderAction_->isChecked();
+}
+
+void MainWindow::setRenderArmed(bool armed) {
+    if (!renderAction_ || !stopAction_) return;
+    // Block signals so toggling check state does not re-enter Start/Stop slots.
+    const QSignalBlocker blockStart(renderAction_);
+    const QSignalBlocker blockStop(stopAction_);
+    renderAction_->setChecked(armed);
+    stopAction_->setChecked(!armed);
+}
+
 void MainWindow::onStartRender() {
+    setRenderArmed(true);
     // Tear down the previous render immediately on the button press so cook /
     // tessellation do not compete with a live BVH + accumulated framebuffer.
     session_.discardPreviousRender();
@@ -983,8 +1013,10 @@ void MainWindow::onStartRender() {
 }
 
 void MainWindow::onStopRender() {
+    setRenderArmed(false);
+    renderRequested_ = false;
     session_.stop();
-    statusBar()->showMessage("Render stopped", 3000);
+    statusBar()->showMessage("Render stopped — press Start to render again", 4000);
     updateStatusBar();
 }
 
@@ -1027,7 +1059,7 @@ void MainWindow::onCameraMoved() {
             lastMbNavIprRestartMs_ = now;
             mbNavIprPending_ = false;
             session_.updateSceneData();
-            if (iprAction_->isChecked()) session_.start();
+            if (iprAction_->isChecked() && renderArmed()) session_.start();
         } else {
             mbNavIprPending_ = true;
         }
@@ -1035,7 +1067,7 @@ void MainWindow::onCameraMoved() {
     }
     mbNavIprPending_ = false;
     session_.updateSceneData();
-    if (iprAction_->isChecked()) session_.start();
+    if (iprAction_->isChecked() && renderArmed()) session_.start();
 }
 
 void MainWindow::onLookThroughCameraNode() {
@@ -1098,7 +1130,7 @@ void MainWindow::lookThroughCamera(const QString& cameraName) {
                           scene_->camera.cameraToWorld);
             }
             session_.updateSceneData();
-            if (iprAction_->isChecked()) session_.start();
+            if (iprAction_->isChecked() && renderArmed()) session_.start();
         }
         return;
     }
@@ -1120,7 +1152,7 @@ void MainWindow::lookThroughCamera(const QString& cameraName) {
                       scene_->camera.cameraToWorld);
         }
         session_.updateSceneData();
-        if (iprAction_->isChecked()) session_.start();
+        if (iprAction_->isChecked() && renderArmed()) session_.start();
     }
     statusBar()->showMessage("Looking through " + camera->name(), 3000);
 }
@@ -1296,8 +1328,8 @@ void MainWindow::onShowShortcuts() {
                              "  Scrubber playhead    current frame (double-click to type)\n"
                              "  Frame → time         Alembic & USD sample time\n\n"
                              "General\n"
-                             "  F5            render\n"
-                             "  Esc           stop\n"
+                             "  F5            Start render (button stays pressed)\n"
+                             "  Esc           Stop (button stays pressed — no auto-restart)\n"
                              "  Ctrl+E        save image");
 }
 

@@ -72,6 +72,9 @@ private:
     void applyTessellationCache(Scene& scene) const;
     void storeTessellationCache(const Scene& scene);
     CameraData resolveDicingCamera(const Scene& scene) const;
+    // Start pressed (Stop not): IPR / param cooks may drive the session.
+    bool renderArmed() const;
+    void setRenderArmed(bool armed);
     void updateWindowTitle();
     void updateStatusBar();
     bool maybeSaveChanges();
