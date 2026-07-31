@@ -163,9 +163,11 @@ void addTessellationParameters(Node& node) {
                                        "Linear: mid-edge triangle splits."));
     node.addParameter(Parameter::makeInt("subdiviterations", "Subdiv Iterations", 3, 0, 100)
                           .withGroup("Subdivision")
-                          .withTooltip("Uniform levels when Screen Adaptive is off; "
-                                       "maximum cap when Screen Adaptive is on. "
-                                       "Each level multiplies triangle count by ~4."));
+                          .withTooltip(
+                              "Max densify passes in the camera frustum (Frustum Cull on). "
+                              "With Screen Adaptive on, also a cap — dicing stops earlier when "
+                              "edges are short enough on screen. "
+                              "Hard stop only at the triangle memory budget (~200M)."));
     node.addParameter(Parameter::makeFloat("dicingquality", "Dicing Quality", 1.0, 0.01, 16.0, false)
                           .withGroup("Subdivision")
                           .withTooltip("Screen-space density when Screen Adaptive is on "

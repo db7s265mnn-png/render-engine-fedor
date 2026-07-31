@@ -505,9 +505,10 @@ void expandFaceMarksByEdgeRing(const Mesh& mesh, std::vector<uint8_t>& faceMark)
 void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQuality,
                               const Mat4& objToWorld, const CameraData& cam, const Mat4& worldToCam,
                               float aspect, int resX, int resY, float padFrac) {
-    // Same iteration ceiling as uniform — local dicing never needs more passes
-    // than whole-mesh 4^n would allow for this cage (prevents Start hang at N=100).
-    maxIter = clampSubdivLevelsForBudget(maxIter, mesh.triangleCount());
+    // Do NOT pre-clamp by whole-mesh 4^n — that made Subdiv Iterations a no-op on
+    // denser cages (e.g. ~200k tris → hard cap at 3 levels). Local dicing only
+    // grows the in-frustum patch; the live triangle budget below is the limiter.
+    maxIter = std::max(0, maxIter);
     if (maxIter <= 0) return;
     if (mesh.normals.size() != mesh.positions.size()) {
         mesh.normals.clear();
@@ -519,7 +520,9 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, floa
 
     for (int iter = 0; iter < maxIter; ++iter) {
         if (mesh.triangleCount() * 4 > kMaxTessTriangles) {
-            logWarning("tessellate: frustum-local subdiv stopped at budget");
+            logWarning("tessellate: frustum-local subdiv stopped at triangle budget (" +
+                       std::to_string(kMaxTessTriangles) + ") after " + std::to_string(iter) +
+                       " iteration(s)");
             break;
         }
         const size_t triCount = mesh.indices.size() / 3;
@@ -545,9 +548,27 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, floa
         // Soft tails: first two iterations also dice a 1-ring outside the frustum.
         if (iter < kTailIters && markedCount < triCount) expandFaceMarksByEdgeRing(mesh, faceMark);
 
-        // Fast path: entire cage still in frustum → same as whole-mesh densify.
-        // Avoids building per-edge maps over millions of faces.
+        // Fast path when every face still hits the frustum.
+        // Important: do NOT batch all remaining levels here when the cage is still
+        // coarse (e.g. 2 huge tris covering the frame) — corners must be allowed to
+        // leave the frustum on later passes. Only batch once the mesh is already
+        // dense enough that a full-frame densify is intentional.
         if (markedCount == triCount) {
+            constexpr size_t kBatchUniformMinTris = 1024;
+            if (!screenAdaptive && triCount >= kBatchUniformMinTris) {
+                const int remain = maxIter - iter;
+                const int allowed = clampSubdivLevelsForBudget(remain, mesh.triangleCount());
+                if (allowed <= 0) {
+                    logWarning("tessellate: frustum-local (full frame) hit triangle budget — further "
+                               "Subdiv Iterations have no effect");
+                    break;
+                }
+                for (int u = 0; u < allowed; ++u) {
+                    if (mesh.triangleCount() * 4 > kMaxTessTriangles) break;
+                    subdivideLinearOnce(mesh);
+                }
+                break;
+            }
             if (screenAdaptive) {
                 if (!subdivideLinearScreenAdaptiveOnce(mesh, objToWorld, worldToCam, cam, aspect, resX,
                                                        resY, targetPx))
@@ -781,22 +802,27 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
         type = kSubdivLinear;  // whole-mesh tris → linear
     }
 
-    // Frustum cull on → local dicing (not whole-mesh 4^N). Still budget-clamp
-    // iterations so Start cannot run away toward the 200M ceiling.
+    // Frustum cull on → local dicing. Pass authored iterations through (live
+    // triangle budget stops runaway). Uniform path still pre-clamps by 4^n.
     const int wantIters = std::max(0, work->subdivIterations);
-    const int cap = clampSubdivLevelsForBudget(wantIters, work->triangleCount());
     try {
-        if (type == kSubdivNone || cap == 0) {
+        if (type == kSubdivNone || wantIters == 0) {
             // no subdiv
         } else if (rs.frustumCull && diceInst) {
             // Catclark OSD is uniform-only — frustum path always uses linear local dicing.
-            refineLinearFrustumLocal(*work, cap, adaptive, work->dicingQuality, diceInst->xform, cam, w2c,
-                                     aspect, resX, resY, padFrac);
-        } else if (type == kSubdivCatclark) {
-            refineCatclark(*work, cap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect, resX,
-                           resY);
+            refineLinearFrustumLocal(*work, wantIters, adaptive, work->dicingQuality, diceInst->xform, cam,
+                                     w2c, aspect, resX, resY, padFrac);
         } else {
-            refineLinear(*work, cap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect, resX, resY);
+            const int uniformCap = clampSubdivLevelsForBudget(wantIters, work->triangleCount());
+            if (uniformCap == 0) {
+                // cage already past budget for any uniform split
+            } else if (type == kSubdivCatclark) {
+                refineCatclark(*work, uniformCap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect,
+                               resX, resY);
+            } else {
+                refineLinear(*work, uniformCap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect,
+                             resX, resY);
+            }
         }
     } catch (const std::bad_alloc&) {
         logWarning("tessellate: subdiv ran out of memory — displacing densest level kept so far");
@@ -804,7 +830,7 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
 
     if (needDisp) {
         Material m = mat;
-        m.subdivIterations = cap;
+        m.subdivIterations = wantIters;
         const float pad = std::max(work->boundsPadding, authoredPad);
         try {
             MeshPtr displaced = displaceMeshOnly(std::move(*work), m, scene);

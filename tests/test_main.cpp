@@ -2662,6 +2662,66 @@ void testFrustumLocalFullyInViewFast() {
     std::printf("  in-view %zu→%zu in %.1fms\n", cage, out->triangleCount(), ms);
 }
 
+void testFrustumLocalItersNotClampedOnDenseCage() {
+    std::printf("frustum-local-iters-not-clamped-on-dense-cage\n");
+    // ~200k cage: whole-mesh 4^n clamp would freeze Subdiv Iterations at 3.
+    // Zoomed frustum-local must still honor higher iteration counts on the patch.
+    auto ground = makeGridMesh(200.0f, 200.0f, 320, 320);
+    check(ground && ground->triangleCount() > 150000, "dense ground cage");
+    ground->subdivType = kSubdivLinear;
+    ground->dicingQuality = 1.0f;
+    const size_t cage = ground->triangleCount();
+
+    Material mat;
+    mat.displacementHeight = 0.01f;
+    mat.displacementScale = 1.0f;
+    mat.displacementZeroValue = 0.0f;
+
+    auto run = [&](int iters) {
+        auto g = std::make_shared<Mesh>(*ground);
+        g->subdivIterations = iters;
+        Scene scene;
+        scene.settings.frustumCull = 1;
+        scene.settings.frustumPadding = 5.0f;
+        scene.settings.screenAdaptive = 0;
+        scene.settings.resolutionX = 640;
+        scene.settings.resolutionY = 360;
+        scene.camera.focalLength = 85.0f;
+        scene.camera.sensorWidth = 36.0f;
+        scene.camera.cameraToWorld = lookAtMatrix(Vec3(0, 6, 10), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        scene.cameraAuthored = true;
+        return tessDisplaceForTest(g, mat, scene, iters, /*forceFrustumOff=*/false);
+    };
+
+    MeshPtr low = run(3);
+    MeshPtr high = run(8);
+    check(low && high, "dense frustum runs");
+    // Old whole-mesh clamp: both stuck at 3 levels → same (or tiny) delta.
+    check(high->triangleCount() > low->triangleCount() + cage / 8,
+          "raising Subdiv Iterations still densifies under frustum-local");
+
+    auto minEdgeNear = [&](const MeshPtr& m, float radius) {
+        float best = 1.0e30f;
+        for (size_t t = 0; t + 2 < m->indices.size(); t += 3) {
+            const Vec3& a = m->positions[m->indices[t]];
+            const Vec3& b = m->positions[m->indices[t + 1]];
+            const Vec3& c = m->positions[m->indices[t + 2]];
+            const Vec3 mid = (a + b + c) * (1.0f / 3.0f);
+            const float r = std::sqrt(mid.x * mid.x + mid.z * mid.z);
+            if (r > radius) continue;
+            best = std::min(best, length(b - a));
+            best = std::min(best, length(c - b));
+            best = std::min(best, length(a - c));
+        }
+        return best;
+    };
+    const float e3 = minEdgeNear(low, 6.0f);
+    const float e8 = minEdgeNear(high, 6.0f);
+    check(e8 < e3 * 0.75f, "higher iters → finer edges in frustum center");
+    std::printf("  dense cage=%zu tris3=%zu tris8=%zu edge3=%.4f edge8=%.4f\n", cage,
+                low->triangleCount(), high->triangleCount(), e3, e8);
+}
+
 void testScreenAdaptiveTessellation() {
     std::printf("screen-adaptive-tessellation\n");
     // Spatial edge dicing: close camera densifies more than a far one.
@@ -3973,6 +4033,7 @@ int main() {
         testFrustumCullCloseUpSubdiv();
         testFrustumLocalDicingFalloff();
         testFrustumLocalFullyInViewFast();
+        testFrustumLocalItersNotClampedOnDenseCage();
         testScreenAdaptiveTessellation();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
@@ -4006,6 +4067,7 @@ int main() {
     testFrustumCullCloseUpSubdiv();
     testFrustumLocalDicingFalloff();
     testFrustumLocalFullyInViewFast();
+    testFrustumLocalItersNotClampedOnDenseCage();
     testScreenAdaptiveTessellation();
     testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();
