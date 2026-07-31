@@ -306,9 +306,9 @@ void displaceVertices(Mesh& mesh, const Material& mat, const SceneView& scene) {
 
 }  // namespace
 
-MeshPtr displaceMeshOnly(const Mesh& src, const Material& mat, const Scene& scene) {
-    auto out = std::make_shared<Mesh>(src);
-    out->name = src.name.empty() ? "displaced" : src.name + "_disp";
+MeshPtr displaceMeshOnly(Mesh&& src, const Material& mat, const Scene& scene) {
+    auto out = std::make_shared<Mesh>(std::move(src));
+    out->name = out->name.empty() ? "displaced" : out->name + "_disp";
     out->motionPositionsPacked_.clear();
 
     if (out->normals.size() != out->positions.size()) {
@@ -344,6 +344,10 @@ MeshPtr displaceMeshOnly(const Mesh& src, const Material& mat, const Scene& scen
         out->computeBounds();
     }
     return out;
+}
+
+MeshPtr displaceMeshOnly(const Mesh& src, const Material& mat, const Scene& scene) {
+    return displaceMeshOnly(Mesh(src), mat, scene);
 }
 
 }  // namespace sol

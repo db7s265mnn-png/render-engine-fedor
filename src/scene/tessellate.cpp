@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <new>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -20,7 +22,29 @@
 namespace sol {
 namespace {
 
-constexpr size_t kMaxTessTriangles = 64000000ull;
+// Soft cap before Render/BVH — 64M was effectively no cap and OOMed on
+// Subdiv Iterations ≥6 for dense cages. 4M tris is still a heavy displace mesh.
+constexpr size_t kMaxTessTriangles = 4000000ull;
+
+int clampSubdivLevelsForBudget(int requested, size_t triCount) {
+    const int want = std::max(0, requested);
+    if (want == 0 || triCount == 0) return 0;
+    size_t est = triCount;
+    int levels = 0;
+    while (levels < want) {
+        if (est > kMaxTessTriangles / 4) break;
+        est *= 4;
+        ++levels;
+    }
+    if (levels < want) {
+        logWarning("tessellate: clamped subdiv iterations " + std::to_string(want) + " → " +
+                   std::to_string(levels) + " (triangle budget " +
+                   std::to_string(kMaxTessTriangles) + ")");
+    }
+    return levels;
+}
+
+bool indexInRange(uint32_t idx, size_t count) { return size_t(idx) < count; }
 
 bool meshIsTriangleOnly(const Mesh& mesh) {
     // Our Mesh stores triangles only (3 indices per face). Catclark needs quads;
@@ -76,13 +100,18 @@ float screenEdgePixels(Vec3 aObj, Vec3 bObj, const Mat4& objToWorld, const Mat4&
 bool meshVisibleInFrustum(const Mesh& mesh, const std::vector<const InstanceData*>& instances,
                           const CameraData& cam, const Mat4& worldToCam, float aspect, float padFrac) {
     if (instances.empty()) return false;
+    const size_t nPos = mesh.positions.size();
     const size_t step = std::max<size_t>(1, mesh.indices.size() / 3 / 256);
     for (const InstanceData* inst : instances) {
         if (!inst) continue;
         for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3 * step) {
-            const Vec3& a = mesh.positions[mesh.indices[t + 0]];
-            const Vec3& b = mesh.positions[mesh.indices[t + 1]];
-            const Vec3& c = mesh.positions[mesh.indices[t + 2]];
+            const uint32_t ia = mesh.indices[t + 0];
+            const uint32_t ib = mesh.indices[t + 1];
+            const uint32_t ic = mesh.indices[t + 2];
+            if (!indexInRange(ia, nPos) || !indexInRange(ib, nPos) || !indexInRange(ic, nPos)) continue;
+            const Vec3& a = mesh.positions[ia];
+            const Vec3& b = mesh.positions[ib];
+            const Vec3& c = mesh.positions[ic];
             const Vec3 mid = (a + b + c) * (1.0f / 3.0f);
             float nx, ny, nz;
             if (projectToNdc(mid, inst->xform, worldToCam, cam, aspect, nx, ny, nz) &&
@@ -141,8 +170,9 @@ const InstanceData* nearestInstance(const std::vector<const InstanceData*>& inst
 void subdivideLinearOnce(Mesh& mesh) {
     const size_t triCount = mesh.indices.size() / 3;
     if (triCount == 0) return;
-    const bool hasN = mesh.normals.size() == mesh.positions.size();
-    const bool hasUv = mesh.uvs.size() == mesh.positions.size();
+    const size_t nPos = mesh.positions.size();
+    const bool hasN = mesh.normals.size() == nPos;
+    const bool hasUv = mesh.uvs.size() == nPos;
 
     struct EdgeKey {
         uint32_t a, b;
@@ -179,6 +209,9 @@ void subdivideLinearOnce(Mesh& mesh) {
         const uint32_t i0 = mesh.indices[t * 3 + 0];
         const uint32_t i1 = mesh.indices[t * 3 + 1];
         const uint32_t i2 = mesh.indices[t * 3 + 2];
+        if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) {
+            throw std::runtime_error("tessellate: triangle index out of range");
+        }
         const uint32_t m01 = midpoint(i0, i1);
         const uint32_t m12 = midpoint(i1, i2);
         const uint32_t m20 = midpoint(i2, i0);
@@ -194,10 +227,15 @@ void subdivideLinearOnce(Mesh& mesh) {
 float maxScreenEdge(const Mesh& mesh, const Mat4& objToWorld, const Mat4& worldToCam,
                     const CameraData& cam, float aspect, int resX, int resY) {
     float m = 0.0f;
+    const size_t nPos = mesh.positions.size();
     for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
-        const Vec3& a = mesh.positions[mesh.indices[t + 0]];
-        const Vec3& b = mesh.positions[mesh.indices[t + 1]];
-        const Vec3& c = mesh.positions[mesh.indices[t + 2]];
+        const uint32_t ia = mesh.indices[t + 0];
+        const uint32_t ib = mesh.indices[t + 1];
+        const uint32_t ic = mesh.indices[t + 2];
+        if (!indexInRange(ia, nPos) || !indexInRange(ib, nPos) || !indexInRange(ic, nPos)) continue;
+        const Vec3& a = mesh.positions[ia];
+        const Vec3& b = mesh.positions[ib];
+        const Vec3& c = mesh.positions[ic];
         m = std::max(m, screenEdgePixels(a, b, objToWorld, worldToCam, cam, aspect, resX, resY));
         m = std::max(m, screenEdgePixels(b, c, objToWorld, worldToCam, cam, aspect, resX, resY));
         m = std::max(m, screenEdgePixels(c, a, objToWorld, worldToCam, cam, aspect, resX, resY));
@@ -208,6 +246,7 @@ float maxScreenEdge(const Mesh& mesh, const Mat4& objToWorld, const Mat4& worldT
 void refineLinear(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQuality,
                   const InstanceData* diceInst, const CameraData& cam, const Mat4& worldToCam,
                   float aspect, int resX, int resY) {
+    maxIter = clampSubdivLevelsForBudget(maxIter, mesh.triangleCount());
     if (maxIter <= 0) return;
     if (mesh.normals.size() != mesh.positions.size()) {
         mesh.normals.clear();
@@ -228,9 +267,6 @@ void refineLinear(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQual
             if (maxPx <= targetPx) break;
         }
         subdivideLinearOnce(mesh);
-        if (!screenAdaptive) {
-            // Uniform: run exactly maxIter passes (no early-out).
-        }
     }
 }
 
@@ -250,6 +286,8 @@ struct OsdVertex {
 
 bool refineCatclarkOpenSubdiv(Mesh& mesh, int levels) {
     if (levels <= 0 || mesh.indices.size() < 3) return false;
+    levels = clampSubdivLevelsForBudget(levels, mesh.triangleCount());
+    if (levels <= 0) return false;
     namespace Far = OpenSubdiv::Far;
     // Build triangle faces (3 verts each). OSD catclark on tris is supported but
     // callers should prefer linear for pure-tri cages.
@@ -319,7 +357,7 @@ bool refineCatclarkOpenSubdiv(Mesh& mesh, int levels) {
 void refineCatclark(Mesh& mesh, int levels, bool screenAdaptive, float dicingQuality,
                     const InstanceData* diceInst, const CameraData& cam, const Mat4& worldToCam,
                     float aspect, int resX, int resY) {
-    int useLevels = std::max(0, levels);
+    int useLevels = clampSubdivLevelsForBudget(levels, mesh.triangleCount());
     if (screenAdaptive && diceInst && useLevels > 0) {
         // Estimate levels from bbox screen size vs dicing quality.
         const float quality = std::max(1.0e-3f, dicingQuality);
@@ -382,7 +420,7 @@ MeshPtr tessellateOne(const Mesh& cage, const Material& mat, const Scene& scene,
         type = kSubdivLinear;  // whole-mesh tris → linear
     }
 
-    const int cap = std::max(0, work->subdivIterations);
+    const int cap = clampSubdivLevelsForBudget(work->subdivIterations, work->triangleCount());
     if (type == kSubdivNone || cap == 0) {
         // no subdiv
     } else if (type == kSubdivCatclark) {
@@ -395,12 +433,16 @@ MeshPtr tessellateOne(const Mesh& cage, const Material& mat, const Scene& scene,
     if (needDisp) {
         Material m = mat;
         m.subdivIterations = cap;
-        MeshPtr displaced = displaceMeshOnly(*work, m, scene);
-        displaced->boundsPadding = std::max(displaced->boundsPadding, cage.boundsPadding);
+        const int subdivType = cage.subdivType;
+        const int subdivIterations = cage.subdivIterations;
+        const float dicingQuality = cage.dicingQuality;
+        const float pad = std::max(work->boundsPadding, cage.boundsPadding);
+        MeshPtr displaced = displaceMeshOnly(std::move(*work), m, scene);
+        displaced->boundsPadding = pad;
         if (displaced->boundsPadding > 0.0f) displaced->computeBounds();
-        displaced->subdivType = cage.subdivType;
-        displaced->subdivIterations = cage.subdivIterations;
-        displaced->dicingQuality = cage.dicingQuality;
+        displaced->subdivType = subdivType;
+        displaced->subdivIterations = subdivIterations;
+        displaced->dicingQuality = dicingQuality;
         return displaced;
     }
     work->computeBounds();
@@ -430,15 +472,22 @@ void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera) {
         if (matIndex >= 0 && size_t(matIndex) < scene.materials.size())
             mat = scene.materials[size_t(matIndex)];
 
-        const bool need =
-            materialHasGeometricDisplacement(mat);
+        const bool need = materialHasGeometricDisplacement(mat);
         if (!need) continue;
 
-        MeshPtr tess = tessellateOne(*mesh, mat, scene, insts, dicingCamera);
-        // Propagate residual levels into the shared material for autobump weight.
-        if (matIndex >= 0 && size_t(matIndex) < scene.materials.size())
-            scene.materials[size_t(matIndex)].subdivIterations = mesh->subdivIterations;
-        mesh = std::move(tess);
+        try {
+            MeshPtr tess = tessellateOne(*mesh, mat, scene, insts, dicingCamera);
+            // Propagate residual levels into the shared material for autobump weight.
+            if (matIndex >= 0 && size_t(matIndex) < scene.materials.size())
+                scene.materials[size_t(matIndex)].subdivIterations = mesh->subdivIterations;
+            mesh = std::move(tess);
+        } catch (const std::bad_alloc&) {
+            logError("tessellate: out of memory on mesh '" + mesh->name +
+                     "' — leaving cage (lower Subdiv Iterations)");
+        } catch (const std::exception& ex) {
+            logError(std::string("tessellate: ") + ex.what() + " on mesh '" + mesh->name +
+                     "' — leaving cage");
+        }
     }
 
     logInfo("tessellate: render tessellation complete");

@@ -15,7 +15,10 @@ inline bool materialHasGeometricDisplacement(const Material& m) {
     return std::fabs(m.displacementHeight * m.displacementScale) > 1.0e-8f;
 }
 
-// Copy `src`, displace vertices, store Pref/Nref, pad bounds. No subdivision.
+// Displace vertices, store Pref/Nref, pad bounds. No subdivision.
+// Prefer the by-value overload when the caller can move a refined mesh in
+// (avoids an extra full copy before Render).
 MeshPtr displaceMeshOnly(const Mesh& src, const Material& mat, const Scene& scene);
+MeshPtr displaceMeshOnly(Mesh&& src, const Material& mat, const Scene& scene);
 
 }  // namespace sol

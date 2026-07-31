@@ -105,6 +105,12 @@ void RenderSession::updateSceneData() {
     framebuffer_.clear();
 }
 
+void RenderSession::releaseDevice() {
+    stop();
+    if (device_) device_->release();
+    sceneDirty_.store(true, std::memory_order_relaxed);
+}
+
 void RenderSession::waitForCompletion() {
     if (thread_.joinable()) thread_.join();
     rendering_.store(false, std::memory_order_relaxed);

@@ -2463,6 +2463,29 @@ void testArnoldDisplacement() {
                 cooked->materials[0].displacementTex);
 }
 
+void testTessellationTriangleBudget() {
+    std::printf("tessellation-triangle-budget\n");
+    // Dense cage + absurd iterations must clamp instead of OOM/crash.
+    MeshPtr sphere = makeSphereMesh(1.0f, 64, 32);
+    check(sphere && sphere->triangleCount() > 1000, "dense sphere cage");
+    const size_t cageTris = sphere->triangleCount();
+
+    Scene scene;
+    Material mat;
+    mat.displacementHeight = 0.05f;
+    mat.displacementScale = 1.0f;
+    mat.displacementZeroValue = 0.0f;
+    sphere->subdivType = kSubdivLinear;
+    sphere->subdivIterations = 12;  // would be cage * 4^12 without a budget
+    MeshPtr out = tessDisplaceForTest(sphere, mat, scene, 12);
+    check(out != nullptr, "budget tess produced a mesh");
+    check(out->triangleCount() > cageTris, "still densified some levels");
+    check(out->triangleCount() <= 4000000ull * 2, "stayed near triangle budget (not 4^12)");
+    // Unclamped 12 levels on this cage would exceed hundreds of millions of tris.
+    check(out->triangleCount() < cageTris * 100000ull, "far below unclamped 4^12 growth");
+    std::printf("  cage=%zu → tess=%zu (iterations requested 12)\n", cageTris, out->triangleCount());
+}
+
 void testMaterialXNoiseAndTriplanar() {
     std::printf("materialx-noise-triplanar\n");
     if (!materialXAvailable()) {
@@ -3727,6 +3750,7 @@ int main() {
     testMaterialXColorIntoFloatSlots();
     testMaterialXBumpAndNormalMap();
     testArnoldDisplacement();
+    testTessellationTriangleBudget();
     testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();
     testRockDisplacementExr();

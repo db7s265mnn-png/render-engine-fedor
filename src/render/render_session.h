@@ -33,6 +33,9 @@ public:
     // Picks up in-place scene edits (camera, film settings) and resets the
     // accumulation without rebuilding acceleration structures.
     void updateSceneData();
+    // Stop the render thread and free device accel/geometry memory so a heavy
+    // tessellation pass does not OOM alongside the previous BVH.
+    void releaseDevice();
 
     bool isRendering() const { return rendering_.load(std::memory_order_relaxed); }
     RenderProgress progress() const;

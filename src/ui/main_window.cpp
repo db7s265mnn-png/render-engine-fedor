@@ -23,6 +23,8 @@
 #include <QToolBar>
 #include <QVector3D>
 #include <algorithm>
+#include <exception>
+#include <new>
 
 #include "app/default_scene.h"
 #include "app/document.h"
@@ -878,6 +880,10 @@ void MainWindow::cookNow() {
     // Publish only after motion keys are fully installed.
     if (!renderRequested_) applyTessellationCache(*builtScene);
     else {
+        // Free previous BVH + tess cache before densifying — high Subdiv
+        // Iterations otherwise OOM next to the live device scene.
+        session_.releaseDevice();
+        tessCache_.clear();
         const CameraData diceCam = [&]() {
             CameraData cam = builtScene->camera;
             if (!stage_ || builtScene->settings.dicingCameraMode != kDicingCameraCustom) return cam;
@@ -891,8 +897,21 @@ void MainWindow::cookNow() {
             logWarning("dicing camera path not found — using render camera");
             return cam;
         }();
-        tessellateSceneForRender(*builtScene, diceCam);
-        storeTessellationCache(*builtScene);
+        try {
+            tessellateSceneForRender(*builtScene, diceCam);
+            storeTessellationCache(*builtScene);
+        } catch (const std::bad_alloc&) {
+            logError("Render tessellation ran out of memory — using undisplaced cages");
+            appMessageBox(this, QStringLiteral("Render"),
+                          QStringLiteral("Tessellation ran out of memory.\n"
+                                         "Lower Subdiv Iterations on the mesh and try again."),
+                          QMessageBox::Ok);
+        } catch (const std::exception& ex) {
+            logError(std::string("Render tessellation failed: ") + ex.what());
+            appMessageBox(this, QStringLiteral("Render"),
+                          QStringLiteral("Tessellation failed:\n%1").arg(ex.what()),
+                          QMessageBox::Ok);
+        }
     }
 
     scene_ = builtScene;
