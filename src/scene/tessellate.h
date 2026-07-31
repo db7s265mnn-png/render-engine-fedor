@@ -18,4 +18,8 @@ void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera);
 // displacement bindings). When this changes, the tess cache is stale.
 std::string tessellationFingerprint(const Scene& scene);
 
+// Quantized dicing-camera pose / lens. Screen Adaptive densify depends on this;
+// orbit/dolly without re-tess leaves coarse cages in close-up.
+std::string dicingCameraFingerprint(const CameraData& cam);
+
 }  // namespace sol

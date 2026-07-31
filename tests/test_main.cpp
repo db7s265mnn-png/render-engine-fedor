@@ -2494,6 +2494,56 @@ void testTessellationTriangleBudget() {
     std::printf("  cage=%zu → tess=%zu (6 levels, ceiling 200M)\n", cageTris, out->triangleCount());
 }
 
+void testFrustumCullCloseUpSubdiv() {
+    std::printf("frustum-cull-close-up-subdiv\n");
+    // Large ground, camera very close — old frustum tests only sampled verts that
+    // sit off-screen, skipped subdiv, and left a 2-tri cage. Must still densify.
+    auto ground = makeGridMesh(40.0f, 40.0f, 1, 1);
+    check(ground && ground->triangleCount() == 2, "ground cage 2 tris");
+    ground->subdivType = kSubdivLinear;
+    ground->subdivIterations = 4;
+    ground->dicingQuality = 1.0f;
+
+    Material mat;
+    mat.displacementHeight = 0.0f;
+    mat.displacementScale = 0.1f;  // also verify scale < 1 still displaces
+    mat.displacementZeroValue = 0.0f;
+    mat.displacementTex = -1;
+    mat.displacementProc = -1;
+    // Constant height via height*scale path in materialHasGeometricDisplacement —
+    // use a tiny constant height with scale 0.1.
+    mat.displacementHeight = 1.0f;  // 1 * 0.1 = 0.1 m offset
+
+    Scene closeScene;
+    closeScene.settings.frustumCull = 1;
+    closeScene.settings.frustumPadding = 10.0f;
+    closeScene.settings.screenAdaptive = 0;
+    closeScene.settings.resolutionX = 640;
+    closeScene.settings.resolutionY = 360;
+    closeScene.camera.focalLength = 50.0f;
+    closeScene.camera.sensorWidth = 36.0f;
+    // Very close above the plane looking at the center — verts at ±20 are off-frame.
+    closeScene.camera.cameraToWorld = lookAtMatrix(Vec3(0, 0.15f, 0.2f), Vec3(0, 0, 0), Vec3(0, 1, 0));
+    closeScene.cameraAuthored = true;
+
+    const size_t cageTris = ground->triangleCount();
+    MeshPtr out = tessDisplaceForTest(ground, mat, closeScene, 4);
+    check(out != nullptr, "close-up tess mesh");
+    check(out->triangleCount() > cageTris * 8, "close-up still subdivides under frustum cull");
+    check(out->triangleCount() >= cageTris * 16, "uniform 4 levels densified (or close)");
+
+    // Displacement scale 0.1 with height 1 / zero 0 → offset ~0.1 along +Y for a flat grid.
+    float maxY = -1.0e9f;
+    float minY = 1.0e9f;
+    for (const Vec3& p : out->positions) {
+        maxY = std::max(maxY, p.y);
+        minY = std::min(minY, p.y);
+    }
+    check(maxY > 0.05f, "displacement scale 0.1 still lifts the surface");
+    std::printf("  close-up tris %zu→%zu y[%.3f, %.3f] scale=0.1\n", cageTris, out->triangleCount(),
+                minY, maxY);
+}
+
 void testScreenAdaptiveTessellation() {
     std::printf("screen-adaptive-tessellation\n");
     // Spatial edge dicing: close camera densifies more than a far one.
@@ -3825,6 +3875,7 @@ int main() {
     testMaterialXBumpAndNormalMap();
     testArnoldDisplacement();
     testTessellationTriangleBudget();
+    testFrustumCullCloseUpSubdiv();
     testScreenAdaptiveTessellation();
     testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();

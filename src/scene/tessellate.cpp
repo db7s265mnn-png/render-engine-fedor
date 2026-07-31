@@ -98,13 +98,96 @@ float screenEdgePixels(Vec3 aObj, Vec3 bObj, const Mat4& objToWorld, const Mat4&
     return std::sqrt(dx * dx + dy * dy);
 }
 
+// Slab test: ray (origin + t*dir, t>=0) vs AABB. dir need not be unit.
+bool rayHitsAabb(Vec3 origin, Vec3 dir, const Bounds3& b) {
+    if (!b.valid()) return false;
+    float tMin = 0.0f;
+    float tMax = 1.0e30f;
+    for (int a = 0; a < 3; ++a) {
+        const float o = a == 0 ? origin.x : (a == 1 ? origin.y : origin.z);
+        const float d = a == 0 ? dir.x : (a == 1 ? dir.y : dir.z);
+        const float lo = a == 0 ? b.lo.x : (a == 1 ? b.lo.y : b.lo.z);
+        const float hi = a == 0 ? b.hi.x : (a == 1 ? b.hi.y : b.hi.z);
+        if (std::fabs(d) < 1.0e-12f) {
+            if (o < lo || o > hi) return false;
+            continue;
+        }
+        float t0 = (lo - o) / d;
+        float t1 = (hi - o) / d;
+        if (t0 > t1) std::swap(t0, t1);
+        tMin = std::max(tMin, t0);
+        tMax = std::min(tMax, t1);
+        if (tMin > tMax) return false;
+    }
+    return tMax >= 0.0f;
+}
+
+bool pointInTriangle2D(float px, float py, float ax, float ay, float bx, float by, float cx, float cy) {
+    const float v0x = cx - ax, v0y = cy - ay;
+    const float v1x = bx - ax, v1y = by - ay;
+    const float v2x = px - ax, v2y = py - ay;
+    const float dot00 = v0x * v0x + v0y * v0y;
+    const float dot01 = v0x * v1x + v0y * v1y;
+    const float dot02 = v0x * v2x + v0y * v2y;
+    const float dot11 = v1x * v1x + v1y * v1y;
+    const float dot12 = v1x * v2x + v1y * v2y;
+    const float den = dot00 * dot11 - dot01 * dot01;
+    if (std::fabs(den) < 1.0e-20f) return false;
+    const float inv = 1.0f / den;
+    const float u = (dot11 * dot02 - dot01 * dot12) * inv;
+    const float v = (dot00 * dot12 - dot01 * dot02) * inv;
+    return u >= -1.0e-4f && v >= -1.0e-4f && (u + v) <= 1.0f + 1.0e-4f;
+}
+
 bool meshVisibleInFrustum(const Mesh& mesh, const std::vector<const InstanceData*>& instances,
                           const CameraData& cam, const Mat4& worldToCam, float aspect, float padFrac) {
     if (instances.empty()) return false;
     const size_t nPos = mesh.positions.size();
-    const size_t step = std::max<size_t>(1, mesh.indices.size() / 3 / 256);
+    const float focal = std::max(1.0e-3f, cam.focalLength);
+    const float sensorW = std::max(1.0e-3f, cam.sensorWidth);
+    const float sensorH = sensorW / std::max(0.01f, aspect);
+    const float lim = 1.0f + padFrac;
+    const Vec3 eye = transformPoint(cam.cameraToWorld, Vec3(0.0f));
+
+    Bounds3 localBounds = mesh.bounds;
+    if (!localBounds.valid()) {
+        for (const Vec3& p : mesh.positions) localBounds.extend(p);
+    }
+
+    // Frustum sample directions in NDC (center, corners, edge mids) — catches the
+    // common close-up case where a huge triangle covers the screen but all cage
+    // vertices sit outside the frame (so point sampling alone returns false).
+    const float ndcSamples[][2] = {
+        {0.0f, 0.0f},   {lim, lim},    {-lim, lim},   {lim, -lim}, {-lim, -lim},
+        {lim, 0.0f},    {-lim, 0.0f},  {0.0f, lim},   {0.0f, -lim},
+    };
+
     for (const InstanceData* inst : instances) {
         if (!inst) continue;
+        const Bounds3 worldBounds = localBounds.valid()
+                                        ? transformBounds(inst->xform, localBounds)
+                                        : Bounds3{};
+
+        // Camera inside / very near the object → always dice (close-up on a plane).
+        if (worldBounds.valid()) {
+            const Vec3 pad(worldBounds.radius() * 0.05f + 1.0e-3f);
+            if (eye.x >= worldBounds.lo.x - pad.x && eye.x <= worldBounds.hi.x + pad.x &&
+                eye.y >= worldBounds.lo.y - pad.y && eye.y <= worldBounds.hi.y + pad.y &&
+                eye.z >= worldBounds.lo.z - pad.z && eye.z <= worldBounds.hi.z + pad.z)
+                return true;
+        }
+
+        if (worldBounds.valid()) {
+            for (const auto& s : ndcSamples) {
+                const Vec3 dirCam =
+                    normalize(Vec3(s[0] * 0.5f * sensorW, s[1] * 0.5f * sensorH, -focal));
+                const Vec3 dirWorld = transformVector(cam.cameraToWorld, dirCam);
+                if (rayHitsAabb(eye, dirWorld, worldBounds)) return true;
+            }
+        }
+
+        // Projected-triangle overlap: verts may be off-screen while the face covers NDC.
+        const size_t step = std::max<size_t>(1, mesh.indices.size() / 3 / 256);
         for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3 * step) {
             const uint32_t ia = mesh.indices[t + 0];
             const uint32_t ib = mesh.indices[t + 1];
@@ -113,38 +196,27 @@ bool meshVisibleInFrustum(const Mesh& mesh, const std::vector<const InstanceData
             const Vec3& a = mesh.positions[ia];
             const Vec3& b = mesh.positions[ib];
             const Vec3& c = mesh.positions[ic];
+
+            float nx[3], ny[3], nz[3];
+            const bool ok0 = projectToNdc(a, inst->xform, worldToCam, cam, aspect, nx[0], ny[0], nz[0]);
+            const bool ok1 = projectToNdc(b, inst->xform, worldToCam, cam, aspect, nx[1], ny[1], nz[1]);
+            const bool ok2 = projectToNdc(c, inst->xform, worldToCam, cam, aspect, nx[2], ny[2], nz[2]);
+            if (ok0 && pointInPaddedFrustum(nx[0], ny[0], padFrac)) return true;
+            if (ok1 && pointInPaddedFrustum(nx[1], ny[1], padFrac)) return true;
+            if (ok2 && pointInPaddedFrustum(nx[2], ny[2], padFrac)) return true;
+
+            if (ok0 && ok1 && ok2) {
+                for (const auto& s : ndcSamples) {
+                    if (pointInTriangle2D(s[0], s[1], nx[0], ny[0], nx[1], ny[1], nx[2], ny[2]))
+                        return true;
+                }
+            }
+
             const Vec3 mid = (a + b + c) * (1.0f / 3.0f);
-            float nx, ny, nz;
-            if (projectToNdc(mid, inst->xform, worldToCam, cam, aspect, nx, ny, nz) &&
-                pointInPaddedFrustum(nx, ny, padFrac))
+            float mx, my, mz;
+            if (projectToNdc(mid, inst->xform, worldToCam, cam, aspect, mx, my, mz) &&
+                pointInPaddedFrustum(mx, my, padFrac))
                 return true;
-            for (const Vec3& p : {a, b, c}) {
-                if (projectToNdc(p, inst->xform, worldToCam, cam, aspect, nx, ny, nz) &&
-                    pointInPaddedFrustum(nx, ny, padFrac))
-                    return true;
-            }
-        }
-    }
-    Bounds3 b = mesh.bounds;
-    if (!b.valid()) {
-        Bounds3 tmp;
-        for (const Vec3& p : mesh.positions) tmp.extend(p);
-        b = tmp;
-    }
-    if (b.valid()) {
-        const Vec3 corners[8] = {
-            {b.lo.x, b.lo.y, b.lo.z}, {b.hi.x, b.lo.y, b.lo.z}, {b.lo.x, b.hi.y, b.lo.z},
-            {b.hi.x, b.hi.y, b.lo.z}, {b.lo.x, b.lo.y, b.hi.z}, {b.hi.x, b.lo.y, b.hi.z},
-            {b.lo.x, b.hi.y, b.hi.z}, {b.hi.x, b.hi.y, b.hi.z},
-        };
-        for (const InstanceData* inst : instances) {
-            if (!inst) continue;
-            for (const Vec3& c : corners) {
-                float nx, ny, nz;
-                if (projectToNdc(c, inst->xform, worldToCam, cam, aspect, nx, ny, nz) &&
-                    pointInPaddedFrustum(nx, ny, padFrac))
-                    return true;
-            }
         }
     }
     return false;
@@ -648,6 +720,35 @@ void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera) {
     // nullptr in SceneView → triplanar samples displaced P (seam artifacts).
     scene.finalize();
     logInfo("tessellate: render tessellation complete");
+}
+
+std::string dicingCameraFingerprint(const CameraData& cam) {
+    // Quantize so tiny orbit noise does not thrash re-tess; still reacts to
+    // meaningful dolly / tumble that changes projected edge length.
+    const Vec3 eye = transformPoint(cam.cameraToWorld, Vec3(0.0f));
+    const Vec3 fwd(-cam.cameraToWorld.at(0, 2), -cam.cameraToWorld.at(1, 2), -cam.cameraToWorld.at(2, 2));
+    auto q = [](float v, float step) {
+        return int(std::lround(double(v) / double(step)));
+    };
+    // ~2cm / ~2° steps — coarse enough for IPR, fine enough for close-up densify.
+    std::string key;
+    key += "e=";
+    key += std::to_string(q(eye.x, 0.02f));
+    key += ",";
+    key += std::to_string(q(eye.y, 0.02f));
+    key += ",";
+    key += std::to_string(q(eye.z, 0.02f));
+    key += ";f=";
+    key += std::to_string(q(fwd.x, 0.03f));
+    key += ",";
+    key += std::to_string(q(fwd.y, 0.03f));
+    key += ",";
+    key += std::to_string(q(fwd.z, 0.03f));
+    key += ";fl=";
+    key += std::to_string(q(cam.focalLength, 0.5f));
+    key += ";sw=";
+    key += std::to_string(q(cam.sensorWidth, 0.5f));
+    return key;
 }
 
 std::string tessellationFingerprint(const Scene& scene) {

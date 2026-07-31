@@ -828,7 +828,9 @@ public:
         addParameter(Parameter::makeBool("frustumcull", "Frustum Cull", true)
                          .withGroup("Subdivision")
                          .withTooltip("Meshes outside the dicing-camera frustum (plus padding) "
-                                      "skip subdivision and only displace the cage."));
+                                      "skip subdivision and only displace the cage. "
+                                      "Close-ups on large faces still count as inside "
+                                      "(screen-covering triangles / camera rays)."));
         addParameter(Parameter::makeFloat("frustumpadding", "Frustum Padding (%)", 10.0, 0.0, 100.0, false)
                          .withGroup("Subdivision")
                          .withTooltip("Screen-space margin as a percent of resolution width/height."));
