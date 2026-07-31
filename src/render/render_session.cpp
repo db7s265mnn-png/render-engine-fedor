@@ -48,13 +48,17 @@ Image RenderSession::displayImage() const {
     ScenePtr scene = this->scene();
     RenderSettingsData settings = scene ? scene->settings : RenderSettingsData();
 
-    // After a clear / restart, keep the last finished preview until the first
-    // bootstrap pixels land — avoids a harsh black flash and tile holes.
+    // After a clear / restart / re-dice, keep the last finished preview until the
+    // first bootstrap pixels land — avoids a harsh black flash.
     if (!framebuffer_.hasAccumulatedData()) {
         std::lock_guard<std::mutex> lock(displayHoldMutex_);
-        if (!displayHold_.empty() && displayHold_.width() == framebuffer_.width() &&
-            displayHold_.height() == framebuffer_.height()) {
-            return displayHold_;
+        if (!displayHold_.empty()) {
+            // FB may be released (size 0) during tess, or already resized to match.
+            if (framebuffer_.width() <= 0 || framebuffer_.height() <= 0 ||
+                (displayHold_.width() == framebuffer_.width() &&
+                 displayHold_.height() == framebuffer_.height())) {
+                return displayHold_;
+            }
         }
         // Soft charcoal placeholder (less jarring than pure black).
         return Image(std::max(1, framebuffer_.width()), std::max(1, framebuffer_.height()),
@@ -124,6 +128,27 @@ void RenderSession::discardPreviousRender() {
         std::lock_guard<std::mutex> lock(displayHoldMutex_);
         displayHold_ = Image();
     }
+    {
+        std::lock_guard<std::mutex> lock(progressMutex_);
+        progress_ = RenderProgress();
+    }
+    sceneDirty_.store(true, std::memory_order_relaxed);
+}
+
+void RenderSession::releaseDeviceKeepDisplay() {
+    stop();
+    {
+        std::lock_guard<std::mutex> lock(sceneMutex_);
+        scene_.reset();
+    }
+    if (device_) {
+        device_->release();
+        device_.reset();
+    }
+    deviceBackend_ = -1;
+    deviceThreads_ = -1;
+    // Free accum RAM; keep displayHold_ so Stop→Start re-dice does not flash black.
+    framebuffer_.release();
     {
         std::lock_guard<std::mutex> lock(progressMutex_);
         progress_ = RenderProgress();

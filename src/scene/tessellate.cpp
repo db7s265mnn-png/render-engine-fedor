@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -40,11 +41,19 @@ size_t tessTriangleBudget(const RenderSettingsData& rs) {
 }
 
 // Leave 2 cores free for UI / OS while densifying (user request).
-int diceWorkerCount(int settingsThreads) {
+// Returns the desired *total* concurrent chunk runners (including the caller).
+int diceParallelism(int settingsThreads) {
     int hw = int(std::thread::hardware_concurrency());
     if (hw <= 0) hw = 4;
     const int want = settingsThreads > 0 ? settingsThreads : hw;
     return std::max(1, want - 2);
+}
+
+// ThreadPool(N) spawns N workers and also runs chunks on the calling thread
+// (N+1 runners). Size the ctor arg so total concurrency ≈ diceParallelism.
+int dicePoolThreadCount(int parallelism) {
+    if (parallelism <= 1) return 1;
+    return std::max(1, parallelism - 1);
 }
 
 struct TessRuntime {
@@ -54,19 +63,21 @@ struct TessRuntime {
     int meshCount = 1;
     std::string meshName;
 
-    void report(const char* phase, int pass, size_t tris) const {
+    int globalPct(float meshFrac) const {
+        const float n = float(std::max(1, meshCount));
+        const float g = (float(meshIndex) + std::clamp(meshFrac, 0.0f, 1.0f)) / n;
+        return int(std::clamp(g * 100.0f, 0.0f, 99.0f));
+    }
+
+    void reportPct(int pct, size_t tris) const {
         if (!progress) return;
-        char buf[256];
-        const double m = double(tris) / 1.0e6;
-        if (pass >= 0) {
-            std::snprintf(buf, sizeof(buf), "Dicing %d/%d  ·  %s pass %d  ·  %.2fM tris", meshIndex + 1,
-                          std::max(1, meshCount), phase, pass + 1, m);
-        } else {
-            std::snprintf(buf, sizeof(buf), "Dicing %d/%d  ·  %s  ·  %.2fM tris", meshIndex + 1,
-                          std::max(1, meshCount), phase, m);
-        }
+        char buf[192];
+        std::snprintf(buf, sizeof(buf), "Dicing %d%%  ·  %.2fM tris", std::clamp(pct, 0, 100),
+                      double(tris) / 1.0e6);
         progress(std::string(buf));
     }
+
+    void reportMeshFrac(float meshFrac, size_t tris) const { reportPct(globalPct(meshFrac), tris); }
 };
 
 int clampSubdivLevelsForBudget(int requested, size_t triCount, size_t budget) {
@@ -284,57 +295,6 @@ bool meshVisibleInFrustum(const Mesh& mesh, const std::vector<const InstanceData
     return false;
 }
 
-// Per-triangle frustum test (padded NDC). Cheap on purpose — called every
-// densify iteration for every face. No ray-AABB (that made Start feel hung once
-// the mesh grew). Close-up / huge face covering the frame is handled by NDC
-// AABB overlap when all three verts project (even if verts sit off-screen).
-bool triangleIntersectsPaddedFrustum(Vec3 a, Vec3 b, Vec3 c, const Mat4& objToWorld,
-                                     const Mat4& worldToCam, const CameraData& cam, float aspect,
-                                     float padFrac) {
-    const float lim = 1.0f + padFrac;
-    float nx[3], ny[3], nz[3];
-    bool ok[3];
-    int nOk = 0;
-    const Vec3 verts[3] = {a, b, c};
-    for (int i = 0; i < 3; ++i) {
-        ok[i] = projectToNdc(verts[i], objToWorld, worldToCam, cam, aspect, nx[i], ny[i], nz[i]);
-        if (ok[i]) {
-            ++nOk;
-            if (pointInPaddedFrustum(nx[i], ny[i], padFrac)) return true;
-        }
-    }
-
-    const Vec3 mid = (a + b + c) * (1.0f / 3.0f);
-    float mx, my, mz;
-    if (projectToNdc(mid, objToWorld, worldToCam, cam, aspect, mx, my, mz) &&
-        pointInPaddedFrustum(mx, my, padFrac))
-        return true;
-
-    if (nOk == 3) {
-        const float minx = std::min(nx[0], std::min(nx[1], nx[2]));
-        const float maxx = std::max(nx[0], std::max(nx[1], nx[2]));
-        const float miny = std::min(ny[0], std::min(ny[1], ny[2]));
-        const float maxy = std::max(ny[0], std::max(ny[1], ny[2]));
-        // Separating-axis reject vs padded NDC rect.
-        if (maxx < -lim || minx > lim || maxy < -lim || miny > lim) return false;
-        // AABB overlap: enough for dicing (may slightly over-mark edge faces).
-        // Also catch thin diagonal coverage via frustum-corner samples.
-        const float samples[][2] = {
-            {0.0f, 0.0f}, {lim, lim},  {-lim, lim}, {lim, -lim}, {-lim, -lim},
-            {lim, 0.0f},  {-lim, 0.0f}, {0.0f, lim}, {0.0f, -lim},
-        };
-        for (const auto& s : samples) {
-            if (pointInTriangle2D(s[0], s[1], nx[0], ny[0], nx[1], ny[1], nx[2], ny[2])) return true;
-        }
-        // Overlapping AABBs but no sample inside — still dice (conservative).
-        return true;
-    }
-
-    // Some verts behind the near plane: triangle may still cut the frame.
-    if (nOk > 0) return true;
-    return false;
-}
-
 const InstanceData* nearestInstance(const std::vector<const InstanceData*>& instances,
                                     const CameraData& cam) {
     if (instances.empty()) return nullptr;
@@ -549,11 +509,85 @@ void expandFaceMarksByEdgeRing(const Mesh& mesh, std::vector<uint8_t>& faceMark)
     faceMark.swap(expand);
 }
 
-void markFacesInFrustum(const Mesh& mesh, const Mat4& objToWorld, const Mat4& worldToCam,
-                        const CameraData& cam, float aspect, float padFrac,
-                        std::vector<uint8_t>& faceMark, size_t& markedCount, ThreadPool* pool) {
-    const size_t triCount = mesh.indices.size() / 3;
+struct VertProj {
+    float nx = 0.0f;
+    float ny = 0.0f;
+    uint8_t ok = 0;
+};
+
+void projectAllVertices(const Mesh& mesh, const Mat4& objToWorld, const Mat4& worldToCam,
+                        const CameraData& cam, float aspect, std::vector<VertProj>& out,
+                        ThreadPool* pool) {
     const size_t nPos = mesh.positions.size();
+    out.resize(nPos);
+    if (nPos == 0) return;
+    auto one = [&](size_t i) {
+        float nx, ny, nz;
+        if (projectToNdc(mesh.positions[i], objToWorld, worldToCam, cam, aspect, nx, ny, nz)) {
+            out[i].nx = nx;
+            out[i].ny = ny;
+            out[i].ok = 1;
+        } else {
+            out[i].ok = 0;
+        }
+    };
+    constexpr size_t kParallelMin = 256;
+    if (pool && pool->threadCount() > 1 && nPos > kParallelMin) {
+        pool->parallelFor(int(nPos), [&](int i, int) { one(size_t(i)); });
+    } else {
+        for (size_t i = 0; i < nPos; ++i) one(i);
+    }
+}
+
+float screenEdgePixelsFromProj(const VertProj& a, const VertProj& b, int resX, int resY) {
+    if (!a.ok && !b.ok) return 0.0f;
+    if (!a.ok || !b.ok) return 1.0e6f;
+    const float dx = (b.nx - a.nx) * 0.5f * float(resX);
+    const float dy = (b.ny - a.ny) * 0.5f * float(resY);
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+bool faceInPaddedFrustumProj(const VertProj& a, const VertProj& b, const VertProj& c, float padFrac) {
+    const float lim = 1.0f + padFrac;
+    int nOk = 0;
+    if (a.ok) {
+        ++nOk;
+        if (pointInPaddedFrustum(a.nx, a.ny, padFrac)) return true;
+    }
+    if (b.ok) {
+        ++nOk;
+        if (pointInPaddedFrustum(b.nx, b.ny, padFrac)) return true;
+    }
+    if (c.ok) {
+        ++nOk;
+        if (pointInPaddedFrustum(c.nx, c.ny, padFrac)) return true;
+    }
+    if (nOk == 3) {
+        const float mx = (a.nx + b.nx + c.nx) * (1.0f / 3.0f);
+        const float my = (a.ny + b.ny + c.ny) * (1.0f / 3.0f);
+        if (pointInPaddedFrustum(mx, my, padFrac)) return true;
+        const float minx = std::min(a.nx, std::min(b.nx, c.nx));
+        const float maxx = std::max(a.nx, std::max(b.nx, c.nx));
+        const float miny = std::min(a.ny, std::min(b.ny, c.ny));
+        const float maxy = std::max(a.ny, std::max(b.ny, c.ny));
+        if (maxx < -lim || minx > lim || maxy < -lim || miny > lim) return false;
+        const float samples[][2] = {
+            {0.0f, 0.0f}, {lim, lim},  {-lim, lim}, {lim, -lim}, {-lim, -lim},
+            {lim, 0.0f},  {-lim, 0.0f}, {0.0f, lim}, {0.0f, -lim},
+        };
+        for (const auto& s : samples) {
+            if (pointInTriangle2D(s[0], s[1], a.nx, a.ny, b.nx, b.ny, c.nx, c.ny)) return true;
+        }
+        return true;
+    }
+    return nOk > 0;
+}
+
+void markFacesInFrustumProjected(const Mesh& mesh, const std::vector<VertProj>& proj, float padFrac,
+                                 std::vector<uint8_t>& faceMark, size_t& markedCount,
+                                 ThreadPool* pool) {
+    const size_t triCount = mesh.indices.size() / 3;
+    const size_t nPos = proj.size();
     faceMark.assign(triCount, 0);
     markedCount = 0;
     if (triCount == 0) return;
@@ -563,12 +597,11 @@ void markFacesInFrustum(const Mesh& mesh, const Mat4& objToWorld, const Mat4& wo
         const uint32_t i1 = mesh.indices[t * 3 + 1];
         const uint32_t i2 = mesh.indices[t * 3 + 2];
         if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) return;
-        if (triangleIntersectsPaddedFrustum(mesh.positions[i0], mesh.positions[i1], mesh.positions[i2],
-                                            objToWorld, worldToCam, cam, aspect, padFrac))
-            faceMark[t] = 1;
+        if (faceInPaddedFrustumProj(proj[i0], proj[i1], proj[i2], padFrac)) faceMark[t] = 1;
     };
 
-    if (pool && pool->threadCount() > 1 && triCount > 512) {
+    constexpr size_t kParallelMin = 256;
+    if (pool && pool->threadCount() > 1 && triCount > kParallelMin) {
         pool->parallelFor(int(triCount), [&](int t, int) { markOne(size_t(t)); });
     } else {
         for (size_t t = 0; t < triCount; ++t) markOne(t);
@@ -576,17 +609,17 @@ void markFacesInFrustum(const Mesh& mesh, const Mat4& objToWorld, const Mat4& wo
     for (uint8_t m : faceMark) markedCount += m ? 1u : 0u;
 }
 
-void collectLongEdgesParallel(const Mesh& mesh, const std::vector<uint8_t>& faceMark, float targetPx,
-                              const Mat4& objToWorld, const Mat4& worldToCam, const CameraData& cam,
-                              float aspect, int resX, int resY, ThreadPool* pool,
-                              std::unordered_map<EdgeKey, char, EdgeHash>& splitEdge) {
+float collectLongEdgesProjected(const Mesh& mesh, const std::vector<uint8_t>& faceMark,
+                                const std::vector<VertProj>& proj, float targetPx, int resX, int resY,
+                                ThreadPool* pool, std::unordered_map<EdgeKey, char, EdgeHash>& splitEdge) {
     const size_t triCount = mesh.indices.size() / 3;
-    const size_t nPos = mesh.positions.size();
+    const size_t nPos = proj.size();
     splitEdge.clear();
 
     const int workers = pool ? std::max(1, pool->threadCount()) : 1;
     std::vector<std::vector<EdgeKey>> local(size_t(workers + 1));
-    for (auto& v : local) v.reserve(triCount / size_t(std::max(1, workers)) + 16);
+    std::vector<float> localMax(size_t(workers + 1), 0.0f);
+    for (auto& v : local) v.reserve(triCount / size_t(std::max(1, workers)) * 2 + 16);
 
     auto considerFace = [&](size_t t, int tid) {
         if (!faceMark[t]) return;
@@ -594,17 +627,60 @@ void collectLongEdgesParallel(const Mesh& mesh, const std::vector<uint8_t>& face
         const uint32_t i1 = mesh.indices[t * 3 + 1];
         const uint32_t i2 = mesh.indices[t * 3 + 2];
         if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) return;
+        const int slot = std::clamp(tid, 0, workers);
         auto pushIfLong = [&](uint32_t a, uint32_t b) {
-            const float px = screenEdgePixels(mesh.positions[a], mesh.positions[b], objToWorld, worldToCam,
-                                             cam, aspect, resX, resY);
-            if (px > targetPx) local[size_t(std::clamp(tid, 0, workers))].push_back(makeEdgeKey(a, b));
+            const float px = screenEdgePixelsFromProj(proj[a], proj[b], resX, resY);
+            localMax[size_t(slot)] = std::max(localMax[size_t(slot)], px);
+            if (px > targetPx) local[size_t(slot)].push_back(makeEdgeKey(a, b));
         };
         pushIfLong(i0, i1);
         pushIfLong(i1, i2);
         pushIfLong(i2, i0);
     };
 
-    if (pool && pool->threadCount() > 1 && triCount > 512) {
+    constexpr size_t kParallelMin = 256;
+    if (pool && pool->threadCount() > 1 && triCount > kParallelMin) {
+        pool->parallelFor(int(triCount), [&](int t, int tid) { considerFace(size_t(t), tid); });
+    } else {
+        for (size_t t = 0; t < triCount; ++t) considerFace(t, 0);
+    }
+
+    size_t total = 0;
+    float maxPx = 0.0f;
+    for (size_t i = 0; i < local.size(); ++i) {
+        total += local[i].size();
+        maxPx = std::max(maxPx, localMax[i]);
+    }
+    splitEdge.reserve(total / 2 + 8);
+    for (const auto& v : local)
+        for (const EdgeKey& k : v) splitEdge[k] = 1;
+    return maxPx;
+}
+
+void collectAllMarkedEdges(const Mesh& mesh, const std::vector<uint8_t>& faceMark, ThreadPool* pool,
+                           std::unordered_map<EdgeKey, char, EdgeHash>& splitEdge) {
+    const size_t triCount = mesh.indices.size() / 3;
+    const size_t nPos = mesh.positions.size();
+    splitEdge.clear();
+
+    const int workers = pool ? std::max(1, pool->threadCount()) : 1;
+    std::vector<std::vector<EdgeKey>> local(size_t(workers + 1));
+    for (auto& v : local) v.reserve(triCount / size_t(std::max(1, workers)) * 2 + 16);
+
+    auto considerFace = [&](size_t t, int tid) {
+        if (!faceMark[t]) return;
+        const uint32_t i0 = mesh.indices[t * 3 + 0];
+        const uint32_t i1 = mesh.indices[t * 3 + 1];
+        const uint32_t i2 = mesh.indices[t * 3 + 2];
+        if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) return;
+        auto& bucket = local[size_t(std::clamp(tid, 0, workers))];
+        bucket.push_back(makeEdgeKey(i0, i1));
+        bucket.push_back(makeEdgeKey(i1, i2));
+        bucket.push_back(makeEdgeKey(i2, i0));
+    };
+
+    constexpr size_t kParallelMin = 256;
+    if (pool && pool->threadCount() > 1 && triCount > kParallelMin) {
         pool->parallelFor(int(triCount), [&](int t, int tid) { considerFace(size_t(t), tid); });
     } else {
         for (size_t t = 0; t < triCount; ++t) considerFace(t, 0);
@@ -617,22 +693,13 @@ void collectLongEdgesParallel(const Mesh& mesh, const std::vector<uint8_t>& face
         for (const EdgeKey& k : v) splitEdge[k] = 1;
 }
 
-void collectAllMarkedEdges(const Mesh& mesh, const std::vector<uint8_t>& faceMark,
-                           std::unordered_map<EdgeKey, char, EdgeHash>& splitEdge) {
-    const size_t triCount = mesh.indices.size() / 3;
-    const size_t nPos = mesh.positions.size();
-    splitEdge.clear();
-    splitEdge.reserve(triCount * 2);
-    for (size_t t = 0; t < triCount; ++t) {
-        if (!faceMark[t]) continue;
-        const uint32_t i0 = mesh.indices[t * 3 + 0];
-        const uint32_t i1 = mesh.indices[t * 3 + 1];
-        const uint32_t i2 = mesh.indices[t * 3 + 2];
-        if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
-        splitEdge[makeEdgeKey(i0, i1)] = 1;
-        splitEdge[makeEdgeKey(i1, i2)] = 1;
-        splitEdge[makeEdgeKey(i2, i0)] = 1;
-    }
+float adaptiveMeshFrac(float startMaxPx, float curMaxPx, float targetPx) {
+    if (!(startMaxPx > targetPx * 1.01f)) return 1.0f;
+    const float cur = std::max(curMaxPx, targetPx);
+    const float num = std::log2(std::max(1.0e-3f, cur / targetPx));
+    const float den = std::log2(std::max(1.0e-3f, startMaxPx / targetPx));
+    if (!(den > 1.0e-6f)) return 1.0f;
+    return 1.0f - std::clamp(num / den, 0.0f, 1.0f);
 }
 
 // Iterative frustum-local dicing: each pass only splits edges of faces that
@@ -651,6 +718,7 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, float dicingQuality, size
     (void)resY;
     constexpr int kTailIters = 2;
     ThreadPool* pool = rt ? rt->pool : nullptr;
+    std::vector<VertProj> proj;
 
     for (int iter = 0; iter < maxIter; ++iter) {
         if (mesh.triangleCount() * 4 > polyBudget) {
@@ -659,11 +727,12 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, float dicingQuality, size
                        " iteration(s)");
             break;
         }
-        if (rt) rt->report("uniform", iter, mesh.triangleCount());
+        if (rt) rt->reportMeshFrac(float(iter) / float(std::max(1, maxIter)), mesh.triangleCount());
 
+        projectAllVertices(mesh, objToWorld, worldToCam, cam, aspect, proj, pool);
         std::vector<uint8_t> faceMark;
         size_t markedCount = 0;
-        markFacesInFrustum(mesh, objToWorld, worldToCam, cam, aspect, padFrac, faceMark, markedCount, pool);
+        markFacesInFrustumProjected(mesh, proj, padFrac, faceMark, markedCount, pool);
         if (markedCount == 0) break;
 
         if (iter < kTailIters && markedCount < faceMark.size()) expandFaceMarksByEdgeRing(mesh, faceMark);
@@ -676,7 +745,9 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, float dicingQuality, size
                 if (allowed <= 0) break;
                 for (int u = 0; u < allowed; ++u) {
                     if (mesh.triangleCount() * 4 > polyBudget) break;
-                    if (rt) rt->report("uniform", iter + u, mesh.triangleCount());
+                    if (rt)
+                        rt->reportMeshFrac(float(iter + u + 1) / float(std::max(1, maxIter)),
+                                           mesh.triangleCount());
                     subdivideLinearOnce(mesh);
                 }
                 break;
@@ -686,9 +757,10 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, float dicingQuality, size
         }
 
         std::unordered_map<EdgeKey, char, EdgeHash> splitEdge;
-        collectAllMarkedEdges(mesh, faceMark, splitEdge);
+        collectAllMarkedEdges(mesh, faceMark, pool, splitEdge);
         if (!subdivideMarkedEdgesOnce(mesh, splitEdge)) break;
     }
+    if (rt) rt->reportMeshFrac(1.0f, mesh.triangleCount());
 }
 
 // Karma / Mantra / RenderMan raster dicing with parallel face/edge marking.
@@ -704,6 +776,8 @@ void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget
     constexpr int kSafetyPasses = 48;
     constexpr int kTailIters = 2;
     ThreadPool* pool = rt ? rt->pool : nullptr;
+    std::vector<VertProj> proj;
+    float startMaxPx = -1.0f;
 
     for (int pass = 0; pass < kSafetyPasses; ++pass) {
         if (mesh.triangleCount() >= polyBudget) {
@@ -711,20 +785,23 @@ void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget
                        std::to_string(polyBudget) + " tris)");
             break;
         }
-        if (rt) rt->report("adaptive", pass, mesh.triangleCount());
 
+        projectAllVertices(mesh, objToWorld, worldToCam, cam, aspect, proj, pool);
         std::vector<uint8_t> faceMark;
         size_t markedCount = 0;
-        markFacesInFrustum(mesh, objToWorld, worldToCam, cam, aspect, padFrac, faceMark, markedCount, pool);
+        markFacesInFrustumProjected(mesh, proj, padFrac, faceMark, markedCount, pool);
         if (markedCount == 0) break;
         if (pass < kTailIters && markedCount < faceMark.size()) expandFaceMarksByEdgeRing(mesh, faceMark);
 
         std::unordered_map<EdgeKey, char, EdgeHash> splitEdge;
-        collectLongEdgesParallel(mesh, faceMark, targetPx, objToWorld, worldToCam, cam, aspect, resX, resY,
-                                 pool, splitEdge);
+        const float maxPx =
+            collectLongEdgesProjected(mesh, faceMark, proj, targetPx, resX, resY, pool, splitEdge);
+        if (startMaxPx < 0.0f) startMaxPx = std::max(maxPx, targetPx);
+        if (rt) rt->reportMeshFrac(adaptiveMeshFrac(startMaxPx, maxPx, targetPx), mesh.triangleCount());
         if (splitEdge.empty()) break;
         if (!subdivideMarkedEdgesOnce(mesh, splitEdge)) break;
     }
+    if (rt) rt->reportMeshFrac(1.0f, mesh.triangleCount());
 }
 
 void refineLinear(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQuality, size_t polyBudget,
@@ -900,7 +977,7 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
         inFrustum = meshVisibleInFrustum(cage, instances, cam, w2c, aspect, padFrac);
     }
     if (useFrustumGate && !inFrustum) {
-        if (rt) rt->report("cull", -1, cage.triangleCount());
+        if (rt) rt->reportMeshFrac(1.0f, cage.triangleCount());
         return displaceMeshOnly(std::move(cage), mat, scene);
     }
 
@@ -937,13 +1014,15 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
             if (uniformCap == 0) {
                 // cage already past budget
             } else if (type == kSubdivCatclark) {
-                if (rt) rt->report("catclark", -1, work->triangleCount());
+                if (rt) rt->reportMeshFrac(0.0f, work->triangleCount());
                 refineCatclark(*work, uniformCap, work->dicingQuality, polyBudget, diceInst, cam, w2c,
                                aspect, resX, resY);
+                if (rt) rt->reportMeshFrac(1.0f, work->triangleCount());
             } else {
-                if (rt) rt->report("uniform", -1, work->triangleCount());
+                if (rt) rt->reportMeshFrac(0.0f, work->triangleCount());
                 refineLinear(*work, uniformCap, false, work->dicingQuality, polyBudget, diceInst, cam, w2c,
                              aspect, resX, resY);
+                if (rt) rt->reportMeshFrac(1.0f, work->triangleCount());
             }
         }
     } catch (const std::bad_alloc&) {
@@ -1003,15 +1082,19 @@ void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera,
 
     // Leave 2 cores free for UI/OS. Destroy the pool before Embree starts so
     // render workers are not oversubscribed against leftover dice threads.
-    const int workers = diceWorkerCount(scene.settings.threads);
+    // ThreadPool(N) = N workers + caller → size ctor so total ≈ parallelism.
+    const int parallelism = diceParallelism(scene.settings.threads);
+    const int poolThreads = dicePoolThreadCount(parallelism);
     std::unique_ptr<ThreadPool> dicePool;
-    if (workers > 1) dicePool = std::make_unique<ThreadPool>(workers);
+    if (poolThreads > 1) dicePool = std::make_unique<ThreadPool>(poolThreads);
     TessRuntime rt;
     rt.pool = dicePool.get();
     rt.progress = progress;
     rt.meshCount = int(diceMeshes.size());
-    logInfo("tessellate: dicing with " + std::to_string(workers) + " worker thread(s) (2 cores reserved)");
+    logInfo("tessellate: dicing with " + std::to_string(parallelism) +
+            " concurrent thread(s) (2 cores reserved)");
 
+    const auto diceStart = std::chrono::steady_clock::now();
     for (int di = 0; di < int(diceMeshes.size()); ++di) {
         const size_t mi = diceMeshes[size_t(di)];
         MeshPtr& mesh = scene.meshes[mi];
@@ -1045,6 +1128,12 @@ void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera,
     }
 
     dicePool.reset();  // join dice workers before Embree/OptiX thread pool starts
+    {
+        const double sec =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - diceStart).count();
+        logInfo("tessellate: densify wall time " + std::to_string(sec) + " s");
+        if (progress) progress("Dicing 100%");
+    }
 
     // Critical: finalize() rebuilt meshViews_ from pre-displace cages. After we
     // replace meshes, those views dangle (UAF crash) and restPositions stay

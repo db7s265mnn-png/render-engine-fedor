@@ -37,6 +37,9 @@ public:
     // cooked scene, accumulation, and display hold. Call before a heavy
     // tessellation so peak RAM is not previous_render + new_tess.
     void discardPreviousRender();
+    // Free device / cooked scene / accum buffers but keep `displayHold_` so the
+    // viewport can keep showing the last beauty while re-dicing (Stop→Start).
+    void releaseDeviceKeepDisplay();
 
     bool isRendering() const { return rendering_.load(std::memory_order_relaxed); }
     RenderProgress progress() const;

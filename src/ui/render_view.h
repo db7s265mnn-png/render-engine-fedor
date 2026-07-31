@@ -46,7 +46,7 @@ public:
     void showPlaceholder(bool show);
     bool isShowingPlaceholder() const { return showPlaceholder_; }
     // Crossfade placeholder → beauty over `durationMs` (samples may accumulate under).
-    void beginPlaceholderFade(int durationMs = 3000);
+    void beginPlaceholderFade(int durationMs = 1000);
     bool placeholderFadeActive() const { return fadeActive_; }
     void setStatusText(const QString& text) {
         statusText_ = text;
@@ -163,7 +163,7 @@ private:
     bool showPlaceholder_ = false;
     bool fadeActive_ = false;
     qint64 fadeStartMs_ = 0;
-    int fadeDurationMs_ = 3000;
+    int fadeDurationMs_ = 1000;
     QString statusText_;
     QString statusTextRight_;
     ViewCamera camera_;

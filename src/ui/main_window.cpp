@@ -924,10 +924,9 @@ void MainWindow::cookNow() {
 
     if (!needTess) applyTessellationCache(*builtScene);
     else {
-        // Drop *everything* from the previous render before densifying: device
-        // BVH, session scene, framebuffer, display hold, and last tess cache /
-        // UI scene (often the same heavy meshes).
-        session_.discardPreviousRender();
+        // Free BVH / cooked scene / accum RAM before densify, but keep the last
+        // beauty in displayHold_ + RenderView so Stop→Start does not flash black.
+        session_.releaseDeviceKeepDisplay();
         tessCache_.clear();
         tessCacheFingerprint_.clear();
         scene_.reset();
@@ -1027,14 +1026,15 @@ void MainWindow::onStartRender() {
     if (renderView_) {
         renderView_->setNavigationEnabled(true);
         if (fromPlaceholder) {
-            renderView_->beginPlaceholderFade(3000);
+            renderView_->beginPlaceholderFade(1000);
         } else {
+            // Stop→Start: keep last beauty in the view; do not clear image_.
             renderView_->showPlaceholder(false);
         }
     }
-    // Tear down the previous render immediately on the button press so cook /
-    // tessellation do not compete with a live BVH + accumulated framebuffer.
-    session_.discardPreviousRender();
+    // Free BVH / scene / accum so cook/tess has RAM headroom, but keep the
+    // last display hold so the viewport does not flash black during re-dice.
+    session_.releaseDeviceKeepDisplay();
     tessCache_.clear();
     tessCacheFingerprint_.clear();
     scene_.reset();
