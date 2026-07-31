@@ -354,9 +354,10 @@ MeshPtr tessellateOne(const Mesh& cage, const Material& mat, const Scene& scene,
     const float aspect = float(resX) / float(resY);
 
     const bool needDisp = materialHasGeometricDisplacement(mat);
-    const bool needSubdiv = cage.subdivType != kSubdivNone && cage.subdivIterations > 0;
-
-    if (!needDisp && !needSubdiv) {
+    // Tessellation exists to feed displacement (and Pref). Without a displace
+    // shader, leave the authored cage alone — default catclark/3 must not explode
+    // every primitive in the default scene.
+    if (!needDisp) {
         return std::make_shared<Mesh>(cage);
     }
 
@@ -430,8 +431,7 @@ void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera) {
             mat = scene.materials[size_t(matIndex)];
 
         const bool need =
-            materialHasGeometricDisplacement(mat) ||
-            (mesh->subdivType != kSubdivNone && mesh->subdivIterations > 0);
+            materialHasGeometricDisplacement(mat);
         if (!need) continue;
 
         MeshPtr tess = tessellateOne(*mesh, mat, scene, insts, dicingCamera);

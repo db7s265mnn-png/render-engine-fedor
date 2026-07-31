@@ -191,9 +191,7 @@ ScenePtr Stage::toScene() const {
                     renderMesh->dicingQuality = prim.dicingQuality;
                     renderMesh->boundsPadding = prim.boundsPadding;
                 }
-                if (materialHasGeometricDisplacement(material) ||
-                    (renderMesh && renderMesh->subdivType != kSubdivNone &&
-                     renderMesh->subdivIterations > 0)) {
+                if (materialHasGeometricDisplacement(material)) {
                     // Unique mesh entry so Render can tessellate without sharing cages.
                     auto cageCopy = std::make_shared<Mesh>(*renderMesh);
                     cageCopy->subdivType = prim.subdivType;
