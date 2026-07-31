@@ -880,10 +880,12 @@ void MainWindow::cookNow() {
     // Publish only after motion keys are fully installed.
     if (!renderRequested_) applyTessellationCache(*builtScene);
     else {
-        // Free previous BVH + tess cache before densifying — high Subdiv
-        // Iterations otherwise OOM next to the live device scene.
-        session_.releaseDevice();
+        // Drop *everything* from the previous render before densifying: device
+        // BVH, session scene, framebuffer, display hold, and last tess cache /
+        // UI scene (often the same heavy meshes).
+        session_.discardPreviousRender();
         tessCache_.clear();
+        scene_.reset();
         const CameraData diceCam = [&]() {
             CameraData cam = builtScene->camera;
             if (!stage_ || builtScene->settings.dicingCameraMode != kDicingCameraCustom) return cam;
@@ -971,6 +973,11 @@ void MainWindow::restartRender() {
 }
 
 void MainWindow::onStartRender() {
+    // Tear down the previous render immediately on the button press so cook /
+    // tessellation do not compete with a live BVH + accumulated framebuffer.
+    session_.discardPreviousRender();
+    tessCache_.clear();
+    scene_.reset();
     renderRequested_ = true;
     cookNow();
 }

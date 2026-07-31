@@ -501,8 +501,14 @@ private:
             if (s) rtcReleaseScene(s);
         }
         meshScenes_.clear();
+        meshScenes_.shrink_to_fit();
         scene_.reset();
         photonMap_.clear();
+#if SOLSTICE_HAVE_OPENPGL
+        // Drop guiding field/sample storage with the scene — next buildScene resets.
+        if (pathGuiding_) pathGuiding_.reset();
+        pathGuiding_ = std::make_unique<PathGuiding>();
+#endif
     }
 
     RTCDevice device_ = nullptr;

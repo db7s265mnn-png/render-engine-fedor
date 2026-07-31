@@ -240,10 +240,12 @@ void displaceVertices(Mesh& mesh, const Material& mat, const SceneView& scene) {
     }
     const bool hasUvs = mesh.uvs.size() == mesh.positions.size();
     const size_t n = mesh.positions.size();
-    // Keep pre-displace normals to reorient after recompute — winding often
-    // disagrees with authored / interpolated outward normals (e.g. grid +Y vs
-    // cross-product -Y), which makes the whole surface shade nearly black.
-    const std::vector<Vec3> orientRef = mesh.normals;
+    // Prefer Pref/Nref already stored on the mesh — avoids a third normals buffer
+    // during displace (restNormals + normals + orientRef copy).
+    const bool useRestN = mesh.restNormals.size() == n;
+    std::vector<Vec3> orientFallback;
+    const std::vector<Vec3>& orientRef = useRestN ? mesh.restNormals : orientFallback;
+    if (!useRestN) orientFallback = mesh.normals;
 
     // Weld by position so sphere poles / UV seams share one offset. Otherwise
     // different UVs on coincident verts explode into floating shards.
@@ -287,11 +289,16 @@ void displaceVertices(Mesh& mesh, const Material& mat, const SceneView& scene) {
         for (uint32_t id : ids) offsets[id] = off;
     }
 
+    // Drop the weld map before touching positions — peak RAM matters on dense cages.
+    groups = {};
+
     for (size_t i = 0; i < n; ++i) mesh.positions[i] += offsets[i];
     for (std::vector<Vec3>& keyPositions : mesh.motionPositions) {
         if (keyPositions.size() != n) continue;
         for (size_t i = 0; i < n; ++i) keyPositions[i] += offsets[i];
     }
+    offsets.clear();
+    offsets.shrink_to_fit();
 
     // Rebuild smooth normals on the displaced surface, then flip any that ended
     // up on the opposite hemisphere from the pre-displace reference.

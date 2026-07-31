@@ -105,9 +105,27 @@ void RenderSession::updateSceneData() {
     framebuffer_.clear();
 }
 
-void RenderSession::releaseDevice() {
+void RenderSession::discardPreviousRender() {
     stop();
-    if (device_) device_->release();
+    {
+        std::lock_guard<std::mutex> lock(sceneMutex_);
+        scene_.reset();
+    }
+    if (device_) {
+        device_->release();
+        device_.reset();
+    }
+    deviceBackend_ = -1;
+    deviceThreads_ = -1;
+    framebuffer_.release();
+    {
+        std::lock_guard<std::mutex> lock(displayHoldMutex_);
+        displayHold_ = Image();
+    }
+    {
+        std::lock_guard<std::mutex> lock(progressMutex_);
+        progress_ = RenderProgress();
+    }
     sceneDirty_.store(true, std::memory_order_relaxed);
 }
 

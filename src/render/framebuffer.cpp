@@ -28,6 +28,18 @@ void Framebuffer::clear() {
     hasData_.store(false, std::memory_order_relaxed);
 }
 
+void Framebuffer::release() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    width_ = 0;
+    height_ = 0;
+    accum_.clear();
+    accum_.shrink_to_fit();
+    splat_.reset();
+    splatPaths_.store(0, std::memory_order_relaxed);
+    samples_.store(0, std::memory_order_relaxed);
+    hasData_.store(false, std::memory_order_relaxed);
+}
+
 Image Framebuffer::resolveLinear() const {
     std::lock_guard<std::mutex> lock(mutex_);
     Image image(width_, height_);

@@ -22,9 +22,9 @@
 namespace sol {
 namespace {
 
-// Soft cap before Render/BVH — 64M was effectively no cap and OOMed on
-// Subdiv Iterations ≥6 for dense cages. 4M tris is still a heavy displace mesh.
-constexpr size_t kMaxTessTriangles = 4000000ull;
+// Safety ceiling only — prefer freeing previous-render memory over clamping.
+// 200M tris ≈ heavy displace mesh; real limiter is host RAM / BVH build.
+constexpr size_t kMaxTessTriangles = 200000000ull;
 
 int clampSubdivLevelsForBudget(int requested, size_t triCount) {
     const int want = std::max(0, requested);
@@ -382,7 +382,7 @@ void refineCatclark(Mesh& mesh, int levels, bool screenAdaptive, float dicingQua
     refineLinear(mesh, useLevels, false, dicingQuality, diceInst, cam, worldToCam, aspect, resX, resY);
 }
 
-MeshPtr tessellateOne(const Mesh& cage, const Material& mat, const Scene& scene,
+MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
                       const std::vector<const InstanceData*>& instances, const CameraData& cam) {
     const RenderSettingsData& rs = scene.settings;
     const Mat4 w2c = worldToCamera(cam);
@@ -396,7 +396,7 @@ MeshPtr tessellateOne(const Mesh& cage, const Material& mat, const Scene& scene,
     // shader, leave the authored cage alone — default catclark/3 must not explode
     // every primitive in the default scene.
     if (!needDisp) {
-        return std::make_shared<Mesh>(cage);
+        return std::make_shared<Mesh>(std::move(cage));
     }
 
     bool inFrustum = true;
@@ -406,12 +406,16 @@ MeshPtr tessellateOne(const Mesh& cage, const Material& mat, const Scene& scene,
 
     // Outside frustum: displace cage only (no subdiv), even if subdiv authored.
     if (rs.frustumCull && !inFrustum) {
-        if (!needDisp) return std::make_shared<Mesh>(cage);
-        MeshPtr out = displaceMeshOnly(cage, mat, scene);
-        return out;
+        return displaceMeshOnly(std::move(cage), mat, scene);
     }
 
-    auto work = std::make_shared<Mesh>(cage);
+    const int authoredSubdivType = cage.subdivType;
+    const int authoredSubdivIterations = cage.subdivIterations;
+    const float authoredDicingQuality = cage.dicingQuality;
+    const float authoredPad = cage.boundsPadding;
+
+    // Steal cage storage — no parallel cage+work copy while refining.
+    auto work = std::make_shared<Mesh>(std::move(cage));
     work->motionPositionsPacked_.clear();
     const InstanceData* diceInst = nearestInstance(instances, cam);
     const bool adaptive = rs.screenAdaptive != 0;
@@ -421,28 +425,29 @@ MeshPtr tessellateOne(const Mesh& cage, const Material& mat, const Scene& scene,
     }
 
     const int cap = clampSubdivLevelsForBudget(work->subdivIterations, work->triangleCount());
-    if (type == kSubdivNone || cap == 0) {
-        // no subdiv
-    } else if (type == kSubdivCatclark) {
-        refineCatclark(*work, cap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect, resX, resY);
-    } else {
-        refineLinear(*work, cap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect, resX, resY);
+    try {
+        if (type == kSubdivNone || cap == 0) {
+            // no subdiv
+        } else if (type == kSubdivCatclark) {
+            refineCatclark(*work, cap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect, resX,
+                           resY);
+        } else {
+            refineLinear(*work, cap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect, resX, resY);
+        }
+    } catch (const std::bad_alloc&) {
+        logWarning("tessellate: subdiv ran out of memory — displacing densest level kept so far");
     }
 
-    // Copy applied levels onto material residual via caller; displace now.
     if (needDisp) {
         Material m = mat;
         m.subdivIterations = cap;
-        const int subdivType = cage.subdivType;
-        const int subdivIterations = cage.subdivIterations;
-        const float dicingQuality = cage.dicingQuality;
-        const float pad = std::max(work->boundsPadding, cage.boundsPadding);
+        const float pad = std::max(work->boundsPadding, authoredPad);
         MeshPtr displaced = displaceMeshOnly(std::move(*work), m, scene);
         displaced->boundsPadding = pad;
         if (displaced->boundsPadding > 0.0f) displaced->computeBounds();
-        displaced->subdivType = subdivType;
-        displaced->subdivIterations = subdivIterations;
-        displaced->dicingQuality = dicingQuality;
+        displaced->subdivType = authoredSubdivType;
+        displaced->subdivIterations = authoredSubdivIterations;
+        displaced->dicingQuality = authoredDicingQuality;
         return displaced;
     }
     work->computeBounds();
@@ -475,18 +480,23 @@ void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera) {
         const bool need = materialHasGeometricDisplacement(mat);
         if (!need) continue;
 
+        const int authoredIterations = mesh->subdivIterations;
+        const std::string meshName = mesh->name;
         try {
-            MeshPtr tess = tessellateOne(*mesh, mat, scene, insts, dicingCamera);
-            // Propagate residual levels into the shared material for autobump weight.
+            // Move cage out of the scene slot first so refine does not keep a
+            // second live copy of the same buffers.
+            Mesh cage = std::move(*mesh);
+            mesh.reset();
+            MeshPtr tess = tessellateOne(std::move(cage), mat, scene, insts, dicingCamera);
             if (matIndex >= 0 && size_t(matIndex) < scene.materials.size())
-                scene.materials[size_t(matIndex)].subdivIterations = mesh->subdivIterations;
+                scene.materials[size_t(matIndex)].subdivIterations = authoredIterations;
             mesh = std::move(tess);
         } catch (const std::bad_alloc&) {
-            logError("tessellate: out of memory on mesh '" + mesh->name +
-                     "' — leaving cage (lower Subdiv Iterations)");
+            logError("tessellate: out of memory on mesh '" + meshName +
+                     "' — mesh slot empty (lower Subdiv Iterations)");
         } catch (const std::exception& ex) {
-            logError(std::string("tessellate: ") + ex.what() + " on mesh '" + mesh->name +
-                     "' — leaving cage");
+            logError(std::string("tessellate: ") + ex.what() + " on mesh '" + meshName +
+                     "' — mesh slot empty");
         }
     }
 

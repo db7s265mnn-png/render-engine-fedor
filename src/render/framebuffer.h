@@ -16,6 +16,8 @@ class Framebuffer {
 public:
     void resize(int width, int height);
     void clear();
+    // Drop accumulation storage entirely (Render teardown).
+    void release();
 
     int width() const { return width_; }
     int height() const { return height_; }
