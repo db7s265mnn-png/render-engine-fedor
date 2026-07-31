@@ -932,7 +932,6 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
     }
 
     if (category == "displacement") {
-        // MaterialX ND_displacement_* + Arnold-style Solstice extras.
         const QString t = (type == "vector3") ? QString("vector3") : QString("float");
         QVector<MtlxInput> out;
         if (t == "vector3")
@@ -940,8 +939,6 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         else
             out.push_back({"displacement", "float", "0", {}});
         out.push_back({"scale", "float", "1", {}});
-        out.push_back({"bounds_padding", "float", "0", {}});
-        out.push_back({"subdiv_iterations", "integer", "3", {}});
         out.push_back({"autobump", "boolean", "true", {}});
         out.push_back({"zero_value", "float", "0.5", {}});
         if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
@@ -992,8 +989,6 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         else
             inputs.push_back({"displacement", "float", "0", {}});
         inputs.push_back({"scale", "float", "1", {}});
-        inputs.push_back({"bounds_padding", "float", "0", {}});
-        inputs.push_back({"subdiv_iterations", "integer", "3", {}});
         inputs.push_back({"autobump", "boolean", "true", {}});
         inputs.push_back({"zero_value", "float", "0.5", {}});
     } else if (category == "surfacematerial") {

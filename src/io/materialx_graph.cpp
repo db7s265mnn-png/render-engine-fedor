@@ -586,19 +586,15 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
     add("bump", "vector3", "Geometric",
         {{"height", "float", "0"}, {"scale", "float", "1"}, {"normal", "vector3", {}}, {"tangent", "vector3", {}},
          {"bitangent", "vector3", {}}});
-    // Arnold-style geometric displacement (MaterialX ND_displacement_* + Solstice extras).
+    // Geometric displacement: height + scale + zero + autobump (tessellation on geometry).
     add("displacement", "float", "PBR / Shading",
         {{"displacement", "float", "0"},
          {"scale", "float", "1"},
-         {"bounds_padding", "float", "0"},
-         {"subdiv_iterations", "integer", "3"},
          {"autobump", "boolean", "true"},
          {"zero_value", "float", "0.5"}});
     add("displacement", "vector3", "PBR / Shading",
         {{"displacement", "vector3", "0, 0, 0"},
          {"scale", "float", "1"},
-         {"bounds_padding", "float", "0"},
-         {"subdiv_iterations", "integer", "3"},
          {"autobump", "boolean", "true"},
          {"zero_value", "float", "0.5"}});
     add("texcoord", "vector2", "Geometric", {{"index", "integer", "0"}});
@@ -1088,18 +1084,12 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         bindSlot("normal", result.normalTexture, result.material.normalProc, true);
         bindSlot("subsurface_color", result.subsurfaceTexture, result.material.subsurfaceProc);
 
-        // MaterialX surfacematerial.displacementshader → Arnold-style geo displace.
+        // MaterialX surfacematerial.displacementshader → height/scale/zero/autobump.
         mx::NodePtr dispNode = surface ? resolveConnectedNode(surface, "displacementshader") : nullptr;
         if (dispNode && dispNode->getCategory() == "displacement") {
             result.material.displacementScale = readNodeFloat(dispNode, "scale", 1.0f);
-            result.material.displacementBoundsPadding = readNodeFloat(dispNode, "bounds_padding", 0.0f);
             result.material.displacementZeroValue = readNodeFloat(dispNode, "zero_value", 0.5f);
-            float subdivF = 2.0f;
-            if (parseFloat(inputValueString(dispNode, "subdiv_iterations"), subdivF))
-                result.material.subdivIterations = int(std::lround(subdivF));
-            else
-                result.material.subdivIterations = 3;
-            if (result.material.subdivIterations < 0) result.material.subdivIterations = 0;
+            result.material.subdivIterations = 0;  // tessellation is authored on geometry
 
             result.material.autobump = 1;
             {
@@ -1151,9 +1141,9 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                             0.2126f * v.x + 0.7152f * v.y + 0.0722f * v.z;
                 }
             }
-            logInfo("MaterialX: displacement shader (subdiv=" +
-                    std::to_string(result.material.subdivIterations) +
-                    ", scale=" + std::to_string(result.material.displacementScale) +
+            logInfo("MaterialX: displacement shader (scale=" +
+                    std::to_string(result.material.displacementScale) +
+                    ", zero=" + std::to_string(result.material.displacementZeroValue) +
                     ", autobump=" + std::to_string(result.material.autobump) + ")");
         }
 

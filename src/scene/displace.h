@@ -1,5 +1,5 @@
-// Arnold-style geometric displacement: uniform triangle subdivision, then
-// vertex offset from a height/vector map, optional bounds padding.
+// Geometric displacement: vertex offset from height/vector maps, Pref storage,
+// bounds padding. Tessellation (subdiv / dicing) lives in tessellate.cpp.
 #pragma once
 
 #include <cmath>
@@ -11,12 +11,11 @@ namespace sol {
 
 inline bool materialHasGeometricDisplacement(const Material& m) {
     if (m.displacementProc >= 0 || m.displacementTex >= 0) return true;
+    // Rare: constant height authored in MaterialX without a map.
     return std::fabs(m.displacementHeight * m.displacementScale) > 1.0e-8f;
 }
 
-// Copy `src`, optionally subdivide, displace vertices, pad bounds.
-// Samples `mat.displacementTex` / `mat.displacementProc` via scene textures/procs
-// (indices must already be absolute in `scene`).
-MeshPtr applyArnoldDisplacement(const Mesh& src, const Material& mat, const Scene& scene);
+// Copy `src`, displace vertices, store Pref/Nref, pad bounds. No subdivision.
+MeshPtr displaceMeshOnly(const Mesh& src, const Material& mat, const Scene& scene);
 
 }  // namespace sol

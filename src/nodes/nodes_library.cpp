@@ -64,6 +64,7 @@ public:
                          .withTooltip(units::importScaleTooltip()));
         addParameter(Parameter::makeBool("importnormals", "Import Normals", true));
         addParameter(Parameter::makeBool("importuvs", "Import UVs", true));
+        addTessellationParameters(*this);
         addTransformParameters(*this);
     }
 
@@ -129,6 +130,7 @@ public:
             leaf.replace('/', '_');
             out.path = (root.endsWith('/') ? root : root + "/") + leaf;
             out.material = Material();
+            applyTessellationParameters(*this, out);
             stage.addPrim(std::move(out));
         }
     }
@@ -156,6 +158,7 @@ public:
                          .withTooltip(units::importScaleTooltip()));
         addParameter(Parameter::makeBool("importnormals", "Import Normals", true));
         addParameter(Parameter::makeBool("importuvs", "Import UVs", true));
+        addTessellationParameters(*this);
         addTransformParameters(*this);
     }
 
@@ -228,6 +231,7 @@ public:
                 out.sourceNode = name();
                 out.path = (meshRoot.endsWith('/') ? meshRoot : meshRoot + "/") + leaf;
                 out.material = Material();
+                applyTessellationParameters(*this, out);
                 stage.addPrim(std::move(out));
             } else if (prim.type == UsdPrim::Type::Camera && prim.hasCamera) {
                 StagePrim out;
@@ -283,6 +287,7 @@ public:
                 addParameter(Parameter::makeInt("segments", "Segments", 48, 3, 512));
                 break;
         }
+        addTessellationParameters(*this);
         addTransformParameters(*this);
     }
 
@@ -310,6 +315,7 @@ public:
         prim.xform = transformFromParameters(*this);
         prim.sourceNode = name();
         prim.path = primPathFor(*this, "geo", stringValue("primname"));
+        applyTessellationParameters(*this, prim);
         stage.addPrim(std::move(prim));
     }
 
@@ -819,6 +825,26 @@ public:
                          .withTooltip("Shutter open duration in frames (Arnold-style, centered on "
                                       "the current frame). Default 0.5 ≈ 180° shutter / ~1/48 s at "
                                       "24 fps (close to 1/50). Open=-Length/2, Close=+Length/2."));
+        addParameter(Parameter::makeBool("frustumcull", "Frustum Cull", true)
+                         .withGroup("Subdivision")
+                         .withTooltip("Meshes outside the dicing-camera frustum (plus padding) "
+                                      "skip subdivision and only displace the cage."));
+        addParameter(Parameter::makeFloat("frustumpadding", "Frustum Padding (%)", 10.0, 0.0, 100.0, false)
+                         .withGroup("Subdivision")
+                         .withTooltip("Screen-space margin as a percent of resolution width/height."));
+        addParameter(Parameter::makeBool("screenadaptive", "Screen Adaptive", false)
+                         .withGroup("Subdivision")
+                         .withTooltip("Dice by projected edge length (Karma-like dicing quality). "
+                                      "When off, Subdiv Iterations is uniform."));
+        addParameter(Parameter::makeMenu("dicingcamera", "Dicing Camera",
+                                         {"Render Camera", "Custom"}, 0)
+                         .withGroup("Subdivision")
+                         .withTooltip("Camera used for frustum cull and screen-space dicing. "
+                                      "Custom locks density to another camera prim."));
+        addParameter(Parameter::makeString("dicingcamerapath", "Dicing Camera Path", "")
+                         .withGroup("Subdivision")
+                         .withTooltip("Stage prim path of the custom dicing camera "
+                                      "(e.g. /cameras/dice). Empty falls back to the render camera."));
         addParameter(Parameter::makeMenu("tonemap", "Tone Map", {"None", "Reinhard", "ACES"}, 2).withGroup("Film"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -8.0, 8.0).withGroup("Film"));
         addParameter(Parameter::makeFloat("gamma", "Gamma", 2.2, 1.0, 4.0).withGroup("Film"));
@@ -851,12 +877,18 @@ public:
         settings.motionBlur = boolValue("motionblur", false) ? 1 : 0;
         settings.motionKeys = std::clamp(intValue("motionkeys", 2), 2, 8);
         settings.shutterLength = float(floatValue("shutterlength", 0.5));
+        settings.frustumCull = boolValue("frustumcull", true) ? 1 : 0;
+        settings.frustumPadding = float(floatValue("frustumpadding", 10.0));
+        settings.screenAdaptive = boolValue("screenadaptive", false) ? 1 : 0;
+        settings.dicingCameraMode =
+            intValue("dicingcamera", 0) == 1 ? kDicingCameraCustom : kDicingCameraRender;
         settings.toneMapper = intValue("tonemap", 2);
         settings.exposure = float(floatValue("exposure", 0.0));
         settings.gamma = float(floatValue("gamma", 2.2));
         settings.envVisibleCamera = boolValue("envvisible", true) ? 1 : 0;
         stage.settings = settings;
         stage.settingsAuthored = true;
+        stage.dicingCameraPath = stringValue("dicingcamerapath");
     }
 };
 

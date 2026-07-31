@@ -96,15 +96,14 @@ struct Material {
     int bumpTex = -1;
     int bumpProc = -1;
 
-    // Arnold-style geometric displacement (MaterialX <displacement> on surfacematerial).
-    // Subdivide cage → offset vertices → pad AABB. Autobump adds residual shade normals.
+    // Geometric displacement (MaterialX <displacement> on surfacematerial).
+    // Tessellation (subdiv / dicing) lives on geometry; the shader supplies height only.
     int displacementTex = -1;
     int displacementProc = -1;
     float displacementScale = 1.0f;
-    float displacementHeight = 0.0f;  // constant when no tex/proc
-    float displacementBoundsPadding = 0.0f;
-    float displacementZeroValue = 0.0f;
-    int subdivIterations = 0;   // mid-edge triangle splits; Arnold subdiv_iterations
+    float displacementHeight = 0.0f;  // unused (no constant-height mode)
+    float displacementZeroValue = 0.5f;
+    int subdivIterations = 0;   // filled at tessellation time for autobump residual weight
     int autobump = 1;           // high-frequency detail as bump after geo displace
     int displacementVector = 0; // 0 = along normal (float), 1 = vector displace
     int _padDisp = 0;
@@ -363,6 +362,17 @@ enum DispersionMode : int {
     kDispersionFake = 3,
 };
 
+enum SubdivType : int {
+    kSubdivNone = 0,
+    kSubdivCatclark = 1,
+    kSubdivLinear = 2,
+};
+
+enum DicingCameraMode : int {
+    kDicingCameraRender = 0,
+    kDicingCameraCustom = 1,
+};
+
 struct RenderSettingsData {
     int resolutionX = 960;
     int resolutionY = 540;
@@ -410,6 +420,12 @@ struct RenderSettingsData {
     int motionBlur = 0;
     int motionKeys = 2;            // transform / deformation samples across the shutter
     float shutterLength = 0.5f;    // fraction of a frame (Arnold default 0.5)
+
+    // Displacement tessellation (applied once at Render / headless start).
+    int frustumCull = 1;              // skip subdiv for meshes outside padded frustum
+    float frustumPadding = 10.0f;     // screen-space margin as % of width/height
+    int screenAdaptive = 0;           // Karma-like dicing by projected edge length
+    int dicingCameraMode = kDicingCameraRender;  // render camera or custom
 };
 
 // ---------------------------------------------------------------------------

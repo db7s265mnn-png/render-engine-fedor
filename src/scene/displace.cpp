@@ -306,34 +306,16 @@ void displaceVertices(Mesh& mesh, const Material& mat, const SceneView& scene) {
 
 }  // namespace
 
-MeshPtr applyArnoldDisplacement(const Mesh& src, const Material& mat, const Scene& scene) {
+MeshPtr displaceMeshOnly(const Mesh& src, const Material& mat, const Scene& scene) {
     auto out = std::make_shared<Mesh>(src);
     out->name = src.name.empty() ? "displaced" : src.name + "_disp";
     out->motionPositionsPacked_.clear();
 
-    int requested = mat.subdivIterations;
-    if (requested < 0) requested = 0;
-    // Honour authored subdiv_iterations fully. Density still early-outs when
-    // edges are short enough / height deltas are flat; the triangle budget is
-    // the only hard stop (4^n growth).
-    const int maxIter = requested;
-
-    // Ensure cage normals before subdiv so midpoints interpolate something sensible.
     if (out->normals.size() != out->positions.size()) {
         out->normals.clear();
         out->computeNormalsIfMissing();
     }
 
-    out->computeBounds();
-    const Vec3 ext = out->bounds.extent();
-    const float size = std::max(ext.x, std::max(ext.y, ext.z));
-    // Higher requested iterations → shorter target edges (more detail before displace).
-    // Use ldexp so large iteration counts stay well-defined (unlike 1<<n).
-    const int qualityPow = std::min(std::max(requested, 0), 30);
-    const float targetEdge =
-        (size > 1e-8f) ? (size / (8.0f * std::ldexp(1.0f, qualityPow))) : 0.0f;
-
-    // Need the height map available while deciding how far to refine.
     std::vector<TextureView> textureViews;
     const SceneView view = makeDisplaceSceneView(scene, textureViews);
     if (mat.displacementTex >= 0 &&
@@ -343,30 +325,7 @@ MeshPtr applyArnoldDisplacement(const Mesh& src, const Material& mat, const Scen
                    " is missing/empty — vertices will not pick up the height map");
     }
 
-    // Keep subdividing while edges still span large height jumps (8K strata) or
-    // remain longer than the quality target — stops terrace banding.
-    const float heightEps = 1.0f / 192.0f;
-    int done = 0;
-    for (; done < maxIter; ++done) {
-        if (out->triangleCount() * 4 > kMaxDisplaceTriangles) {
-            logWarning("displacement: stopping subdiv at " + std::to_string(done) +
-                       " levels (triangle budget " + std::to_string(kMaxDisplaceTriangles) + ")");
-            break;
-        }
-        if (done >= 2) {
-            const float maxEdge = meshMaxEdgeLength(*out);
-            const float maxDh = meshMaxEdgeHeightDelta(*out, mat, view);
-            if (maxEdge <= targetEdge && maxDh < heightEps) break;
-        }
-        subdivideOnce(*out, size);
-    }
-    if (requested > 0) {
-        logInfo("displacement: subdivided " + std::to_string(done) + " levels → " +
-                std::to_string(out->triangleCount()) + " tris (requested=" +
-                std::to_string(requested) + ", targetEdge=" + std::to_string(targetEdge) + ")");
-    }
-
-    // Arnold Pref / Nref: lock triplanar & autobump to the cage before vertex offset.
+    // Pref / Nref: lock triplanar & autobump to the cage before vertex offset.
     out->restPositions = out->positions;
     if (out->normals.size() == out->positions.size())
         out->restNormals = out->normals;
@@ -379,7 +338,7 @@ MeshPtr applyArnoldDisplacement(const Mesh& src, const Material& mat, const Scen
     displaceVertices(*out, mat, view);
 
     out->computeBounds();
-    const float pad = mat.displacementBoundsPadding;
+    const float pad = out->boundsPadding;
     if (pad > 0.0f) {
         out->boundsPadding = pad;
         out->computeBounds();

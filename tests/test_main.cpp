@@ -33,6 +33,7 @@
 #include "render/shading.h"
 #include "scene/scene.h"
 #include "scene/displace.h"
+#include "scene/tessellate.h"
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_TIFF
@@ -62,6 +63,46 @@ void checkNear(float value, float expected, float tolerance, const std::string& 
 
 using namespace sol;
 
+
+namespace {
+MeshPtr tessDisplaceForTest(MeshPtr cage, Material mat, Scene& scene, int subdivIters = -1) {
+    if (!cage) return cage;
+    if (subdivIters >= 0) cage->subdivIterations = subdivIters;
+    if (cage->subdivType == kSubdivCatclark) cage->subdivType = kSubdivLinear; // tests use tri cages
+    // Ensure material + instance wiring for tessellateSceneForRender.
+    if (scene.materials.empty()) scene.addMaterial(mat);
+    else scene.materials[0] = mat;
+    scene.meshes.clear();
+    scene.instances.clear();
+    const int mi = scene.addMesh(cage);
+    InstanceData inst;
+    inst.meshIndex = mi;
+    inst.materialIndex = 0;
+    inst.xform = Mat4::identity();
+    inst.xformInv = Mat4::identity();
+    scene.instances.push_back(inst);
+    if (!scene.cameraAuthored) {
+        scene.camera = CameraData{};
+        scene.camera.cameraToWorld = composeTRS(Vec3(0, 2, 8), Vec3(0, 0, 0), Vec3(1));
+        scene.cameraAuthored = true;
+    }
+    scene.settings.frustumCull = 0;  // tests assert densify regardless of view
+    tessellateSceneForRender(scene, scene.camera);
+    return scene.meshes.empty() ? cage : scene.meshes[0];
+}
+
+void tessellateCookedScene(ScenePtr scene) {
+    if (!scene) return;
+    if (!scene->cameraAuthored) {
+        scene->camera = CameraData{};
+        scene->camera.cameraToWorld = composeTRS(Vec3(0, 2, 8), Vec3(0, 0, 0), Vec3(1));
+        scene->cameraAuthored = true;
+    }
+    // Frustum cull default on — keep contents in view for tests.
+    scene->settings.frustumCull = 0;
+    tessellateSceneForRender(*scene, scene->camera);
+}
+}  // namespace
 void testMath() {
     std::printf("math\n");
     const Mat4 m = composeTRS(Vec3(1.0f, 2.0f, 3.0f), Vec3(20.0f, -35.0f, 12.0f), Vec3(2.0f, 0.5f, 1.5f));
@@ -1842,8 +1883,11 @@ void testTriplanarDisplacementArtifacts() {
         prim.procedurals = eval.procedurals;
         prim.proceduralImages = eval.proceduralImages;
         prim.materialAssigned = true;
+        prim.subdivType = kSubdivLinear;
+        prim.subdivIterations = 4;
         stage.prims.push_back(prim);
         ScenePtr cooked = stage.toScene();
+        tessellateCookedScene(cooked);
         check(cooked && !cooked->meshes.empty(), "cooked smooth tri");
         const Mesh& m = *cooked->meshes[0];
         std::vector<float> edges;
@@ -1878,8 +1922,11 @@ void testTriplanarDisplacementArtifacts() {
         g.procedurals = eval.procedurals;
         g.proceduralImages = eval.proceduralImages;
         g.materialAssigned = true;
+        g.subdivType = kSubdivLinear;
+        g.subdivIterations = 4;
         stage2.prims.push_back(g);
         ScenePtr cooked2 = stage2.toScene();
+        tessellateCookedScene(cooked2);
         float ymin = 1e9f, ymax = -1e9f;
         for (const Vec3& p : cooked2->meshes[0]->positions) {
             ymin = std::min(ymin, p.y);
@@ -1942,8 +1989,11 @@ void testTriplanarDisplacementArtifacts() {
         prim.procedurals = eval.procedurals;
         prim.proceduralImages = eval.proceduralImages;
         prim.materialAssigned = true;
+        prim.subdivType = kSubdivLinear;
+        prim.subdivIterations = 4;
         stage.prims.push_back(prim);
         ScenePtr cooked = stage.toScene();
+        tessellateCookedScene(cooked);
         check(cooked && !cooked->meshes.empty() && !cooked->materials.empty(), "pref cooked");
         const Mesh& mesh = *cooked->meshes[0];
         const Material& mat = cooked->materials[0];
@@ -2027,7 +2077,6 @@ void testDefaultGroundDisplacement() {
     mat.displacementScale = 0.35f;
     mat.displacementZeroValue = 0.5f;
     mat.subdivIterations = 6;
-    mat.displacementBoundsPadding = 0.2f;
     mat.autobump = 1;
     Scene scene;
     check(scene.addTexture(tex) == 0, "tex0");
@@ -2046,7 +2095,7 @@ void testDefaultGroundDisplacement() {
     }();
     std::printf("  cage edge=%.3f tris=%zu\n", cageEdge, ground->triangleCount());
 
-    MeshPtr out = applyArnoldDisplacement(*ground, mat, scene);
+    MeshPtr out = tessDisplaceForTest(ground, mat, scene, mat.subdivIterations);
     float ymin = 1e9f, ymax = -1e9f;
     for (const Vec3& p : out->positions) {
         ymin = std::min(ymin, p.y);
@@ -2103,8 +2152,12 @@ void testDefaultGroundDisplacement() {
     prim.procedurals = eval.procedurals;
     prim.proceduralImages = eval.proceduralImages;
     prim.materialAssigned = true;
+    prim.subdivType = kSubdivLinear;
+    prim.subdivIterations = 6;
+    prim.boundsPadding = 0.2f;
     stage.prims.push_back(prim);
     ScenePtr cooked = stage.toScene();
+    tessellateCookedScene(cooked);
     check(cooked && !cooked->meshes.empty(), "cooked ground");
     ymin = 1e9f; ymax = -1e9f;
     for (const Vec3& p : cooked->meshes[0]->positions) {
@@ -2152,7 +2205,7 @@ void testRockDisplacementExr() {
     Scene scene;
     check(scene.addTexture(tex) == 0, "tex index 0");
     MeshPtr sphere = makeSphereMesh(1.0f, 48, 24);
-    MeshPtr out = applyArnoldDisplacement(*sphere, mat, scene);
+    MeshPtr out = tessDisplaceForTest(sphere, mat, scene, mat.subdivIterations);
     float rmin = 1e9f, rmax = 0.0f;
     for (const Vec3& p : out->positions) {
         const float r = length(p);
@@ -2219,8 +2272,12 @@ void testRockDisplacementExr() {
     prim.procedurals = eval.procedurals;
     prim.proceduralImages = eval.proceduralImages;
     prim.materialAssigned = true;
+    prim.subdivType = kSubdivLinear;
+    prim.subdivIterations = 6;
+    prim.boundsPadding = 0.2f;
     stage.prims.push_back(prim);
     ScenePtr cooked = stage.toScene();
+    tessellateCookedScene(cooked);
     check(cooked && !cooked->meshes.empty(), "cooked");
     rmin = 1e9f; rmax = 0.0f;
     for (const Vec3& p : cooked->meshes[0]->positions) {
@@ -2311,8 +2368,7 @@ void testArnoldDisplacement() {
     check(eval.ok, "displacement evaluates");
     check(std::fabs(eval.material.displacementHeight - 0.25f) < 1e-4f, "displacement height");
     check(std::fabs(eval.material.displacementScale - 2.0f) < 1e-4f, "displacement scale");
-    check(eval.material.subdivIterations == 1, "subdiv_iterations");
-    check(std::fabs(eval.material.displacementBoundsPadding - 0.1f) < 1e-4f, "bounds_padding");
+    check(eval.material.subdivIterations == 0, "subdiv on geo not material");
     check(eval.material.autobump == 1, "autobump on");
     check(materialHasGeometricDisplacement(eval.material), "has geometric displacement");
 
@@ -2326,7 +2382,8 @@ void testArnoldDisplacement() {
     }();
 
     Scene scene;
-    MeshPtr displaced = applyArnoldDisplacement(*grid, eval.material, scene);
+    grid->boundsPadding = 0.1f;
+    MeshPtr displaced = tessDisplaceForTest(grid, eval.material, scene, 1);
     check(displaced != nullptr, "displaced mesh");
     check(displaced->triangleCount() == cageTris * 4, "one subdiv → 4x triangles");
     float maxY = -1e9f;
@@ -2380,7 +2437,7 @@ void testArnoldDisplacement() {
     eval = evaluateMaterialXDocument(mapXml, tmp.path());
     check(eval.ok, "map displacement evaluates");
     check(eval.displacementTexture != nullptr, "displacement binds height texture");
-    check(eval.material.subdivIterations == 2, "map subdiv=2");
+    check(eval.material.subdivIterations == 0, "map subdiv not on material");
     check(eval.material.autobump == 0, "autobump off");
 
     Stage stage;
@@ -2391,8 +2448,11 @@ void testArnoldDisplacement() {
     prim.material = eval.material;
     prim.displacementTexture = eval.displacementTexture;
     prim.materialAssigned = true;
+    prim.subdivType = kSubdivLinear;
+    prim.subdivIterations = 2;
     stage.prims.push_back(prim);
     ScenePtr cooked = stage.toScene();
+    tessellateCookedScene(cooked);
     check(cooked && !cooked->meshes.empty(), "stage cooks displaced scene");
     const MeshPtr& outMesh = cooked->meshes[0];
     check(outMesh->triangleCount() == 8 * 16, "subdiv 2 → 16x tris (8 cage tris)");

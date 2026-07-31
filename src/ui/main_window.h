@@ -8,7 +8,9 @@
 #include <memory>
 
 #include "nodes/node_graph.h"
+#include "nodes/stage.h"
 #include "render/render_session.h"
+#include "scene/scene.h"
 #include "ui/render_view.h"
 
 class QAction;
@@ -67,6 +69,9 @@ private:
     void scheduleCook(int delayMilliseconds = 120);
     void cookNow();
     void restartRender();
+    void applyTessellationCache(Scene& scene) const;
+    void storeTessellationCache(const Scene& scene);
+    CameraData resolveDicingCamera(const Scene& scene) const;
     void updateWindowTitle();
     void updateStatusBar();
     bool maybeSaveChanges();
@@ -84,6 +89,8 @@ private:
     RenderSession session_;
     StagePtr stage_;
     ScenePtr scene_;
+    // Last Render tessellation, keyed by prim path — kept until the next Render.
+    std::vector<std::pair<std::string, MeshPtr>> tessCache_;
 
     NodeGraphView* networkView_ = nullptr;
     MaterialNetworkView* materialNetworkView_ = nullptr;

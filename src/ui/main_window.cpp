@@ -35,6 +35,7 @@
 #include "render/render_session.h"
 #include "render/scene_picker.h"
 #include "scene/scene.h"
+#include "scene/tessellate.h"
 #include "solstice_config.h"
 #include "ui/log_panel.h"
 #include "ui/material_network_view.h"
@@ -875,6 +876,25 @@ void MainWindow::cookNow() {
     }
 
     // Publish only after motion keys are fully installed.
+    if (!renderRequested_) applyTessellationCache(*builtScene);
+    else {
+        const CameraData diceCam = [&]() {
+            CameraData cam = builtScene->camera;
+            if (!stage_ || builtScene->settings.dicingCameraMode != kDicingCameraCustom) return cam;
+            if (stage_->dicingCameraPath.isEmpty()) return cam;
+            for (const StagePrim& prim : stage_->prims) {
+                if (prim.type != PrimType::Camera || prim.path != stage_->dicingCameraPath) continue;
+                cam = prim.camera;
+                cam.cameraToWorld = prim.xform;
+                return cam;
+            }
+            logWarning("dicing camera path not found — using render camera");
+            return cam;
+        }();
+        tessellateSceneForRender(*builtScene, diceCam);
+        storeTessellationCache(*builtScene);
+    }
+
     scene_ = builtScene;
     renderView_->setResolution(scene_->settings.resolutionX, scene_->settings.resolutionY);
 
@@ -883,6 +903,43 @@ void MainWindow::cookNow() {
     if (!timelineInteractive) refreshViewportCameraMenu();
 
     if (iprAction_->isChecked() || renderRequested_) restartRender();
+}
+
+void MainWindow::applyTessellationCache(Scene& scene) const {
+    if (tessCache_.empty()) return;
+    for (const PrimRecord& prim : scene.prims) {
+        if (prim.instanceIndex < 0 || size_t(prim.instanceIndex) >= scene.instances.size()) continue;
+        InstanceData& inst = scene.instances[size_t(prim.instanceIndex)];
+        if (inst.meshIndex < 0 || size_t(inst.meshIndex) >= scene.meshes.size()) continue;
+        for (const auto& entry : tessCache_) {
+            if (entry.first != prim.path || !entry.second) continue;
+            scene.meshes[size_t(inst.meshIndex)] = entry.second;
+            break;
+        }
+    }
+}
+
+void MainWindow::storeTessellationCache(const Scene& scene) {
+    tessCache_.clear();
+    for (const PrimRecord& prim : scene.prims) {
+        if (prim.instanceIndex < 0 || size_t(prim.instanceIndex) >= scene.instances.size()) continue;
+        const InstanceData& inst = scene.instances[size_t(prim.instanceIndex)];
+        if (inst.meshIndex < 0 || size_t(inst.meshIndex) >= scene.meshes.size()) continue;
+        tessCache_.push_back({prim.path, scene.meshes[size_t(inst.meshIndex)]});
+    }
+}
+
+CameraData MainWindow::resolveDicingCamera(const Scene& scene) const {
+    CameraData cam = scene.camera;
+    if (!stage_ || scene.settings.dicingCameraMode != kDicingCameraCustom) return cam;
+    if (stage_->dicingCameraPath.isEmpty()) return cam;
+    for (const StagePrim& prim : stage_->prims) {
+        if (prim.type != PrimType::Camera || prim.path != stage_->dicingCameraPath) continue;
+        cam = prim.camera;
+        cam.cameraToWorld = prim.xform;
+        return cam;
+    }
+    return cam;
 }
 
 void MainWindow::restartRender() {

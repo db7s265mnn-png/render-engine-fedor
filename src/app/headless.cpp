@@ -12,6 +12,7 @@
 #include "nodes/node_registry.h"
 #include "render/motion_blur.h"
 #include "render/render_session.h"
+#include "scene/tessellate.h"
 
 namespace sol {
 
@@ -61,6 +62,20 @@ int runHeadless(const HeadlessOptions& options) {
     if (options.threads >= 0) scene->settings.threads = options.threads;
 
     if (scene->settings.motionBlur) attachMotionBlurKeys(graph, context, *scene);
+
+    {
+        CameraData diceCam = scene->camera;
+        if (scene->settings.dicingCameraMode == kDicingCameraCustom &&
+            !stage->dicingCameraPath.isEmpty()) {
+            for (const StagePrim& prim : stage->prims) {
+                if (prim.type != PrimType::Camera || prim.path != stage->dicingCameraPath) continue;
+                diceCam = prim.camera;
+                diceCam.cameraToWorld = prim.xform;
+                break;
+            }
+        }
+        tessellateSceneForRender(*scene, diceCam);
+    }
 
     std::fprintf(stderr, "Rendering %dx%d, %d spp, %zu triangles, %zu lights\n", scene->settings.resolutionX,
                  scene->settings.resolutionY, scene->settings.samplesPerPixel, scene->totalTriangles(),

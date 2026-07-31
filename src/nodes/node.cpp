@@ -1,5 +1,7 @@
 #include "nodes/node.h"
 
+#include <algorithm>
+
 #include "core/log.h"
 #include "core/units.h"
 
@@ -149,6 +151,35 @@ Mat4 transformFromParameters(const Node& node) {
     const float uniform = float(node.floatValue("uniformscale", 1.0));
     scale = scale * uniform;
     return composeTRS(translate, rotate, scale);
+}
+
+void addTessellationParameters(Node& node) {
+    node.addParameter(Parameter::makeMenu("subdivtype", "Subdiv Type",
+                                          {"None", "Catclark", "Linear"}, 1)
+                          .withGroup("Subdivision")
+                          .withTooltip("None: displace cage only.\n"
+                                       "Catclark: OpenSubdiv Catmull-Clark (triangle cages "
+                                       "fall back to Linear).\n"
+                                       "Linear: mid-edge triangle splits."));
+    node.addParameter(Parameter::makeInt("subdiviterations", "Subdiv Iterations", 3, 0, 12)
+                          .withGroup("Subdivision")
+                          .withTooltip("Uniform levels when Screen Adaptive is off; "
+                                       "maximum cap when Screen Adaptive is on."));
+    node.addParameter(Parameter::makeFloat("dicingquality", "Dicing Quality", 1.0, 0.01, 16.0, false)
+                          .withGroup("Subdivision")
+                          .withTooltip("Screen-space density when Screen Adaptive is on "
+                                       "(Karma-like: 1 ≈ one micropolygon per pixel). "
+                                       "Ignored when Screen Adaptive is off."));
+    node.addParameter(Parameter::makeFloat("boundspadding", "Bounds Padding", 0.0, 0.0, 100.0, false)
+                          .withGroup("Subdivision")
+                          .withTooltip("Extra AABB padding after displacement (scene units)."));
+}
+
+void applyTessellationParameters(const Node& node, StagePrim& prim) {
+    prim.subdivType = node.intValue("subdivtype", kSubdivCatclark);
+    prim.subdivIterations = std::max(0, node.intValue("subdiviterations", 3));
+    prim.dicingQuality = float(node.floatValue("dicingquality", 1.0));
+    prim.boundsPadding = float(node.floatValue("boundspadding", 0.0));
 }
 
 }  // namespace sol

@@ -12,6 +12,7 @@ option(SOLSTICE_ENABLE_OPENEXR "Build with OpenEXR image support" ON)
 option(SOLSTICE_ENABLE_TIFF "Build with libtiff (.tx / .tif mipmap) support" ON)
 option(SOLSTICE_ENABLE_MATERIALX "Build with Academy Software Foundation MaterialX" ON)
 option(SOLSTICE_ENABLE_OPENPGL "Build with Intel OpenPGL path guiding (CPU)" ON)
+option(SOLSTICE_ENABLE_OPENSUBDIV "Build with OpenSubdiv Catmull-Clark" ON)
 option(SOLSTICE_BUILD_TESTS "Build unit tests" ON)
 option(SOLSTICE_BUILD_APP "Build the Qt desktop application" ON)
 option(SOLSTICE_BUILD_TOOLS "Build helper tools (test scene generators)" ON)
@@ -241,6 +242,43 @@ if(SOLSTICE_ENABLE_OPENPGL)
     endif()
 endif()
 
+# OpenSubdiv — Catmull-Clark for displacement tessellation
+set(SOLSTICE_HAVE_OPENSUBDIV_01 0)
+if(SOLSTICE_ENABLE_OPENSUBDIV)
+    include(FetchContent)
+    message(STATUS "Fetching OpenSubdiv for Catmull-Clark tessellation")
+    set(NO_TUTORIALS ON CACHE BOOL "" FORCE)
+    set(NO_EXAMPLES ON CACHE BOOL "" FORCE)
+    set(NO_REGRESSION ON CACHE BOOL "" FORCE)
+    set(NO_DOC ON CACHE BOOL "" FORCE)
+    set(NO_OMP ON CACHE BOOL "" FORCE)
+    set(NO_TBB ON CACHE BOOL "" FORCE)
+    set(NO_CUDA ON CACHE BOOL "" FORCE)
+    set(NO_OPENCL ON CACHE BOOL "" FORCE)
+    set(NO_OPENGL ON CACHE BOOL "" FORCE)
+    set(NO_METAL ON CACHE BOOL "" FORCE)
+    set(NO_DX ON CACHE BOOL "" FORCE)
+    set(NO_TESTS ON CACHE BOOL "" FORCE)
+    set(NO_GLTESTS ON CACHE BOOL "" FORCE)
+    set(NO_CLEW ON CACHE BOOL "" FORCE)
+    set(NO_PTEX ON CACHE BOOL "" FORCE)
+    if(EXISTS "/tmp/opensubdiv.tgz")
+        set(_solstice_osd_url "file:///tmp/opensubdiv.tgz")
+    else()
+        set(_solstice_osd_url
+            "https://github.com/PixarAnimationStudios/OpenSubdiv/archive/refs/tags/v3_6_1.tar.gz")
+    endif()
+    FetchContent_Declare(opensubdiv
+        URL ${_solstice_osd_url}
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(opensubdiv)
+    if(TARGET osd_static_cpu OR TARGET osdCPU)
+        set(SOLSTICE_HAVE_OPENSUBDIV_01 1)
+    else()
+        message(WARNING "OpenSubdiv targets missing — catclark falls back to linear")
+    endif()
+endif()
+
 # TinyUSDZ — binary USD (.usdc / crate .usd / .usdz) → USDA text for our importer
 set(SOLSTICE_HAVE_TINYUSDZ_01 0)
 option(SOLSTICE_ENABLE_TINYUSDZ "Build with TinyUSDZ for binary USD import" ON)
@@ -306,6 +344,7 @@ set(SOLSTICE_LIB_SOURCES
     src/core/log.cpp
     src/scene/scene.cpp
     src/scene/displace.cpp
+    src/scene/tessellate.cpp
     src/io/image_io.cpp
     src/io/alembic_loader.cpp
     src/io/usd_loader.cpp
@@ -341,6 +380,7 @@ set(SOLSTICE_LIB_HEADERS
     src/scene/types.h
     src/scene/scene.h
     src/scene/displace.h
+    src/scene/tessellate.h
     src/io/image_io.h
     src/io/alembic_loader.h
     src/io/usd_loader.h
@@ -402,6 +442,17 @@ if(SOLSTICE_HAVE_OPENPGL_01)
     target_link_libraries(solstice_lib PUBLIC openpgl)
     if(TARGET TBB::tbb)
         target_link_libraries(solstice_lib PUBLIC TBB::tbb)
+    endif()
+endif()
+
+if(SOLSTICE_HAVE_OPENSUBDIV_01)
+    if(TARGET osd_static_cpu)
+        target_link_libraries(solstice_lib PUBLIC osd_static_cpu)
+    elseif(TARGET osdCPU)
+        target_link_libraries(solstice_lib PUBLIC osdCPU)
+    endif()
+    if(DEFINED opensubdiv_SOURCE_DIR)
+        target_include_directories(solstice_lib PUBLIC ${opensubdiv_SOURCE_DIR})
     endif()
 endif()
 
@@ -518,6 +569,7 @@ message(STATUS "  TIFF /.tx mips  : ${SOLSTICE_HAVE_TIFF_01}")
 message(STATUS "  MaterialX       : ${SOLSTICE_HAVE_MATERIALX_01}")
 message(STATUS "  OptiX backend   : ${SOLSTICE_HAVE_OPTIX_01}")
 message(STATUS "  OpenPGL guiding : ${SOLSTICE_HAVE_OPENPGL_01}")
+message(STATUS "  OpenSubdiv      : ${SOLSTICE_HAVE_OPENSUBDIV_01}")
 message(STATUS "  TinyUSDZ / USDC : ${SOLSTICE_HAVE_TINYUSDZ_01}")
 message(STATUS "  Modern CPU ISA  : ${SOLSTICE_MODERN_CPU}")
 message(STATUS "")

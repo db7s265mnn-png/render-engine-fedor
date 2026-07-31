@@ -180,12 +180,28 @@ ScenePtr Stage::toScene() const {
                     clampRoot(material.transmissionColorProc);
                 }
 
-                // Arnold-style displacement mutates a mesh copy — do not share the cage cache.
+                // Cages only at cook — tessellation + displace run at Render start.
                 int meshIndex = -1;
                 MeshPtr renderMesh = prim.mesh;
-                if (materialHasGeometricDisplacement(material)) {
-                    renderMesh = applyArnoldDisplacement(*prim.mesh, material, *scene);
-                    meshIndex = scene->addMesh(renderMesh);
+                if (renderMesh) {
+                    // Stamp authored tessellation onto the mesh (may share cage pointers;
+                    // params are overwritten each cook from the owning prim).
+                    renderMesh->subdivType = prim.subdivType;
+                    renderMesh->subdivIterations = prim.subdivIterations;
+                    renderMesh->dicingQuality = prim.dicingQuality;
+                    renderMesh->boundsPadding = prim.boundsPadding;
+                }
+                if (materialHasGeometricDisplacement(material) ||
+                    (renderMesh && renderMesh->subdivType != kSubdivNone &&
+                     renderMesh->subdivIterations > 0)) {
+                    // Unique mesh entry so Render can tessellate without sharing cages.
+                    auto cageCopy = std::make_shared<Mesh>(*renderMesh);
+                    cageCopy->subdivType = prim.subdivType;
+                    cageCopy->subdivIterations = prim.subdivIterations;
+                    cageCopy->dicingQuality = prim.dicingQuality;
+                    cageCopy->boundsPadding = prim.boundsPadding;
+                    meshIndex = scene->addMesh(cageCopy);
+                    renderMesh = cageCopy;
                 } else {
                     auto it = meshIndexCache.find(prim.mesh.get());
                     if (it != meshIndexCache.end()) {

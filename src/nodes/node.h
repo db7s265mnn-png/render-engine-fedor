@@ -135,4 +135,7 @@ void addTransformParameters(Node& node, Vec3 translate = Vec3(0.0f), Vec3 rotate
                             Vec3 scale = Vec3(1.0f));
 Mat4 transformFromParameters(const Node& node);
 
+void addTessellationParameters(Node& node);
+void applyTessellationParameters(const Node& node, StagePrim& prim);
+
 }  // namespace sol

@@ -23,6 +23,11 @@ struct StagePrim {
 
     // Geometry
     MeshPtr mesh;
+    // Tessellation authored on the shape (subdiv / dicing / bounds pad).
+    int subdivType = kSubdivCatclark;
+    int subdivIterations = 3;
+    float dicingQuality = 1.0f;
+    float boundsPadding = 0.0f;
     Material material;
     bool materialAssigned = false;
     QString materialName;
@@ -60,6 +65,7 @@ public:
     RenderSettingsData settings;
     bool settingsAuthored = false;
     QString renderCameraPath;
+    QString dicingCameraPath;  // used when settings.dicingCameraMode == custom
 
     StagePrim* find(const QString& path);
     const StagePrim* find(const QString& path) const;
