@@ -1,5 +1,5 @@
 // Render-time displacement tessellation: subdiv (none / catclark / linear),
-// optional frustum cull, optional screen-space dicing (Karma-like).
+// optional frustum cull, RenderMan/Karma-style screen-space dicing.
 #pragma once
 
 #include <functional>
