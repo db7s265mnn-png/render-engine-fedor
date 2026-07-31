@@ -47,6 +47,17 @@ int clampSubdivLevelsForBudget(int requested, size_t triCount) {
 
 bool indexInRange(uint32_t idx, size_t count) { return size_t(idx) < count; }
 
+struct EdgeKey {
+    uint32_t a, b;
+    bool operator==(const EdgeKey& o) const { return a == o.a && b == o.b; }
+};
+struct EdgeHash {
+    size_t operator()(const EdgeKey& e) const {
+        return (size_t(e.a) * 0x9e3779b97f4a7c15ULL) ^ size_t(e.b);
+    }
+};
+EdgeKey makeEdgeKey(uint32_t a, uint32_t b) { return EdgeKey{std::min(a, b), std::max(a, b)}; }
+
 bool meshIsTriangleOnly(const Mesh& mesh) {
     // Our Mesh stores triangles only (3 indices per face). Catclark needs quads;
     // triangle-only cages fall back to linear.
@@ -222,6 +233,63 @@ bool meshVisibleInFrustum(const Mesh& mesh, const std::vector<const InstanceData
     return false;
 }
 
+// Per-triangle frustum test (padded NDC). Used for iterative local dicing so a
+// huge face that covers the frame is refined only where it still intersects.
+bool triangleIntersectsPaddedFrustum(Vec3 a, Vec3 b, Vec3 c, const Mat4& objToWorld,
+                                     const Mat4& worldToCam, const CameraData& cam, float aspect,
+                                     float padFrac) {
+    const float focal = std::max(1.0e-3f, cam.focalLength);
+    const float sensorW = std::max(1.0e-3f, cam.sensorWidth);
+    const float sensorH = sensorW / std::max(0.01f, aspect);
+    const float lim = 1.0f + padFrac;
+    const Vec3 eye = transformPoint(cam.cameraToWorld, Vec3(0.0f));
+
+    const float ndcSamples[][2] = {
+        {0.0f, 0.0f}, {lim, lim},  {-lim, lim}, {lim, -lim}, {-lim, -lim},
+        {lim, 0.0f},  {-lim, 0.0f}, {0.0f, lim}, {0.0f, -lim},
+    };
+
+    // Camera eye near the triangle's world AABB → treat as intersecting (close-up).
+    Bounds3 wb;
+    wb.extend(transformPoint(objToWorld, a));
+    wb.extend(transformPoint(objToWorld, b));
+    wb.extend(transformPoint(objToWorld, c));
+    if (wb.valid()) {
+        const Vec3 pad(wb.radius() * 0.05f + 1.0e-3f);
+        if (eye.x >= wb.lo.x - pad.x && eye.x <= wb.hi.x + pad.x &&
+            eye.y >= wb.lo.y - pad.y && eye.y <= wb.hi.y + pad.y &&
+            eye.z >= wb.lo.z - pad.z && eye.z <= wb.hi.z + pad.z)
+            return true;
+        for (const auto& s : ndcSamples) {
+            const Vec3 dirCam =
+                normalize(Vec3(s[0] * 0.5f * sensorW, s[1] * 0.5f * sensorH, -focal));
+            const Vec3 dirWorld = transformVector(cam.cameraToWorld, dirCam);
+            if (rayHitsAabb(eye, dirWorld, wb)) return true;
+        }
+    }
+
+    float nx[3], ny[3], nz[3];
+    const bool ok0 = projectToNdc(a, objToWorld, worldToCam, cam, aspect, nx[0], ny[0], nz[0]);
+    const bool ok1 = projectToNdc(b, objToWorld, worldToCam, cam, aspect, nx[1], ny[1], nz[1]);
+    const bool ok2 = projectToNdc(c, objToWorld, worldToCam, cam, aspect, nx[2], ny[2], nz[2]);
+    if (ok0 && pointInPaddedFrustum(nx[0], ny[0], padFrac)) return true;
+    if (ok1 && pointInPaddedFrustum(nx[1], ny[1], padFrac)) return true;
+    if (ok2 && pointInPaddedFrustum(nx[2], ny[2], padFrac)) return true;
+
+    if (ok0 && ok1 && ok2) {
+        for (const auto& s : ndcSamples) {
+            if (pointInTriangle2D(s[0], s[1], nx[0], ny[0], nx[1], ny[1], nx[2], ny[2])) return true;
+        }
+    }
+
+    const Vec3 mid = (a + b + c) * (1.0f / 3.0f);
+    float mx, my, mz;
+    if (projectToNdc(mid, objToWorld, worldToCam, cam, aspect, mx, my, mz) &&
+        pointInPaddedFrustum(mx, my, padFrac))
+        return true;
+    return false;
+}
+
 const InstanceData* nearestInstance(const std::vector<const InstanceData*>& instances,
                                     const CameraData& cam) {
     if (instances.empty()) return nullptr;
@@ -240,116 +308,22 @@ const InstanceData* nearestInstance(const std::vector<const InstanceData*>& inst
     return best;
 }
 
-void subdivideLinearOnce(Mesh& mesh) {
-    const size_t triCount = mesh.indices.size() / 3;
-    if (triCount == 0) return;
-    const size_t nPos = mesh.positions.size();
-    const bool hasN = mesh.normals.size() == nPos;
-    const bool hasUv = mesh.uvs.size() == nPos;
-
-    struct EdgeKey {
-        uint32_t a, b;
-        bool operator==(const EdgeKey& o) const { return a == o.a && b == o.b; }
-    };
-    struct EdgeHash {
-        size_t operator()(const EdgeKey& e) const {
-            return (size_t(e.a) * 0x9e3779b97f4a7c15ULL) ^ size_t(e.b);
-        }
-    };
-    std::unordered_map<EdgeKey, uint32_t, EdgeHash> mid;
-    mid.reserve(triCount * 2);
-
-    auto midpoint = [&](uint32_t i0, uint32_t i1) -> uint32_t {
-        EdgeKey key{std::min(i0, i1), std::max(i0, i1)};
-        const auto it = mid.find(key);
-        if (it != mid.end()) return it->second;
-        const Vec3 p = (mesh.positions[i0] + mesh.positions[i1]) * 0.5f;
-        const uint32_t id = uint32_t(mesh.positions.size());
-        mesh.positions.push_back(p);
-        if (hasN) {
-            Vec3 n = mesh.normals[i0] + mesh.normals[i1];
-            const float len = length(n);
-            mesh.normals.push_back(len > 1e-8f ? n / len : mesh.normals[i0]);
-        }
-        if (hasUv) mesh.uvs.push_back((mesh.uvs[i0] + mesh.uvs[i1]) * 0.5f);
-        mid.emplace(key, id);
-        return id;
-    };
-
-    std::vector<uint32_t> newIdx;
-    newIdx.reserve(triCount * 12);
-    for (size_t t = 0; t < triCount; ++t) {
-        const uint32_t i0 = mesh.indices[t * 3 + 0];
-        const uint32_t i1 = mesh.indices[t * 3 + 1];
-        const uint32_t i2 = mesh.indices[t * 3 + 2];
-        if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) {
-            throw std::runtime_error("tessellate: triangle index out of range");
-        }
-        const uint32_t m01 = midpoint(i0, i1);
-        const uint32_t m12 = midpoint(i1, i2);
-        const uint32_t m20 = midpoint(i2, i0);
-        newIdx.insert(newIdx.end(), {i0, m01, m20, i1, m12, m01, i2, m20, m12, m01, m12, m20});
-    }
-    mesh.indices.swap(newIdx);
-    mesh.restPositions.clear();
-    mesh.restNormals.clear();
-    mesh.motionPositions.clear();
-    mesh.motionPositionsPacked_.clear();
-}
-
-// Split only edges that exceed `targetPx` in screen space (and force midpoints
-// on shared edges so neighbors stay watertight). True spatial dicing — unlike
-// uniform 1→4 on the whole mesh when only the longest edge is large.
-bool subdivideLinearScreenAdaptiveOnce(Mesh& mesh, const Mat4& objToWorld, const Mat4& worldToCam,
-                                       const CameraData& cam, float aspect, int resX, int resY,
-                                       float targetPx) {
+// Split only the marked edges (red-green style). Shared midpoints keep seams
+// watertight when a neighbor also marks the same edge.
+bool subdivideMarkedEdgesOnce(
+    Mesh& mesh, const std::unordered_map<EdgeKey, char, EdgeHash>& splitEdge) {
+    if (splitEdge.empty()) return false;
     const size_t triCount = mesh.indices.size() / 3;
     if (triCount == 0) return false;
     const size_t nPos = mesh.positions.size();
     const bool hasN = mesh.normals.size() == nPos;
     const bool hasUv = mesh.uvs.size() == nPos;
 
-    struct EdgeKey {
-        uint32_t a, b;
-        bool operator==(const EdgeKey& o) const { return a == o.a && b == o.b; }
-    };
-    struct EdgeHash {
-        size_t operator()(const EdgeKey& e) const {
-            return (size_t(e.a) * 0x9e3779b97f4a7c15ULL) ^ size_t(e.b);
-        }
-    };
-
     std::unordered_map<EdgeKey, uint32_t, EdgeHash> mid;
-    mid.reserve(triCount);
-    auto edgeKey = [](uint32_t a, uint32_t b) {
-        return EdgeKey{std::min(a, b), std::max(a, b)};
-    };
-
-    // Mark edges that are too long on screen.
-    std::unordered_map<EdgeKey, char, EdgeHash> longEdge;
-    longEdge.reserve(triCount * 2);
-    for (size_t t = 0; t < triCount; ++t) {
-        const uint32_t i0 = mesh.indices[t * 3 + 0];
-        const uint32_t i1 = mesh.indices[t * 3 + 1];
-        const uint32_t i2 = mesh.indices[t * 3 + 2];
-        if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
-        const float e01 =
-            screenEdgePixels(mesh.positions[i0], mesh.positions[i1], objToWorld, worldToCam, cam, aspect,
-                             resX, resY);
-        const float e12 =
-            screenEdgePixels(mesh.positions[i1], mesh.positions[i2], objToWorld, worldToCam, cam, aspect,
-                             resX, resY);
-        const float e20 =
-            screenEdgePixels(mesh.positions[i2], mesh.positions[i0], objToWorld, worldToCam, cam, aspect,
-                             resX, resY);
-        if (e01 > targetPx) longEdge[edgeKey(i0, i1)] = 1;
-        if (e12 > targetPx) longEdge[edgeKey(i1, i2)] = 1;
-        if (e20 > targetPx) longEdge[edgeKey(i2, i0)] = 1;
-    }
-    if (longEdge.empty()) return false;
+    mid.reserve(splitEdge.size());
 
     auto midpoint = [&](uint32_t i0, uint32_t i1) -> uint32_t {
-        EdgeKey key = edgeKey(i0, i1);
+        EdgeKey key = makeEdgeKey(i0, i1);
         const auto it = mid.find(key);
         if (it != mid.end()) return it->second;
         const Vec3 p = (mesh.positions[i0] + mesh.positions[i1]) * 0.5f;
@@ -365,7 +339,9 @@ bool subdivideLinearScreenAdaptiveOnce(Mesh& mesh, const Mat4& objToWorld, const
         return id;
     };
 
-    auto isLong = [&](uint32_t a, uint32_t b) { return longEdge.find(edgeKey(a, b)) != longEdge.end(); };
+    auto isSplit = [&](uint32_t a, uint32_t b) {
+        return splitEdge.find(makeEdgeKey(a, b)) != splitEdge.end();
+    };
 
     std::vector<uint32_t> newIdx;
     newIdx.reserve(triCount * 12);
@@ -374,9 +350,9 @@ bool subdivideLinearScreenAdaptiveOnce(Mesh& mesh, const Mat4& objToWorld, const
         const uint32_t i1 = mesh.indices[t * 3 + 1];
         const uint32_t i2 = mesh.indices[t * 3 + 2];
         if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
-        const bool b01 = isLong(i0, i1);
-        const bool b12 = isLong(i1, i2);
-        const bool b20 = isLong(i2, i0);
+        const bool b01 = isSplit(i0, i1);
+        const bool b12 = isSplit(i1, i2);
+        const bool b20 = isSplit(i2, i0);
         const int bits = (b01 ? 1 : 0) | (b12 ? 2 : 0) | (b20 ? 4 : 0);
         if (bits == 0) {
             newIdx.insert(newIdx.end(), {i0, i1, i2});
@@ -418,6 +394,60 @@ bool subdivideLinearScreenAdaptiveOnce(Mesh& mesh, const Mat4& objToWorld, const
     return true;
 }
 
+void subdivideLinearOnce(Mesh& mesh) {
+    const size_t triCount = mesh.indices.size() / 3;
+    if (triCount == 0) return;
+    const size_t nPos = mesh.positions.size();
+
+    std::unordered_map<EdgeKey, char, EdgeHash> allEdges;
+    allEdges.reserve(triCount * 2);
+    for (size_t t = 0; t < triCount; ++t) {
+        const uint32_t i0 = mesh.indices[t * 3 + 0];
+        const uint32_t i1 = mesh.indices[t * 3 + 1];
+        const uint32_t i2 = mesh.indices[t * 3 + 2];
+        if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) {
+            throw std::runtime_error("tessellate: triangle index out of range");
+        }
+        allEdges[makeEdgeKey(i0, i1)] = 1;
+        allEdges[makeEdgeKey(i1, i2)] = 1;
+        allEdges[makeEdgeKey(i2, i0)] = 1;
+    }
+    subdivideMarkedEdgesOnce(mesh, allEdges);
+}
+
+// Split only edges that exceed `targetPx` in screen space (and force midpoints
+// on shared edges so neighbors stay watertight). True spatial dicing — unlike
+// uniform 1→4 on the whole mesh when only the longest edge is large.
+bool subdivideLinearScreenAdaptiveOnce(Mesh& mesh, const Mat4& objToWorld, const Mat4& worldToCam,
+                                       const CameraData& cam, float aspect, int resX, int resY,
+                                       float targetPx) {
+    const size_t triCount = mesh.indices.size() / 3;
+    if (triCount == 0) return false;
+    const size_t nPos = mesh.positions.size();
+
+    std::unordered_map<EdgeKey, char, EdgeHash> longEdge;
+    longEdge.reserve(triCount * 2);
+    for (size_t t = 0; t < triCount; ++t) {
+        const uint32_t i0 = mesh.indices[t * 3 + 0];
+        const uint32_t i1 = mesh.indices[t * 3 + 1];
+        const uint32_t i2 = mesh.indices[t * 3 + 2];
+        if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
+        const float e01 =
+            screenEdgePixels(mesh.positions[i0], mesh.positions[i1], objToWorld, worldToCam, cam, aspect,
+                             resX, resY);
+        const float e12 =
+            screenEdgePixels(mesh.positions[i1], mesh.positions[i2], objToWorld, worldToCam, cam, aspect,
+                             resX, resY);
+        const float e20 =
+            screenEdgePixels(mesh.positions[i2], mesh.positions[i0], objToWorld, worldToCam, cam, aspect,
+                             resX, resY);
+        if (e01 > targetPx) longEdge[makeEdgeKey(i0, i1)] = 1;
+        if (e12 > targetPx) longEdge[makeEdgeKey(i1, i2)] = 1;
+        if (e20 > targetPx) longEdge[makeEdgeKey(i2, i0)] = 1;
+    }
+    return subdivideMarkedEdgesOnce(mesh, longEdge);
+}
+
 float maxScreenEdge(const Mesh& mesh, const Mat4& objToWorld, const Mat4& worldToCam,
                     const CameraData& cam, float aspect, int resX, int resY) {
     float m = 0.0f;
@@ -435,6 +465,115 @@ float maxScreenEdge(const Mesh& mesh, const Mat4& objToWorld, const Mat4& worldT
         m = std::max(m, screenEdgePixels(c, a, objToWorld, worldToCam, cam, aspect, resX, resY));
     }
     return m;
+}
+
+// Expand face marks by one edge-adjacent ring (soft falloff / "tails").
+void expandFaceMarksByEdgeRing(const Mesh& mesh, std::vector<uint8_t>& faceMark) {
+    const size_t triCount = mesh.indices.size() / 3;
+    if (faceMark.size() != triCount) return;
+
+    struct EdgeFaces {
+        int f0 = -1, f1 = -1;
+    };
+    std::unordered_map<EdgeKey, EdgeFaces, EdgeHash> edgeFaces;
+    edgeFaces.reserve(triCount * 2);
+    auto addEdge = [&](uint32_t a, uint32_t b, int fi) {
+        EdgeKey k = makeEdgeKey(a, b);
+        EdgeFaces& ef = edgeFaces[k];
+        if (ef.f0 < 0)
+            ef.f0 = fi;
+        else if (ef.f1 < 0 && ef.f0 != fi)
+            ef.f1 = fi;
+    };
+    for (size_t t = 0; t < triCount; ++t) {
+        const uint32_t i0 = mesh.indices[t * 3 + 0];
+        const uint32_t i1 = mesh.indices[t * 3 + 1];
+        const uint32_t i2 = mesh.indices[t * 3 + 2];
+        addEdge(i0, i1, int(t));
+        addEdge(i1, i2, int(t));
+        addEdge(i2, i0, int(t));
+    }
+
+    std::vector<uint8_t> expand = faceMark;
+    for (const auto& kv : edgeFaces) {
+        const EdgeFaces& ef = kv.second;
+        if (ef.f0 < 0 || ef.f1 < 0) continue;
+        if (faceMark[size_t(ef.f0)] && !faceMark[size_t(ef.f1)]) expand[size_t(ef.f1)] = 1;
+        if (faceMark[size_t(ef.f1)] && !faceMark[size_t(ef.f0)]) expand[size_t(ef.f0)] = 1;
+    }
+    faceMark.swap(expand);
+}
+
+// Iterative frustum-local dicing: each pass only splits edges of faces that
+// intersect the padded frustum (plus 1–2 rings of soft tails on early passes).
+// Combined with Screen Adaptive: long screen edges only. N iterations = max
+// depth inside the frame — outside stops refining once faces leave the frustum.
+void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQuality,
+                              const Mat4& objToWorld, const CameraData& cam, const Mat4& worldToCam,
+                              float aspect, int resX, int resY, float padFrac) {
+    // Don't pre-clamp as if the whole mesh 4^n grows — local dicing is far cheaper.
+    maxIter = std::max(0, maxIter);
+    if (maxIter <= 0) return;
+    if (mesh.normals.size() != mesh.positions.size()) {
+        mesh.normals.clear();
+        mesh.computeNormalsIfMissing();
+    }
+    const float quality = std::max(1.0e-3f, dicingQuality);
+    const float targetPx = 1.0f / quality;
+    constexpr int kTailIters = 2;
+
+    for (int iter = 0; iter < maxIter; ++iter) {
+        if (mesh.triangleCount() >= kMaxTessTriangles) {
+            logWarning("tessellate: frustum-local subdiv stopped at budget");
+            break;
+        }
+        const size_t triCount = mesh.indices.size() / 3;
+        const size_t nPos = mesh.positions.size();
+        if (triCount == 0) break;
+
+        std::vector<uint8_t> faceMark(triCount, 0);
+        bool anyIn = false;
+        for (size_t t = 0; t < triCount; ++t) {
+            const uint32_t i0 = mesh.indices[t * 3 + 0];
+            const uint32_t i1 = mesh.indices[t * 3 + 1];
+            const uint32_t i2 = mesh.indices[t * 3 + 2];
+            if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
+            if (triangleIntersectsPaddedFrustum(mesh.positions[i0], mesh.positions[i1],
+                                                mesh.positions[i2], objToWorld, worldToCam, cam, aspect,
+                                                padFrac)) {
+                faceMark[t] = 1;
+                anyIn = true;
+            }
+        }
+        if (!anyIn) break;
+
+        // Soft tails: first two iterations also dice a 1-ring outside the frustum.
+        if (iter < kTailIters) expandFaceMarksByEdgeRing(mesh, faceMark);
+
+        std::unordered_map<EdgeKey, char, EdgeHash> splitEdge;
+        splitEdge.reserve(triCount * 2);
+        for (size_t t = 0; t < triCount; ++t) {
+            if (!faceMark[t]) continue;
+            const uint32_t i0 = mesh.indices[t * 3 + 0];
+            const uint32_t i1 = mesh.indices[t * 3 + 1];
+            const uint32_t i2 = mesh.indices[t * 3 + 2];
+            if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
+
+            auto consider = [&](uint32_t a, uint32_t b) {
+                if (screenAdaptive) {
+                    const float px =
+                        screenEdgePixels(mesh.positions[a], mesh.positions[b], objToWorld, worldToCam,
+                                         cam, aspect, resX, resY);
+                    if (!(px > targetPx)) return;
+                }
+                splitEdge[makeEdgeKey(a, b)] = 1;
+            };
+            consider(i0, i1);
+            consider(i1, i2);
+            consider(i2, i0);
+        }
+        if (!subdivideMarkedEdgesOnce(mesh, splitEdge)) break;
+    }
 }
 
 void refineLinear(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQuality,
@@ -634,10 +773,18 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
         type = kSubdivLinear;  // whole-mesh tris → linear
     }
 
-    const int cap = clampSubdivLevelsForBudget(work->subdivIterations, work->triangleCount());
+    // Frustum cull on → local dicing (not whole-mesh 4^N). Cap iterations only by
+    // the live triangle budget inside refineLinearFrustumLocal.
+    const int wantIters = std::max(0, work->subdivIterations);
+    const int cap = rs.frustumCull ? wantIters
+                                   : clampSubdivLevelsForBudget(wantIters, work->triangleCount());
     try {
         if (type == kSubdivNone || cap == 0) {
             // no subdiv
+        } else if (rs.frustumCull && diceInst) {
+            // Catclark OSD is uniform-only — frustum path always uses linear local dicing.
+            refineLinearFrustumLocal(*work, cap, adaptive, work->dicingQuality, diceInst->xform, cam, w2c,
+                                     aspect, resX, resY, padFrac);
         } else if (type == kSubdivCatclark) {
             refineCatclark(*work, cap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect, resX,
                            resY);

@@ -65,7 +65,8 @@ using namespace sol;
 
 
 namespace {
-MeshPtr tessDisplaceForTest(MeshPtr cage, Material mat, Scene& scene, int subdivIters = -1) {
+MeshPtr tessDisplaceForTest(MeshPtr cage, Material mat, Scene& scene, int subdivIters = -1,
+                            bool forceFrustumOff = true) {
     if (!cage) return cage;
     if (subdivIters >= 0) cage->subdivIterations = subdivIters;
     if (cage->subdivType == kSubdivCatclark) cage->subdivType = kSubdivLinear; // tests use tri cages
@@ -86,7 +87,8 @@ MeshPtr tessDisplaceForTest(MeshPtr cage, Material mat, Scene& scene, int subdiv
         scene.camera.cameraToWorld = composeTRS(Vec3(0, 2, 8), Vec3(0, 0, 0), Vec3(1));
         scene.cameraAuthored = true;
     }
-    scene.settings.frustumCull = 0;  // tests assert densify regardless of view
+    // Most tests want whole-mesh densify; frustum-local tests pass forceFrustumOff=false.
+    if (forceFrustumOff) scene.settings.frustumCull = 0;
     tessellateSceneForRender(scene, scene.camera);
     return scene.meshes.empty() ? cage : scene.meshes[0];
 }
@@ -2496,8 +2498,8 @@ void testTessellationTriangleBudget() {
 
 void testFrustumCullCloseUpSubdiv() {
     std::printf("frustum-cull-close-up-subdiv\n");
-    // Large ground, camera very close — old frustum tests only sampled verts that
-    // sit off-screen, skipped subdiv, and left a 2-tri cage. Must still densify.
+    // Large ground, camera very close — verts sit off-screen but the face covers
+    // the frame. Must still densify locally (not skip the mesh entirely).
     auto ground = makeGridMesh(40.0f, 40.0f, 1, 1);
     check(ground && ground->triangleCount() == 2, "ground cage 2 tris");
     ground->subdivType = kSubdivLinear;
@@ -2505,14 +2507,11 @@ void testFrustumCullCloseUpSubdiv() {
     ground->dicingQuality = 1.0f;
 
     Material mat;
-    mat.displacementHeight = 0.0f;
-    mat.displacementScale = 0.1f;  // also verify scale < 1 still displaces
+    mat.displacementHeight = 1.0f;  // 1 * 0.1 = 0.1 m offset
+    mat.displacementScale = 0.1f;   // also verify scale < 1 still displaces
     mat.displacementZeroValue = 0.0f;
     mat.displacementTex = -1;
     mat.displacementProc = -1;
-    // Constant height via height*scale path in materialHasGeometricDisplacement —
-    // use a tiny constant height with scale 0.1.
-    mat.displacementHeight = 1.0f;  // 1 * 0.1 = 0.1 m offset
 
     Scene closeScene;
     closeScene.settings.frustumCull = 1;
@@ -2527,10 +2526,11 @@ void testFrustumCullCloseUpSubdiv() {
     closeScene.cameraAuthored = true;
 
     const size_t cageTris = ground->triangleCount();
-    MeshPtr out = tessDisplaceForTest(ground, mat, closeScene, 4);
+    MeshPtr out = tessDisplaceForTest(ground, mat, closeScene, 4, /*forceFrustumOff=*/false);
     check(out != nullptr, "close-up tess mesh");
     check(out->triangleCount() > cageTris * 8, "close-up still subdivides under frustum cull");
-    check(out->triangleCount() >= cageTris * 16, "uniform 4 levels densified (or close)");
+    // Local dicing — must NOT explode the whole 40×40 plane to uniform 4^N.
+    check(out->triangleCount() < cageTris * 256, "frustum-local stays below uniform 4^4");
 
     // Displacement scale 0.1 with height 1 / zero 0 → offset ~0.1 along +Y for a flat grid.
     float maxY = -1.0e9f;
@@ -2542,6 +2542,82 @@ void testFrustumCullCloseUpSubdiv() {
     check(maxY > 0.05f, "displacement scale 0.1 still lifts the surface");
     std::printf("  close-up tris %zu→%zu y[%.3f, %.3f] scale=0.1\n", cageTris, out->triangleCount(),
                 minY, maxY);
+}
+
+void testFrustumLocalDicingFalloff() {
+    std::printf("frustum-local-dicing-falloff\n");
+    // Huge plane + narrow view: density must peak near the look-at and stay coarse
+    // at far corners — not uniform 4^N across the whole mesh.
+    auto ground = makeGridMesh(200.0f, 200.0f, 1, 1);
+    check(ground && ground->triangleCount() == 2, "huge ground cage");
+    ground->subdivType = kSubdivLinear;
+    ground->subdivIterations = 6;
+    ground->dicingQuality = 1.0f;
+
+    Material mat;
+    mat.displacementHeight = 0.01f;
+    mat.displacementScale = 1.0f;
+    mat.displacementZeroValue = 0.0f;
+
+    Scene scene;
+    scene.settings.frustumCull = 1;
+    scene.settings.frustumPadding = 5.0f;
+    scene.settings.screenAdaptive = 0;
+    scene.settings.resolutionX = 640;
+    scene.settings.resolutionY = 360;
+    scene.camera.focalLength = 85.0f;
+    scene.camera.sensorWidth = 36.0f;
+    scene.camera.cameraToWorld = lookAtMatrix(Vec3(0, 8, 12), Vec3(0, 0, 0), Vec3(0, 1, 0));
+    scene.cameraAuthored = true;
+
+    const size_t uniformCap = ground->triangleCount() * 4096ull;  // 4^6
+    MeshPtr out = tessDisplaceForTest(ground, mat, scene, 6, /*forceFrustumOff=*/false);
+    check(out != nullptr, "frustum-local mesh");
+    check(out->triangleCount() > 32, "frustum-local actually densified");
+    check(out->triangleCount() < uniformCap / 4, "far cheaper than whole-mesh 4^6");
+
+    auto maxEdgeNear = [&](float radius) {
+        float m = 0.0f;
+        size_t n = 0;
+        for (size_t t = 0; t + 2 < out->indices.size(); t += 3) {
+            const Vec3& a = out->positions[out->indices[t]];
+            const Vec3& b = out->positions[out->indices[t + 1]];
+            const Vec3& c = out->positions[out->indices[t + 2]];
+            const Vec3 mid = (a + b + c) * (1.0f / 3.0f);
+            const float r = std::sqrt(mid.x * mid.x + mid.z * mid.z);
+            if (r > radius) continue;
+            m = std::max(m, length(b - a));
+            m = std::max(m, length(c - b));
+            m = std::max(m, length(a - c));
+            ++n;
+        }
+        check(n > 0, "found tris in radius band");
+        return m;
+    };
+    auto maxEdgeFar = [&](float minR) {
+        float m = 0.0f;
+        size_t n = 0;
+        for (size_t t = 0; t + 2 < out->indices.size(); t += 3) {
+            const Vec3& a = out->positions[out->indices[t]];
+            const Vec3& b = out->positions[out->indices[t + 1]];
+            const Vec3& c = out->positions[out->indices[t + 2]];
+            const Vec3 mid = (a + b + c) * (1.0f / 3.0f);
+            const float r = std::sqrt(mid.x * mid.x + mid.z * mid.z);
+            if (r < minR) continue;
+            m = std::max(m, length(b - a));
+            m = std::max(m, length(c - b));
+            m = std::max(m, length(a - c));
+            ++n;
+        }
+        check(n > 0, "found far tris");
+        return m;
+    };
+
+    const float nearEdge = maxEdgeNear(8.0f);
+    const float farEdge = maxEdgeFar(60.0f);
+    check(farEdge > nearEdge * 2.0f, "corners stay coarser than frustum center");
+    std::printf("  local tris=%zu nearEdge=%.3f farEdge=%.3f (uniform6 would be %zu)\n",
+                out->triangleCount(), nearEdge, farEdge, uniformCap);
 }
 
 void testScreenAdaptiveTessellation() {
@@ -3849,6 +3925,15 @@ int main() {
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
+    if (getenv("SOL_ONLY_TESS")) {
+        registerBuiltinNodes();
+        testTessellationTriangleBudget();
+        testFrustumCullCloseUpSubdiv();
+        testFrustumLocalDicingFalloff();
+        testScreenAdaptiveTessellation();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     testMath();
     testSampling();
     testBsdf();
@@ -3876,6 +3961,7 @@ int main() {
     testArnoldDisplacement();
     testTessellationTriangleBudget();
     testFrustumCullCloseUpSubdiv();
+    testFrustumLocalDicingFalloff();
     testScreenAdaptiveTessellation();
     testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();
