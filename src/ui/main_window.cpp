@@ -285,23 +285,21 @@ void MainWindow::createActions() {
 
     renderAction_ = new QAction("Start", this);
     renderAction_->setCheckable(true);
-    renderAction_->setChecked(true);
+    renderAction_->setChecked(false);
     renderAction_->setShortcut(QKeySequence("F5"));
-    renderAction_->setToolTip("Start render (F5). Stays pressed while live/IPR restarts are allowed.");
+    renderAction_->setToolTip("Start cook + render (F5). Stays pressed — graph edits auto-restart "
+                              "the render. Re-tessellates displacement dicing on each Start.");
     renderControlGroup->addAction(renderAction_);
     connect(renderAction_, &QAction::triggered, this, &MainWindow::onStartRender);
 
     stopAction_ = new QAction("Stop", this);
     stopAction_->setCheckable(true);
+    stopAction_->setChecked(true);
     stopAction_->setShortcut(QKeySequence("Esc"));
-    stopAction_->setToolTip("Stop render (Esc). Stays pressed — edits will not auto-restart until Start.");
+    stopAction_->setToolTip("Stop render (Esc). Stays pressed — no cook / no render until Start. "
+                            "Camera frozen; last frame kept.");
     renderControlGroup->addAction(stopAction_);
     connect(stopAction_, &QAction::triggered, this, &MainWindow::onStopRender);
-
-    iprAction_ = new QAction("Interactive Rendering", this);
-    iprAction_->setCheckable(true);
-    iprAction_->setChecked(true);
-    iprAction_->setToolTip("Re-render automatically after every edit (only while Start is pressed)");
 
     auto* transformGroup = new QActionGroup(this);
     transformGroup->setExclusive(true);
@@ -394,8 +392,6 @@ void MainWindow::createToolBar() {
     // T/R/S live on the viewport chrome bar above the framebuffer.
     toolBar->addAction(renderAction_);
     toolBar->addAction(stopAction_);
-    toolBar->addSeparator();
-    toolBar->addAction(iprAction_);
 }
 
 void MainWindow::createTimeline() {
@@ -520,7 +516,7 @@ void MainWindow::createDocks() {
             applyLensFromCameraNode(camera, scene_->camera);
             scene_->camera.focusDistance = distanceMetres;
             session_.updateSceneData();
-            if (iprAction_->isChecked() && renderArmed()) session_.start();
+            if (renderArmed()) session_.start();
         }
         if (parameterPanel_->node() == camera) parameterPanel_->refresh();
         parameterPanel_->setFocusPickActive(false);
@@ -633,7 +629,6 @@ void MainWindow::createDocks() {
 // ---------------------------------------------------------------------------
 
 void MainWindow::newScene() {
-    session_.stop();
     buildDefaultGraph(graph_);
     networkView_->setGraph(&graph_);
     parameterPanel_->clearSelection();
@@ -642,16 +637,15 @@ void MainWindow::newScene() {
     selectedSourceNode_.clear();
     cameraOverride_ = false;
     lookThroughCameraName_.clear();
-    renderView_->clearImage();
+    enterIdlePlaceholder();
     updateWindowTitle();
-    cookNow();
     selectDisplayNode();
     if (Node* cam = findCameraNode()) lookThroughCamera(cam->name());
     else refreshViewportCameraMenu();
+    statusBar()->showMessage("Scene ready — press Start to cook and render", 5000);
 }
 
 void MainWindow::newSceneFromAlembic(const QString& alembicPath, const QString& hdriPath) {
-    session_.stop();
     buildAlembicGraph(graph_, alembicPath, hdriPath);
     networkView_->setGraph(&graph_);
     parameterPanel_->clearSelection();
@@ -660,16 +654,15 @@ void MainWindow::newSceneFromAlembic(const QString& alembicPath, const QString& 
     selectedSourceNode_.clear();
     cameraOverride_ = false;
     lookThroughCameraName_.clear();
-    renderView_->clearImage();
+    enterIdlePlaceholder();
     updateWindowTitle();
-    cookNow();
     selectDisplayNode();
     if (Node* cam = findCameraNode()) lookThroughCamera(cam->name());
     else refreshViewportCameraMenu();
+    statusBar()->showMessage("Scene ready — press Start to cook and render", 5000);
 }
 
 bool MainWindow::openScene(const QString& path) {
-    session_.stop();
     QString error;
     if (!loadGraphFromFile(graph_, path, error)) {
         appMessageBox(this, "Open scene", error);
@@ -682,11 +675,12 @@ bool MainWindow::openScene(const QString& path) {
     selectedSourceNode_.clear();
     cameraOverride_ = false;
     lookThroughCameraName_.clear();
+    enterIdlePlaceholder();
     updateWindowTitle();
-    cookNow();
     selectDisplayNode();
     if (Node* cam = findCameraNode()) lookThroughCamera(cam->name());
     else refreshViewportCameraMenu();
+    statusBar()->showMessage("Opened — press Start to cook and render", 5000);
     return true;
 }
 
@@ -780,8 +774,31 @@ void MainWindow::onSaveImage() {
 // ---------------------------------------------------------------------------
 
 void MainWindow::scheduleCook(int delayMilliseconds) {
+    // Safe idle: while Stop is pressed, do not cook the graph at all.
+    if (!renderArmed()) {
+        if (cookTimer_) cookTimer_->stop();
+        return;
+    }
     if (!cookTimer_) return;
     cookTimer_->start(delayMilliseconds);
+}
+
+void MainWindow::enterIdlePlaceholder() {
+    session_.stop();
+    session_.discardPreviousRender();
+    setRenderArmed(false);
+    renderRequested_ = false;
+    if (cookTimer_) cookTimer_->stop();
+    tessCache_.clear();
+    tessCacheFingerprint_.clear();
+    scene_.reset();
+    stage_.reset();
+    if (sceneGraphPanel_) sceneGraphPanel_->setStage(nullptr, {});
+    if (renderView_) {
+        renderView_->setNavigationEnabled(false);
+        renderView_->showPlaceholder(true);
+    }
+    framePending_.store(false, std::memory_order_relaxed);
 }
 
 void MainWindow::onCookTimeout() { cookNow(); }
@@ -956,7 +973,8 @@ void MainWindow::cookNow() {
     if (renderRequested_ || needTess) {
         if (renderRequested_ || renderArmed()) setRenderArmed(true);
         restartRender();
-    } else if (iprAction_->isChecked() && renderArmed()) {
+    } else if (renderArmed()) {
+        // While Start is pressed, graph edits re-cook and restart (former IPR-on behavior).
         restartRender();
     }
 }
@@ -990,7 +1008,16 @@ void MainWindow::storeTessellationCache(const Scene& scene) {
 }
 
 void MainWindow::onStartRender() {
+    const bool fromPlaceholder = renderView_ && renderView_->isShowingPlaceholder();
     setRenderArmed(true);
+    if (renderView_) {
+        renderView_->setNavigationEnabled(true);
+        if (fromPlaceholder) {
+            renderView_->beginPlaceholderFade(3000);
+        } else {
+            renderView_->showPlaceholder(false);
+        }
+    }
     // Tear down the previous render immediately on the button press so cook /
     // tessellation do not compete with a live BVH + accumulated framebuffer.
     session_.discardPreviousRender();
@@ -1004,8 +1031,13 @@ void MainWindow::onStartRender() {
 void MainWindow::onStopRender() {
     setRenderArmed(false);
     renderRequested_ = false;
+    if (cookTimer_) cookTimer_->stop();
     session_.stop();
-    statusBar()->showMessage("Render stopped — press Start to render again", 4000);
+    if (renderView_) {
+        renderView_->setNavigationEnabled(false);
+        renderView_->showPlaceholder(false);  // keep last beauty frame
+    }
+    statusBar()->showMessage("Stopped — last frame held; press Start to cook/render again", 4000);
     updateStatusBar();
 }
 
@@ -1045,12 +1077,19 @@ void MainWindow::setRenderArmed(bool armed) {
 }
 
 void MainWindow::onRenderTick() {
-    if (!framePending_.exchange(false, std::memory_order_relaxed)) return;
-    renderView_->setImage(toQImage(session_.displayImage()));
-    updateStatusBar();
+    const bool fade = renderView_ && renderView_->placeholderFadeActive();
+    const bool pending = framePending_.exchange(false, std::memory_order_relaxed);
+    if (!pending && !fade) return;
+    if (!renderView_) return;
+    if (renderArmed() || fade) {
+        renderView_->setImage(toQImage(session_.displayImage()));
+        updateStatusBar();
+    }
 }
 
 void MainWindow::onCameraMoved() {
+    // Idle / Stop: camera frozen — ignore orbit/pan/dolly.
+    if (!renderArmed()) return;
     cameraOverride_ = true;
     if (Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
         // Looking through: navigation authors the camera node (Houdini lock-to-camera).
@@ -1073,8 +1112,8 @@ void MainWindow::onCameraMoved() {
         applyLensFromCameraNode(cam, scene_->camera);
     }
 
-    // With motion blur, each IPR sample is expensive. Joining the render thread on every
-    // mouse-move freezes orbit — only push camera + restart IPR on a throttle / release.
+    // With motion blur, each sample is expensive. Joining the render thread on every
+    // mouse-move freezes orbit — only push camera + restart on a throttle / release.
     const bool navigating = renderView_->isNavigating();
     const bool heavyMb = scene_->settings.motionBlur != 0;
     if (heavyMb && navigating) {
@@ -1083,7 +1122,7 @@ void MainWindow::onCameraMoved() {
             lastMbNavIprRestartMs_ = now;
             mbNavIprPending_ = false;
             session_.updateSceneData();
-            if (iprAction_->isChecked() && renderArmed()) session_.start();
+            session_.start();
         } else {
             mbNavIprPending_ = true;
         }
@@ -1091,7 +1130,7 @@ void MainWindow::onCameraMoved() {
     }
     mbNavIprPending_ = false;
     session_.updateSceneData();
-    if (iprAction_->isChecked() && renderArmed()) session_.start();
+    session_.start();
 }
 
 void MainWindow::onLookThroughCameraNode() {
@@ -1154,7 +1193,7 @@ void MainWindow::lookThroughCamera(const QString& cameraName) {
                           scene_->camera.cameraToWorld);
             }
             session_.updateSceneData();
-            if (iprAction_->isChecked() && renderArmed()) session_.start();
+            if (renderArmed()) session_.start();
         }
         return;
     }
@@ -1176,7 +1215,7 @@ void MainWindow::lookThroughCamera(const QString& cameraName) {
                       scene_->camera.cameraToWorld);
         }
         session_.updateSceneData();
-        if (iprAction_->isChecked() && renderArmed()) session_.start();
+        if (renderArmed()) session_.start();
     }
     statusBar()->showMessage("Looking through " + camera->name(), 3000);
 }
@@ -1334,7 +1373,7 @@ void MainWindow::onShowShortcuts() {
                              "  H / Home      frame all\n"
                              "  Sel / Q       select — LMB click geometry (Select tool only)\n"
                              "  T / R / S     translate / rotate / scale\n"
-                             "  LMB on gizmo  transform (IPR restarts on release)\n"
+                             "  LMB on gizmo  transform (restarts render on release while Start)\n"
                              "  Focus Pick    camera Lens → click geo to set DOF focus\n"
                              "  Cam menu      look through a camera (nav edits that camera)\n"
                              "  Home button   frame all (same as H)\n"
@@ -1352,8 +1391,8 @@ void MainWindow::onShowShortcuts() {
                              "  Scrubber playhead    current frame (double-click to type)\n"
                              "  Frame → time         Alembic & USD sample time\n\n"
                              "General\n"
-                             "  F5            Start render (button stays pressed)\n"
-                             "  Esc           Stop (button stays pressed — no auto-restart)\n"
+                             "  F5            Start cook + render (button stays pressed)\n"
+                             "  Esc           Stop (no cook until Start; last frame held)\n"
                              "  Ctrl+E        save image");
 }
 

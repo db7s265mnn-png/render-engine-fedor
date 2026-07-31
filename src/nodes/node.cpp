@@ -164,15 +164,15 @@ void addTessellationParameters(Node& node) {
     node.addParameter(Parameter::makeInt("subdiviterations", "Subdiv Iterations", 3, 0, 100)
                           .withGroup("Subdivision")
                           .withTooltip(
-                              "Max densify passes in the camera frustum (Frustum Cull on). "
-                              "With Screen Adaptive on, also a cap — dicing stops earlier when "
-                              "edges are short enough on screen. "
-                              "Hard stop only at the triangle memory budget (~200M)."));
+                              "Uniform densify passes when Screen Adaptive is off. "
+                              "Ignored when Screen Adaptive is on (density from Dicing Quality). "
+                              "With Frustum Cull on, only the in-frame patch densifies."));
     node.addParameter(Parameter::makeFloat("dicingquality", "Dicing Quality", 1.0, 0.01, 16.0, false)
                           .withGroup("Subdivision")
-                          .withTooltip("Screen-space density when Screen Adaptive is on "
-                                       "(Karma-like: 1 ≈ one micropolygon per pixel). "
-                                       "Ignored when Screen Adaptive is off."));
+                          .withTooltip(
+                              "Screen Adaptive only (Karma/Mantra/PRMan): target micropolygon "
+                              "edge ≈ 1/Quality pixels. Quality 1 ≈ 1 micropoly/pixel; "
+                              "Quality 2 ≈ 0.5 px edge (4× density)."));
     node.addParameter(Parameter::makeFloat("boundspadding", "Bounds Padding", 0.0, 0.0, 100.0, false)
                           .withGroup("Subdivision")
                           .withTooltip("Extra AABB padding after displacement (scene units)."));

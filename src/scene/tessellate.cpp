@@ -24,25 +24,36 @@ namespace sol {
 namespace {
 
 // Safety ceiling only — prefer freeing previous-render memory over clamping.
-// 200M tris ≈ heavy displace mesh; real limiter is host RAM / BVH build.
-constexpr size_t kMaxTessTriangles = 200000000ull;
+// Overridden per-scene by Render Settings → Dicing Poly Limit (M).
+constexpr size_t kDefaultTessTriangles = 10000000ull;  // 10M
+constexpr size_t kHardMaxTessTriangles = 200000000ull;  // absolute ceiling
 
-int clampSubdivLevelsForBudget(int requested, size_t triCount) {
+size_t tessTriangleBudget(const RenderSettingsData& rs) {
+    const int millions = std::clamp(rs.dicingPolyLimitM, 1, 200);
+    const size_t want = size_t(millions) * 1000000ull;
+    return std::min(want, kHardMaxTessTriangles);
+}
+
+int clampSubdivLevelsForBudget(int requested, size_t triCount, size_t budget) {
     const int want = std::max(0, requested);
     if (want == 0 || triCount == 0) return 0;
+    const size_t lim = std::max<size_t>(1, budget);
     size_t est = triCount;
     int levels = 0;
     while (levels < want) {
-        if (est > kMaxTessTriangles / 4) break;
+        if (est > lim / 4) break;
         est *= 4;
         ++levels;
     }
     if (levels < want) {
         logWarning("tessellate: clamped subdiv iterations " + std::to_string(want) + " → " +
-                   std::to_string(levels) + " (triangle budget " +
-                   std::to_string(kMaxTessTriangles) + ")");
+                   std::to_string(levels) + " (triangle budget " + std::to_string(lim) + ")");
     }
     return levels;
+}
+
+int clampSubdivLevelsForBudget(int requested, size_t triCount) {
+    return clampSubdivLevelsForBudget(requested, triCount, kDefaultTessTriangles);
 }
 
 bool indexInRange(uint32_t idx, size_t count) { return size_t(idx) < count; }
@@ -102,8 +113,13 @@ bool pointInPaddedFrustum(float ndcX, float ndcY, float padFrac) {
 float screenEdgePixels(Vec3 aObj, Vec3 bObj, const Mat4& objToWorld, const Mat4& worldToCam,
                        const CameraData& cam, float aspect, int resX, int resY) {
     float ax, ay, az, bx, by, bz;
-    if (!projectToNdc(aObj, objToWorld, worldToCam, cam, aspect, ax, ay, az)) return 0.0f;
-    if (!projectToNdc(bObj, objToWorld, worldToCam, cam, aspect, bx, by, bz)) return 0.0f;
+    const bool oka = projectToNdc(aObj, objToWorld, worldToCam, cam, aspect, ax, ay, az);
+    const bool okb = projectToNdc(bObj, objToWorld, worldToCam, cam, aspect, bx, by, bz);
+    // Both behind / failed → no useful screen length.
+    if (!oka && !okb) return 0.0f;
+    // Partially behind the near plane or failed projection: force further dice
+    // (Karma/PRMan keep refining until the edge is stable in raster space).
+    if (!oka || !okb) return 1.0e6f;
     const float dx = (bx - ax) * 0.5f * float(resX);
     const float dy = (by - ay) * 0.5f * float(resY);
     return std::sqrt(dx * dx + dy * dy);
@@ -500,28 +516,23 @@ void expandFaceMarksByEdgeRing(const Mesh& mesh, std::vector<uint8_t>& faceMark)
 
 // Iterative frustum-local dicing: each pass only splits edges of faces that
 // intersect the padded frustum (plus 1–2 rings of soft tails on early passes).
-// Combined with Screen Adaptive: long screen edges only. N iterations = max
-// depth inside the frame — outside stops refining once faces leave the frustum.
-void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQuality,
+// N iterations = max depth inside the frame when Screen Adaptive is off.
+void refineLinearFrustumLocal(Mesh& mesh, int maxIter, float dicingQuality, size_t polyBudget,
                               const Mat4& objToWorld, const CameraData& cam, const Mat4& worldToCam,
                               float aspect, int resX, int resY, float padFrac) {
-    // Do NOT pre-clamp by whole-mesh 4^n — that made Subdiv Iterations a no-op on
-    // denser cages (e.g. ~200k tris → hard cap at 3 levels). Local dicing only
-    // grows the in-frustum patch; the live triangle budget below is the limiter.
     maxIter = std::max(0, maxIter);
     if (maxIter <= 0) return;
     if (mesh.normals.size() != mesh.positions.size()) {
         mesh.normals.clear();
         mesh.computeNormalsIfMissing();
     }
-    const float quality = std::max(1.0e-3f, dicingQuality);
-    const float targetPx = 1.0f / quality;
+    (void)dicingQuality;
     constexpr int kTailIters = 2;
 
     for (int iter = 0; iter < maxIter; ++iter) {
-        if (mesh.triangleCount() * 4 > kMaxTessTriangles) {
+        if (mesh.triangleCount() * 4 > polyBudget) {
             logWarning("tessellate: frustum-local subdiv stopped at triangle budget (" +
-                       std::to_string(kMaxTessTriangles) + ") after " + std::to_string(iter) +
+                       std::to_string(polyBudget) + ") after " + std::to_string(iter) +
                        " iteration(s)");
             break;
         }
@@ -545,37 +556,21 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, floa
         }
         if (markedCount == 0) break;
 
-        // Soft tails: first two iterations also dice a 1-ring outside the frustum.
         if (iter < kTailIters && markedCount < triCount) expandFaceMarksByEdgeRing(mesh, faceMark);
 
-        // Fast path when every face still hits the frustum.
-        // Important: do NOT batch all remaining levels here when the cage is still
-        // coarse (e.g. 2 huge tris covering the frame) — corners must be allowed to
-        // leave the frustum on later passes. Only batch once the mesh is already
-        // dense enough that a full-frame densify is intentional.
         if (markedCount == triCount) {
             constexpr size_t kBatchUniformMinTris = 1024;
-            if (!screenAdaptive && triCount >= kBatchUniformMinTris) {
+            if (triCount >= kBatchUniformMinTris) {
                 const int remain = maxIter - iter;
-                const int allowed = clampSubdivLevelsForBudget(remain, mesh.triangleCount());
-                if (allowed <= 0) {
-                    logWarning("tessellate: frustum-local (full frame) hit triangle budget — further "
-                               "Subdiv Iterations have no effect");
-                    break;
-                }
+                const int allowed = clampSubdivLevelsForBudget(remain, mesh.triangleCount(), polyBudget);
+                if (allowed <= 0) break;
                 for (int u = 0; u < allowed; ++u) {
-                    if (mesh.triangleCount() * 4 > kMaxTessTriangles) break;
+                    if (mesh.triangleCount() * 4 > polyBudget) break;
                     subdivideLinearOnce(mesh);
                 }
                 break;
             }
-            if (screenAdaptive) {
-                if (!subdivideLinearScreenAdaptiveOnce(mesh, objToWorld, worldToCam, cam, aspect, resX,
-                                                       resY, targetPx))
-                    break;
-            } else {
-                subdivideLinearOnce(mesh);
-            }
+            subdivideLinearOnce(mesh);
             continue;
         }
 
@@ -587,28 +582,88 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, floa
             const uint32_t i1 = mesh.indices[t * 3 + 1];
             const uint32_t i2 = mesh.indices[t * 3 + 2];
             if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
-
-            auto consider = [&](uint32_t a, uint32_t b) {
-                if (screenAdaptive) {
-                    const float px =
-                        screenEdgePixels(mesh.positions[a], mesh.positions[b], objToWorld, worldToCam,
-                                         cam, aspect, resX, resY);
-                    if (!(px > targetPx)) return;
-                }
-                splitEdge[makeEdgeKey(a, b)] = 1;
-            };
-            consider(i0, i1);
-            consider(i1, i2);
-            consider(i2, i0);
+            splitEdge[makeEdgeKey(i0, i1)] = 1;
+            splitEdge[makeEdgeKey(i1, i2)] = 1;
+            splitEdge[makeEdgeKey(i2, i0)] = 1;
         }
         if (!subdivideMarkedEdgesOnce(mesh, splitEdge)) break;
     }
 }
 
-void refineLinear(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQuality,
+// Karma / Mantra / RenderMan raster dicing:
+//   target edge length (px) = 1 / dicingQuality
+//   Quality 1 → ~1 micropolygon per pixel; Quality 2 → ~0.5 px (4× density).
+// Subdiv Iterations ignored. Always frustum-aware (padding from Render Settings).
+// Stops when edges are short enough or Dicing Poly Limit is hit.
+void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget,
+                              const Mat4& objToWorld, const CameraData& cam, const Mat4& worldToCam,
+                              float aspect, int resX, int resY, float padFrac) {
+    if (mesh.normals.size() != mesh.positions.size()) {
+        mesh.normals.clear();
+        mesh.computeNormalsIfMissing();
+    }
+    const float quality = std::max(1.0e-3f, dicingQuality);
+    const float targetPx = 1.0f / quality;
+    constexpr int kSafetyPasses = 48;
+    constexpr int kTailIters = 2;
+
+    for (int pass = 0; pass < kSafetyPasses; ++pass) {
+        if (mesh.triangleCount() >= polyBudget) {
+            logWarning("tessellate: Screen Adaptive stopped at Dicing Poly Limit (" +
+                       std::to_string(polyBudget) + " tris)");
+            break;
+        }
+        const size_t triCount = mesh.indices.size() / 3;
+        const size_t nPos = mesh.positions.size();
+        if (triCount == 0) break;
+
+        std::vector<uint8_t> faceMark(triCount, 0);
+        size_t markedCount = 0;
+        for (size_t t = 0; t < triCount; ++t) {
+            const uint32_t i0 = mesh.indices[t * 3 + 0];
+            const uint32_t i1 = mesh.indices[t * 3 + 1];
+            const uint32_t i2 = mesh.indices[t * 3 + 2];
+            if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
+            if (triangleIntersectsPaddedFrustum(mesh.positions[i0], mesh.positions[i1],
+                                                mesh.positions[i2], objToWorld, worldToCam, cam, aspect,
+                                                padFrac)) {
+                faceMark[t] = 1;
+                ++markedCount;
+            }
+        }
+        if (markedCount == 0) break;
+        if (pass < kTailIters && markedCount < triCount) expandFaceMarksByEdgeRing(mesh, faceMark);
+
+        std::unordered_map<EdgeKey, char, EdgeHash> splitEdge;
+        splitEdge.reserve(markedCount * 2 + 8);
+        for (size_t t = 0; t < triCount; ++t) {
+            if (!faceMark[t]) continue;
+            const uint32_t i0 = mesh.indices[t * 3 + 0];
+            const uint32_t i1 = mesh.indices[t * 3 + 1];
+            const uint32_t i2 = mesh.indices[t * 3 + 2];
+            if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
+            auto consider = [&](uint32_t a, uint32_t b) {
+                const float px = screenEdgePixels(mesh.positions[a], mesh.positions[b], objToWorld,
+                                                  worldToCam, cam, aspect, resX, resY);
+                if (px > targetPx) splitEdge[makeEdgeKey(a, b)] = 1;
+            };
+            consider(i0, i1);
+            consider(i1, i2);
+            consider(i2, i0);
+        }
+        if (splitEdge.empty()) break;
+        // Bound growth toward the poly limit.
+        if (mesh.triangleCount() + splitEdge.size() > polyBudget && mesh.triangleCount() > polyBudget / 2) {
+            // Still try one pass; next loop hits the hard stop.
+        }
+        if (!subdivideMarkedEdgesOnce(mesh, splitEdge)) break;
+    }
+}
+
+void refineLinear(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQuality, size_t polyBudget,
                   const InstanceData* diceInst, const CameraData& cam, const Mat4& worldToCam,
                   float aspect, int resX, int resY) {
-    maxIter = clampSubdivLevelsForBudget(maxIter, mesh.triangleCount());
+    maxIter = clampSubdivLevelsForBudget(maxIter, mesh.triangleCount(), polyBudget);
     if (maxIter <= 0) return;
     if (mesh.normals.size() != mesh.positions.size()) {
         mesh.normals.clear();
@@ -628,7 +683,7 @@ void refineLinear(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQual
     }
 
     for (int i = 0; i < maxIter; ++i) {
-        if (mesh.triangleCount() * 4 > kMaxTessTriangles) {
+        if (mesh.triangleCount() * 4 > polyBudget) {
             logWarning("tessellate: linear subdiv stopped at budget");
             break;
         }
@@ -726,30 +781,18 @@ bool refineCatclarkOpenSubdiv(Mesh& mesh, int levels) {
 }
 #endif
 
-void refineCatclark(Mesh& mesh, int levels, bool screenAdaptive, float dicingQuality,
+void refineCatclark(Mesh& mesh, int levels, float dicingQuality, size_t polyBudget,
                     const InstanceData* diceInst, const CameraData& cam, const Mat4& worldToCam,
                     float aspect, int resX, int resY) {
-    int useLevels = clampSubdivLevelsForBudget(levels, mesh.triangleCount());
-    if (screenAdaptive && diceInst && useLevels > 0) {
-        // Prefer true screen-adaptive linear splits for dicing. Catclark OSD is
-        // uniform-only; estimate a level count from screen size as a fallback.
-        const float quality = std::max(1.0e-3f, dicingQuality);
-        const float targetPx = 1.0f / quality;
-        float maxPx = maxScreenEdge(mesh, diceInst->xform, worldToCam, cam, aspect, resX, resY);
-        if (!(maxPx > 0.0f)) {
-            logWarning("tessellate: screen adaptive projection failed — using uniform catclark");
-        } else {
-            // Triangle cages already fall back to linear adaptive in tessellateOne.
-            // For rare quad cages keep a level estimate for OSD.
-            int est = 0;
-            while (est < useLevels && maxPx > targetPx) {
-                maxPx *= 0.5f;
-                ++est;
-            }
-            useLevels = est;
-        }
-    }
+    int useLevels = clampSubdivLevelsForBudget(levels, mesh.triangleCount(), polyBudget);
     if (useLevels <= 0) return;
+    (void)dicingQuality;
+    (void)diceInst;
+    (void)cam;
+    (void)worldToCam;
+    (void)aspect;
+    (void)resX;
+    (void)resY;
 
 #if SOLSTICE_HAVE_OPENSUBDIV
     if (refineCatclarkOpenSubdiv(mesh, useLevels)) return;
@@ -757,7 +800,8 @@ void refineCatclark(Mesh& mesh, int levels, bool screenAdaptive, float dicingQua
 #else
     logWarning("tessellate: OpenSubdiv not in this build — catclark falls back to linear");
 #endif
-    refineLinear(mesh, useLevels, false, dicingQuality, diceInst, cam, worldToCam, aspect, resX, resY);
+    refineLinear(mesh, useLevels, false, dicingQuality, polyBudget, diceInst, cam, worldToCam, aspect, resX,
+                 resY);
 }
 
 MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
@@ -768,6 +812,7 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
     const int resX = std::max(1, rs.resolutionX);
     const int resY = std::max(1, rs.resolutionY);
     const float aspect = float(resX) / float(resY);
+    const size_t polyBudget = tessTriangleBudget(rs);
 
     const bool needDisp = materialHasGeometricDisplacement(mat);
     // Tessellation exists to feed displacement (and Pref). Without a displace
@@ -777,13 +822,16 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
         return std::make_shared<Mesh>(std::move(cage));
     }
 
+    const bool adaptive = rs.screenAdaptive != 0;
+    // Screen Adaptive always implies camera-visible dicing (Karma-style).
+    // Frustum Cull checkbox still gates the non-adaptive path.
+    const bool useFrustumGate = adaptive || rs.frustumCull != 0;
+
     bool inFrustum = true;
-    if (rs.frustumCull) {
+    if (useFrustumGate) {
         inFrustum = meshVisibleInFrustum(cage, instances, cam, w2c, aspect, padFrac);
     }
-
-    // Outside frustum: displace cage only (no subdiv), even if subdiv authored.
-    if (rs.frustumCull && !inFrustum) {
+    if (useFrustumGate && !inFrustum) {
         return displaceMeshOnly(std::move(cage), mat, scene);
     }
 
@@ -796,32 +844,35 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
     auto work = std::make_shared<Mesh>(std::move(cage));
     work->motionPositionsPacked_.clear();
     const InstanceData* diceInst = nearestInstance(instances, cam);
-    const bool adaptive = rs.screenAdaptive != 0;
     int type = work->subdivType;
     if (type == kSubdivCatclark && !meshHasQuadsHint(*work) && meshIsTriangleOnly(*work)) {
         type = kSubdivLinear;  // whole-mesh tris → linear
     }
 
-    // Frustum cull on → local dicing. Pass authored iterations through (live
-    // triangle budget stops runaway). Uniform path still pre-clamps by 4^n.
     const int wantIters = std::max(0, work->subdivIterations);
     try {
-        if (type == kSubdivNone || wantIters == 0) {
+        if (!diceInst) {
+            // no instance — leave cage
+        } else if (adaptive) {
+            // Karma/Mantra/PRMan: Quality-driven raster dicing; Iterations ignored.
+            refineScreenAdaptiveDice(*work, work->dicingQuality, polyBudget, diceInst->xform, cam, w2c,
+                                     aspect, resX, resY, padFrac);
+        } else if (type == kSubdivNone || wantIters == 0) {
             // no subdiv
-        } else if (rs.frustumCull && diceInst) {
-            // Catclark OSD is uniform-only — frustum path always uses linear local dicing.
-            refineLinearFrustumLocal(*work, wantIters, adaptive, work->dicingQuality, diceInst->xform, cam,
+        } else if (rs.frustumCull) {
+            refineLinearFrustumLocal(*work, wantIters, work->dicingQuality, polyBudget, diceInst->xform, cam,
                                      w2c, aspect, resX, resY, padFrac);
         } else {
-            const int uniformCap = clampSubdivLevelsForBudget(wantIters, work->triangleCount());
+            const int uniformCap =
+                clampSubdivLevelsForBudget(wantIters, work->triangleCount(), polyBudget);
             if (uniformCap == 0) {
-                // cage already past budget for any uniform split
+                // cage already past budget
             } else if (type == kSubdivCatclark) {
-                refineCatclark(*work, uniformCap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect,
-                               resX, resY);
+                refineCatclark(*work, uniformCap, work->dicingQuality, polyBudget, diceInst, cam, w2c,
+                               aspect, resX, resY);
             } else {
-                refineLinear(*work, uniformCap, adaptive, work->dicingQuality, diceInst, cam, w2c, aspect,
-                             resX, resY);
+                refineLinear(*work, uniformCap, false, work->dicingQuality, polyBudget, diceInst, cam, w2c,
+                             aspect, resX, resY);
             }
         }
     } catch (const std::bad_alloc&) {
@@ -941,6 +992,8 @@ std::string tessellationFingerprint(const Scene& scene) {
     key += std::to_string(rs.frustumPadding);
     key += ";sa=";
     key += std::to_string(rs.screenAdaptive);
+    key += ";dpl=";
+    key += std::to_string(rs.dicingPolyLimitM);
     key += ";dc=";
     key += std::to_string(rs.dicingCameraMode);
     key += ";rx=";

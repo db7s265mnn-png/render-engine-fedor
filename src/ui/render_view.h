@@ -42,6 +42,12 @@ public:
 
     void setImage(const QImage& image);
     void clearImage();
+    // Idle / safe-start: cover-cropped bundled placeholder instead of a black FB.
+    void showPlaceholder(bool show);
+    bool isShowingPlaceholder() const { return showPlaceholder_; }
+    // Crossfade placeholder → beauty over `durationMs` (samples may accumulate under).
+    void beginPlaceholderFade(int durationMs = 3000);
+    bool placeholderFadeActive() const { return fadeActive_; }
     void setStatusText(const QString& text) {
         statusText_ = text;
         update();
@@ -119,6 +125,7 @@ private:
     enum class GizmoAxis { None = 0, X, Y, Z, Center };
 
     QRect imageRect() const;
+    QImage coverCroppedPlaceholder(const QSize& targetSize) const;
     bool pickUnderMouse(const QPoint& pos, Vec3& hitPoint) const;
     bool pickObjectUnderMouse(const QPoint& pos, QString& sourceNode) const;
     bool projectWorldToWidget(const Vec3& world, QPointF& out) const;
@@ -147,6 +154,11 @@ private:
                            const Vec3& az, float radius);
 
     QImage image_;
+    QImage placeholderImage_;
+    bool showPlaceholder_ = false;
+    bool fadeActive_ = false;
+    qint64 fadeStartMs_ = 0;
+    int fadeDurationMs_ = 3000;
     QString statusText_;
     ViewCamera camera_;
     PickCallback pickCallback_;

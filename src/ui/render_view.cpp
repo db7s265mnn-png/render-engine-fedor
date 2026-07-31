@@ -2,7 +2,10 @@
 
 #include <QApplication>
 #include <QButtonGroup>
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QAction>
@@ -21,6 +24,28 @@
 
 namespace sol {
 namespace {
+
+QString findPlaceholderAsset() {
+    QStringList roots = {
+        QDir::currentPath() + "/examples",
+        QDir::currentPath() + "/assets",
+        QDir::currentPath() + "/../examples",
+        QDir::currentPath() + "/../assets",
+        QDir::currentPath() + "/../../examples",
+    };
+    if (QCoreApplication::instance()) {
+        const QString appDir = QCoreApplication::applicationDirPath();
+        roots.prepend(appDir + "/examples");
+        roots.prepend(appDir + "/assets");
+        roots.prepend(appDir + "/../examples");
+        roots.prepend(appDir + "/../assets");
+    }
+    for (const QString& root : roots) {
+        const QFileInfo info(QDir(root).absoluteFilePath(QStringLiteral("render_placeholder.jpg")));
+        if (info.exists() && info.isFile()) return info.absoluteFilePath();
+    }
+    return {};
+}
 
 Vec3 rotateAroundAxis(const Vec3& point, const Vec3& center, const Vec3& axis, float degrees) {
     const float a = radians(degrees);
@@ -345,16 +370,94 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         setTransformSpace(TransformSpace::World);
     });
     layoutToolStrip();
+
+    const QString phPath = findPlaceholderAsset();
+    if (!phPath.isEmpty()) {
+        placeholderImage_ = QImage(phPath);
+        if (placeholderImage_.isNull())
+            placeholderImage_ = QImage();
+    }
 }
 
 void RenderView::setImage(const QImage& image) {
-    image_ = image;
+    if (fadeActive_ && !placeholderImage_.isNull() && !image.isNull()) {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        const float t =
+            fadeDurationMs_ > 0
+                ? std::clamp(float(now - fadeStartMs_) / float(fadeDurationMs_), 0.0f, 1.0f)
+                : 1.0f;
+        if (t >= 1.0f) {
+            fadeActive_ = false;
+            image_ = image;
+        } else {
+            const QSize sz = image.size();
+            QImage ph = coverCroppedPlaceholder(sz).convertToFormat(QImage::Format_RGB32);
+            QImage beauty = image.convertToFormat(QImage::Format_RGB32);
+            if (ph.size() != sz)
+                ph = ph.scaled(sz, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            QImage blended(sz, QImage::Format_RGB32);
+            for (int y = 0; y < sz.height(); ++y) {
+                const QRgb* a = reinterpret_cast<const QRgb*>(ph.constScanLine(y));
+                const QRgb* b = reinterpret_cast<const QRgb*>(beauty.constScanLine(y));
+                QRgb* d = reinterpret_cast<QRgb*>(blended.scanLine(y));
+                for (int x = 0; x < sz.width(); ++x) {
+                    const int ar = qRed(a[x]), ag = qGreen(a[x]), ab = qBlue(a[x]);
+                    const int br = qRed(b[x]), bg = qGreen(b[x]), bb = qBlue(b[x]);
+                    d[x] = qRgb(int(ar + (br - ar) * t + 0.5f), int(ag + (bg - ag) * t + 0.5f),
+                                int(ab + (bb - ab) * t + 0.5f));
+                }
+            }
+            image_ = blended;
+        }
+    } else {
+        fadeActive_ = false;
+        image_ = image;
+    }
     update();
 }
 
 void RenderView::clearImage() {
     image_ = QImage();
+    fadeActive_ = false;
     update();
+}
+
+void RenderView::showPlaceholder(bool show) {
+    showPlaceholder_ = show;
+    if (show) {
+        fadeActive_ = false;
+        image_ = QImage();
+    }
+    update();
+}
+
+void RenderView::beginPlaceholderFade(int durationMs) {
+    fadeActive_ = true;
+    fadeStartMs_ = QDateTime::currentMSecsSinceEpoch();
+    fadeDurationMs_ = std::max(1, durationMs);
+    showPlaceholder_ = false;
+    update();
+}
+
+QImage RenderView::coverCroppedPlaceholder(const QSize& targetSize) const {
+    if (placeholderImage_.isNull() || targetSize.width() <= 0 || targetSize.height() <= 0)
+        return QImage();
+    const double srcAspect =
+        double(placeholderImage_.width()) / double(std::max(1, placeholderImage_.height()));
+    const double dstAspect = double(targetSize.width()) / double(targetSize.height());
+    QRect src(0, 0, placeholderImage_.width(), placeholderImage_.height());
+    if (dstAspect > srcAspect) {
+        // Framebuffer wider → crop top/bottom.
+        const int h = int(std::lround(placeholderImage_.width() / dstAspect));
+        const int y = std::max(0, (placeholderImage_.height() - h) / 2);
+        src = QRect(0, y, placeholderImage_.width(), std::min(h, placeholderImage_.height() - y));
+    } else if (dstAspect < srcAspect) {
+        // Framebuffer narrower → crop sides.
+        const int w = int(std::lround(placeholderImage_.height() * dstAspect));
+        const int x = std::max(0, (placeholderImage_.width() - w) / 2);
+        src = QRect(x, 0, std::min(w, placeholderImage_.width() - x), placeholderImage_.height());
+    }
+    return placeholderImage_.copy(src).scaled(targetSize, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
 }
 
 void RenderView::setResolution(int width, int height) {
@@ -959,12 +1062,14 @@ void RenderView::paintEvent(QPaintEvent*) {
     painter.fillRect(rect(), theme::gridDark());
 
     const QRect target = imageRect();
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
     if (!image_.isNull()) {
-        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
         painter.drawImage(target, image_);
+    } else if (showPlaceholder_ && !placeholderImage_.isNull()) {
+        painter.drawImage(target, coverCroppedPlaceholder(target.size()));
     } else {
         painter.setPen(theme::textDim());
-        painter.drawText(rect(), Qt::AlignCenter, "Press Render to start the path tracer");
+        painter.drawText(rect(), Qt::AlignCenter, "Press Start to cook and render");
     }
     painter.setPen(QPen(QColor(0, 0, 0, 120), 1));
     painter.drawRect(target.adjusted(0, 0, -1, -1));

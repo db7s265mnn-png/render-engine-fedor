@@ -836,11 +836,16 @@ public:
                          .withTooltip("Screen-space margin as a percent of resolution width/height."));
         addParameter(Parameter::makeBool("screenadaptive", "Screen Adaptive", false)
                          .withGroup("Subdivision")
-                         .withTooltip("Dice by projected edge length (Karma-like): only long "
-                                      "screen-space edges split. Subdiv Iterations is the max "
-                                      "cap. When off, Iterations is a uniform level count. "
-                                      "Uses each mesh's Dicing Quality (1 ≈ 1 micropoly/pixel). "
-                                      "Re-tessellates on Start (or automatically while Start is armed)."));
+                         .withTooltip(
+                             "Karma / Mantra / RenderMan-style raster dicing: split until projected "
+                             "edge length ≈ 1/DicingQuality pixels (Quality 1 ≈ 1 micropolygon per "
+                             "pixel). Only camera-visible faces (plus Frustum Padding). "
+                             "Per-mesh Subdiv Iterations are ignored — density comes from Quality. "
+                             "Re-tessellates only on Start."));
+        addParameter(Parameter::makeInt("dicingpolylimitm", "Dicing Poly Limit (M)", 10, 1, 200)
+                         .withGroup("Subdivision")
+                         .withTooltip("Safety fuse: stop densify / Screen Adaptive once the mesh "
+                                      "reaches this many million triangles (default 10)."));
         addParameter(Parameter::makeMenu("dicingcamera", "Dicing Camera",
                                          {"Render Camera", "Custom"}, 0)
                          .withGroup("Subdivision")
@@ -885,6 +890,7 @@ public:
         settings.frustumCull = boolValue("frustumcull", true) ? 1 : 0;
         settings.frustumPadding = float(floatValue("frustumpadding", 10.0));
         settings.screenAdaptive = boolValue("screenadaptive", false) ? 1 : 0;
+        settings.dicingPolyLimitM = std::clamp(intValue("dicingpolylimitm", 10), 1, 200);
         settings.dicingCameraMode =
             intValue("dicingcamera", 0) == 1 ? kDicingCameraCustom : kDicingCameraRender;
         settings.toneMapper = intValue("tonemap", 2);

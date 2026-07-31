@@ -72,10 +72,11 @@ private:
     void scheduleCook(int delayMilliseconds = 120);
     void cookNow();
     void restartRender();
+    void enterIdlePlaceholder();
     void applyTessellationCache(Scene& scene) const;
     void storeTessellationCache(const Scene& scene);
     CameraData resolveDicingCamera(const Scene& scene) const;
-    // Start pressed (Stop not): IPR / param cooks may drive the session.
+    // Start pressed (Stop not): edits may cook + restart the session.
     bool renderArmed() const;
     void setRenderArmed(bool armed);
     void updateWindowTitle();
@@ -112,7 +113,6 @@ private:
     QTimer* refreshTimer_ = nullptr;
     QAction* renderAction_ = nullptr;
     QAction* stopAction_ = nullptr;
-    QAction* iprAction_ = nullptr;
     QAction* selectToolAction_ = nullptr;
     QAction* translateToolAction_ = nullptr;
     QAction* rotateToolAction_ = nullptr;

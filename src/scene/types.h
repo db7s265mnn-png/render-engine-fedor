@@ -426,6 +426,8 @@ struct RenderSettingsData {
     float frustumPadding = 10.0f;     // screen-space margin as % of width/height
     int screenAdaptive = 0;           // Karma-like dicing by projected edge length
     int dicingCameraMode = kDicingCameraRender;  // render camera or custom
+    // Safety fuse for Screen Adaptive / densify (millions of triangles). Default 10M.
+    int dicingPolyLimitM = 10;
 };
 
 // ---------------------------------------------------------------------------

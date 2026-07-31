@@ -2476,12 +2476,13 @@ void testArnoldDisplacement() {
 
 void testTessellationTriangleBudget() {
     std::printf("tessellation-triangle-budget\n");
-    // Ceiling is 200M — densify past the old 4M soft-cap without clamping early.
+    // Default Dicing Poly Limit is 10M; hard ceiling 200M.
     MeshPtr sphere = makeSphereMesh(1.0f, 48, 24);
     check(sphere && sphere->triangleCount() > 1000, "sphere cage");
     const size_t cageTris = sphere->triangleCount();
 
     Scene scene;
+    scene.settings.dicingPolyLimitM = 200;  // allow the classic 6-level explode for this test
     Material mat;
     mat.displacementHeight = 0.05f;
     mat.displacementScale = 1.0f;
@@ -2564,6 +2565,7 @@ void testFrustumLocalDicingFalloff() {
     scene.settings.frustumCull = 1;
     scene.settings.frustumPadding = 5.0f;
     scene.settings.screenAdaptive = 0;
+    scene.settings.dicingPolyLimitM = 50;
     scene.settings.resolutionX = 640;
     scene.settings.resolutionY = 360;
     scene.camera.focalLength = 85.0f;
@@ -2684,6 +2686,7 @@ void testFrustumLocalItersNotClampedOnDenseCage() {
         scene.settings.frustumCull = 1;
         scene.settings.frustumPadding = 5.0f;
         scene.settings.screenAdaptive = 0;
+        scene.settings.dicingPolyLimitM = 50;
         scene.settings.resolutionX = 640;
         scene.settings.resolutionY = 360;
         scene.camera.focalLength = 85.0f;
