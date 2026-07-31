@@ -442,13 +442,19 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
         Material m = mat;
         m.subdivIterations = cap;
         const float pad = std::max(work->boundsPadding, authoredPad);
-        MeshPtr displaced = displaceMeshOnly(std::move(*work), m, scene);
-        displaced->boundsPadding = pad;
-        if (displaced->boundsPadding > 0.0f) displaced->computeBounds();
-        displaced->subdivType = authoredSubdivType;
-        displaced->subdivIterations = authoredSubdivIterations;
-        displaced->dicingQuality = authoredDicingQuality;
-        return displaced;
+        try {
+            MeshPtr displaced = displaceMeshOnly(std::move(*work), m, scene);
+            displaced->boundsPadding = pad;
+            if (displaced->boundsPadding > 0.0f) displaced->computeBounds();
+            displaced->subdivType = authoredSubdivType;
+            displaced->subdivIterations = authoredSubdivIterations;
+            displaced->dicingQuality = authoredDicingQuality;
+            return displaced;
+        } catch (const std::bad_alloc&) {
+            logWarning("tessellate: displace OOM — returning densified cage without Pref lock");
+            work->computeBounds();
+            return work;
+        }
     }
     work->computeBounds();
     return work;
@@ -483,23 +489,26 @@ void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera) {
         const int authoredIterations = mesh->subdivIterations;
         const std::string meshName = mesh->name;
         try {
-            // Move cage out of the scene slot first so refine does not keep a
-            // second live copy of the same buffers.
-            Mesh cage = std::move(*mesh);
-            mesh.reset();
-            MeshPtr tess = tessellateOne(std::move(cage), mat, scene, insts, dicingCamera);
+            // Steal cage buffers into a local Mesh while keeping the shared_ptr
+            // slot non-null (empty shell). Avoids a parallel cage+work copy and
+            // never leaves a nullptr mesh index for Embree/OptiX.
+            Mesh working = std::move(*mesh);
+            MeshPtr tess = tessellateOne(std::move(working), mat, scene, insts, dicingCamera);
             if (matIndex >= 0 && size_t(matIndex) < scene.materials.size())
                 scene.materials[size_t(matIndex)].subdivIterations = authoredIterations;
-            mesh = std::move(tess);
+            if (tess) mesh = std::move(tess);
         } catch (const std::bad_alloc&) {
             logError("tessellate: out of memory on mesh '" + meshName +
-                     "' — mesh slot empty (lower Subdiv Iterations)");
+                     "' — keeping emptied cage slot (lower Subdiv Iterations)");
         } catch (const std::exception& ex) {
-            logError(std::string("tessellate: ") + ex.what() + " on mesh '" + meshName +
-                     "' — mesh slot empty");
+            logError(std::string("tessellate: ") + ex.what() + " on mesh '" + meshName + "'");
         }
     }
 
+    // Critical: finalize() rebuilt meshViews_ from pre-displace cages. After we
+    // replace meshes, those views dangle (UAF crash) and restPositions stay
+    // nullptr in SceneView → triplanar samples displaced P (seam artifacts).
+    scene.finalize();
     logInfo("tessellate: render tessellation complete");
 }
 

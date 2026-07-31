@@ -944,6 +944,7 @@ void MainWindow::cookNow() {
 
 void MainWindow::applyTessellationCache(Scene& scene) const {
     if (tessCache_.empty()) return;
+    bool swapped = false;
     for (const PrimRecord& prim : scene.prims) {
         if (prim.instanceIndex < 0 || size_t(prim.instanceIndex) >= scene.instances.size()) continue;
         InstanceData& inst = scene.instances[size_t(prim.instanceIndex)];
@@ -951,9 +952,12 @@ void MainWindow::applyTessellationCache(Scene& scene) const {
         for (const auto& entry : tessCache_) {
             if (entry.first != prim.path || !entry.second) continue;
             scene.meshes[size_t(inst.meshIndex)] = entry.second;
+            swapped = true;
             break;
         }
     }
+    // Cached meshes already carry Pref; refresh views so SceneView pointers match.
+    if (swapped) scene.finalize();
 }
 
 void MainWindow::storeTessellationCache(const Scene& scene) {

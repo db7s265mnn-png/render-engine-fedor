@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <new>
+#include <string>
 
 #include "core/log.h"
 
@@ -178,8 +180,7 @@ void RenderSession::threadMain() {
         return;
     }
 
-    std::string error;
-    if (!prepareDevice(error)) {
+    auto fail = [&](const std::string& error) {
         logError("Render failed: " + error);
         {
             std::lock_guard<std::mutex> lock(progressMutex_);
@@ -193,6 +194,19 @@ void RenderSession::threadMain() {
             finished = finishedCallback_;
         }
         if (finished) finished();
+    };
+
+    std::string error;
+    try {
+        if (!prepareDevice(error)) {
+            fail(error.empty() ? std::string("device prepare failed") : error);
+            return;
+        }
+    } catch (const std::bad_alloc&) {
+        fail("out of memory while building the scene (lower Subdiv Iterations)");
+        return;
+    } catch (const std::exception& ex) {
+        fail(ex.what());
         return;
     }
 

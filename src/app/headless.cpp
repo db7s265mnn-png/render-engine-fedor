@@ -77,6 +77,10 @@ int runHeadless(const HeadlessOptions& options) {
         tessellateSceneForRender(*scene, diceCam);
     }
 
+    // tessellateSceneForRender calls finalize(); keep a defensive refresh if
+    // tessellation was skipped (empty scene) so views still match meshes.
+    scene->refreshMeshViews();
+
     std::fprintf(stderr, "Rendering %dx%d, %d spp, %zu triangles, %zu lights\n", scene->settings.resolutionX,
                  scene->settings.resolutionY, scene->settings.samplesPerPixel, scene->totalTriangles(),
                  scene->lights.size());

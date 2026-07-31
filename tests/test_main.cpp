@@ -2002,6 +2002,14 @@ void testTriplanarDisplacementArtifacts() {
               "restPositions stored (Pref)");
         check(!mesh.restNormals.empty() && mesh.restNormals.size() == mesh.positions.size(),
               "restNormals stored (Nref)");
+        // SceneView must expose Pref after tessellate — otherwise CPU shading
+        // falls back to displaced P and triplanar seams return (and pointers UAF).
+        const SceneView cookedView = cooked->view();
+        check(cookedView.meshCount > 0 && cookedView.meshes, "cooked SceneView has meshes");
+        check(cookedView.meshes[0].restPositions != nullptr, "SceneView exposes Pref after tess");
+        check(cookedView.meshes[0].restNormals != nullptr, "SceneView exposes Nref after tess");
+        check(cookedView.meshes[0].restPositions == mesh.restPositions.data(),
+              "SceneView Pref points at live mesh buffers");
 
         float maxDelta = 0.0f;
         for (size_t i = 0; i < mesh.positions.size(); ++i)
