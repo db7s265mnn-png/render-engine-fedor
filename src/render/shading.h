@@ -327,7 +327,7 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         base.bumpProc >= 0 || (base.bumpTex >= 0 && base.bumpTex < scene.textureCount && scene.textures);
     // Autobump only when there is real high-frequency content (map/proc). Constant
     // height has zero FD and must not enable this path. Geometric displace already
-    // rebuilt vertex normals — autobump is residual shade detail only.
+    // rebuilt vertex normals — autobump supplies the Pref-space displace normal.
     const bool hasAutobump =
         base.autobump != 0 && !hasBump &&
         (base.displacementProc >= 0 ||
@@ -400,9 +400,13 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         ns = normalize(frame.toWorld(nMap));
         if (!srIsFinite(ns.x) || !srIsFinite(ns.y) || !srIsFinite(ns.z)) ns = frame.n;
     } else if (hasAutobump) {
-        // Arnold autobump: residual high frequencies as shade-time bump. Sample the
-        // displacement shader at Pref (pre-displace cage) so triplanar axes stay
-        // locked — evaluating on displaced P would flip projections and compound.
+        // Arnold autobump: estimate the shading normal as if the mesh were diced
+        // far past the geometric tessellation. Evaluate the displacement shader at
+        // Pref (pre-displace cage) so triplanar axes stay locked — evaluating on
+        // displaced P would flip projections and compound the height.
+        // No residual×1/(1+iters): denser geo already matches this Pref normal, so
+        // the visual "strength" falls off naturally (Arnold-like). Applies to all
+        // ray types (camera / specular / diffuse / transmission).
         const Vec3 geoNs = ns;
         const float dispScale = srIsFinite(base.displacementScale) ? base.displacementScale : 1.0f;
         const Vec3 pref = ctx.hasPref ? ctx.pRef : pObject;
@@ -438,11 +442,8 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
             dHt = (hu - h) / epsUv / srMax(worldPerUv, 1e-4f);
             dHb = (hv - h) / epsUv / srMax(worldPerUv, 1e-4f);
         }
-        // Residual weight: subdiv already captured mid frequencies.
-        const float residual =
-            1.0f / float(1 + srMax(0, base.subdivIterations));
-        float bx = -dHt * residual;
-        float by = -dHb * residual;
+        float bx = -dHt;
+        float by = -dHb;
         // Clamp slope so shading normals stay within ~60° of the geometric normal
         // (avoids black NEE from shadingNormalConsistent / tiny N·L).
         const float xy = sqrtf(bx * bx + by * by);
@@ -454,9 +455,8 @@ SR_INL SR_HD Material evaluateTexturedMaterial(const SceneView& scene, const Mat
         Vec3 nMap(bx, by, 1.0f);
         if (!srIsFinite(nMap.x) || !srIsFinite(nMap.y) || !srIsFinite(nMap.z)) nMap = Vec3(0.0f, 0.0f, 1.0f);
         nMap = normalize(nMap);
-        // Apply residual in the geometric shading frame (post-displace).
-        const Frame frameShade(geoNs);
-        ns = normalize(frameShade.toWorld(nMap));
+        // Pref/Nref frame = "insanely subdivided" displace normal (Arnold).
+        ns = normalize(frameP.toWorld(nMap));
         if (!srIsFinite(ns.x) || !srIsFinite(ns.y) || !srIsFinite(ns.z)) ns = geoNs;
         if (dot(ns, geoNs) < 0.0f) ns = -ns;
     } else if (base.normalProc >= 0 ||

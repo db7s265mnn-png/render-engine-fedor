@@ -103,8 +103,8 @@ struct Material {
     float displacementScale = 1.0f;
     float displacementHeight = 0.0f;  // unused (no constant-height mode)
     float displacementZeroValue = 0.5f;
-    int subdivIterations = 0;   // filled at tessellation time for autobump residual weight
-    int autobump = 1;           // high-frequency detail as bump after geo displace
+    int subdivIterations = 0;   // authored on geometry; densify may ignore under Screen Adaptive
+    int autobump = 1;           // Pref-space displace normal (Arnold-like), all ray types
     int displacementVector = 0; // 0 = along normal (float), 1 = vector displace
     int _padDisp = 0;
 

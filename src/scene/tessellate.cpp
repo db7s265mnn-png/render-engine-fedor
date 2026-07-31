@@ -325,7 +325,7 @@ bool subdivideMarkedEdgesOnce(
     const bool hasUv = mesh.uvs.size() == nPos;
 
     std::unordered_map<EdgeKey, uint32_t, EdgeHash> mid;
-    mid.reserve(splitEdge.size());
+    mid.reserve(splitEdge.size() * 2);
 
     auto midpoint = [&](uint32_t i0, uint32_t i1) -> uint32_t {
         EdgeKey key = makeEdgeKey(i0, i1);
@@ -350,6 +350,11 @@ bool subdivideMarkedEdgesOnce(
 
     std::vector<uint32_t> newIdx;
     newIdx.reserve(triCount * 12);
+    auto emit3 = [&](uint32_t a, uint32_t b, uint32_t c) {
+        newIdx.push_back(a);
+        newIdx.push_back(b);
+        newIdx.push_back(c);
+    };
     for (size_t t = 0; t < triCount; ++t) {
         const uint32_t i0 = mesh.indices[t * 3 + 0];
         const uint32_t i1 = mesh.indices[t * 3 + 1];
@@ -360,34 +365,45 @@ bool subdivideMarkedEdgesOnce(
         const bool b20 = isSplit(i2, i0);
         const int bits = (b01 ? 1 : 0) | (b12 ? 2 : 0) | (b20 ? 4 : 0);
         if (bits == 0) {
-            newIdx.insert(newIdx.end(), {i0, i1, i2});
+            emit3(i0, i1, i2);
             continue;
         }
         const uint32_t m01 = b01 ? midpoint(i0, i1) : 0;
         const uint32_t m12 = b12 ? midpoint(i1, i2) : 0;
         const uint32_t m20 = b20 ? midpoint(i2, i0) : 0;
         switch (bits) {
-            case 1:  // split i0-i1
-                newIdx.insert(newIdx.end(), {i0, m01, i2, m01, i1, i2});
+            case 1:
+                emit3(i0, m01, i2);
+                emit3(m01, i1, i2);
                 break;
-            case 2:  // split i1-i2
-                newIdx.insert(newIdx.end(), {i0, i1, m12, i0, m12, i2});
+            case 2:
+                emit3(i0, i1, m12);
+                emit3(i0, m12, i2);
                 break;
-            case 4:  // split i2-i0
-                newIdx.insert(newIdx.end(), {i0, i1, m20, m20, i1, i2});
+            case 4:
+                emit3(i0, i1, m20);
+                emit3(m20, i1, i2);
                 break;
-            case 3:  // i0-i1, i1-i2
-                newIdx.insert(newIdx.end(), {i0, m01, i2, m01, i1, m12, m01, m12, i2});
+            case 3:
+                emit3(i0, m01, i2);
+                emit3(m01, i1, m12);
+                emit3(m01, m12, i2);
                 break;
-            case 5:  // i0-i1, i2-i0
-                newIdx.insert(newIdx.end(), {i0, m01, m20, m01, i1, i2, m20, m01, i2});
+            case 5:
+                emit3(i0, m01, m20);
+                emit3(m01, i1, i2);
+                emit3(m20, m01, i2);
                 break;
-            case 6:  // i1-i2, i2-i0
-                newIdx.insert(newIdx.end(), {i0, i1, m12, i0, m12, m20, m20, m12, i2});
+            case 6:
+                emit3(i0, i1, m12);
+                emit3(i0, m12, m20);
+                emit3(m20, m12, i2);
                 break;
-            default:  // all three — classic 1→4
-                newIdx.insert(newIdx.end(),
-                              {i0, m01, m20, i1, m12, m01, i2, m20, m12, m01, m12, m20});
+            default:
+                emit3(i0, m01, m20);
+                emit3(i1, m12, m01);
+                emit3(i2, m20, m12);
+                emit3(m01, m12, m20);
                 break;
         }
     }
@@ -717,10 +733,11 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, float dicingQuality, size
     (void)resX;
     (void)resY;
     constexpr int kTailIters = 2;
+    constexpr int kBurst = 3;
     ThreadPool* pool = rt ? rt->pool : nullptr;
     std::vector<VertProj> proj;
 
-    for (int iter = 0; iter < maxIter; ++iter) {
+    for (int iter = 0; iter < maxIter;) {
         if (mesh.triangleCount() * 4 > polyBudget) {
             logWarning("tessellate: frustum-local subdiv stopped at triangle budget (" +
                        std::to_string(polyBudget) + ") after " + std::to_string(iter) +
@@ -753,12 +770,39 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, float dicingQuality, size
                 break;
             }
             subdivideLinearOnce(mesh);
+            ++iter;
             continue;
         }
 
-        std::unordered_map<EdgeKey, char, EdgeHash> splitEdge;
-        collectAllMarkedEdges(mesh, faceMark, pool, splitEdge);
-        if (!subdivideMarkedEdgesOnce(mesh, splitEdge)) break;
+        // Burst several marked splits per frustum measure.
+        const int take = std::min(kBurst, maxIter - iter);
+        bool stop = false;
+        for (int b = 0; b < take; ++b) {
+            std::unordered_map<EdgeKey, char, EdgeHash> splitEdge;
+            if (b == 0) {
+                collectAllMarkedEdges(mesh, faceMark, pool, splitEdge);
+            } else {
+                if (mesh.triangleCount() * 4 > polyBudget) {
+                    stop = true;
+                    break;
+                }
+                projectAllVertices(mesh, objToWorld, worldToCam, cam, aspect, proj, pool);
+                markedCount = 0;
+                markFacesInFrustumProjected(mesh, proj, padFrac, faceMark, markedCount, pool);
+                if (markedCount == 0) {
+                    stop = true;
+                    break;
+                }
+                collectAllMarkedEdges(mesh, faceMark, pool, splitEdge);
+            }
+            if (splitEdge.empty() || !subdivideMarkedEdgesOnce(mesh, splitEdge)) {
+                stop = true;
+                break;
+            }
+            ++iter;
+            if (rt) rt->reportMeshFrac(float(iter) / float(std::max(1, maxIter)), mesh.triangleCount());
+        }
+        if (stop) break;
     }
     if (rt) rt->reportMeshFrac(1.0f, mesh.triangleCount());
 }
@@ -773,8 +817,9 @@ void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget
     }
     const float quality = std::max(1.0e-3f, dicingQuality);
     const float targetPx = 1.0f / quality;
-    constexpr int kSafetyPasses = 48;
+    constexpr int kSafetyPasses = 24;
     constexpr int kTailIters = 2;
+    constexpr int kMaxBurst = 5;  // binary splits per measure — halves edge length each
     ThreadPool* pool = rt ? rt->pool : nullptr;
     std::vector<VertProj> proj;
     float startMaxPx = -1.0f;
@@ -794,12 +839,44 @@ void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget
         if (pass < kTailIters && markedCount < faceMark.size()) expandFaceMarksByEdgeRing(mesh, faceMark);
 
         std::unordered_map<EdgeKey, char, EdgeHash> splitEdge;
-        const float maxPx =
+        float maxPx =
             collectLongEdgesProjected(mesh, faceMark, proj, targetPx, resX, resY, pool, splitEdge);
         if (startMaxPx < 0.0f) startMaxPx = std::max(maxPx, targetPx);
         if (rt) rt->reportMeshFrac(adaptiveMeshFrac(startMaxPx, maxPx, targetPx), mesh.triangleCount());
         if (splitEdge.empty()) break;
-        if (!subdivideMarkedEdgesOnce(mesh, splitEdge)) break;
+
+        // Burst: each split ≈ halves screen edge. log2(max/target) splits without
+        // re-expanding soft-tail rings — far fewer full measure passes.
+        int bursts = 1;
+        if (maxPx > targetPx * 1.01f) {
+            bursts = int(std::ceil(std::log2(std::max(maxPx / targetPx, 1.0f))));
+            bursts = std::clamp(bursts, 1, kMaxBurst);
+        }
+
+        bool done = false;
+        for (int b = 0; b < bursts; ++b) {
+            if (mesh.triangleCount() >= polyBudget) {
+                done = true;
+                break;
+            }
+            if (!subdivideMarkedEdgesOnce(mesh, splitEdge)) {
+                done = true;
+                break;
+            }
+            if (b + 1 >= bursts) break;
+
+            projectAllVertices(mesh, objToWorld, worldToCam, cam, aspect, proj, pool);
+            // Topology changed — skip frustum remake; collect over all faces with
+            // the fresh projection cache (cheap vs another expandFaceMarks).
+            std::vector<uint8_t> allMark(mesh.indices.size() / 3, 1);
+            maxPx = collectLongEdgesProjected(mesh, allMark, proj, targetPx, resX, resY, pool, splitEdge);
+            if (rt) rt->reportMeshFrac(adaptiveMeshFrac(startMaxPx, maxPx, targetPx), mesh.triangleCount());
+            if (splitEdge.empty()) {
+                done = true;
+                break;
+            }
+        }
+        if (done) break;
     }
     if (rt) rt->reportMeshFrac(1.0f, mesh.triangleCount());
 }
