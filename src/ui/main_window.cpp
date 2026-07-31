@@ -23,7 +23,9 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QVector3D>
+#include <QEventLoop>
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <new>
 
@@ -945,9 +947,20 @@ void MainWindow::cookNow() {
         try {
             // Fingerprint authored cages before meshes are replaced.
             tessCacheFingerprint_ = tessellationFingerprint(*builtScene);
-            tessellateSceneForRender(*builtScene, diceCam);
+            auto lastUi = std::chrono::steady_clock::now();
+            tessellateSceneForRender(*builtScene, diceCam, [&](const std::string& msg) {
+                if (!renderView_) return;
+                renderView_->setStatusTextRight(QString::fromStdString(msg));
+                const auto now = std::chrono::steady_clock::now();
+                if (now - lastUi < std::chrono::milliseconds(50)) return;
+                lastUi = now;
+                // Keep UI alive during long dice without re-entering Start/Stop.
+                QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+            });
+            if (renderView_) renderView_->setStatusTextRight(QString());
             storeTessellationCache(*builtScene);
         } catch (const std::bad_alloc&) {
+            if (renderView_) renderView_->setStatusTextRight(QString());
             tessCacheFingerprint_.clear();
             logError("Render tessellation ran out of memory — using undisplaced cages");
             appMessageBox(this, QStringLiteral("Render"),
@@ -955,6 +968,7 @@ void MainWindow::cookNow() {
                                          "Lower Subdiv Iterations on the mesh and try again."),
                           QMessageBox::Ok);
         } catch (const std::exception& ex) {
+            if (renderView_) renderView_->setStatusTextRight(QString());
             tessCacheFingerprint_.clear();
             logError(std::string("Render tessellation failed: ") + ex.what());
             appMessageBox(this, QStringLiteral("Render"),

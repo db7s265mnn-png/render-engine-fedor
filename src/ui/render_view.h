@@ -52,6 +52,11 @@ public:
         statusText_ = text;
         update();
     }
+    // Right side of the same bottom strip (e.g. dicing progress next to spp).
+    void setStatusTextRight(const QString& text) {
+        statusTextRight_ = text;
+        update();
+    }
     void setResolution(int width, int height);
 
     ViewCamera& camera() { return camera_; }
@@ -160,6 +165,7 @@ private:
     qint64 fadeStartMs_ = 0;
     int fadeDurationMs_ = 3000;
     QString statusText_;
+    QString statusTextRight_;
     ViewCamera camera_;
     PickCallback pickCallback_;
     ObjectPickCallback objectPickCallback_;

@@ -1089,14 +1089,22 @@ void RenderView::paintEvent(QPaintEvent*) {
 
     drawGizmo(painter);
 
-    if (!statusText_.isEmpty()) {
+    if (!statusText_.isEmpty() || !statusTextRight_.isEmpty()) {
         QFont font = painter.font();
         font.setPointSizeF(8.5);
         painter.setFont(font);
         const QRect textRect(target.left(), target.bottom() - 22, target.width(), 20);
         painter.fillRect(textRect, QColor(0, 0, 0, 130));
         painter.setPen(QColor(235, 237, 240));
-        painter.drawText(textRect.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, statusText_);
+        if (!statusText_.isEmpty()) {
+            painter.drawText(textRect.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                             statusText_);
+        }
+        if (!statusTextRight_.isEmpty()) {
+            // Slightly right of the spp strip — same bar, secondary status (dicing).
+            painter.drawText(textRect.adjusted(textRect.width() / 3, 0, -8, 0),
+                             Qt::AlignVCenter | Qt::AlignLeft, statusTextRight_);
+        }
     } else if (focusPickActive_) {
         QFont font = painter.font();
         font.setPointSizeF(8.5);
