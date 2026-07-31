@@ -1,4 +1,5 @@
 // Unit tests for the maths, sampling, node graph and renderer plumbing.
+#include <chrono>
 #include <cmath>
 #include <functional>
 #include <utility>
@@ -2571,10 +2572,14 @@ void testFrustumLocalDicingFalloff() {
     scene.cameraAuthored = true;
 
     const size_t uniformCap = ground->triangleCount() * 4096ull;  // 4^6
+    const auto t0 = std::chrono::steady_clock::now();
     MeshPtr out = tessDisplaceForTest(ground, mat, scene, 6, /*forceFrustumOff=*/false);
+    const auto t1 = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     check(out != nullptr, "frustum-local mesh");
     check(out->triangleCount() > 32, "frustum-local actually densified");
     check(out->triangleCount() < uniformCap / 4, "far cheaper than whole-mesh 4^6");
+    check(ms < 5000.0, "frustum-local densify finishes quickly (no Start hang)");
 
     auto maxEdgeNear = [&](float radius) {
         float m = 0.0f;
@@ -2616,8 +2621,45 @@ void testFrustumLocalDicingFalloff() {
     const float nearEdge = maxEdgeNear(8.0f);
     const float farEdge = maxEdgeFar(60.0f);
     check(farEdge > nearEdge * 2.0f, "corners stay coarser than frustum center");
-    std::printf("  local tris=%zu nearEdge=%.3f farEdge=%.3f (uniform6 would be %zu)\n",
-                out->triangleCount(), nearEdge, farEdge, uniformCap);
+    std::printf("  local tris=%zu nearEdge=%.3f farEdge=%.3f ms=%.1f (uniform6 would be %zu)\n",
+                out->triangleCount(), nearEdge, farEdge, ms, uniformCap);
+}
+
+void testFrustumLocalFullyInViewFast() {
+    std::printf("frustum-local-fully-in-view-fast\n");
+    // Mesh entirely in frustum must not hang: fast-path to uniform splits.
+    MeshPtr sphere = makeSphereMesh(1.0f, 24, 16);
+    check(sphere && sphere->triangleCount() > 100, "sphere cage");
+    sphere->subdivType = kSubdivLinear;
+    sphere->subdivIterations = 4;
+    const size_t cage = sphere->triangleCount();
+
+    Material mat;
+    mat.displacementHeight = 0.02f;
+    mat.displacementScale = 1.0f;
+    mat.displacementZeroValue = 0.0f;
+
+    Scene fr;
+    fr.settings.frustumCull = 1;
+    fr.settings.frustumPadding = 10.0f;
+    fr.settings.screenAdaptive = 0;
+    fr.settings.resolutionX = 640;
+    fr.settings.resolutionY = 360;
+    fr.camera.focalLength = 50.0f;
+    fr.camera.sensorWidth = 36.0f;
+    fr.camera.cameraToWorld = lookAtMatrix(Vec3(0, 0, 6), Vec3(0, 0, 0), Vec3(0, 1, 0));
+    fr.cameraAuthored = true;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    MeshPtr out = tessDisplaceForTest(sphere, mat, fr, 4, /*forceFrustumOff=*/false);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+                          .count();
+    check(out != nullptr, "in-view frustum mesh");
+    // Nearly full densify (silhouette faces may leave the frustum a level early).
+    check(out->triangleCount() > cage * 128, "fully in-view densifies aggressively");
+    check(out->triangleCount() <= cage * 256, "does not exceed uniform 4^4");
+    check(ms < 8000.0, "fully in-view frustum densify stays responsive");
+    std::printf("  in-view %zu→%zu in %.1fms\n", cage, out->triangleCount(), ms);
 }
 
 void testScreenAdaptiveTessellation() {
@@ -3930,6 +3972,7 @@ int main() {
         testTessellationTriangleBudget();
         testFrustumCullCloseUpSubdiv();
         testFrustumLocalDicingFalloff();
+        testFrustumLocalFullyInViewFast();
         testScreenAdaptiveTessellation();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
@@ -3962,6 +4005,7 @@ int main() {
     testTessellationTriangleBudget();
     testFrustumCullCloseUpSubdiv();
     testFrustumLocalDicingFalloff();
+    testFrustumLocalFullyInViewFast();
     testScreenAdaptiveTessellation();
     testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();

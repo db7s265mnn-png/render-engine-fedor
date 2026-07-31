@@ -233,52 +233,23 @@ bool meshVisibleInFrustum(const Mesh& mesh, const std::vector<const InstanceData
     return false;
 }
 
-// Per-triangle frustum test (padded NDC). Used for iterative local dicing so a
-// huge face that covers the frame is refined only where it still intersects.
+// Per-triangle frustum test (padded NDC). Cheap on purpose — called every
+// densify iteration for every face. No ray-AABB (that made Start feel hung once
+// the mesh grew). Close-up / huge face covering the frame is handled by NDC
+// AABB overlap when all three verts project (even if verts sit off-screen).
 bool triangleIntersectsPaddedFrustum(Vec3 a, Vec3 b, Vec3 c, const Mat4& objToWorld,
                                      const Mat4& worldToCam, const CameraData& cam, float aspect,
                                      float padFrac) {
-    const float focal = std::max(1.0e-3f, cam.focalLength);
-    const float sensorW = std::max(1.0e-3f, cam.sensorWidth);
-    const float sensorH = sensorW / std::max(0.01f, aspect);
     const float lim = 1.0f + padFrac;
-    const Vec3 eye = transformPoint(cam.cameraToWorld, Vec3(0.0f));
-
-    const float ndcSamples[][2] = {
-        {0.0f, 0.0f}, {lim, lim},  {-lim, lim}, {lim, -lim}, {-lim, -lim},
-        {lim, 0.0f},  {-lim, 0.0f}, {0.0f, lim}, {0.0f, -lim},
-    };
-
-    // Camera eye near the triangle's world AABB → treat as intersecting (close-up).
-    Bounds3 wb;
-    wb.extend(transformPoint(objToWorld, a));
-    wb.extend(transformPoint(objToWorld, b));
-    wb.extend(transformPoint(objToWorld, c));
-    if (wb.valid()) {
-        const Vec3 pad(wb.radius() * 0.05f + 1.0e-3f);
-        if (eye.x >= wb.lo.x - pad.x && eye.x <= wb.hi.x + pad.x &&
-            eye.y >= wb.lo.y - pad.y && eye.y <= wb.hi.y + pad.y &&
-            eye.z >= wb.lo.z - pad.z && eye.z <= wb.hi.z + pad.z)
-            return true;
-        for (const auto& s : ndcSamples) {
-            const Vec3 dirCam =
-                normalize(Vec3(s[0] * 0.5f * sensorW, s[1] * 0.5f * sensorH, -focal));
-            const Vec3 dirWorld = transformVector(cam.cameraToWorld, dirCam);
-            if (rayHitsAabb(eye, dirWorld, wb)) return true;
-        }
-    }
-
     float nx[3], ny[3], nz[3];
-    const bool ok0 = projectToNdc(a, objToWorld, worldToCam, cam, aspect, nx[0], ny[0], nz[0]);
-    const bool ok1 = projectToNdc(b, objToWorld, worldToCam, cam, aspect, nx[1], ny[1], nz[1]);
-    const bool ok2 = projectToNdc(c, objToWorld, worldToCam, cam, aspect, nx[2], ny[2], nz[2]);
-    if (ok0 && pointInPaddedFrustum(nx[0], ny[0], padFrac)) return true;
-    if (ok1 && pointInPaddedFrustum(nx[1], ny[1], padFrac)) return true;
-    if (ok2 && pointInPaddedFrustum(nx[2], ny[2], padFrac)) return true;
-
-    if (ok0 && ok1 && ok2) {
-        for (const auto& s : ndcSamples) {
-            if (pointInTriangle2D(s[0], s[1], nx[0], ny[0], nx[1], ny[1], nx[2], ny[2])) return true;
+    bool ok[3];
+    int nOk = 0;
+    const Vec3 verts[3] = {a, b, c};
+    for (int i = 0; i < 3; ++i) {
+        ok[i] = projectToNdc(verts[i], objToWorld, worldToCam, cam, aspect, nx[i], ny[i], nz[i]);
+        if (ok[i]) {
+            ++nOk;
+            if (pointInPaddedFrustum(nx[i], ny[i], padFrac)) return true;
         }
     }
 
@@ -287,6 +258,29 @@ bool triangleIntersectsPaddedFrustum(Vec3 a, Vec3 b, Vec3 c, const Mat4& objToWo
     if (projectToNdc(mid, objToWorld, worldToCam, cam, aspect, mx, my, mz) &&
         pointInPaddedFrustum(mx, my, padFrac))
         return true;
+
+    if (nOk == 3) {
+        const float minx = std::min(nx[0], std::min(nx[1], nx[2]));
+        const float maxx = std::max(nx[0], std::max(nx[1], nx[2]));
+        const float miny = std::min(ny[0], std::min(ny[1], ny[2]));
+        const float maxy = std::max(ny[0], std::max(ny[1], ny[2]));
+        // Separating-axis reject vs padded NDC rect.
+        if (maxx < -lim || minx > lim || maxy < -lim || miny > lim) return false;
+        // AABB overlap: enough for dicing (may slightly over-mark edge faces).
+        // Also catch thin diagonal coverage via frustum-corner samples.
+        const float samples[][2] = {
+            {0.0f, 0.0f}, {lim, lim},  {-lim, lim}, {lim, -lim}, {-lim, -lim},
+            {lim, 0.0f},  {-lim, 0.0f}, {0.0f, lim}, {0.0f, -lim},
+        };
+        for (const auto& s : samples) {
+            if (pointInTriangle2D(s[0], s[1], nx[0], ny[0], nx[1], ny[1], nx[2], ny[2])) return true;
+        }
+        // Overlapping AABBs but no sample inside — still dice (conservative).
+        return true;
+    }
+
+    // Some verts behind the near plane: triangle may still cut the frame.
+    if (nOk > 0) return true;
     return false;
 }
 
@@ -511,8 +505,9 @@ void expandFaceMarksByEdgeRing(const Mesh& mesh, std::vector<uint8_t>& faceMark)
 void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, float dicingQuality,
                               const Mat4& objToWorld, const CameraData& cam, const Mat4& worldToCam,
                               float aspect, int resX, int resY, float padFrac) {
-    // Don't pre-clamp as if the whole mesh 4^n grows — local dicing is far cheaper.
-    maxIter = std::max(0, maxIter);
+    // Same iteration ceiling as uniform — local dicing never needs more passes
+    // than whole-mesh 4^n would allow for this cage (prevents Start hang at N=100).
+    maxIter = clampSubdivLevelsForBudget(maxIter, mesh.triangleCount());
     if (maxIter <= 0) return;
     if (mesh.normals.size() != mesh.positions.size()) {
         mesh.normals.clear();
@@ -523,7 +518,7 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, floa
     constexpr int kTailIters = 2;
 
     for (int iter = 0; iter < maxIter; ++iter) {
-        if (mesh.triangleCount() >= kMaxTessTriangles) {
+        if (mesh.triangleCount() * 4 > kMaxTessTriangles) {
             logWarning("tessellate: frustum-local subdiv stopped at budget");
             break;
         }
@@ -532,7 +527,7 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, floa
         if (triCount == 0) break;
 
         std::vector<uint8_t> faceMark(triCount, 0);
-        bool anyIn = false;
+        size_t markedCount = 0;
         for (size_t t = 0; t < triCount; ++t) {
             const uint32_t i0 = mesh.indices[t * 3 + 0];
             const uint32_t i1 = mesh.indices[t * 3 + 1];
@@ -542,16 +537,29 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, bool screenAdaptive, floa
                                                 mesh.positions[i2], objToWorld, worldToCam, cam, aspect,
                                                 padFrac)) {
                 faceMark[t] = 1;
-                anyIn = true;
+                ++markedCount;
             }
         }
-        if (!anyIn) break;
+        if (markedCount == 0) break;
 
         // Soft tails: first two iterations also dice a 1-ring outside the frustum.
-        if (iter < kTailIters) expandFaceMarksByEdgeRing(mesh, faceMark);
+        if (iter < kTailIters && markedCount < triCount) expandFaceMarksByEdgeRing(mesh, faceMark);
+
+        // Fast path: entire cage still in frustum → same as whole-mesh densify.
+        // Avoids building per-edge maps over millions of faces.
+        if (markedCount == triCount) {
+            if (screenAdaptive) {
+                if (!subdivideLinearScreenAdaptiveOnce(mesh, objToWorld, worldToCam, cam, aspect, resX,
+                                                       resY, targetPx))
+                    break;
+            } else {
+                subdivideLinearOnce(mesh);
+            }
+            continue;
+        }
 
         std::unordered_map<EdgeKey, char, EdgeHash> splitEdge;
-        splitEdge.reserve(triCount * 2);
+        splitEdge.reserve(markedCount * 2 + 8);
         for (size_t t = 0; t < triCount; ++t) {
             if (!faceMark[t]) continue;
             const uint32_t i0 = mesh.indices[t * 3 + 0];
@@ -773,11 +781,10 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
         type = kSubdivLinear;  // whole-mesh tris → linear
     }
 
-    // Frustum cull on → local dicing (not whole-mesh 4^N). Cap iterations only by
-    // the live triangle budget inside refineLinearFrustumLocal.
+    // Frustum cull on → local dicing (not whole-mesh 4^N). Still budget-clamp
+    // iterations so Start cannot run away toward the 200M ceiling.
     const int wantIters = std::max(0, work->subdivIterations);
-    const int cap = rs.frustumCull ? wantIters
-                                   : clampSubdivLevelsForBudget(wantIters, work->triangleCount());
+    const int cap = clampSubdivLevelsForBudget(wantIters, work->triangleCount());
     try {
         if (type == kSubdivNone || cap == 0) {
             // no subdiv
