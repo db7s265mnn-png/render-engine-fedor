@@ -244,7 +244,7 @@ endif()
 
 # OpenSubdiv — Catmull-Clark for displacement tessellation
 set(SOLSTICE_HAVE_OPENSUBDIV_01 0)
-if(SOLSTICE_ENABLE_OPENSUBDIV)
+if(SOLSTICE_ENABLE_OPENSUBDIV AND NOT WIN32)
     include(FetchContent)
     message(STATUS "Fetching OpenSubdiv for Catmull-Clark tessellation")
     set(NO_TUTORIALS ON CACHE BOOL "" FORCE)
@@ -277,6 +277,8 @@ if(SOLSTICE_ENABLE_OPENSUBDIV)
     else()
         message(WARNING "OpenSubdiv targets missing — catclark falls back to linear")
     endif()
+elseif(SOLSTICE_ENABLE_OPENSUBDIV AND WIN32)
+    message(STATUS "OpenSubdiv disabled on Windows (clang-cl/MSVC climits conflict) — catclark → linear")
 endif()
 
 # TinyUSDZ — binary USD (.usdc / crate .usd / .usdz) → USDA text for our importer
