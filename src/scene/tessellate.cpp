@@ -521,7 +521,9 @@ void projectAllVertices(const Mesh& mesh, const Mat4& objToWorld, const Mat4& wo
 
 float screenEdgePixelsFromProj(const VertProj& a, const VertProj& b, int resX, int resY) {
     if (!a.ok && !b.ok) return 0.0f;
-    if (!a.ok || !b.ok) return 1.0e6f;
+    // Partially clipped: request a modest refine, not "infinite" (that forced
+    // maxLevel on the whole frustum when we used to broadcast maxL).
+    if (!a.ok || !b.ok) return float(std::max(resX, resY));
     const float dx = (b.nx - a.nx) * 0.5f * float(resX);
     const float dy = (b.ny - a.ny) * 0.5f * float(resY);
     return std::sqrt(dx * dx + dy * dy);
@@ -946,13 +948,15 @@ void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget
         if (startMaxPx < 0.0f) startMaxPx = std::max(maxPx, targetPx);
         if (rt) rt->reportMeshFrac(adaptiveMeshFrac(startMaxPx, maxPx, targetPx), mesh.triangleCount());
 
-        // Uniform rate inside the marked region (watertight); depth = max need.
-        uint8_t maxL = 0;
-        for (uint8_t L : faceLevel) maxL = std::max(maxL, L);
-        if (maxL == 0) break;
+        // Keep per-face rates (Karma/PRMan): Quality scales targetPx. Do NOT
+        // stamp maxL onto every marked face — that ignored low Quality and
+        // densified the whole frustum from one close/clipped edge.
+        bool any = false;
         for (size_t t = 0; t < faceLevel.size(); ++t) {
-            faceLevel[t] = faceMark[t] ? maxL : uint8_t(0);
+            if (!faceMark[t]) faceLevel[t] = 0;
+            if (faceLevel[t]) any = true;
         }
+        if (!any) break;
 
         const size_t before = mesh.triangleCount();
         if (!diceMeshByFaceLevels(mesh, faceLevel, polyBudget)) break;

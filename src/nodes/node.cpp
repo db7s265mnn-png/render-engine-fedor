@@ -170,9 +170,10 @@ void addTessellationParameters(Node& node) {
     node.addParameter(Parameter::makeFloat("dicingquality", "Dicing Quality", 1.0, 0.01, 16.0, false)
                           .withGroup("Subdivision")
                           .withTooltip(
-                              "Screen Adaptive only (Karma/Mantra/PRMan): target micropolygon "
-                              "edge ≈ 1/Quality pixels. Quality 1 ≈ 1 micropoly/pixel; "
-                              "Quality 2 ≈ 0.5 px edge (4× density)."));
+                              "Screen Adaptive only: target edge ≈ 1/Quality pixels "
+                              "(Karma/Mantra/PRMan). Higher = denser. "
+                              "1 ≈ 1 µpoly/px; 0.01 ≈ 100 px edge (much coarser); "
+                              "2 ≈ 0.5 px (denser). Ignored when Screen Adaptive is off."));
     node.addParameter(Parameter::makeFloat("boundspadding", "Bounds Padding", 0.0, 0.0, 100.0, false)
                           .withGroup("Subdivision")
                           .withTooltip("Extra AABB padding after displacement (scene units)."));
