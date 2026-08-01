@@ -6,6 +6,7 @@
 #include <QString>
 #include <QRegularExpression>
 #include <algorithm>
+#include <cstring>
 #include <map>
 
 #include "core/log.h"
@@ -67,6 +68,7 @@ public:
         addParameter(Parameter::makeBool("importnormals", "Import Normals", true));
         addParameter(Parameter::makeBool("importuvs", "Import UVs", true));
         addTessellationParameters(*this);
+        addMediumParameters(*this);
         addTransformParameters(*this);
     }
 
@@ -134,6 +136,7 @@ public:
             out.path = (root.endsWith('/') ? root : root + "/") + leaf;
             out.material = Material();
             applyTessellationParameters(*this, out);
+            applyMediumParameters(*this, out);
             stage.addPrim(std::move(out));
         }
     }
@@ -162,6 +165,7 @@ public:
         addParameter(Parameter::makeBool("importnormals", "Import Normals", true));
         addParameter(Parameter::makeBool("importuvs", "Import UVs", true));
         addTessellationParameters(*this);
+        addMediumParameters(*this);
         addTransformParameters(*this);
     }
 
@@ -238,6 +242,7 @@ public:
                 out.path = (meshRoot.endsWith('/') ? meshRoot : meshRoot + "/") + leaf;
                 out.material = Material();
                 applyTessellationParameters(*this, out);
+                applyMediumParameters(*this, out);
                 stage.addPrim(std::move(out));
             } else if (prim.type == UsdPrim::Type::Camera && prim.hasCamera) {
                 StagePrim out;
@@ -294,6 +299,7 @@ public:
                 break;
         }
         addTessellationParameters(*this);
+        addMediumParameters(*this);
         addTransformParameters(*this);
     }
 
@@ -322,6 +328,7 @@ public:
         prim.sourceNode = name();
         prim.path = primPathFor(*this, "geo", stringValue("primname"));
         applyTessellationParameters(*this, prim);
+        applyMediumParameters(*this, prim);
         stage.addPrim(std::move(prim));
     }
 
@@ -948,6 +955,17 @@ public:
                          .withGroup("Film")
                          .withVisibleWhen("integrator==4&&filmfalsecolor==1")
                          .withTooltip("Which spectral bin to show when Spectral False Color is on."));
+
+        addParameter(Parameter::makeBool("enabletxcache", "Convert Textures to TX", true)
+                         .withGroup("Image")
+                         .withTooltip("Before rendering, convert source textures to .tx mipmapped "
+                                      "TIFF files using maketx or oiiotool. Cached in TX Cache "
+                                      "Directory; unchanged textures are skipped."));
+        addParameter(Parameter::makeString("txcachedir", "TX Cache Directory", "tx_cache")
+                         .withGroup("Image")
+                         .withTooltip("Directory for converted .tx files. Relative paths are "
+                                      "resolved from the current working directory. Empty uses "
+                                      "\"tx_cache\" next to the cwd."));
     }
 
     void cook(CookContext&, const std::vector<StagePtr>&, Stage& stage) override {
@@ -992,6 +1010,13 @@ public:
         settings.envVisibleCamera = boolValue("envvisible", true) ? 1 : 0;
         settings.filmFalseColor = boolValue("filmfalsecolor", false) ? 1 : 0;
         settings.filmFalseColorBin = std::clamp(intValue("filmfalsecolorbin", 0), 0, 31);
+        settings.enableTxCache = boolValue("enabletxcache", true) ? 1 : 0;
+        {
+            const std::string dir = stringValue("txcachedir", "tx_cache").toStdString();
+            const size_t maxLen = sizeof(settings.txCacheDir) - 1;
+            std::strncpy(settings.txCacheDir, dir.c_str(), maxLen);
+            settings.txCacheDir[maxLen] = '\0';
+        }
         stage.settings = settings;
         stage.settingsAuthored = true;
         stage.dicingCameraPath = stringValue("dicingcamerapath");

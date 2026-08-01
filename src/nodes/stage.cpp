@@ -4,6 +4,7 @@
 #include <map>
 #include <vector>
 
+#include "io/tx_cache.h"
 #include "scene/displace.h"
 
 namespace sol {
@@ -84,6 +85,13 @@ QStringList Stage::paths() const {
 ScenePtr Stage::toScene() const {
     auto scene = std::make_shared<Scene>();
     scene->settings = settings;
+
+    // Activate TX cache for image loads performed during this toScene call.
+    // Cleared when toScene returns so subsequent loads don't unexpectedly convert.
+    setActiveTxCacheSettings(settingsAuthored ? &scene->settings : nullptr);
+    struct TxGuard {
+        ~TxGuard() { setActiveTxCacheSettings(nullptr); }
+    } txGuard;
 
     std::map<const Mesh*, int> meshIndexCache;
     std::map<const EnvironmentMap*, int> envIndexCache;
@@ -241,6 +249,10 @@ ScenePtr Stage::toScene() const {
                 inst.materialIndex = materialIndex;
                 inst.lightIndex = -1;
                 inst.visibleCamera = 1;
+                if (prim.mediumAssigned && prim.medium.type != 0) {
+                    const std::string vdbPath = prim.vdbPath.toStdString();
+                    inst.mediumIndex = scene->addMedium(prim.medium, vdbPath);
+                }
                 scene->instances.push_back(inst);
 
                 PrimRecord record;

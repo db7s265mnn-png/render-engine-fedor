@@ -5,11 +5,21 @@
 
 namespace sol {
 
+// Optional host-side QMC stream (Owen-scrambled Sobol). When set, nextFloat()
+// pulls dimension sampleDim, sampleDim+1, … instead of PCG. Device/CUDA keeps
+// sampleFn null and uses PCG only.
+using RngQmcFn = float (*)(void* ctx, uint32_t dimension);
+
 // PCG32 - O'Neill 2014. Deterministic per pixel/sample which keeps CPU and GPU
 // renders reproducible for a given seed.
 struct Rng {
     uint64_t state = 0x853c49e6748fea9bULL;
     uint64_t inc = 0xda3e39cb94b95bdbULL;
+
+    // Host QMC (Sobol path dims). Null on GPU / when unused.
+    void* qmcCtx = nullptr;
+    RngQmcFn qmcFn = nullptr;
+    uint32_t sampleDim = 4u;  // dims 0-3 reserved for pixel/lens
 
     Rng() = default;
 
@@ -21,6 +31,9 @@ struct Rng {
         nextUint();
         state += 0x853c49e6748fea9bULL + seed;
         nextUint();
+        qmcCtx = nullptr;
+        qmcFn = nullptr;
+        sampleDim = 4u;
     }
 
     SR_HD uint32_t nextUint() {
@@ -32,6 +45,9 @@ struct Rng {
     }
 
     SR_HD float nextFloat() {
+#if !defined(__CUDACC__)
+        if (qmcFn) return qmcFn(qmcCtx, sampleDim++);
+#endif
         // 24 bits of mantissa gives values in [0,1).
         return static_cast<float>(nextUint() >> 8) * 0x1.0p-24f;
     }

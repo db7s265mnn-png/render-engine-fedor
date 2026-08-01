@@ -138,4 +138,7 @@ Mat4 transformFromParameters(const Node& node);
 void addTessellationParameters(Node& node);
 void applyTessellationParameters(const Node& node, StagePrim& prim);
 
+void addMediumParameters(Node& node);
+void applyMediumParameters(const Node& node, StagePrim& prim);
+
 }  // namespace sol

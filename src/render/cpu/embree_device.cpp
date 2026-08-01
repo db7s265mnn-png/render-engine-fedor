@@ -306,6 +306,20 @@ public:
             EmbreeTracer tracer{topScene_};
             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
             Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
+            // Owen-scrambled Sobol for path dimensions (4+). Pixel/lens use dims 0–3.
+            struct SobolQmc {
+                SobolSampler sampler;
+                int sampleIndex = 0;
+            } sobolQmc;
+            sobolQmc.sampler.setPixel(x, y);
+            sobolQmc.sampleIndex = sampleIndex;
+            rng.qmcCtx = &sobolQmc;
+            rng.qmcFn = [](void* ctx, uint32_t dim) -> float {
+                auto* c = static_cast<SobolQmc*>(ctx);
+                const int si = c->sampleIndex < 0 ? 0 : c->sampleIndex;
+                return c->sampler.sample1D(uint32_t(si), dim);
+            };
+            rng.sampleDim = 4u;
             float jx = 0.5f, jy = 0.5f;
             pixelSample(x, y, sampleIndex, jx, jy);
             float lensU = 0.5f, lensV = 0.5f;

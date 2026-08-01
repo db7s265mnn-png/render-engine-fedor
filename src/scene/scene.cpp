@@ -6,6 +6,7 @@
 #include <unordered_map>
 
 #include "core/log.h"
+#include "solstice_config.h"
 
 namespace sol {
 
@@ -233,6 +234,11 @@ int Scene::addMedium(const MediumData& medium, const std::string& vdbPath) {
             volumePaths.push_back(vdbPath);
         }
         m.volumeIndex = vi;
+#if !SOLSTICE_HAVE_OPENVDB
+        // Without OpenVDB, type-2 media still use the authored homogeneous σa/σs.
+        logWarning("OpenVDB not in this build — volume '" + vdbPath +
+                   "' uses homogeneous σa/σs/density fallback");
+#endif
     }
     media.push_back(m);
     return static_cast<int>(media.size()) - 1;

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/log.h"
+#include "io/tx_cache.h"
 #include "render/framebuffer.h"
 #include "solstice_config.h"
 
@@ -506,11 +507,15 @@ bool imageFormatIsHdr(const std::string& path) {
 }
 
 bool loadImage(const std::string& path, Image& out, std::string& error, bool srgbColor) {
-    const std::string ext = toLowerExtension(path);
-    if (ext == "hdr" || ext == "rgbe" || ext == "pic") return loadHdr(path, out, error);
+    // When the TX cache is active, try to convert the source to a .tx mipmap
+    // before loading.  If conversion fails the original path is used as-is.
+    const std::string resolved = txCacheResolve(path);
+    const std::string& loadPath = resolved;
+    const std::string ext = toLowerExtension(loadPath);
+    if (ext == "hdr" || ext == "rgbe" || ext == "pic") return loadHdr(loadPath, out, error);
     if (ext == "exr") {
 #if SOLSTICE_HAVE_OPENEXR
-        return loadExr(path, out, error);
+        return loadExr(loadPath, out, error);
 #else
         error = "this build has no OpenEXR support, use .hdr instead";
         return false;
@@ -518,17 +523,17 @@ bool loadImage(const std::string& path, Image& out, std::string& error, bool srg
     }
     if (ext == "tx" || ext == "tif" || ext == "tiff") {
 #if SOLSTICE_HAVE_TIFF
-        return loadTiffWithMips(path, out, error, srgbColor);
+        return loadTiffWithMips(loadPath, out, error, srgbColor);
 #else
         if (ext == "tx") {
             error = "this build has no libtiff support — cannot load .tx mipmaps";
             return false;
         }
         // Fall back to Qt for plain TIFF when libtiff is unavailable.
-        return loadLdr(path, out, error, srgbColor);
+        return loadLdr(loadPath, out, error, srgbColor);
 #endif
     }
-    return loadLdr(path, out, error, srgbColor);
+    return loadLdr(loadPath, out, error, srgbColor);
 }
 
 bool pathHasUdimToken(const QString& path) {

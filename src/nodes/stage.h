@@ -58,6 +58,11 @@ struct StagePrim {
     // Camera
     CameraData camera;
 
+    // Participating medium (authored on geo nodes; plumbed to scene for later use).
+    MediumData medium;
+    bool mediumAssigned = false;   // true when any medium parameter was set by the user
+    QString vdbPath;               // absolute path to the VDB file (when medium.type == 2)
+
     QString typeName() const;
 };
 

@@ -189,4 +189,53 @@ void applyTessellationParameters(const Node& node, StagePrim& prim) {
     prim.boundsPadding = float(node.floatValue("boundspadding", 0.0));
 }
 
+void addMediumParameters(Node& node) {
+    node.addParameter(Parameter::makeMenu(
+                          "mediumtype", "Medium Type",
+                          {"None", "Homogeneous", "OpenVDB"}, 0)
+                          .withGroup("Medium")
+                          .withTooltip("None: no participating medium on this prim.\n"
+                                       "Homogeneous: uniform fog/smoke described by sigma_a/sigma_s.\n"
+                                       "OpenVDB: heterogeneous volume from a VDB file (path below)."));
+    node.addParameter(Parameter::makeColor("medium_sigma_a", "Absorption (σa)", Vec3(0.0f))
+                          .withGroup("Medium")
+                          .withVisibleWhen("mediumtype!=0")
+                          .withTooltip("Absorption coefficient per scene unit (RGB)"));
+    node.addParameter(Parameter::makeColor("medium_sigma_s", "Scattering (σs)", Vec3(0.0f))
+                          .withGroup("Medium")
+                          .withVisibleWhen("mediumtype!=0")
+                          .withTooltip("Scattering coefficient per scene unit (RGB)"));
+    node.addParameter(Parameter::makeFloat("medium_g", "Phase (g)", 0.0, -1.0, 1.0, false)
+                          .withGroup("Medium")
+                          .withVisibleWhen("mediumtype!=0")
+                          .withTooltip("Henyey-Greenstein asymmetry: 0 = isotropic, "
+                                       ">0 = forward scatter, <0 = back scatter"));
+    node.addParameter(Parameter::makeFloat("medium_density", "Density", 1.0, 0.0, 1000.0, false)
+                          .withGroup("Medium")
+                          .withVisibleWhen("mediumtype!=0")
+                          .withTooltip("Global density scale multiplied with sigma_a and sigma_s"));
+    node.addParameter(Parameter::makeFile("medium_vdbfile", "VDB File", "",
+                                          "OpenVDB (*.vdb)")
+                          .withGroup("Medium")
+                          .withVisibleWhen("mediumtype==2")
+                          .withTooltip("Path to the OpenVDB file (.vdb). "
+                                       "The volume integrator will load and sample this file."));
+}
+
+void applyMediumParameters(const Node& node, StagePrim& prim) {
+    const int type = node.intValue("mediumtype", 0);
+    prim.medium.type = type;
+    if (type == 0) {
+        prim.mediumAssigned = false;
+        return;
+    }
+    prim.mediumAssigned = true;
+    prim.medium.sigmaA = node.vec3Value("medium_sigma_a", Vec3(0.0f));
+    prim.medium.sigmaS = node.vec3Value("medium_sigma_s", Vec3(0.0f));
+    prim.medium.g = float(node.floatValue("medium_g", 0.0));
+    prim.medium.density = float(node.floatValue("medium_density", 1.0));
+    prim.vdbPath = (type == 2) ? node.stringValue("medium_vdbfile") : QString();
+    prim.medium.volumeIndex = -1;  // resolved later in Stage::toScene
+}
+
 }  // namespace sol

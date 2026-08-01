@@ -739,7 +739,10 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
                     const float d = ggxD(h, lw.alpha);
                     const float g = smithG2(wo, wi, lw.alpha);
                     const float factor = fabsf(dotIH * dotOH / (wo.z * wi.z));
-                    const float ft = (1.0f - fr) * d * g * factor / (sqrtDenom * sqrtDenom);
+                    // PBRT radiance-mode transmission: include η² so f matches the
+                    // PDF jacobian below (was missing → rough glass too dark).
+                    const float ft =
+                        (1.0f - fr) * d * g * factor * (eta * eta) / (sqrtDenom * sqrtDenom);
                     out.f += lw.transmissionTint * (ft * tw);
                     const float dwhDwi = fabsf(eta * eta * dotIH) / (sqrtDenom * sqrtDenom);
                     // When Internal Reflections is off from inside we always sample

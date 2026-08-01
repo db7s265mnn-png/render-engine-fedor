@@ -13,6 +13,7 @@ option(SOLSTICE_ENABLE_TIFF "Build with libtiff (.tx / .tif mipmap) support" ON)
 option(SOLSTICE_ENABLE_MATERIALX "Build with Academy Software Foundation MaterialX" ON)
 option(SOLSTICE_ENABLE_OPENPGL "Build with Intel OpenPGL path guiding (CPU)" ON)
 option(SOLSTICE_ENABLE_OPENSUBDIV "Build with OpenSubdiv Catmull-Clark" ON)
+option(SOLSTICE_ENABLE_OPENVDB "Build with OpenVDB volume support (optional)" ON)
 option(SOLSTICE_BUILD_TESTS "Build unit tests" ON)
 option(SOLSTICE_BUILD_APP "Build the Qt desktop application" ON)
 option(SOLSTICE_BUILD_TOOLS "Build helper tools (test scene generators)" ON)
@@ -121,6 +122,17 @@ if(SOLSTICE_ENABLE_TIFF)
     endif()
     if(NOT SOLSTICE_HAVE_TIFF_01)
         message(WARNING "libtiff not available — .tx mipmap loading disabled")
+    endif()
+endif()
+
+# OpenVDB — optional heterogeneous volumes (falls back to homogeneous σ when absent).
+set(SOLSTICE_HAVE_OPENVDB_01 0)
+if(SOLSTICE_ENABLE_OPENVDB)
+    find_package(OpenVDB QUIET)
+    if(OpenVDB_FOUND)
+        set(SOLSTICE_HAVE_OPENVDB_01 1)
+    else()
+        message(STATUS "OpenVDB not found — VDB media use homogeneous σa/σs fallback")
     endif()
 endif()
 
@@ -348,6 +360,7 @@ set(SOLSTICE_LIB_SOURCES
     src/scene/displace.cpp
     src/scene/tessellate.cpp
     src/io/image_io.cpp
+    src/io/tx_cache.cpp
     src/io/alembic_loader.cpp
     src/io/usd_loader.cpp
     src/io/materialx_graph.cpp
@@ -385,6 +398,7 @@ set(SOLSTICE_LIB_HEADERS
     src/scene/displace.h
     src/scene/tessellate.h
     src/io/image_io.h
+    src/io/tx_cache.h
     src/io/alembic_loader.h
     src/io/usd_loader.h
     src/io/materialx_graph.h
@@ -569,6 +583,7 @@ message(STATUS "  Embree          : ${EMBREE_VERSION}")
 message(STATUS "  Alembic support : ${SOLSTICE_HAVE_ALEMBIC_01}")
 message(STATUS "  OpenEXR support : ${SOLSTICE_HAVE_OPENEXR_01}")
 message(STATUS "  TIFF /.tx mips  : ${SOLSTICE_HAVE_TIFF_01}")
+message(STATUS "  OpenVDB volumes : ${SOLSTICE_HAVE_OPENVDB_01}")
 message(STATUS "  MaterialX       : ${SOLSTICE_HAVE_MATERIALX_01}")
 message(STATUS "  OptiX backend   : ${SOLSTICE_HAVE_OPTIX_01}")
 message(STATUS "  OpenPGL guiding : ${SOLSTICE_HAVE_OPENPGL_01}")

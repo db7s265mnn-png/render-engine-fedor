@@ -9,6 +9,7 @@
 #include "core/rng.h"
 #include "render/lights.h"
 #include "render/shading.h"
+#include "render/volume.h"
 #include "scene/types.h"
 #include "solstice_config.h"
 
@@ -573,7 +574,8 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& tracer,
                                           const SurfaceInteraction& si, const Material& mat,
-                                          const Frame& frame, Vec3 wo, Rng& rng, Guiding* guiding) {
+                                          const Frame& frame, Vec3 wo, Rng& rng, Guiding* guiding,
+                                          int mediumIndex = -1) {
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
@@ -620,24 +622,30 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     const float lightPdf = ls.pdf * selectPdf;
     const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
     result = ls.radiance * be.f * (fabsf(wiLocal.z) * misWeight / lightPdf) * visibility;
+    // Homogeneous medium transmittance along the shadow segment (finite lights).
+    if (const MediumData* med = getMedium(scene, mediumIndex)) {
+        if (ls.distance < 1.0e7f) result = result * mediumShadowTr(*med, ls.distance);
+    }
     return result;
 }
 
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
                                       const Material& mat, const Frame& frame, Vec3 wo, Rng& rng,
-                                      Guiding* guiding) {
+                                      Guiding* guiding, int mediumIndex = -1) {
     const int n = srMax(1, scene.settings.lightSamples);
     Vec3 sum(0.0f);
     for (int i = 0; i < n; ++i)
-        sum += nextEventEstimationOnce(scene, tracer, si, mat, frame, wo, rng, guiding);
+        sum += nextEventEstimationOnce(scene, tracer, si, mat, frame, wo, rng, guiding, mediumIndex);
     return sum * (1.0f / float(n));
 }
 
 template <typename Tracer>
 SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
-                                      const Material& mat, const Frame& frame, Vec3 wo, Rng& rng) {
-    return nextEventEstimation<Tracer, NullGuiding>(scene, tracer, si, mat, frame, wo, rng, nullptr);
+                                      const Material& mat, const Frame& frame, Vec3 wo, Rng& rng,
+                                      int mediumIndex = -1) {
+    return nextEventEstimation<Tracer, NullGuiding>(scene, tracer, si, mat, frame, wo, rng, nullptr,
+                                                    mediumIndex);
 }
 
 template <typename Tracer, typename Guiding>
@@ -655,6 +663,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     bool causticSuffix = false;
     int depth = 0;
     int passThrough = 0;
+    // Homogeneous medium currently surrounding the ray (-1 = vacuum).
+    int currentMedium = -1;
     // Arnold ray_switch: incoming ray type selects the surfaceshader port.
     RayShadeKind rayKind = RayShadeKind::Camera;
     const RenderSettingsData& settings = scene.settings;
@@ -663,6 +673,61 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     while (depth <= maxDepth) {
         RayHit hit;
         const bool didHit = tracer.intersect(origin, direction, kFloatMax, hit);
+
+        // Null-scattering / delta tracking through the active homogeneous medium.
+        if (const MediumData* med = getMedium(scene, currentMedium)) {
+            const float tMax = didHit ? hit.t : 1.0e6f;
+            const MediumSample ms = sampleMediumHomogeneous(*med, tMax, rng, throughput);
+            if (ms.absorbed || isBlack(throughput)) break;
+            if (ms.scattered) {
+                origin = origin + direction * ms.t;
+                float phasePdf = 0.0f;
+                const Vec3 woVol = -direction;
+                direction = sampleHenyeyGreenstein(woVol, med->g, rng.nextFloat(), rng.nextFloat(),
+                                                   phasePdf);
+                // Volume next-event: sample a light and apply phase * Tr * MIS-free estimate.
+                if (scene.lightCount > 0 && depth < maxDepth) {
+                    float selectPdf = 0.0f;
+                    const int li = sampleLightIndex(scene, origin, rng.nextFloat(), selectPdf);
+                    if (li >= 0 && selectPdf > 0.0f) {
+                        LightSample ls;
+                        if (sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) &&
+                            ls.pdf > 0.0f && !isBlack(ls.radiance)) {
+                            float vis = 1.0f;
+                            if (scene.lights[li].shadowEnable) {
+                                float tShadow = 1.0e8f;
+                                if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
+                                vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
+                            }
+                            if (vis > 1e-5f) {
+                                const float cosTheta = clampf(dot(woVol, ls.wi), -1.0f, 1.0f);
+                                const float p = henyeyGreenstein(cosTheta, med->g);
+                                Vec3 contrib =
+                                    throughput * ls.radiance * (p * vis / (ls.pdf * selectPdf));
+                                if (ls.distance < 1.0e7f)
+                                    contrib = contrib * mediumShadowTr(*med, ls.distance);
+                                if (depth > 0)
+                                    contrib = clampContribution(contrib, settings.clampIndirect);
+                                radiance += contrib;
+                            }
+                        }
+                    }
+                }
+                bsdfPdf = phasePdf;
+                specularBounce = false;
+                sawNonSpecular = true;
+                rayKind = RayShadeKind::DiffuseReflection;
+                ++depth;
+                if (depth >= settings.rrStartDepth) {
+                    const float lum = luminance(throughput);
+                    const float q = clampf(lum, 0.05f, 0.95f);
+                    if (rng.nextFloat() > q) break;
+                    throughput = throughput / q;
+                }
+                continue;
+            }
+            // Reached the surface (or infinity) with Tr already in throughput.
+        }
 
         if (!didHit) {
             if (scene.domeLightIndex >= 0) {
@@ -816,8 +881,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
             // Direct specular lighting at entry (works for rough GGX; delta → 0).
             if (pSpec > 0.0f) {
-                const Vec3 nee =
-                    nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding);
+                    const Vec3 nee =
+                    nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding,
+                                        currentMedium);
                 Vec3 contrib = throughput * nee;
                 if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
                 radiance += contrib;
@@ -862,7 +928,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             const Frame ssFrame(walk.exitN);
             // NEE at SSS exit (lightSamples is handled inside nextEventEstimation).
             const Vec3 nee =
-                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding);
+                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding,
+                                    currentMedium);
             Vec3 contrib = throughput * walk.pathWeight * nee;
             if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
             radiance += contrib;
@@ -903,7 +970,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
         // NEE on diffuse after a caustic-disabled specular/transmission bounce is suppressed.
         if (!(suppressCausticLight && !specularBounce)) {
-            const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, guiding);
+            const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, guiding,
+                                                 currentMedium);
             Vec3 contrib = throughput * nee;
             if (depth > 0 && !specularBounce)
                 contrib = clampContribution(contrib, settings.clampIndirect);
@@ -979,6 +1047,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         direction = wiWorld;
         bsdfPdf = bs.pdf;
         specularBounce = bs.specular;
+        // Homogeneous volume interior: transmission across a geo-authored medium
+        // boundary enters/exits the medium (PBRT MediumInterface on the prim).
+        if (bs.transmitted && inst.mediumIndex >= 0 && mediumIsActive(scene, inst.mediumIndex)) {
+            const bool entering = dot(si.ng, wiWorld) < 0.0f;
+            currentMedium = entering ? inst.mediumIndex : -1;
+        }
         // Child ray type for the next hit (Arnold ray_switch on that surface).
         rayKind = nextRayShadeKind(bs, lw);
         // Caustic bookkeeping follows the near-specular classification (same as BDPT)
