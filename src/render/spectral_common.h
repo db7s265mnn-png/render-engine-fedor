@@ -54,6 +54,18 @@ inline SampledSpectrum upsampleRgb(Vec3 rgb, const SampledWavelengths& w) {
     return rgbToSpectrumLinear(rgb, w);
 }
 
+// Cap spectral path contributions in linear radiance (Arnold-style), matching
+// RGB clampContribution: scale all λ bins by clamp/max so chromaticity is kept.
+inline SampledSpectrum clampSpectrumIndirect(SampledSpectrum s, float clampValue) {
+    if (clampValue <= 0.0f) return s;
+    float m = 0.0f;
+    for (int i = 0; i < s.n; ++i) m = srMax(m, s.values[i]);
+    if (!(m > clampValue)) return s;
+    const float scale = clampValue / m;
+    for (int i = 0; i < s.n; ++i) s.values[i] *= scale;
+    return s;
+}
+
 // Lift an RGB BSDF weight; conductors use η/κ, dispersing dielectrics get per-λ Fresnel.
 // baseIor = undispersed IOR; heroIdx selects the wavelength that drove refraction sampling.
 inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, Vec3 wo, Vec3 wi,

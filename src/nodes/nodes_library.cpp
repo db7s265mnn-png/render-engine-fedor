@@ -823,11 +823,12 @@ public:
                                       "Higher = less light/reflection noise, slower."));
         addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Engine")
-                         .withTooltip("Caps each indirect sample’s contribution in linear pixel "
-                                      "radiance (Arnold/Karma style). Default 10 is typical.\n"
-                                      "Applies to path contributions only — not BSDF weights.\n"
-                                      "0 disables. Lower = fewer fireflies, slightly darker "
-                                      "highlights/caustics."));
+                         .withTooltip("Caps each eye-path indirect sample in linear pixel radiance "
+                                      "(Arnold/Karma style). Default 10; ~100 is a soft look.\n"
+                                      "Does not clamp BDPT light-tracing splat deposits (those "
+                                      "carry camera PDF, not radiance — clamping them killed "
+                                      "caustics at Arnold-scale values).\n"
+                                      "0 disables. Lower = fewer fireflies."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Engine"));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")

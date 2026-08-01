@@ -813,7 +813,9 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             camVert.p = camProj.camPos;
             const float w = misWeight(&camVert, 1, light, s, ov);
             c = c * w;
-            if (s > 2) c = clampContribution(c, settings.clampIndirect);
+            // Light-tracing deposits include cameraPdfOmega (~1e6); they are NOT
+            // linear pixel radiance. Indirect Clamp must not touch them — doing so
+            // at Arnold-scale values (10–1000) wipes BDPT floor caustics.
             if (!isFinite(c)) continue;
             if (dispersion && dispersion->heroChannel >= 0 && dispersion->used &&
                 (dispersion->mode == kDispersionHero || dispersion->mode == kDispersionOptimized ||
@@ -1073,8 +1075,8 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                                       pdfPosArea, selectPdf, blockerInstance, dispersion);
             if (!mr.solved || isBlack(mr.contribution)) continue;
             Vec3 c = E.beta * mr.contribution;
-            // Same headroom as PT+MNEE: caustics keep more energy than diffuse indirect.
-            c = clampContribution(c, settings.clampIndirect > 0.0f ? settings.clampIndirect * 4.0f : 0.0f);
+            // Single radiance-scale clamp (same threshold as other eye strategies).
+            if (t > 2) c = clampContribution(c, settings.clampIndirect);
             if (settings.causticClamp > 0.0f) c = clampContribution(c, settings.causticClamp);
             if (!isFinite(c)) continue;
             L += c;

@@ -423,8 +423,8 @@ struct RenderSettingsData {
     int seed = 0;
     int integrator = kIntegratorPathTracer;
 
-    // Caps indirect path contributions in linear pixel radiance (Arnold/Karma).
-    // <= 0 disables. Does not clamp BSDF bounce weights.
+    // Caps eye-path indirect contributions in linear pixel radiance (Arnold/Karma).
+    // <= 0 disables. Does not clamp BDPT light-tracing splat deposits (camera-PDF units).
     float clampIndirect = 10.0f;
     float exposure = 0.0f;
     float gamma = 2.2f;

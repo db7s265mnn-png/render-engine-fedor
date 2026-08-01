@@ -61,10 +61,8 @@ public:
                                 weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                             }
                             SampledSpectrum contrib = throughput * upsampleRgb(envL, waves) * weight;
-                            if (depth > 0 && !specularBounce && settings.clampIndirect > 0.0f) {
-                                for (int i = 0; i < contrib.n; ++i)
-                                    contrib.values[i] = srMin(contrib.values[i], settings.clampIndirect);
-                            }
+                            if (depth > 0 && !specularBounce)
+                                contrib = clampSpectrumIndirect(contrib, settings.clampIndirect);
                             radiance += contrib;
                         }
                     }
@@ -96,10 +94,8 @@ public:
                         weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                     }
                     SampledSpectrum contrib = throughput * upsampleRgb(emitted, waves) * weight;
-                    if (depth > 0 && !specularBounce && settings.clampIndirect > 0.0f) {
-                        for (int i = 0; i < contrib.n; ++i)
-                            contrib.values[i] = srMin(contrib.values[i], settings.clampIndirect);
-                    }
+                    if (depth > 0 && !specularBounce)
+                        contrib = clampSpectrumIndirect(contrib, settings.clampIndirect);
                     radiance += contrib;
                 }
                 break;
@@ -142,10 +138,7 @@ public:
             const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng);
             if (!isBlack(nee)) {
                 SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
-                if (depth > 0 && settings.clampIndirect > 0.0f) {
-                    for (int i = 0; i < contrib.n; ++i)
-                        contrib.values[i] = srMin(contrib.values[i], settings.clampIndirect);
-                }
+                if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampIndirect);
                 radiance += contrib;
             }
 

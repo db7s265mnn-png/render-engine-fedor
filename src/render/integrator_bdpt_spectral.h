@@ -20,12 +20,6 @@ inline bool spectrumIsFinite(const SampledSpectrum& s) {
     return true;
 }
 
-inline SampledSpectrum clampSpectrumIndirect(SampledSpectrum s, float clampValue) {
-    if (clampValue <= 0.0f) return s;
-    for (int i = 0; i < s.n; ++i) s.values[i] = srMin(s.values[i], clampValue);
-    return s;
-}
-
 namespace spectral_bdpt {
 
 struct WalkConfig {
@@ -429,7 +423,7 @@ inline Vec3 traceRadianceBdptSpectral(
             Vert cameraVert = eye[0];
             cameraVert.p = camProj.camPos;
             c *= misWeight(&cameraVert, 1, light, s, ov);
-            if (s > 2) c = clampSpectrumIndirect(c, settings.clampIndirect);
+            // LT splat carries cameraPdfOmega — not radiance. Do not Indirect-Clamp.
             if (!spectrumIsFinite(c)) continue;
             const Vec3 rgb = spectrumToRgb(c, waves);
             if (isFinite(rgb)) splatFb->addSplat(int(px), int(py), rgb);
@@ -668,8 +662,7 @@ inline Vec3 traceRadianceBdptSpectral(
             if (!mr.solved || isBlack(mr.contribution)) continue;
             SampledSpectrum local = upsampleRgb(mr.contribution, waves);
             SampledSpectrum c = eyeBeta[t - 1] * local;
-            c = clampSpectrumIndirect(
-                c, settings.clampIndirect > 0.0f ? settings.clampIndirect * 4.0f : 0.0f);
+            if (t > 2) c = clampSpectrumIndirect(c, settings.clampIndirect);
             if (settings.causticClamp > 0.0f)
                 c = clampSpectrumIndirect(c, settings.causticClamp);
             if (!spectrumIsFinite(c)) continue;

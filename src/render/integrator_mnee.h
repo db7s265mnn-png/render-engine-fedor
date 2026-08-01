@@ -872,15 +872,13 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         mnee::manifoldConnect(scene, tracer, si.p, si.ns, wo, mat, li, y, yN, Le, pdfArea,
                                               selectPdf, blockerInstance, dispersion);
                     if (mr.solved && !isBlack(mr.contribution)) {
-                        Vec3 c = mr.contribution;
-                        c = clampContribution(c, settings.clampIndirect > 0.0f
-                                                     ? settings.clampIndirect * 4.0f
-                                                     : 0.0f);  // caustics keep more energy
-                        neeSum += c;
+                        // Clamp once on the final pixel contribution below — not here
+                        // (and not at clamp*4). Double application forced ~1e6 thresholds.
+                        neeSum += mr.contribution;
                         // Train the diffuse receiver (floor under glass). Do not
                         // guide-sample on the glass itself — only learn incident
                         // caustic radiance here when Indirect Guides is on.
-                        if (trainGuide) neeSumGuide += c;
+                        if (trainGuide) neeSumGuide += mr.contribution;
                     }
                 }
             }
