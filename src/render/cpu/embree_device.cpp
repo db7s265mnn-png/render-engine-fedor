@@ -10,6 +10,7 @@
 #include "core/log.h"
 #include "core/thread_pool.h"
 #include "render/blue_noise.h"
+#include "render/sobol.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
 #include "render/integrator_base.h"
@@ -306,9 +307,9 @@ public:
             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
             Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
             float jx = 0.5f, jy = 0.5f;
-            blueNoisePixelJitter(x, y, sampleIndex, jx, jy);
+            pixelSample(x, y, sampleIndex, jx, jy);
             float lensU = 0.5f, lensV = 0.5f;
-            blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
+            lensSample(x, y, sampleIndex, lensU, lensV);
 
             // Light-tracing splats assume the pinhole/thin-lens projection —
             // polynomial optics rays and camera motion blur bypass it.
