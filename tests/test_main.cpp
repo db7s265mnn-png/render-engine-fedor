@@ -2940,7 +2940,7 @@ void testScreenAdaptiveNearDensityDip() {
         // Screen-adaptive target is uniform screen length — nearest should not be
         // clearly coarser (larger px) than the next band.
         std::printf("  compare nearest meanPx=%.3f vs next=%.3f\n", meanPx[first], meanPx[second]);
-        check(meanPx[first] <= meanPx[second] * 1.12f,
+        check(meanPx[first] <= meanPx[second] * 1.05f,
               "nearest in-frustum band is not coarser in screen space (no near dip)");
     }
 }

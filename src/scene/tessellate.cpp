@@ -872,24 +872,33 @@ float collectLongEdgesForAdaptive(const Mesh& mesh, const std::vector<uint8_t>& 
         const uint32_t i2 = mesh.indices[t * 3 + 2];
         if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) return;
         const int slot = std::clamp(tid, 0, workers);
-        // Underfoot / near-camera faces: binary edge dice leaves a slightly coarser
-        // residual in screen space than mid-field. Tighten the local target so the
-        // nearest band matches mid-near density.
+        // Underfoot bias: binary edge residuals land coarser in screen space near the
+        // camera than in mid-field. Cheap fix — only shrink the split threshold for
+        // near viewZ faces (no screen-area tests).
         float minViewZ = 1.0e30f;
         int nFront = 0;
+        bool anyBehind = false;
         auto account = [&](const VertProj& v) {
-            if (!v.ok) return;
+            if (!v.ok) {
+                anyBehind = true;
+                return;
+            }
             ++nFront;
             minViewZ = std::min(minViewZ, -v.cam.z);
         };
         account(proj[i0]);
         account(proj[i1]);
         account(proj[i2]);
+        // Straddling near-plane faces count as very near.
+        if (anyBehind && nFront > 0) minViewZ = std::min(minViewZ, 0.2f);
+
         float localTarget = targetPx;
-        if (nFront > 0 && minViewZ < 1.25f) {
-            // Lerp: at viewZ→0 use 0.6×target; at viewZ≥1.25 keep full target.
-            const float w = std::clamp(minViewZ / 1.25f, 0.0f, 1.0f);
-            localTarget = targetPx * (0.60f + 0.40f * w);
+        constexpr float kNearBoostEnd = 3.0f;   // metres — full target beyond this
+        constexpr float kNearBoostMin = 0.35f;  // ×target at the camera
+        if (nFront > 0 && minViewZ < kNearBoostEnd) {
+            const float w = std::clamp(minViewZ / kNearBoostEnd, 0.0f, 1.0f);
+            const float s = w * w * (3.0f - 2.0f * w);  // smoothstep
+            localTarget = targetPx * (kNearBoostMin + (1.0f - kNearBoostMin) * s);
         }
         auto pushIfLong = [&](uint32_t a, uint32_t b) {
             const float px = screenEdgePixelsFromProj(proj[a], proj[b], cam, aspect, resX, resY);
