@@ -72,9 +72,10 @@ Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
     Image image(width_, height_);
     const bool bootstrap = samples_.load(std::memory_order_relaxed) == 0 &&
                            hasData_.load(std::memory_order_relaxed);
-    // During the interleaved first pass, each finished pixel stands in for its
-    // 4x4 cell so the viewport fills smoothly instead of flashing black tiles.
-    constexpr int kBootstrapStep = 4;
+    // During the interleaved first pass, unfinished pixels borrow from a finished
+    // neighbor. Keep the cell small (2×2) and distance-weight so IPR does not
+    // flash black holes or show large hard 4×4 square blocks.
+    constexpr int kBootstrapStep = 2;
 
     const double invPaths = invSplatPaths();
     for (int y = 0; y < height_; ++y) {
@@ -88,24 +89,20 @@ Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
                 const int y0 = y - (y % kBootstrapStep);
                 const int x1 = std::min(x0 + kBootstrapStep, width_);
                 const int y1 = std::min(y0 + kBootstrapStep, height_);
-                bool found = false;
-                float bestDist = 1e9f;
-                Vec3 best(0.0f);
+                Vec3 sum(0.0f);
+                float wSum = 0.0f;
                 for (int sy = y0; sy < y1; ++sy) {
                     for (int sx = x0; sx < x1; ++sx) {
                         const Vec4& q = accum_[size_t(sy) * size_t(width_) + size_t(sx)];
                         if (q.w <= 0.0f) continue;
                         const float dx = float(sx - x);
                         const float dy = float(sy - y);
-                        const float dist = dx * dx + dy * dy;
-                        if (dist < bestDist) {
-                            bestDist = dist;
-                            best = q.xyz() * (1.0f / q.w);
-                            found = true;
-                        }
+                        const float w = 1.0f / (1.0f + dx * dx + dy * dy);
+                        sum += q.xyz() * (w / q.w);
+                        wSum += w;
                     }
                 }
-                if (found) linearColor = best;
+                if (wSum > 0.0f) linearColor = sum * (1.0f / wSum);
             }
             image.setRgb(x, y, applyToneMap(linearColor, settings), 1.0f);
         }

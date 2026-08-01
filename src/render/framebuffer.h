@@ -97,7 +97,7 @@ public:
     Image resolveLinear() const;
     // Display ready image: exposure, tone mapping and gamma applied.
     // Incomplete bootstrap pixels are filled from nearby samples so IPR does
-    // not flash black tile holes.
+    // not flash black tile holes (soft 2×2, not hard 4×4 blocks).
     Image resolveDisplay(const RenderSettingsData& settings) const;
 
     std::mutex& mutex() { return mutex_; }

@@ -321,20 +321,10 @@ public:
             EmbreeTracer tracer{topScene_};
             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
             Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
-            // Owen-scrambled Sobol for path dimensions (4+). Pixel/lens use dims 0–3.
-            struct SobolQmc {
-                SobolSampler sampler;
-                int sampleIndex = 0;
-            } sobolQmc;
-            sobolQmc.sampler.setPixel(x, y);
-            sobolQmc.sampleIndex = sampleIndex;
-            rng.qmcCtx = &sobolQmc;
-            rng.qmcFn = [](void* ctx, uint32_t dim) -> float {
-                auto* c = static_cast<SobolQmc*>(ctx);
-                const int si = c->sampleIndex < 0 ? 0 : c->sampleIndex;
-                return c->sampler.sample1D(uint32_t(si), dim);
-            };
-            rng.sampleDim = 4u;
+            // Pixel/lens: Owen-Sobol (dims 0–3). Path RNG stays PCG — feeding the
+            // whole path from Sobol made high-variance regions (caustic shadows,
+            // MNEE fireflies) show a visible square/grid sampling structure.
+            // Pixel stratification is enough; path dimensions prefer white-noise look.
             float jx = 0.5f, jy = 0.5f;
             pixelSample(x, y, sampleIndex, jx, jy);
             float lensU = 0.5f, lensV = 0.5f;
@@ -510,9 +500,9 @@ public:
             fb.addSample(x, y, radiance);
         };
 
-        // First sample: interleaved 4x4 bootstrap so the whole frame appears
-        // gradually (with hole-fill in resolveDisplay) instead of black tiles.
-        constexpr int kBootstrapStep = 4;
+        // First sample: interleaved 2×2 bootstrap so the whole frame appears
+        // gradually (with soft hole-fill in resolveDisplay) instead of black tiles.
+        constexpr int kBootstrapStep = 2;
         if (sampleIndex == 0) {
             const int phaseCount = kBootstrapStep * kBootstrapStep;
             for (int phase = 0; phase < phaseCount; ++phase) {
