@@ -376,7 +376,8 @@ enum IntegratorMode : int {
 
 // How refractive / reflective caustics are estimated when settings.caustics != 0.
 enum CausticsEngine : int {
-    // Path Tracer → MNEE; BDPT → light-tracing splats + MNEE through glass.
+    // Path Tracer → Auto picks MNEE (delta glass) or Photon (rough casters);
+    // BDPT → light-tracing splats + MNEE through glass (Photon when Auto+rough).
     kCausticsEngineAuto = 0,
     // Manifold next-event (PT) / BDPT LT+MNEE — best for near-delta glass.
     kCausticsEngineMnee = 1,

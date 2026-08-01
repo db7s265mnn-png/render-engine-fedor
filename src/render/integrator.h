@@ -963,7 +963,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         const LobeWeights lw = computeLobes(mat);
 #if !defined(__CUDACC__)
         const bool guideReady =
-            guiding && guiding->active() && !lw.delta && guiding->prepare(si.p, si.ns, rng);
+            guiding && guiding->active() && !lw.delta && !isNearSpecularLobe(lw) &&
+            lw.diffuse > 1e-4f && guiding->prepare(si.p, si.ns, rng);
 #else
         const bool guideReady = false;
 #endif
@@ -1011,7 +1012,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             bs = bsdfSampleLocal(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
                                  rng.nextFloat());
 #if !defined(__CUDACC__)
-            if (bs.pdf > 0.0f && guideReady) {
+            if (bs.pdf > 0.0f && guideReady && !bs.specular) {
                 const float pg = guiding->guideProbability();
                 const float gPdf = guiding->pdf(normalize(frame.toWorld(bs.wi)));
                 const float mixPdf = pg * gPdf + (1.0f - pg) * bs.pdf;
@@ -1034,7 +1035,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
         if (!shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) break;
 #if !defined(__CUDACC__)
-        if (guiding && guiding->active())
+        if (guiding && guiding->active() && !bs.specular)
             guiding->recordBounce(si.ns, wiWorld, bs.pdf, weight, bs.specular, mat.roughness, lw.eta,
                                   1.0f);
 #endif

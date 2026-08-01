@@ -10,10 +10,11 @@
 // converged Jacobian |dx⊥/dω| provides the generalized geometry term, so the
 // estimator matches plain NEE when no glass is present.
 //
-// To avoid double counting, diffuse→(all-transmissive delta chain)→finite-light
-// BSDF hits are suppressed — MNEE is the (much lower variance) estimator for
-// that family. Reflective caustics stay with BSDF sampling; environment light
-// stays with regular NEE/MIS.
+// To avoid double counting, diffuse→(delta glass chain)→finite-light BSDF hits
+// share energy with MNEE via power-heuristic MIS (same seed set). When the photon
+// map owns caustics, those BSDF caustic hits are suppressed entirely.
+// Reflective caustics stay with BSDF sampling; environment light stays with
+// regular NEE/MIS (no dome MNEE).
 #pragma once
 
 #include "core/rng.h"
@@ -63,7 +64,7 @@ SR_INL bool refractTravel(Vec3 d, Vec3 n, float ior, Vec3& out, float& etaRel, f
     const float cosT = sqrtf(srMax(0.0f, 1.0f - sin2T));
     out = normalize(d * eta + nn * (eta * cosI - cosT));
     etaRel = eta;
-    fresnel = fresnelDielectric(cosI, ior);
+    fresnel = fresnelDielectric(cosI, 1.0f / srMax(1e-6f, eta));
     return true;
 }
 
@@ -546,7 +547,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
     RayShadeKind rayKind = RayShadeKind::Camera;
     const RenderSettingsData& settings = scene.settings;
     const int maxDepth = srMax(1, settings.maxDepth);
-    const bool photonCaustics = photons != nullptr && !photons->empty();
+    const bool photonEngine = photons != nullptr;
+    const bool photonCaustics = photonEngine && !photons->empty();
     const float photonRadius = photonCaustics ? photons->gatherRadius(settings) : 0.0f;
 
     while (depth <= maxDepth) {
@@ -596,16 +598,27 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         }
 
         if (si.lightIndex >= 0) {
+            // Photon map owns the caustic family (light→spec→diffuse and SDS). Do not
+            // also accept eye→spec→light BSDF hits or apply MNEE MIS against a disabled
+            // technique — that double-counted and biased the power heuristic.
+            const LightData& light = scene.lights[si.lightIndex];
+            const bool finiteLight = light.type == kLightRect || light.type == kLightDisk ||
+                                     light.type == kLightSphere || light.type == kLightPoint;
+            // Photon engine owns the caustic family even when this pass deposited
+            // zero photons (e.g. all casters have Contribute to Caustics off).
+            if (photonEngine && sawNonSpecular && specularBounce && finiteLight &&
+                lightContributesCaustics(light))
+                break;
+            if (photonEngine && mneeFamily && finiteLight) break;
+
             // MIS with the MNEE estimator: when replaying the seed set converges to
             // the branch this BSDF path took, the two estimators sample the same
             // family and the contribution gets the power-heuristic weight (in
             // light-area measure via the chain Jacobian). If the solver cannot find
             // the branch (complex glass), full weight stays here — no energy loss.
-            const LightData& light = scene.lights[si.lightIndex];
-            const bool finiteLight = light.type == kLightRect || light.type == kLightDisk ||
-                                     light.type == kLightSphere || light.type == kLightPoint;
             float misScale = 1.0f;
-            if (mneeFamily && finiteLight && settings.caustics != 0 && lightContributesCaustics(light)) {
+            if (!photonEngine && mneeFamily && finiteLight && settings.caustics != 0 &&
+                lightContributesCaustics(light)) {
                 Vec3 seg = si.p - anchorP;
                 const float segLen = length(seg);
                 if (segLen > 1e-5f) {
@@ -706,9 +719,15 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 
 #if !defined(__CUDACC__)
         bool guideReady = false;
-        if (guiding && guiding->active() && !lw.delta) {
+        if (guiding && guiding->active()) {
+            // Always open a segment so recordBounce cannot overwrite a prior
+            // diffuse vertex when we hit delta glass (was corrupting OpenPGL chains).
             guiding->beginSegment(si.p, wo);
-            guideReady = guiding->prepare(si.p, si.ns, rng);
+            // Do not guide specular / near-specular / caustic casters — OpenPGL
+            // best practice; MNEE / LT / photons own that family.
+            const bool guideable =
+                !lw.delta && !isNearSpecularLobe(lw) && lw.diffuse > 1e-4f;
+            if (guideable) guideReady = guiding->prepare(si.p, si.ns, rng);
         }
 #else
         const bool guideReady = false;
@@ -729,6 +748,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             }
             const int nLightSamples = srMax(1, settings.lightSamples);
             Vec3 neeSum(0.0f);
+            Vec3 neeSumGuide(0.0f);  // clear-path only — do not train guiding on MNEE
             for (int ls = 0; ls < nLightSamples; ++ls) {
                 float selectPdf = 0.0f;
                 const int li = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
@@ -758,7 +778,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 #endif
                     const float lightPdf = lsam.pdf * selectPdf;
                     const float w = lsam.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
-                    neeSum += lsam.radiance * be.f * (fabsf(wiL.z) * w * visibility / lightPdf);
+                    const Vec3 c = lsam.radiance * be.f * (fabsf(wiL.z) * w * visibility / lightPdf);
+                    neeSum += c;
+                    neeSumGuide += c;
                     continue;
                 }
 
@@ -823,17 +845,21 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     }
 #endif
                     if (l.type == kLightPoint) {
-                        neeSum += Le * be.f * (fabsf(wiLocal.z) / (dist2 * selectPdf));
+                        const Vec3 c = Le * be.f * (fabsf(wiLocal.z) / (dist2 * selectPdf));
+                        neeSum += c;
+                        neeSumGuide += c;
                     } else {
                         const float pdfSa = pdfArea * dist2 / cosL;  // area → solid angle
                         const float lightPdf = pdfSa * selectPdf;
                         const float w = powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
-                        neeSum += Le * be.f * (fabsf(wiLocal.z) * w / lightPdf);
+                        const Vec3 c = Le * be.f * (fabsf(wiLocal.z) * w / lightPdf);
+                        neeSum += c;
+                        neeSumGuide += c;
                     }
-                } else if (glassPath && !photonCaustics) {
+                } else if (glassPath && !photonEngine) {
                     // Multi-seed MNEE: manifold connections through the refraction
-                    // chain (matching BSDF path copies are suppressed at light hits).
-                    // Skipped when the photon map owns caustics.
+                    // chain (matching BSDF path copies are MIS'd at light hits).
+                    // Skipped when the photon engine owns caustics.
                     const mnee::MneeResult mr =
                         mnee::manifoldConnect(scene, tracer, si.p, si.ns, wo, mat, li, y, yN, Le, pdfArea,
                                               selectPdf, blockerInstance, dispersion);
@@ -843,15 +869,17 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                                                      ? settings.clampIndirect * 4.0f
                                                      : 0.0f);  // caustics keep more energy
                         neeSum += c;
+                        // Do NOT add MNEE into OpenPGL — it already owns this family.
                     }
                 }
             }
-            const Vec3 nee = neeSum * (1.0f / float(srMax(1, settings.lightSamples)));
+            const float invLs = 1.0f / float(srMax(1, settings.lightSamples));
+            const Vec3 nee = neeSum * invLs;
             Vec3 contrib = throughput * nee;
             if (depth > 0 && !specularBounce) contrib = clampContribution(contrib, settings.clampIndirect);
             radiance += contrib;
 #if !defined(__CUDACC__)
-            if (guiding && guiding->active()) guiding->addScattered(nee);
+            if (guiding && guiding->active()) guiding->addScattered(neeSumGuide * invLs);
 #endif
         }
 
@@ -916,8 +944,18 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 ++familyChainLen;
                 mneeFamily = familyChainLen <= mnee::kMaxChain;
             } else {
-                mneeFamily = false;
-                familyChainLen = 0;
+                // Transmissive glass with Contribute to Caustics OFF is not an MNEE
+                // caster, but floor→glass→light must still be suppressed — otherwise
+                // disabling the flag leaks caustic-family energy via BSDF.
+                const bool nonContribGlass =
+                    bs.transmitted && matCau.transmission > 0.25f && !materialContributesCaustics(matCau);
+                if (nonContribGlass) {
+                    mneeFamily = true;
+                    familyChainLen = 0;
+                } else {
+                    mneeFamily = false;
+                    familyChainLen = 0;
+                }
             }
         }
         // Caustics disabled: suppress all diffuse→specular→light transport.
@@ -932,7 +970,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
         if (!shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) break;
 #if !defined(__CUDACC__)
-        if (guiding && guiding->active())
+        // Specular / near-spec bounces are not guided — skip training on them.
+        if (guiding && guiding->active() && !bs.specular && !isNearSpecularLobe(lw))
             guiding->recordBounce(si.ns, wiWorld, bs.pdf, weight, bs.specular, mat.roughness, lw.eta, 1.0f);
 #endif
 

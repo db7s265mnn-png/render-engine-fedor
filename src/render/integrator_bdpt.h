@@ -665,7 +665,8 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
     if (maxVerts > kMaxVerts) maxVerts = kMaxVerts;
     if (maxVerts < 2) maxVerts = 2;
     const bool causticsOn = settings.caustics != 0;
-    const bool photonCaustics = photons != nullptr && !photons->empty();
+    const bool photonEngine = photons != nullptr;
+    const bool photonCaustics = photonEngine && !photons->empty();
     const float photonRadius = photonCaustics ? photons->gatherRadius(settings) : 0.0f;
 
     const CameraProj camProj = buildCameraProj(scene);
@@ -748,7 +749,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                     lightPrefixCaustic = true;
             if (!causticsOn) {
                 if (lightPrefixCaustic) continue;
-            } else if (photonCaustics && lightPrefixCaustic) {
+            } else if (photonEngine && lightPrefixCaustic) {
                 // Photon map owns the caustic family — skip LT splats for it.
                 continue;
             } else if (lightPrefixCaustic && light[0].lightIndex >= 0 &&
@@ -875,11 +876,16 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                 break;
             }
         }
-        if (causticsOn && doSplats && specularToLight && t >= 4) {
+        if (causticsOn && specularToLight && t >= 4) {
             int j = t - 2;
             while (j >= 1 && eye[j].type == VType::Surface && eye[j].nearSpec) --j;
-            // LDS: hand the family to light-tracing splats.
-            if (j >= 1 && !eye[j].nearSpec && !eye[1].nearSpec) break;
+            // LDS: hand the family to light-tracing splats (or the photon map).
+            if (j >= 1 && !eye[j].nearSpec && !eye[1].nearSpec) {
+                if (doSplats || photonEngine) break;
+            }
+            // SDS under glass (eye[1] near-spec): s=1 MNEE owns this when MNEE is
+            // active — suppress s=0 so the two estimators do not double-count.
+            if (j >= 1 && !eye[j].nearSpec && eye[1].nearSpec && !photonEngine) break;
         }
 
         MisOverride ov;
@@ -1028,7 +1034,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             // (floor→camera occluded) — MNEE owns that family. On open floor
             // the same glass block is already handled by t=1 splats; skip MNEE
             // there to avoid double-counting.
-            if (!(glassPath && eyeThroughSpec) || photonCaustics) continue;
+            if (!(glassPath && eyeThroughSpec) || photonEngine) continue;
             // Radiance / intensity as expected by manifoldConnect (not /r²).
             const Vec3 LeMnee =
                 l.type == kLightPoint ? l.emittedRadiance() : lightRadiance(l);
@@ -1130,7 +1136,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                         chainAfterDiffuse = true;
                 }
                 if (chainAfterDiffuse) continue;
-            } else if (photonCaustics && lightPrefixCaustic) {
+            } else if (photonEngine && lightPrefixCaustic) {
                 continue;
             } else if (lightPrefixCaustic && light[0].lightIndex >= 0 &&
                        !lightContributesCaustics(scene.lights[light[0].lightIndex])) {

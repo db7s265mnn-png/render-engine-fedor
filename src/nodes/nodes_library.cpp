@@ -844,9 +844,11 @@ public:
                                          {"Automatic", "MNEE (manifolds)", "Photon / VCM"}, 0)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==0||integrator==1")
-                         .withTooltip("Automatic: Path Tracer → MNEE; BDPT → light tracing + MNEE "
-                                      "through glass.\n"
-                                      "MNEE: manifold next-event — best for near-delta glass.\n"
+                         .withTooltip("Automatic: delta glass → MNEE; rough refractive casters → "
+                                      "Photon / VCM (any roughness). BDPT always keeps light "
+                                      "tracing; MNEE upgrades under-glass SDS.\n"
+                                      "MNEE: manifold next-event — best for near-delta glass + "
+                                      "area lights.\n"
                                       "Photon / VCM: caustic-only photon map gather — better for "
                                       "rough glass and black bases seen through refraction."));
         addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)

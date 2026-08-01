@@ -61,7 +61,7 @@ public:
         // Flux → per-photon power (density estimation divides by gather area).
         const float invN = 1.0f / float(photonCount);
         for (CausticPhoton& ph : photons_) ph.power = ph.power * invN;
-        buildGrid_();
+        buildGrid_(gatherRadius(scene.settings));
     }
 
     // Estimate reflected radiance at a diffuse-ish shading point (W/m²/sr).
@@ -82,10 +82,11 @@ public:
         const int cx = int(floorf(cellF.x));
         const int cy = int(floorf(cellF.y));
         const int cz = int(floorf(cellF.z));
-        // Visit the 3×3×3 neighbourhood — cell size ≈ radius.
-        for (int dz = -1; dz <= 1; ++dz)
-            for (int dy = -1; dy <= 1; ++dy)
-                for (int dx = -1; dx <= 1; ++dx) {
+        // Neighbourhood must cover the gather ball: ceil(r/cell)+1 in each axis.
+        const int nHood = srMax(1, int(ceilf(radius * invCellSize_)) + 1);
+        for (int dz = -nHood; dz <= nHood; ++dz)
+            for (int dy = -nHood; dy <= nHood; ++dy)
+                for (int dx = -nHood; dx <= nHood; ++dx) {
                     const uint32_t h = hashCell_(cx + dx, cy + dy, cz + dz);
                     const uint32_t start = cellStarts_[h];
                     const uint32_t end = cellStarts_[h + 1];
@@ -111,6 +112,7 @@ private:
     std::vector<uint32_t> cells_;
     std::vector<uint32_t> cellStarts_;
     float invCellSize_ = 1.0f;
+    float cellSize_ = 1.0f;
     Vec3 origin_{0.0f};
 
     static uint32_t hashCell_(int x, int y, int z) {
@@ -121,14 +123,16 @@ private:
         return h & 4095u;  // 4096 slots
     }
 
-    void buildGrid_() {
+    void buildGrid_(float gatherRadiusHint) {
         Bounds3 b;
         for (const CausticPhoton& ph : photons_) b.extend(ph.p);
         const Vec3 ext = b.extent();
         const float maxExt = srMax(ext.x, srMax(ext.y, ext.z));
-        float cell = srMax(1e-3f, maxExt / 64.0f);
-        // Prefer cell ≈ mean photon radius hint from settings is unknown here —
-        // use a fraction of the scene extent; gather still uses its own radius.
+        // Cell size tied to the gather radius so a 3×3×3 (or expanded) walk
+        // covers the kernel. Cap by scene extent so tiny radii don't explode slots.
+        float cell = srMax(1e-4f, gatherRadiusHint);
+        if (maxExt > 1e-6f) cell = srMin(cell, maxExt / 8.0f);
+        cellSize_ = cell;
         invCellSize_ = 1.0f / cell;
         origin_ = b.lo - Vec3(cell);
 
@@ -257,15 +261,39 @@ private:
     }
 };
 
-// True when the active caustics engine is the photon map.
-SR_INL bool causticsUsePhotonMap(const RenderSettingsData& s) {
-    return s.caustics != 0 && s.causticsEngine == kCausticsEnginePhoton;
+// True when any material can cast refractive caustics that are too rough for
+// delta MNEE (α > kDeltaAlpha). Used by Automatic caustics routing.
+SR_INL bool sceneHasRoughCausticCaster(const SceneView& scene) {
+    for (int i = 0; i < scene.materialCount; ++i) {
+        const Material& m = scene.materials[i];
+        if (!materialContributesCaustics(m)) continue;
+        if (m.transmission <= 0.25f) continue;
+        const LobeWeights lw = computeLobes(m);
+        if (lw.transmission > 0.25f && !lw.delta && lw.diffuse < 1e-3f) return true;
+    }
+    return false;
 }
 
-// True when MNEE should run (PT auto/mnee, and not photon engine).
-SR_INL bool causticsUseMnee(const RenderSettingsData& s) {
-    return s.caustics != 0 && s.causticsEngine != kCausticsEnginePhoton &&
-           (s.causticsEngine == kCausticsEngineAuto || s.causticsEngine == kCausticsEngineMnee);
+// True when the active caustics engine should use the photon map.
+// Automatic: Photon when the scene has rough refractive casters; else MNEE.
+SR_INL bool causticsUsePhotonMap(const RenderSettingsData& s, const SceneView* scene = nullptr) {
+    if (s.caustics == 0) return false;
+    if (s.causticsEngine == kCausticsEnginePhoton) return true;
+    if (s.causticsEngine == kCausticsEngineAuto && scene && sceneHasRoughCausticCaster(*scene))
+        return true;
+    return false;
+}
+
+// True when MNEE should run (explicit MNEE, or Auto on delta-only glass scenes).
+SR_INL bool causticsUseMnee(const RenderSettingsData& s, const SceneView* scene = nullptr) {
+    if (s.caustics == 0) return false;
+    if (s.causticsEngine == kCausticsEnginePhoton) return false;
+    if (s.causticsEngine == kCausticsEngineMnee) return true;
+    if (s.causticsEngine == kCausticsEngineAuto) {
+        // Auto + rough glass → photons; Auto + delta-only → MNEE.
+        return !causticsUsePhotonMap(s, scene);
+    }
+    return false;
 }
 
 }  // namespace sol
