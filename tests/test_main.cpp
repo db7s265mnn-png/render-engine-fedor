@@ -2791,6 +2791,43 @@ void testScreenAdaptiveTessellation() {
     std::printf("  adaptive near=%zu far=%zu uniform8=%zu\n", nearTris, farTris, uniTris);
 }
 
+void testScreenAdaptiveQualityCoarse() {
+    std::printf("screen-adaptive-quality-coarse\n");
+    // Quality 0.01 → target ≈ 100 px. A close-up on a large ground must NOT
+    // explode to the Dicing Poly Limit (clipped-edge "force refine" bug).
+    auto ground = makeGridMesh(200.0f, 200.0f, 1, 1);
+    check(ground && ground->triangleCount() == 2, "coarse quality ground cage");
+    ground->subdivType = kSubdivLinear;
+    ground->subdivIterations = 8;  // ignored under Screen Adaptive
+    ground->dicingQuality = 0.01f;
+
+    Material mat;
+    mat.displacementHeight = 0.01f;
+    mat.displacementScale = 1.0f;
+    mat.displacementZeroValue = 0.0f;
+
+    Scene scene;
+    scene.settings.screenAdaptive = 1;
+    scene.settings.frustumCull = 1;
+    scene.settings.frustumPadding = 10.0f;
+    scene.settings.dicingPolyLimitM = 50;
+    scene.settings.resolutionX = 1920;
+    scene.settings.resolutionY = 1080;
+    scene.camera.focalLength = 50.0f;
+    scene.camera.sensorWidth = 36.0f;
+    scene.camera.cameraToWorld = lookAtMatrix(Vec3(0, 0.2f, 0.3f), Vec3(0, 0, 0), Vec3(0, 1, 0));
+    scene.cameraAuthored = true;
+
+    MeshPtr out = tessDisplaceForTest(ground, mat, scene, 8, /*forceFrustumOff=*/false);
+    check(out != nullptr, "coarse quality mesh");
+    const size_t tris = out->triangleCount();
+    // Ideal µpoly count at 100 px ≈ screenArea/100² ≈ 200; allow soft tails +
+    // perspective, but nowhere near tens of millions.
+    check(tris < 200000ull, "Quality 0.01 stays well below poly-limit explosion");
+    check(tris > 2ull, "Quality 0.01 still dices the visible patch a bit");
+    std::printf("  Q=0.01 close-up tris=%zu (limit would be 50M)\n", tris);
+}
+
 void testMaterialXNoiseAndTriplanar() {
     std::printf("materialx-noise-triplanar\n");
     if (!materialXAvailable()) {
@@ -4038,6 +4075,7 @@ int main() {
         testFrustumLocalFullyInViewFast();
         testFrustumLocalItersNotClampedOnDenseCage();
         testScreenAdaptiveTessellation();
+        testScreenAdaptiveQualityCoarse();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -4072,6 +4110,7 @@ int main() {
     testFrustumLocalFullyInViewFast();
     testFrustumLocalItersNotClampedOnDenseCage();
     testScreenAdaptiveTessellation();
+    testScreenAdaptiveQualityCoarse();
     testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();
     testRockDisplacementExr();

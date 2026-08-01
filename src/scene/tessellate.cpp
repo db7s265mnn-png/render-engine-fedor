@@ -133,13 +133,15 @@ Mat4 worldToCamera(const CameraData& cam) {
     return inverse(cam.cameraToWorld);
 }
 
+constexpr float kDiceNearViewZ = 1.0e-4f;
+
 // Project object-space point through instance xform into NDC (xy in ~[-1,1]).
 bool projectToNdc(Vec3 pObject, const Mat4& objToWorld, const Mat4& worldToCam, const CameraData& cam,
                   float aspect, float& ndcX, float& ndcY, float& viewZ) {
     const Vec3 pWorld = transformPoint(objToWorld, pObject);
     const Vec3 pCam = transformPoint(worldToCam, pWorld);
     viewZ = -pCam.z;  // camera looks down -Z
-    if (!(viewZ > 1.0e-5f)) return false;
+    if (!(viewZ > 0.0f)) return false;
     const float focal = std::max(1.0e-3f, cam.focalLength);
     const float sensorW = std::max(1.0e-3f, cam.sensorWidth);
     const float sensorH = sensorW / std::max(0.01f, aspect);
@@ -152,6 +154,57 @@ bool projectToNdc(Vec3 pObject, const Mat4& objToWorld, const Mat4& worldToCam, 
     return true;
 }
 
+bool projectCamToNdc(Vec3 pCam, const CameraData& cam, float aspect, float& ndcX, float& ndcY) {
+    const float viewZ = -pCam.z;
+    // Any point in front of the camera. Clip hits sit at viewZ == kDiceNearViewZ;
+    // allow a little FP slack below that.
+    if (!(viewZ > 0.0f)) return false;
+    const float focal = std::max(1.0e-3f, cam.focalLength);
+    const float sensorW = std::max(1.0e-3f, cam.sensorWidth);
+    const float sensorH = sensorW / std::max(0.01f, aspect);
+    const float halfW = 0.5f * sensorW * (viewZ / focal);
+    const float halfH = 0.5f * sensorH * (viewZ / focal);
+    if (!(halfW > 1e-8f) || !(halfH > 1e-8f)) return false;
+    ndcX = pCam.x / halfW;
+    ndcY = pCam.y / halfH;
+    return true;
+}
+
+// Clip camera-space segment to viewZ >= near. Returns false if fully behind.
+bool clipEdgeToNearCam(Vec3 aCam, Vec3 bCam, Vec3& aOut, Vec3& bOut) {
+    const float za = -aCam.z;
+    const float zb = -bCam.z;
+    const bool aFront = za >= kDiceNearViewZ;
+    const bool bFront = zb >= kDiceNearViewZ;
+    if (aFront && bFront) {
+        aOut = aCam;
+        bOut = bCam;
+        return true;
+    }
+    if (!aFront && !bFront) return false;
+    // z(t) = a.z + t*(b.z-a.z) = -near → viewZ(t) = near
+    const float denom = bCam.z - aCam.z;
+    if (std::fabs(denom) < 1.0e-20f) return false;
+    const float t = std::clamp((-kDiceNearViewZ - aCam.z) / denom, 0.0f, 1.0f);
+    Vec3 hit = aCam + (bCam - aCam) * t;
+    // Nudge onto the near plane so FP error cannot push the hit behind.
+    hit.z = -kDiceNearViewZ;
+    if (aFront) {
+        aOut = aCam;
+        bOut = hit;
+    } else {
+        aOut = hit;
+        bOut = bCam;
+    }
+    return true;
+}
+
+float ndcEdgePixels(float ax, float ay, float bx, float by, int resX, int resY) {
+    const float dx = (bx - ax) * 0.5f * float(resX);
+    const float dy = (by - ay) * 0.5f * float(resY);
+    return std::sqrt(dx * dx + dy * dy);
+}
+
 bool pointInPaddedFrustum(float ndcX, float ndcY, float padFrac) {
     const float lim = 1.0f + padFrac;
     return ndcX >= -lim && ndcX <= lim && ndcY >= -lim && ndcY <= lim;
@@ -159,17 +212,14 @@ bool pointInPaddedFrustum(float ndcX, float ndcY, float padFrac) {
 
 float screenEdgePixels(Vec3 aObj, Vec3 bObj, const Mat4& objToWorld, const Mat4& worldToCam,
                        const CameraData& cam, float aspect, int resX, int resY) {
-    float ax, ay, az, bx, by, bz;
-    const bool oka = projectToNdc(aObj, objToWorld, worldToCam, cam, aspect, ax, ay, az);
-    const bool okb = projectToNdc(bObj, objToWorld, worldToCam, cam, aspect, bx, by, bz);
-    // Both behind / failed → no useful screen length.
-    if (!oka && !okb) return 0.0f;
-    // Partially behind the near plane or failed projection: force further dice
-    // (Karma/PRMan keep refining until the edge is stable in raster space).
-    if (!oka || !okb) return 1.0e6f;
-    const float dx = (bx - ax) * 0.5f * float(resX);
-    const float dy = (by - ay) * 0.5f * float(resY);
-    return std::sqrt(dx * dx + dy * dy);
+    const Vec3 aCam = transformPoint(worldToCam, transformPoint(objToWorld, aObj));
+    const Vec3 bCam = transformPoint(worldToCam, transformPoint(objToWorld, bObj));
+    Vec3 ca, cb;
+    if (!clipEdgeToNearCam(aCam, bCam, ca, cb)) return 0.0f;
+    float ax, ay, bx, by;
+    if (!projectCamToNdc(ca, cam, aspect, ax, ay) || !projectCamToNdc(cb, cam, aspect, bx, by))
+        return 0.0f;
+    return ndcEdgePixels(ax, ay, bx, by, resX, resY);
 }
 
 // Slab test: ray (origin + t*dir, t>=0) vs AABB. dir need not be unit.
@@ -490,9 +540,10 @@ float maxScreenEdge(const Mesh& mesh, const Mat4& objToWorld, const Mat4& worldT
 }
 
 struct VertProj {
+    Vec3 cam{0.0f, 0.0f, 0.0f};  // camera-space position (for near-plane clip)
     float nx = 0.0f;
     float ny = 0.0f;
-    uint8_t ok = 0;
+    uint8_t ok = 0;  // 1 if in front of near plane and projectable
 };
 
 void projectAllVertices(const Mesh& mesh, const Mat4& objToWorld, const Mat4& worldToCam,
@@ -502,12 +553,16 @@ void projectAllVertices(const Mesh& mesh, const Mat4& objToWorld, const Mat4& wo
     out.resize(nPos);
     if (nPos == 0) return;
     auto one = [&](size_t i) {
-        float nx, ny, nz;
-        if (projectToNdc(mesh.positions[i], objToWorld, worldToCam, cam, aspect, nx, ny, nz)) {
+        const Vec3 pCam = transformPoint(worldToCam, transformPoint(objToWorld, mesh.positions[i]));
+        out[i].cam = pCam;
+        float nx, ny;
+        if (projectCamToNdc(pCam, cam, aspect, nx, ny)) {
             out[i].nx = nx;
             out[i].ny = ny;
             out[i].ok = 1;
         } else {
+            out[i].nx = 0.0f;
+            out[i].ny = 0.0f;
             out[i].ok = 0;
         }
     };
@@ -519,55 +574,101 @@ void projectAllVertices(const Mesh& mesh, const Mat4& objToWorld, const Mat4& wo
     }
 }
 
-float screenEdgePixelsFromProj(const VertProj& a, const VertProj& b, int resX, int resY) {
-    if (!a.ok && !b.ok) return 0.0f;
-    // Partially clipped: request a modest refine, not "infinite" (that forced
-    // maxLevel on the whole frustum when we used to broadcast maxL).
-    if (!a.ok || !b.ok) return float(std::max(resX, resY));
-    const float dx = (b.nx - a.nx) * 0.5f * float(resX);
-    const float dy = (b.ny - a.ny) * 0.5f * float(resY);
-    return std::sqrt(dx * dx + dy * dy);
+// Screen length of the *visible* portion (clipped to the near plane). Never invent
+// a fake "infinite" length — that used to drive Screen Adaptive to the poly limit
+// on close-ups where many cage edges straddled the camera.
+float screenEdgePixelsFromProj(const VertProj& a, const VertProj& b, const CameraData& cam, float aspect,
+                               int resX, int resY) {
+    Vec3 ca, cb;
+    if (!clipEdgeToNearCam(a.cam, b.cam, ca, cb)) return 0.0f;
+    float ax, ay, bx, by;
+    if (!projectCamToNdc(ca, cam, aspect, ax, ay) || !projectCamToNdc(cb, cam, aspect, bx, by))
+        return 0.0f;
+    // Cap pathological near-camera projections (NDC blows up as viewZ → 0).
+    const float cap = 4.0f * float(std::max(resX, resY));
+    return std::min(ndcEdgePixels(ax, ay, bx, by, resX, resY), cap);
 }
 
-bool faceInPaddedFrustumProj(const VertProj& a, const VertProj& b, const VertProj& c, float padFrac) {
+bool ndcPolyHitsFrustum(const float* xs, const float* ys, int n, float padFrac) {
+    if (n <= 0) return false;
     const float lim = 1.0f + padFrac;
-    int nOk = 0;
-    if (a.ok) {
-        ++nOk;
-        if (pointInPaddedFrustum(a.nx, a.ny, padFrac)) return true;
+    for (int i = 0; i < n; ++i) {
+        if (pointInPaddedFrustum(xs[i], ys[i], padFrac)) return true;
     }
-    if (b.ok) {
-        ++nOk;
-        if (pointInPaddedFrustum(b.nx, b.ny, padFrac)) return true;
+    if (n < 2) return false;
+    float minx = xs[0], maxx = xs[0], miny = ys[0], maxy = ys[0];
+    for (int i = 1; i < n; ++i) {
+        minx = std::min(minx, xs[i]);
+        maxx = std::max(maxx, xs[i]);
+        miny = std::min(miny, ys[i]);
+        maxy = std::max(maxy, ys[i]);
     }
-    if (c.ok) {
-        ++nOk;
-        if (pointInPaddedFrustum(c.nx, c.ny, padFrac)) return true;
-    }
-    if (nOk == 3) {
-        const float mx = (a.nx + b.nx + c.nx) * (1.0f / 3.0f);
-        const float my = (a.ny + b.ny + c.ny) * (1.0f / 3.0f);
-        if (pointInPaddedFrustum(mx, my, padFrac)) return true;
-        const float minx = std::min(a.nx, std::min(b.nx, c.nx));
-        const float maxx = std::max(a.nx, std::max(b.nx, c.nx));
-        const float miny = std::min(a.ny, std::min(b.ny, c.ny));
-        const float maxy = std::max(a.ny, std::max(b.ny, c.ny));
-        if (maxx < -lim || minx > lim || maxy < -lim || miny > lim) return false;
-        const float samples[][2] = {
-            {0.0f, 0.0f}, {lim, lim},  {-lim, lim}, {lim, -lim}, {-lim, -lim},
-            {lim, 0.0f},  {-lim, 0.0f}, {0.0f, lim}, {0.0f, -lim},
-        };
+    // Fully outside the padded NDC box.
+    if (maxx < -lim || minx > lim || maxy < -lim || miny > lim) return false;
+    const float samples[][2] = {
+        {0.0f, 0.0f}, {lim, lim},  {-lim, lim}, {lim, -lim}, {-lim, -lim},
+        {lim, 0.0f},  {-lim, 0.0f}, {0.0f, lim}, {0.0f, -lim},
+    };
+    if (n >= 3) {
+        // Fan from first vertex — clipped near-plane polys are convex.
         for (const auto& s : samples) {
-            if (pointInTriangle2D(s[0], s[1], a.nx, a.ny, b.nx, b.ny, c.nx, c.ny)) return true;
+            for (int i = 1; i + 1 < n; ++i) {
+                if (pointInTriangle2D(s[0], s[1], xs[0], ys[0], xs[i], ys[i], xs[i + 1], ys[i + 1]))
+                    return true;
+            }
         }
-        return true;
     }
-    return nOk > 0;
+    // AABB overlaps the frustum. Keep this conservative fallback: huge faces that
+    // cover the frame often have extreme NDC verts where point-in-triangle loses
+    // precision. Off-screen faces are still rejected by the AABB test above.
+    return true;
+}
+
+// Clip triangle to the near plane → NDC polygon (0..4 verts).
+int clipFaceToNearNdc(const VertProj& a, const VertProj& b, const VertProj& c, const CameraData& cam,
+                      float aspect, float* xs, float* ys) {
+    const VertProj* v[3] = {&a, &b, &c};
+    Vec3 poly[4];
+    int n = 0;
+    for (int i = 0; i < 3; ++i) {
+        const VertProj& p0 = *v[i];
+        const VertProj& p1 = *v[(i + 1) % 3];
+        const bool in0 = p0.ok != 0;
+        const bool in1 = p1.ok != 0;
+        if (in0) {
+            poly[n++] = p0.cam;
+        }
+        if (in0 != in1) {
+            Vec3 ca, cb;
+            if (clipEdgeToNearCam(p0.cam, p1.cam, ca, cb)) {
+                // The new vertex is the one that lies on the near plane.
+                const Vec3 hit = in0 ? cb : ca;
+                if (n == 0 || lengthSquared(poly[n - 1] - hit) > 1.0e-16f) poly[n++] = hit;
+            }
+        }
+        if (n >= 4) break;
+    }
+    int outN = 0;
+    for (int i = 0; i < n; ++i) {
+        float nx, ny;
+        if (!projectCamToNdc(poly[i], cam, aspect, nx, ny)) continue;
+        xs[outN] = nx;
+        ys[outN] = ny;
+        ++outN;
+    }
+    return outN;
+}
+
+bool faceInPaddedFrustumProj(const VertProj& a, const VertProj& b, const VertProj& c, float padFrac,
+                             const CameraData& cam, float aspect) {
+    float xs[4], ys[4];
+    const int n = clipFaceToNearNdc(a, b, c, cam, aspect, xs, ys);
+    return ndcPolyHitsFrustum(xs, ys, n, padFrac);
 }
 
 void markFacesInFrustumProjected(const Mesh& mesh, const std::vector<VertProj>& proj, float padFrac,
-                                 std::vector<uint8_t>& faceMark, size_t& markedCount,
-                                 ThreadPool* pool) {
+                                 const CameraData& cam, float aspect, std::vector<uint8_t>& faceMark,
+                                 size_t& markedCount, ThreadPool* pool) {
     const size_t triCount = mesh.indices.size() / 3;
     const size_t nPos = proj.size();
     faceMark.assign(triCount, 0);
@@ -579,7 +680,7 @@ void markFacesInFrustumProjected(const Mesh& mesh, const std::vector<VertProj>& 
         const uint32_t i1 = mesh.indices[t * 3 + 1];
         const uint32_t i2 = mesh.indices[t * 3 + 2];
         if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) return;
-        if (faceInPaddedFrustumProj(proj[i0], proj[i1], proj[i2], padFrac)) faceMark[t] = 1;
+        if (faceInPaddedFrustumProj(proj[i0], proj[i1], proj[i2], padFrac, cam, aspect)) faceMark[t] = 1;
     };
 
     constexpr size_t kParallelMin = 256;
@@ -752,7 +853,8 @@ bool diceMeshByFaceLevels(Mesh& mesh, const std::vector<uint8_t>& faceLevel, siz
 
 // Collect edges of marked faces whose screen length exceeds targetPx.
 float collectLongEdgesForAdaptive(const Mesh& mesh, const std::vector<uint8_t>& faceMark,
-                                  const std::vector<VertProj>& proj, float targetPx, int resX, int resY,
+                                  const std::vector<VertProj>& proj, float targetPx,
+                                  const CameraData& cam, float aspect, int resX, int resY,
                                   ThreadPool* pool, std::unordered_map<EdgeKey, char, EdgeHash>& splitEdge) {
     const size_t triCount = mesh.indices.size() / 3;
     const size_t nPos = proj.size();
@@ -771,7 +873,7 @@ float collectLongEdgesForAdaptive(const Mesh& mesh, const std::vector<uint8_t>& 
         if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) return;
         const int slot = std::clamp(tid, 0, workers);
         auto pushIfLong = [&](uint32_t a, uint32_t b) {
-            const float px = screenEdgePixelsFromProj(proj[a], proj[b], resX, resY);
+            const float px = screenEdgePixelsFromProj(proj[a], proj[b], cam, aspect, resX, resY);
             localMax[size_t(slot)] = std::max(localMax[size_t(slot)], px);
             if (px > targetPx) local[size_t(slot)].push_back(makeEdgeKey(a, b));
         };
@@ -837,7 +939,7 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, float dicingQuality, size
         projectAllVertices(mesh, objToWorld, worldToCam, cam, aspect, proj, pool);
         std::vector<uint8_t> faceMark;
         size_t markedCount = 0;
-        markFacesInFrustumProjected(mesh, proj, padFrac, faceMark, markedCount, pool);
+        markFacesInFrustumProjected(mesh, proj, padFrac, cam, aspect, faceMark, markedCount, pool);
         if (markedCount == 0) break;
         if (iter < kTailIters && markedCount < faceMark.size()) expandFaceMarksOneRing(mesh, faceMark);
 
@@ -887,7 +989,7 @@ void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget
         projectAllVertices(mesh, objToWorld, worldToCam, cam, aspect, proj, pool);
         std::vector<uint8_t> faceMark;
         size_t markedCount = 0;
-        markFacesInFrustumProjected(mesh, proj, padFrac, faceMark, markedCount, pool);
+        markFacesInFrustumProjected(mesh, proj, padFrac, cam, aspect, faceMark, markedCount, pool);
         if (markedCount == 0) break;
         if (pass < kTailPasses && markedCount < faceMark.size()) {
             expandFaceMarksOneRing(mesh, faceMark);
@@ -895,8 +997,8 @@ void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget
         }
 
         std::unordered_map<EdgeKey, char, EdgeHash> splitEdge;
-        const float maxPx =
-            collectLongEdgesForAdaptive(mesh, faceMark, proj, targetPx, resX, resY, pool, splitEdge);
+        const float maxPx = collectLongEdgesForAdaptive(mesh, faceMark, proj, targetPx, cam, aspect, resX,
+                                                        resY, pool, splitEdge);
         if (startMaxPx < 0.0f) startMaxPx = std::max(maxPx, targetPx);
         if (rt) rt->reportMeshFrac(adaptiveMeshFrac(startMaxPx, maxPx, targetPx), mesh.triangleCount());
         if (splitEdge.empty()) break;
