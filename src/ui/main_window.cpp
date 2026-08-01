@@ -960,25 +960,11 @@ void MainWindow::cookNow() {
     const bool displaceOn = builtScene->settings.enableDisplacement != 0;
 
     bool needTess = renderRequested_ && displaceOn;
-    bool partialTimedTess = false;
-    if (!needTess && frameCook && renderArmed() && displaceOn) {
-        // Play / scrub: re-dice only animated displace meshes; static grounds keep cache.
-        for (size_t mi = 0; mi < builtScene->meshes.size(); ++mi) {
-            const MeshPtr& m = builtScene->meshes[mi];
-            if (!m || !m->timeDependent) continue;
-            for (const InstanceData& inst : builtScene->instances) {
-                if (inst.meshIndex != int(mi)) continue;
-                if (inst.materialIndex < 0 ||
-                    size_t(inst.materialIndex) >= builtScene->materials.size())
-                    break;
-                if (materialHasGeometricDisplacement(builtScene->materials[size_t(inst.materialIndex)])) {
-                    partialTimedTess = true;
-                    break;
-                }
-            }
-            if (partialTimedTess) break;
-        }
-    }
+    // Timeline frame change + Displacement: never paste Start-frame densify over
+    // freshly cooked animated cages (that froze Alembic while Start was armed).
+    // Static grounds stay on tessCache_; timeDependent meshes keep new cages and
+    // are re-diced below when they carry geometric displacement.
+    const bool partialTimedTess = !needTess && frameCook && displaceOn;
     if (!displaceOn) {
         // Cages only — drop any densify so we never apply stale Pref meshes.
         tessCache_.clear();
@@ -1051,9 +1037,33 @@ void MainWindow::cookNow() {
     if (needTess) {
         runTess(false);
     } else if (partialTimedTess) {
-        // Restore densify for static meshes, then dice only timeDependent cages.
+        // Restore densify for static meshes; keep fresh animated cages.
         applyTessellationCache(*builtScene, /*skipTimeDependent=*/true);
-        runTess(true);
+        bool rediceTimed = false;
+        auto cacheWasTimed = [&](const std::string& path) {
+            for (const auto& entry : tessCache_) {
+                if (entry.first == path && entry.second && entry.second->timeDependent) return true;
+            }
+            return false;
+        };
+        for (const PrimRecord& prim : builtScene->prims) {
+            if (prim.instanceIndex < 0 || size_t(prim.instanceIndex) >= builtScene->instances.size())
+                continue;
+            const InstanceData& inst = builtScene->instances[size_t(prim.instanceIndex)];
+            if (inst.meshIndex < 0 || size_t(inst.meshIndex) >= builtScene->meshes.size()) continue;
+            const MeshPtr& m = builtScene->meshes[size_t(inst.meshIndex)];
+            if (!m) continue;
+            if (!m->timeDependent && !cacheWasTimed(prim.path)) continue;
+            // Ensure re-dice sees the flag even if the fresh cage omitted it.
+            if (!m->timeDependent) m->timeDependent = true;
+            if (inst.materialIndex < 0 || size_t(inst.materialIndex) >= builtScene->materials.size())
+                continue;
+            if (materialHasGeometricDisplacement(
+                    builtScene->materials[size_t(inst.materialIndex)])) {
+                rediceTimed = true;
+            }
+        }
+        if (rediceTimed) runTess(true);
     } else if (displaceOn) {
         applyTessellationCache(*builtScene, /*skipTimeDependent=*/false);
     }
@@ -1086,6 +1096,9 @@ void MainWindow::applyTessellationCache(Scene& scene, bool skipTimeDependent) co
         if (skipTimeDependent && mesh->timeDependent) continue;
         for (const auto& entry : tessCache_) {
             if (entry.first != prim.path || !entry.second) continue;
+            // Cached densify from an animated mesh must not overwrite a new cage,
+            // even if the fresh cage lost its timeDependent stamp.
+            if (skipTimeDependent && entry.second->timeDependent) break;
             mesh = entry.second;
             swapped = true;
             break;

@@ -292,7 +292,11 @@ void traverse(const IObject& object, const Mat4& parentTransform, bool parentXfo
             IPolyMesh polyMesh(child, kWrapExisting);
             IPolyMeshSchema& schema = polyMesh.getSchema();
             if (context.options.pathFilter.empty() || globMatch(context.options.pathFilter, path)) {
-                const bool meshAnimated = schema.getNumSamples() > 1;
+                size_t posSamples = 0;
+                if (schema.getPositionsProperty().valid())
+                    posSamples = schema.getPositionsProperty().getNumSamples();
+                const bool meshAnimated =
+                    schema.getNumSamples() > 1 || posSamples > 1;
                 MeshPtr mesh = readPolygonSchema(schema, context, false);
                 if (mesh) {
                     mesh->name = child.getName();
@@ -313,7 +317,11 @@ void traverse(const IObject& object, const Mat4& parentTransform, bool parentXfo
             ISubD subd(child, kWrapExisting);
             ISubDSchema& schema = subd.getSchema();
             if (context.options.pathFilter.empty() || globMatch(context.options.pathFilter, path)) {
-                const bool meshAnimated = schema.getNumSamples() > 1;
+                size_t posSamples = 0;
+                if (schema.getPositionsProperty().valid())
+                    posSamples = schema.getPositionsProperty().getNumSamples();
+                const bool meshAnimated =
+                    schema.getNumSamples() > 1 || posSamples > 1;
                 MeshPtr mesh = readPolygonSchema(schema, context, true);
                 if (mesh) {
                     mesh->name = child.getName();
