@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QString>
+#include <QRegularExpression>
 #include <algorithm>
 #include <map>
 
@@ -12,6 +13,7 @@
 #include "io/alembic_loader.h"
 #include "io/image_io.h"
 #include "io/materialx_graph.h"
+#include "render/metal_spectra.h"
 #include "io/usd_loader.h"
 #include "nodes/node_registry.h"
 #include "render/cpu/polynomial_optics.h"
@@ -415,12 +417,11 @@ public:
                          .withGroup("MaterialX"));
         // Hidden from the parameter panel; edited by MaterialNetworkView.
         addParameter(Parameter::makeString("mtlx", "MaterialX Document", ""));
+        // Legacy tag (pre conductor_eta/k). Hidden; migrated into MaterialX on cook.
         addParameter(Parameter::makeMenu("spectralmetalpreset", "Spectral Metal Preset",
                                          {"None", "Gold (Au)", "Silver (Ag)", "Copper (Cu)", "Aluminium (Al)"},
                                          0)
-                         .withGroup("Spectral")
-                         .withTooltip("PT Spectral: use tabulated η/κ for metals. "
-                                      "Also set via Material Network → Presets."));
+                         .withVisibleWhen("false"));
     }
 
     void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
@@ -441,7 +442,42 @@ public:
                 evaluated.procedurals.clear();
                 evaluated.proceduralImages.clear();
             }
-            evaluated.material.spectralMetalPreset = intValue("spectralmetalpreset", 0);
+            // Legacy spectralMetalPreset → conductor_eta / conductor_k in MaterialX.
+            const int legacyPreset = intValue("spectralmetalpreset", 0);
+            if (legacyPreset > 0) {
+                const char* name = "Au";
+                if (legacyPreset == 2) name = "Ag";
+                else if (legacyPreset == 3) name = "Cu";
+                else if (legacyPreset == 4) name = "Al";
+                Vec3 etaRgb, kRgb;
+                metalNkRgbPreset(name, etaRgb, kRgb);
+                evaluated.material.conductorEta = etaRgb;
+                evaluated.material.conductorK = kRgb;
+                auto fmt3 = [](Vec3 v) {
+                    return QString("%1, %2, %3")
+                        .arg(v.x, 0, 'g', 6)
+                        .arg(v.y, 0, 'g', 6)
+                        .arg(v.z, 0, 'g', 6);
+                };
+                auto upsertColor = [](QString doc, const QString& input, const QString& value) {
+                    const QRegularExpression re(
+                        QStringLiteral("<input\\s+name=\"%1\"\\s+type=\"color3\"\\s+value=\"[^\"]*\"/>")
+                            .arg(input));
+                    const QString tag =
+                        QStringLiteral("<input name=\"%1\" type=\"color3\" value=\"%2\"/>").arg(input, value);
+                    if (re.match(doc).hasMatch())
+                        return doc.replace(re, tag);
+                    const QString needle = QStringLiteral("</standard_surface>");
+                    int at = doc.indexOf(needle);
+                    if (at >= 0)
+                        doc.insert(at, QStringLiteral("    %1\n").arg(tag));
+                    return doc;
+                };
+                xml = upsertColor(xml, QStringLiteral("conductor_eta"), fmt3(etaRgb));
+                xml = upsertColor(xml, QStringLiteral("conductor_k"), fmt3(kRgb));
+                setParameterValue("mtlx", xml, false);
+                setParameterValue("spectralmetalpreset", 0, false);
+            }
 
             // Drop dangling procedural roots (corrupt XML / failed partial compiles).
             auto sanitizeProc = [&](int& idx) {
@@ -757,14 +793,17 @@ public:
         addParameter(Parameter::makeBool("_integrator_menu_v2", "", true));
         addParameter(Parameter::makeInt("spectralsamples", "Spectral Samples", 4, 2, 16)
                          .withGroup("Engine")
+                         .withVisibleWhen("integrator==4")
                          .withTooltip("PT Spectral only: number of hero wavelengths per path "
                                       "(2–16, default 4). Higher = cleaner colour, slower."));
         addParameter(Parameter::makeInt("spectralbins", "Spectral Bins", 16, 8, 32)
                          .withGroup("Engine")
+                         .withVisibleWhen("integrator==4")
                          .withTooltip("PT Spectral: fixed wavelength bins for multilayer spectral "
                                       "EXR / false-color (8–32)."));
         addParameter(Parameter::makeBool("spectralexr", "Write Spectral EXR Layers", false)
                          .withGroup("Engine")
+                         .withVisibleWhen("integrator==4")
                          .withTooltip("When saving EXR with PT Spectral, also write fixed spectral "
                                       "bin layers (S0..Sn)."));
         addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
@@ -782,9 +821,12 @@ public:
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
         addParameter(Parameter::makeInt("tilesize", "Tile Size", 32, 8, 256).withGroup("Engine"));
-        addParameter(Parameter::makeFloat("aodistance", "AO Distance", 1.0, 0.01, 100.0, false).withGroup("Engine"));
+        addParameter(Parameter::makeFloat("aodistance", "AO Distance", 1.0, 0.01, 100.0, false)
+                         .withGroup("Engine")
+                         .withVisibleWhen("integrator==3"));
         addParameter(Parameter::makeBool("caustics", "Caustics", true)
                          .withGroup("Engine")
+                         .withVisibleWhen("integrator==0||integrator==1")
                          .withTooltip("Enable caustic light transport (light focused through glass "
                                       "and off mirrors).\n"
                                       "Engine picks the estimator (Auto / MNEE / Photon).\n"
@@ -794,6 +836,7 @@ public:
         addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
                                          {"Automatic", "MNEE (manifolds)", "Photon / VCM"}, 0)
                          .withGroup("Engine")
+                         .withVisibleWhen("integrator==0||integrator==1")
                          .withTooltip("Automatic: Path Tracer → MNEE; BDPT → light tracing + MNEE "
                                       "through glass.\n"
                                       "MNEE: manifold next-event — best for near-delta glass.\n"
@@ -801,14 +844,17 @@ public:
                                       "rough glass and black bases seen through refraction."));
         addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)
                          .withGroup("Engine")
+                         .withVisibleWhen("caustics==1&&causticsengine==2")
                          .withTooltip("Photons emitted per progressive pass when Caustics Engine "
                                       "is Photon / VCM."));
         addParameter(Parameter::makeFloat("photonradius", "Photon Radius", 0.08, 0.001, 10.0, false)
                          .withGroup("Engine")
+                         .withVisibleWhen("caustics==1&&causticsengine==2")
                          .withTooltip("Initial gather radius (scene units) for the caustic photon "
                                       "map. Shrinks as samples accumulate."));
         addParameter(Parameter::makeFloat("causticclamp", "Caustic Firefly Clamp", 0.0, 0.0, 1000.0, false)
                          .withGroup("Engine")
+                         .withVisibleWhen("integrator==0||integrator==1")
                          .withTooltip("Extra cap on paths that look through glass/mirrors at a light "
                                       "(the sparkle inside refractive objects).\n"
                                       "Even at 0, a safety cap of 10 is applied to those paths — they "
@@ -818,6 +864,7 @@ public:
                          "dispersionmode", "Dispersion Mode",
                          {"Hero (default)", "Optimized", "Spectral RGB ×3", "Fake tint"}, 0)
                          .withGroup("Engine")
+                         .withVisibleWhen("integrator!=4")
                          .withTooltip(
                              "How chromatic dispersion (dispersion_abbe) is sampled.\n"
                              "Hero: one random RGB channel per sample; masks the whole path "
@@ -829,10 +876,12 @@ public:
                              "Fake tint: no ray bending — chromatic transmission tint only."));
         addParameter(Parameter::makeInt("dispersionmaxiface", "Dispersion Max Interfaces", 2, 1, 16)
                          .withGroup("Engine")
+                         .withVisibleWhen("integrator!=4&&dispersionmode==1")
                          .withTooltip("Optimized mode only: how many dispersing glass interfaces "
                                       "may change IOR (enter+exit of one pane ≈ 2)."));
         addParameter(Parameter::makeBool("pathguiding", "Path Guiding (OpenPGL)", false)
                          .withGroup("Engine")
+                         .withVisibleWhen("integrator==0")
                          .withTooltip("Learn incident radiance while rendering and guide BSDF "
                                       "samples (CPU / Embree). Kicks in after the first training "
                                       "passes; helps indirect-heavy scenes."));
@@ -892,10 +941,12 @@ public:
         addParameter(Parameter::makeBool("envvisible", "Environment Visible To Camera", true).withGroup("Film"));
         addParameter(Parameter::makeBool("filmfalsecolor", "Spectral False Color", false)
                          .withGroup("Film")
+                         .withVisibleWhen("integrator==4")
                          .withTooltip("PT Spectral: visualise one spectral bin as false-color "
                                       "instead of beauty RGB (debug)."));
         addParameter(Parameter::makeInt("filmfalsecolorbin", "False Color Bin", 0, 0, 31)
                          .withGroup("Film")
+                         .withVisibleWhen("integrator==4&&filmfalsecolor==1")
                          .withTooltip("Which spectral bin to show when Spectral False Color is on."));
     }
 

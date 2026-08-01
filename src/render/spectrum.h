@@ -111,7 +111,17 @@ inline void cieXyzAtLambda(float lambda, float& x, float& y, float& z) {
     z = 1.839f * gauss(lambda, 449.1f, 19.44f, 28.54f);
 }
 
-// SampledSpectrum → linear sRGB (D65), dividing out wavelength pdfs.
+// XYZ → linear sRGB (D65).
+inline Vec3 xyzToLinearSrgb(float X, float Y, float Z) {
+    float r = 3.2404542f * X - 1.5371385f * Y - 0.4985314f * Z;
+    float g = -0.9692660f * X + 1.8760108f * Y + 0.0415560f * Z;
+    float b = 0.0556434f * X - 0.2040259f * Y + 1.0572252f * Z;
+    return Vec3(r, g, b);
+}
+
+// SampledSpectrum → linear sRGB, dividing out wavelength pdfs.
+// White-balances against a unit (equal-energy) spectrum under the same samples so
+// flat spectra map to neutral RGB (fixes the pink cast from Y-only normalisation).
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w) {
     if (s.n <= 0 || w.n <= 0) return Vec3(0.0f);
     const int n = std::min(s.n, w.n);
@@ -137,21 +147,24 @@ inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w)
     Xw *= invN;
     Yw *= invN;
     Zw *= invN;
-    // Normalize so a flat spectrum of 1 → RGB ≈ (1,1,1).
-    if (Yw > 1e-8f) {
+    // Chromatic white-point: unit spectrum → relative XYZ (1,1,1).
+    if (Xw > 1e-8f && Yw > 1e-8f && Zw > 1e-8f) {
+        X /= Xw;
+        Y /= Yw;
+        Z /= Zw;
+    } else if (Yw > 1e-8f) {
         X /= Yw;
         Y /= Yw;
         Z /= Yw;
-        Xw /= Yw;
-        Zw /= Yw;
-        Yw = 1.0f;
     }
-    (void)Xw;
-    (void)Zw;
-    float r = 3.2404542f * X - 1.5371385f * Y - 0.4985314f * Z;
-    float g = -0.9692660f * X + 1.8760108f * Y + 0.0415560f * Z;
-    float b = 0.0556434f * X - 0.2040259f * Y + 1.0572252f * Z;
-    return Vec3(srMax(0.0f, r), srMax(0.0f, g), srMax(0.0f, b));
+    // (1,1,1) XYZ through the D65 matrix is not (1,1,1) RGB — renormalise so a
+    // flat spectrum lands on neutral white and greys match Path Tracer albedo.
+    Vec3 rgb = xyzToLinearSrgb(X, Y, Z);
+    const Vec3 whiteRgb = xyzToLinearSrgb(1.0f, 1.0f, 1.0f);
+    rgb.x /= srMax(1e-8f, whiteRgb.x);
+    rgb.y /= srMax(1e-8f, whiteRgb.y);
+    rgb.z /= srMax(1e-8f, whiteRgb.z);
+    return Vec3(srMax(0.0f, rgb.x), srMax(0.0f, rgb.y), srMax(0.0f, rgb.z));
 }
 
 // False-color: map a spectral bin / wavelength to a visible debug color.

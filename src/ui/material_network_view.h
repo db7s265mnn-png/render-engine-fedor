@@ -41,6 +41,9 @@ struct MaterialXSelection {
     QStringList typeVariants;
     QString name;
     QVector<MaterialXInputParam> inputs;
+    // Active RenderSettings integrator (0=PT … 4=PT Spectral). Used to hide
+    // spectral-only standard_surface inputs in the Parameters dock.
+    int activeIntegrator = 0;
 };
 
 // Public Material Network dock widget: container level + MaterialX canvas.

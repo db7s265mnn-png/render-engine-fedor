@@ -1,5 +1,7 @@
 #include "nodes/parameter.h"
 
+#include "nodes/node.h"
+
 #include <QJsonArray>
 
 namespace sol {
@@ -117,6 +119,74 @@ Parameter& Parameter::withGroup(const QString& groupName) {
 Parameter& Parameter::withTooltip(const QString& text) {
     tooltip = text;
     return *this;
+}
+
+Parameter& Parameter::withVisibleWhen(const QString& expression) {
+    visibleWhen = expression;
+    return *this;
+}
+
+namespace {
+
+double paramNumericValue(const Node& node, const QString& name) {
+    const Parameter* p = node.findParameter(name);
+    if (!p) return 0.0;
+    switch (p->type) {
+        case ParamType::Bool: return p->toBool() ? 1.0 : 0.0;
+        case ParamType::Int:
+        case ParamType::Menu: return double(p->toInt());
+        case ParamType::Float: return p->toDouble();
+        default: return p->value.toDouble();
+    }
+}
+
+bool evalVisibleComparison(const QString& token, const Node& node) {
+    const QString t = token.trimmed();
+    if (t.isEmpty() || t == QLatin1String("true") || t == QLatin1String("1")) return true;
+    if (t == QLatin1String("false") || t == QLatin1String("0")) return false;
+
+    const int ne = t.indexOf(QLatin1String("!="));
+    if (ne > 0) {
+        const QString lhs = t.left(ne).trimmed();
+        const QString rhs = t.mid(ne + 2).trimmed();
+        bool ok = false;
+        const double want = rhs.toDouble(&ok);
+        if (!ok) return false;
+        return paramNumericValue(node, lhs) != want;
+    }
+    const int eq = t.indexOf(QLatin1String("=="));
+    if (eq > 0) {
+        const QString lhs = t.left(eq).trimmed();
+        const QString rhs = t.mid(eq + 2).trimmed();
+        bool ok = false;
+        const double want = rhs.toDouble(&ok);
+        if (!ok) return false;
+        return paramNumericValue(node, lhs) == want;
+    }
+    // Bare param name → truthy if non-zero.
+    return paramNumericValue(node, t) != 0.0;
+}
+
+bool evalVisibleAnd(const QString& expr, const Node& node) {
+    const QStringList parts = expr.split(QLatin1String("&&"), Qt::SkipEmptyParts);
+    for (const QString& part : parts) {
+        if (!evalVisibleComparison(part, node)) return false;
+    }
+    return !parts.isEmpty() || expr.trimmed().isEmpty();
+}
+
+}  // namespace
+
+bool evaluateVisibleWhen(const QString& expression, const Node& node) {
+    const QString expr = expression.trimmed();
+    if (expr.isEmpty()) return true;
+    // OR of AND-clauses: a&&b || c&&d
+    const QStringList orParts = expr.split(QLatin1String("||"), Qt::SkipEmptyParts);
+    if (orParts.isEmpty()) return evalVisibleComparison(expr, node);
+    for (const QString& part : orParts) {
+        if (evalVisibleAnd(part, node)) return true;
+    }
+    return false;
 }
 
 Vec3 Parameter::toVec3() const {

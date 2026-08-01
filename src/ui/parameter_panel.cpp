@@ -23,6 +23,7 @@
 #include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QVector3D>
 #include <algorithm>
@@ -171,6 +172,8 @@ QString prettyMaterialXLabel(const QString& name) {
         {QStringLiteral("filex"), QStringLiteral("Input X")},
         {QStringLiteral("filey"), QStringLiteral("Input Y")},
         {QStringLiteral("filez"), QStringLiteral("Input Z")},
+        {QStringLiteral("conductor_eta"), QStringLiteral("Conductor η")},
+        {QStringLiteral("conductor_k"), QStringLiteral("Conductor κ")},
     };
     if (special.contains(name)) return special.value(name);
 
@@ -472,6 +475,7 @@ void ParameterPanel::rebuildLop() {
             if (parameter.name == "mtlx") continue;
             if (parameter.name.startsWith(QLatin1String("_"))) continue;
             if (parameter.group != group) continue;
+            if (!evaluateVisibleWhen(parameter.visibleWhen, *node_)) continue;
             if (!form) {
                 auto* box = new QGroupBox(group.isEmpty() ? QString("Parameters") : group);
                 form = new QFormLayout(box);
@@ -628,6 +632,11 @@ void ParameterPanel::rebuildMaterialX() {
 
     for (const MaterialXInputParam& input : materialX_.inputs) {
         if (input.name.isEmpty()) continue;
+        // Spectral-only conductor η/κ — hide unless PT Spectral is active.
+        if ((input.name == QLatin1String("conductor_eta") || input.name == QLatin1String("conductor_k")) &&
+            materialX_.activeIntegrator != 4) {
+            continue;
+        }
         const QString label = prettyMaterialXLabel(input.name);
 
         if (!input.nodename.isEmpty()) {
@@ -784,6 +793,14 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
         if (updating_ || !node) return;
         node->setParameterValue(name, value);
         emit parameterEdited(node, name);
+        bool affectsVisibility = false;
+        for (const Parameter& p : node->parameters()) {
+            if (!p.visibleWhen.isEmpty() && p.visibleWhen.contains(name)) {
+                affectsVisibility = true;
+                break;
+            }
+        }
+        if (affectsVisibility) QTimer::singleShot(0, this, [this] { refresh(); });
     };
 
     switch (parameter.type) {

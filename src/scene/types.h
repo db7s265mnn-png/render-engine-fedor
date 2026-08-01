@@ -106,8 +106,10 @@ struct Material {
     int subdivIterations = 0;   // authored on geometry; densify may ignore under Screen Adaptive
     int autobump = 1;           // Pref-space displace normal (Arnold-like), all ray types
     int displacementVector = 0; // 0 = along normal (float), 1 = vector displace
-    // PT Spectral metal η/κ preset: 0=none, 1=Au, 2=Ag, 3=Cu, 4=Al.
-    int spectralMetalPreset = 0;
+    // PT Spectral metal complex IOR (RGB ≈ η/κ at ~650/550/450 nm). Used only by
+    // the spectral integrator; RGB Path Tracer ignores these.
+    Vec3 conductorEta{1.5f, 1.5f, 1.5f};
+    Vec3 conductorK{0.0f, 0.0f, 0.0f};
 
     // Chromatic dispersion of the transmission lobe (Abbe number, Arnold-style
     // `dispersion_abbe`): 0 = off; typical glass 20–60, lower = stronger rainbow.

@@ -632,9 +632,16 @@ void MainWindow::createDocks() {
         renderView_->frameAll();
     });
     connect(parameterPanel_, &ParameterPanel::parameterEdited, this,
-            [this](Node*, const QString&) {
+            [this](Node* node, const QString& parameterName) {
                 if (renderView_->isGizmoDragging()) return;
                 scheduleCook();
+                // Integrator change may show/hide spectral-only MaterialX inputs.
+                if (node && node->typeName() == QLatin1String("rendersettings") &&
+                    parameterName == QLatin1String("integrator") && parameterPanel_->showingMaterialX()) {
+                    MaterialXSelection mtlx;
+                    if (materialNetworkView_->selectedMaterialX(mtlx))
+                        parameterPanel_->setMaterialXSelection(mtlx);
+                }
             });
     connect(parameterPanel_, &ParameterPanel::nodeRenamed, this, [this](Node*) { scheduleCook(); });
     connect(parameterPanel_, &ParameterPanel::materialXRenamed, this,

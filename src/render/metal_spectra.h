@@ -1,6 +1,9 @@
-// Spectral η/κ metal presets + dielectric IOR(λ) from Abbe (Cauchy).
+// Spectral η/κ metal tables + dielectric IOR(λ) from Abbe (Cauchy).
+// Material authoring stores RGB triplets (η/κ ≈ samples at 650/550/450 nm);
+// tables remain for presets that seed those triplets.
 #pragma once
 
+#include "core/math.h"
 #include "render/spectrum.h"
 
 namespace sol {
@@ -9,6 +12,22 @@ struct SpectralNk {
     float eta;
     float k;
 };
+
+// Interpolate an RGB triplet authored at R≈650, G≈550, B≈450 nm.
+inline float rgbTripletAtLambda(Vec3 rgb, float lambdaNm) {
+    if (lambdaNm <= 450.0f) return rgb.z;
+    if (lambdaNm >= 650.0f) return rgb.x;
+    if (lambdaNm <= 550.0f) {
+        const float t = (lambdaNm - 450.0f) / 100.0f;
+        return lerpf(rgb.z, rgb.y, t);
+    }
+    const float t = (lambdaNm - 550.0f) / 100.0f;
+    return lerpf(rgb.y, rgb.x, t);
+}
+
+inline SpectralNk nkFromRgb(Vec3 etaRgb, Vec3 kRgb, float lambdaNm) {
+    return {rgbTripletAtLambda(etaRgb, lambdaNm), rgbTripletAtLambda(kRgb, lambdaNm)};
+}
 
 // Very compact tabulated metals (visible range). Linear interpolate in λ.
 inline SpectralNk metalNk(const char* preset, float lambdaNm) {
@@ -53,6 +72,15 @@ inline SpectralNk metalNk(const char* preset, float lambdaNm) {
     }
     // Fallback: treat as dielectric-ish conductor from grey.
     return {0.2f, 3.0f};
+}
+
+// Seed MaterialX conductor_eta / conductor_k from a named metal table.
+inline void metalNkRgbPreset(const char* preset, Vec3& etaRgb, Vec3& kRgb) {
+    const SpectralNk r = metalNk(preset, 650.0f);
+    const SpectralNk g = metalNk(preset, 550.0f);
+    const SpectralNk b = metalNk(preset, 450.0f);
+    etaRgb = Vec3(r.eta, g.eta, b.eta);
+    kRgb = Vec3(r.k, g.k, b.k);
 }
 
 // Cauchy: n(λ) = A + B/λ² with A,B from nd + Vd (Abbe).

@@ -281,6 +281,9 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     setFloat("specular_IOR", material.ior);
     setFloat("transmission", material.transmission);
     setColor("transmission_color", material.transmissionColor);
+    // PT Spectral conductor η/κ (RGB ≈ 650/550/450 nm). Defaults: dielectric-ish.
+    setColor("conductor_eta", material.conductorEta);
+    setColor("conductor_k", material.conductorK);
     material.roughness = saturatef(material.roughness);
     material.metallic = saturatef(material.metallic);
     material.specular = saturatef(material.specular);
@@ -616,6 +619,8 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"specular_roughness", "float", "0.35"},
          {"specular_IOR", "float", "1.5"},
          {"metalness", "float", "0"},
+         {"conductor_eta", "color3", "1.5, 1.5, 1.5"},
+         {"conductor_k", "color3", "0, 0, 0"},
          {"transmission", "float", "0"},
          {"transmission_color", "color3", "1, 1, 1"},
          {"shadow_opacity", "float", "1"},
@@ -781,6 +786,8 @@ QString createDefaultMaterialXDocument() {
     ss->setInputValue("base", 0.8f);
     ss->setInputValue("specular_roughness", 0.35f);
     ss->setInputValue("metalness", 0.0f);
+    ss->setInputValue("conductor_eta", mx::Color3(1.5f, 1.5f, 1.5f));
+    ss->setInputValue("conductor_k", mx::Color3(0.0f, 0.0f, 0.0f));
     ss->setInputValue("specular", 0.5f);
     ss->setInputValue("specular_IOR", 1.5f);
     ss->setInputValue("transmission", 0.0f);

@@ -30,6 +30,10 @@ public:
     QString label;
     QString tooltip;
     QString group;        // parameter folder shown in the UI
+    // Declarative show/hide vs sibling params, e.g. "integrator==4",
+    // "caustics==1&&causticsengine==2", "integrator==0||integrator==1".
+    // Empty = always visible. "false" / "0" = never.
+    QString visibleWhen;
     ParamType type = ParamType::Float;
     QVariant value;
     QVariant defaultValue;
@@ -57,6 +61,7 @@ public:
 
     Parameter& withGroup(const QString& groupName);
     Parameter& withTooltip(const QString& text);
+    Parameter& withVisibleWhen(const QString& expression);
 
     double toDouble() const { return value.toDouble(); }
     int toInt() const { return value.toInt(); }
@@ -71,5 +76,8 @@ public:
 
 QString paramTypeName(ParamType type);
 ParamType paramTypeFromName(const QString& name);
+
+// Evaluate a Parameter::visibleWhen expression against a node’s current values.
+bool evaluateVisibleWhen(const QString& expression, const class Node& node);
 
 }  // namespace sol

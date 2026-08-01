@@ -2905,7 +2905,22 @@ void testSpectralHeroBasics() {
     check(spectrumAvg(gold) > 0.1f, "gold fresnel");
     Vec3 rgb = spectrumToRgb(white, w);
     check(rgb.x > 0.0f && rgb.y > 0.0f && rgb.z > 0.0f, "spectrumToRgb white");
-    std::printf("  spectral hero ok rgb=(%.3f,%.3f,%.3f)\n", rgb.x, rgb.y, rgb.z);
+    // Neutral white: no pink cast under equal-energy / unit spectrum.
+    check(std::fabs(rgb.x - rgb.y) < 0.05f && std::fabs(rgb.y - rgb.z) < 0.05f, "white is neutral");
+    check(std::fabs(rgb.x - 1.0f) < 0.08f, "white ~1");
+    // Grey albedo round-trip ≈ Path Tracer brightness.
+    Vec3 greyIn(0.8f, 0.8f, 0.8f);
+    Vec3 greyOut = spectrumToRgb(rgbToSpectrumReflectance(greyIn, w), w);
+    check(std::fabs(greyOut.x - 0.8f) < 0.08f && std::fabs(greyOut.y - greyOut.x) < 0.05f,
+          "grey 0.8 round-trip");
+    // RGB η/κ seed from metal table.
+    Vec3 eta, k;
+    metalNkRgbPreset("Au", eta, k);
+    check(eta.x > 0.0f && k.x > 0.0f, "Au η/κ rgb seed");
+    SpectralNk nk550 = nkFromRgb(eta, k, 550.0f);
+    check(nk550.eta > 0.0f && nk550.k > 0.0f, "nkFromRgb");
+    std::printf("  spectral hero ok rgb=(%.3f,%.3f,%.3f) grey=(%.3f,%.3f,%.3f)\n", rgb.x, rgb.y, rgb.z,
+                greyOut.x, greyOut.y, greyOut.z);
 }
 
 void testScreenAdaptiveNearDensityDip() {

@@ -42,6 +42,7 @@
 
 #include "io/image_io.h"
 #include "io/materialx_graph.h"
+#include "render/metal_spectra.h"
 #include "nodes/node.h"
 #include "nodes/node_graph.h"
 #include "nodes/parameter.h"
@@ -297,6 +298,8 @@ QString fallbackDefaultDocument() {
         "    <input name=\"specular_color\" type=\"color3\" value=\"1, 1, 1\"/>\n"
         "    <input name=\"specular_roughness\" type=\"float\" value=\"0.35\"/>\n"
         "    <input name=\"metalness\" type=\"float\" value=\"0\"/>\n"
+        "    <input name=\"conductor_eta\" type=\"color3\" value=\"1.5, 1.5, 1.5\"/>\n"
+        "    <input name=\"conductor_k\" type=\"color3\" value=\"0, 0, 0\"/>\n"
         "    <input name=\"transmission\" type=\"float\" value=\"0\"/>\n"
         "    <input name=\"transmission_color\" type=\"color3\" value=\"1, 1, 1\"/>\n"
         "    <input name=\"subsurface_scale\" type=\"float\" value=\"1\"/>\n"
@@ -738,6 +741,8 @@ QStringList MaterialNetworkGraphView::canonicalInputOrder(const QString& categor
                 QStringLiteral("specular_roughness"),
                 QStringLiteral("specular_IOR"),
                 QStringLiteral("metalness"),
+                QStringLiteral("conductor_eta"),
+                QStringLiteral("conductor_k"),
                 QStringLiteral("transmission"),
                 QStringLiteral("transmission_color"),
                 QStringLiteral("shadow_opacity"),
@@ -822,6 +827,8 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
             {"specular_roughness", "float", "0.35", {}},
             {"specular_IOR", "float", "1.5", {}},
             {"metalness", "float", "0", {}},
+            {"conductor_eta", "color3", "1.5, 1.5, 1.5", {}},
+            {"conductor_k", "color3", "0, 0, 0", {}},
             {"transmission", "float", "0", {}},
             {"transmission_color", "color3", "1, 1, 1", {}},
             {"shadow_opacity", "float", "1", {}},
@@ -2763,7 +2770,7 @@ void MaterialNetworkView::onMaterialXSelectionChanged() {
 void MaterialNetworkView::showPresetsMenu() {
     if (!presetsButton_ || !presetsButton_->isEnabled()) return;
     QMenu menu(this);
-    auto* metals = menu.addMenu("Metals (spectral η/κ)");
+    auto* metals = menu.addMenu("Metals (conductor η/κ)");
     metals->addAction("Gold (Au)", this, [this] { applyPreset("Au"); });
     metals->addAction("Silver (Ag)", this, [this] { applyPreset("Ag"); });
     metals->addAction("Copper (Cu)", this, [this] { applyPreset("Cu"); });
@@ -2773,8 +2780,6 @@ void MaterialNetworkView::showPresetsMenu() {
     glass->addAction("Crown Glass (IOR 1.52, Abbe 60)", this, [this] { applyPreset("glass_crown"); });
     glass->addAction("Flint Glass (IOR 1.65, Abbe 33)", this, [this] { applyPreset("glass_flint"); });
     glass->addAction("Acrylic (IOR 1.49, Abbe 55)", this, [this] { applyPreset("glass_acrylic"); });
-    menu.addSeparator();
-    menu.addAction("Clear Spectral Metal Preset", this, [this] { applyPreset("none"); });
     menu.exec(presetsButton_->mapToGlobal(QPoint(0, presetsButton_->height())));
 }
 
@@ -2787,32 +2792,37 @@ void MaterialNetworkView::applyPreset(const QString& presetId) {
     auto setIn = [&](const QString& input, const QString& value) {
         graphView_->setInputValue(name, input, value);
     };
+    auto setNk = [&](const char* metal) {
+        Vec3 eta, k;
+        metalNkRgbPreset(metal, eta, k);
+        setIn("conductor_eta", QString("%1, %2, %3").arg(eta.x).arg(eta.y).arg(eta.z));
+        setIn("conductor_k", QString("%1, %2, %3").arg(k.x).arg(k.y).arg(k.z));
+    };
 
-    int metalPreset = 0;
     if (presetId == "Au") {
-        metalPreset = 1;
         setIn("base_color", "1, 0.71, 0.29");
         setIn("metalness", "1");
         setIn("specular_roughness", "0.2");
         setIn("transmission", "0");
+        setNk("Au");
     } else if (presetId == "Ag") {
-        metalPreset = 2;
         setIn("base_color", "0.97, 0.96, 0.91");
         setIn("metalness", "1");
         setIn("specular_roughness", "0.15");
         setIn("transmission", "0");
+        setNk("Ag");
     } else if (presetId == "Cu") {
-        metalPreset = 3;
         setIn("base_color", "0.95, 0.64, 0.54");
         setIn("metalness", "1");
         setIn("specular_roughness", "0.25");
         setIn("transmission", "0");
+        setNk("Cu");
     } else if (presetId == "Al") {
-        metalPreset = 4;
         setIn("base_color", "0.91, 0.92, 0.92");
         setIn("metalness", "1");
         setIn("specular_roughness", "0.2");
         setIn("transmission", "0");
+        setNk("Al");
     } else if (presetId == "glass_clear") {
         setIn("base_color", "1, 1, 1");
         setIn("metalness", "0");
@@ -2820,6 +2830,8 @@ void MaterialNetworkView::applyPreset(const QString& presetId) {
         setIn("transmission", "1");
         setIn("specular_IOR", "1.5");
         setIn("dispersion_abbe", "55");
+        setIn("conductor_eta", "1.5, 1.5, 1.5");
+        setIn("conductor_k", "0, 0, 0");
     } else if (presetId == "glass_crown") {
         setIn("base_color", "1, 1, 1");
         setIn("metalness", "0");
@@ -2827,6 +2839,8 @@ void MaterialNetworkView::applyPreset(const QString& presetId) {
         setIn("transmission", "1");
         setIn("specular_IOR", "1.52");
         setIn("dispersion_abbe", "60");
+        setIn("conductor_eta", "1.5, 1.5, 1.5");
+        setIn("conductor_k", "0, 0, 0");
     } else if (presetId == "glass_flint") {
         setIn("base_color", "1, 1, 1");
         setIn("metalness", "0");
@@ -2834,6 +2848,8 @@ void MaterialNetworkView::applyPreset(const QString& presetId) {
         setIn("transmission", "1");
         setIn("specular_IOR", "1.65");
         setIn("dispersion_abbe", "33");
+        setIn("conductor_eta", "1.5, 1.5, 1.5");
+        setIn("conductor_k", "0, 0, 0");
     } else if (presetId == "glass_acrylic") {
         setIn("base_color", "1, 1, 1");
         setIn("metalness", "0");
@@ -2841,12 +2857,13 @@ void MaterialNetworkView::applyPreset(const QString& presetId) {
         setIn("transmission", "1");
         setIn("specular_IOR", "1.49");
         setIn("dispersion_abbe", "55");
-    } else {
-        metalPreset = 0;
+        setIn("conductor_eta", "1.5, 1.5, 1.5");
+        setIn("conductor_k", "0, 0, 0");
     }
 
+    // Clear any legacy spectral metal tag.
     if (currentMaterial_->findParameter("spectralmetalpreset"))
-        currentMaterial_->setParameterValue("spectralmetalpreset", metalPreset);
+        currentMaterial_->setParameterValue("spectralmetalpreset", 0);
     emit materialEdited(currentMaterial_);
     emit statusMessage(QString("Applied preset: %1").arg(presetId));
 }
@@ -2874,6 +2891,15 @@ bool MaterialNetworkView::selectedMaterialX(MaterialXSelection& out) const {
     out.category = node->category;
     out.type = node->type;
     out.name = node->name;
+    out.activeIntegrator = 0;
+    if (graph_) {
+        for (const NodePtr& n : graph_->nodes()) {
+            if (n && n->typeName() == QLatin1String("rendersettings")) {
+                out.activeIntegrator = n->intValue("integrator", 0);
+                break;
+            }
+        }
+    }
     if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(node->category)) {
         out.typeVariants = entry->typeVariants;
         if (out.typeVariants.isEmpty() && !entry->type.isEmpty()) out.typeVariants << entry->type;

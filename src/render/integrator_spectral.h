@@ -50,34 +50,27 @@ struct SpectralBinBuffer {
     }
 };
 
-inline const char* spectralMetalPresetName(int id) {
-    switch (id) {
-        case 1: return "Au";
-        case 2: return "Ag";
-        case 3: return "Cu";
-        case 4: return "Al";
-        default: return "";
-    }
-}
-
 inline SampledSpectrum upsampleRgb(Vec3 rgb, const SampledWavelengths& w) {
     return rgbToSpectrumEmission(rgb, w);
 }
 
-// Lift an RGB BSDF weight with optional spectral metal Fresnel.
-inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, Vec3 wo, Vec3 wi,
+// Lift an RGB BSDF weight; conductors with authored η/κ use spectral Fresnel.
+inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& /*frame*/, Vec3 wo, Vec3 wi,
                                       Vec3 rgbWeight, const SampledWavelengths& w) {
     SampledSpectrum base = upsampleRgb(rgbWeight, w);
-    if (mat.spectralMetalPreset <= 0 || mat.metallic < 0.5f) return base;
+    // Spectral metals: use conductor_eta / conductor_k when metalness is high.
+    // κ≈0 (default white diffuse) keeps the RGB upsample path.
+    const bool useConductor =
+        mat.metallic >= 0.5f && (mat.conductorK.x + mat.conductorK.y + mat.conductorK.z) > 1e-4f;
+    if (!useConductor) return base;
     const Vec3 wh = normalize(wo + wi);
     if (length(wh) < 1e-6f) return base;
     SampledSpectrum s(w.n);
     for (int i = 0; i < w.n; ++i) {
-        const SpectralNk nk = metalNk(spectralMetalPresetName(mat.spectralMetalPreset), w.lambda[i]);
+        const SpectralNk nk = nkFromRgb(mat.conductorEta, mat.conductorK, w.lambda[i]);
         const float F = conductorFresnel(dot(wh, wo), nk.eta, nk.k);
         const float mag = (rgbWeight.x + rgbWeight.y + rgbWeight.z) * (1.0f / 3.0f);
         s.values[i] = mag * (0.25f + 0.75f * F);
-        (void)frame;
     }
     return s;
 }
