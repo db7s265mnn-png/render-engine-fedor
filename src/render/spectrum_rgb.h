@@ -1,14 +1,16 @@
 // RGB→spectrum upsampling for materials/lights authored in linear sRGB.
-// Built so spectrumToRgb(upsample(c)) ≈ c (including HDR emissions / HDRI).
+// Jakob & Hanika (2019) tabulated sigmoid polynomials + one round-trip align pass
+// so spectrumToRgb(upsample(c)) ≈ c (including HDR emissions / HDRI).
 #pragma once
 
+#include "render/rgb_spectrum_tables.h"
 #include "render/spectrum.h"
 
 namespace sol {
 
 namespace {
 
-// Smooth RGB lobe weights vs wavelength (R≈650, G≈550, B≈450 nm).
+// Smooth RGB lobe weights vs wavelength — used only for the round-trip polish scale.
 inline void rgbLobeWeights(float lambdaNm, float& wr, float& wg, float& wb) {
     auto lobe = [](float lam, float mu, float width) {
         const float d = (lam - mu) / width;
@@ -27,19 +29,6 @@ inline void rgbLobeWeights(float lambdaNm, float& wr, float& wg, float& wb) {
     }
 }
 
-inline SampledSpectrum rgbToSpectrumBasis(Vec3 rgb, const SampledWavelengths& w) {
-    SampledSpectrum s(w.n);
-    const float r = srMax(0.0f, rgb.x);
-    const float g = srMax(0.0f, rgb.y);
-    const float b = srMax(0.0f, rgb.z);
-    for (int i = 0; i < w.n; ++i) {
-        float wr, wg, wb;
-        rgbLobeWeights(w.lambda[i], wr, wg, wb);
-        s.values[i] = wr * r + wg * g + wb * b;
-    }
-    return s;
-}
-
 inline void applyRgbScaleToSpectrum(SampledSpectrum& s, const SampledWavelengths& w, Vec3 scale) {
     for (int i = 0; i < s.n && i < w.n; ++i) {
         float wr, wg, wb;
@@ -49,32 +38,63 @@ inline void applyRgbScaleToSpectrum(SampledSpectrum& s, const SampledWavelengths
     }
 }
 
+// One align pass so spectrumToRgb(s) ≈ rgb (kills pink HDRI / white drift).
+inline void alignSpectrumToRgb(SampledSpectrum& s, const SampledWavelengths& w, Vec3 rgb) {
+    const Vec3 got = spectrumToRgb(s, w);
+    Vec3 scale(1.0f);
+    if (got.x > 1e-8f) scale.x = rgb.x / got.x;
+    if (got.y > 1e-8f) scale.y = rgb.y / got.y;
+    if (got.z > 1e-8f) scale.z = rgb.z / got.z;
+    scale.x = clampf(scale.x, 0.05f, 20.0f);
+    scale.y = clampf(scale.y, 0.05f, 20.0f);
+    scale.z = clampf(scale.z, 0.05f, 20.0f);
+    if (fabsf(scale.x - 1.0f) < 1e-3f && fabsf(scale.y - 1.0f) < 1e-3f &&
+        fabsf(scale.z - 1.0f) < 1e-3f)
+        return;
+    applyRgbScaleToSpectrum(s, w, scale);
+}
+
 }  // namespace
 
-// Reflectance in [0,1] (and HDR if needed): basis + round-trip align to spectrumToRgb.
+// Reflectance / albedo: Jakob albedo table (spectra in [0,1]). HDR albedo uses
+// the PBRT unbounded path (scale = 2·max, lookup rgb/scale).
 inline SampledSpectrum rgbToSpectrumReflectance(Vec3 rgb, const SampledWavelengths& w) {
-    SampledSpectrum s = rgbToSpectrumBasis(rgb, w);
-    // 1–2 align passes so spectrumToRgb(s) ≈ rgb (kills pink HDRI / white drift).
-    for (int pass = 0; pass < 2; ++pass) {
-        const Vec3 got = spectrumToRgb(s, w);
-        Vec3 scale(1.0f);
-        if (got.x > 1e-8f) scale.x = rgb.x / got.x;
-        if (got.y > 1e-8f) scale.y = rgb.y / got.y;
-        if (got.z > 1e-8f) scale.z = rgb.z / got.z;
-        // Clamp extreme corrections (near-black channels).
-        scale.x = clampf(scale.x, 0.05f, 20.0f);
-        scale.y = clampf(scale.y, 0.05f, 20.0f);
-        scale.z = clampf(scale.z, 0.05f, 20.0f);
-        if (fabsf(scale.x - 1.0f) < 1e-3f && fabsf(scale.y - 1.0f) < 1e-3f &&
-            fabsf(scale.z - 1.0f) < 1e-3f)
-            break;
-        applyRgbScaleToSpectrum(s, w, scale);
+    const float r = srMax(0.0f, rgb.x);
+    const float g = srMax(0.0f, rgb.y);
+    const float b = srMax(0.0f, rgb.z);
+    const Vec3 c(r, g, b);
+    if (r <= 0.0f && g <= 0.0f && b <= 0.0f)
+        return SampledSpectrum::zero(w.n);
+
+    SampledSpectrum s;
+    const float m = srMax(r, srMax(g, b));
+    if (m <= 1.0f) {
+        s = rgb_spec::evalPolynomial(rgb_spec::fetchAlbedo(c), w);
+    } else {
+        // Unbounded reflectance (rare): same scaling as PBRT RGBUnboundedSpectrum.
+        const float scale = 2.0f * m;
+        s = rgb_spec::evalPolynomial(rgb_spec::fetchAlbedo(c / scale), w, scale);
     }
+    alignSpectrumToRgb(s, w, c);
     return s;
 }
 
+// Emission / illuminant: Jakob illuminant table + PBRT unbounded scaling for HDR.
 inline SampledSpectrum rgbToSpectrumEmission(Vec3 rgb, const SampledWavelengths& w) {
-    return rgbToSpectrumReflectance(rgb, w);
+    const float r = srMax(0.0f, rgb.x);
+    const float g = srMax(0.0f, rgb.y);
+    const float b = srMax(0.0f, rgb.z);
+    const Vec3 c(r, g, b);
+    if (r <= 0.0f && g <= 0.0f && b <= 0.0f)
+        return SampledSpectrum::zero(w.n);
+
+    const float m = srMax(r, srMax(g, b));
+    const float scale = 2.0f * m;
+    SampledSpectrum s =
+        rgb_spec::evalPolynomial(rgb_spec::fetchIlluminant(scale > 0.0f ? c / scale : Vec3(0.0f)), w,
+                                 scale);
+    alignSpectrumToRgb(s, w, c);
+    return s;
 }
 
 }  // namespace sol
