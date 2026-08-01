@@ -2828,6 +2828,123 @@ void testScreenAdaptiveQualityCoarse() {
     std::printf("  Q=0.01 close-up tris=%zu (limit would be 50M)\n", tris);
 }
 
+void testScreenAdaptiveNearDensityDip() {
+    std::printf("screen-adaptive-near-density-dip\n");
+    // Check whether mean *screen* edge length is non-monotonic with view depth
+    // (user report: underfoot slightly coarser than mid-near, then falloff).
+    auto ground = makeGridMesh(80.0f, 80.0f, 1, 1);
+    check(ground && ground->triangleCount() == 2, "dip probe ground");
+    ground->subdivType = kSubdivLinear;
+    ground->subdivIterations = 8;
+    ground->dicingQuality = 1.0f;  // target ≈ 1 px
+
+    Material mat;
+    mat.displacementHeight = 0.001f;
+    mat.displacementScale = 1.0f;
+    mat.displacementZeroValue = 0.0f;
+
+    Scene scene;
+    scene.settings.screenAdaptive = 1;
+    scene.settings.frustumCull = 1;
+    scene.settings.frustumPadding = 5.0f;
+    scene.settings.dicingPolyLimitM = 30;
+    scene.settings.resolutionX = 1280;
+    scene.settings.resolutionY = 720;
+    scene.camera.focalLength = 35.0f;
+    scene.camera.sensorWidth = 36.0f;
+    scene.camera.cameraToWorld = lookAtMatrix(Vec3(0, 0.35f, 0.5f), Vec3(0, 0, -4.0f), Vec3(0, 1, 0));
+    scene.cameraAuthored = true;
+
+    MeshPtr out = tessDisplaceForTest(ground, mat, scene, 8, /*forceFrustumOff=*/false);
+    check(out != nullptr && out->triangleCount() > 100, "dip probe densified");
+
+    const Mat4 w2c = inverse(scene.camera.cameraToWorld);
+    const float aspect = float(scene.settings.resolutionX) / float(scene.settings.resolutionY);
+    const float focal = scene.camera.focalLength;
+    const float sensorW = scene.camera.sensorWidth;
+    const float sensorH = sensorW / aspect;
+    const int resX = scene.settings.resolutionX;
+    const int resY = scene.settings.resolutionY;
+
+    auto project = [&](Vec3 p, float& nx, float& ny, float& viewZ) -> bool {
+        const Vec3 pc = transformPoint(w2c, p);
+        viewZ = -pc.z;
+        if (!(viewZ > 1e-4f)) return false;
+        const float halfW = 0.5f * sensorW * (viewZ / focal);
+        const float halfH = 0.5f * sensorH * (viewZ / focal);
+        nx = pc.x / halfW;
+        ny = pc.y / halfH;
+        return true;
+    };
+    auto edgePx = [&](Vec3 a, Vec3 b) -> float {
+        float ax, ay, az, bx, by, bz;
+        if (!project(a, ax, ay, az) || !project(b, bx, by, bz)) return -1.0f;
+        const float dx = (bx - ax) * 0.5f * float(resX);
+        const float dy = (by - ay) * 0.5f * float(resY);
+        return std::sqrt(dx * dx + dy * dy);
+    };
+
+    struct Band {
+        float z0, z1;
+        double sumPx = 0.0;
+        double sumWorld = 0.0;
+        size_t n = 0;
+    };
+    // View-depth bands (metres in front of camera).
+    Band bands[] = {{0.05f, 0.4f}, {0.4f, 1.0f}, {1.0f, 2.5f}, {2.5f, 6.0f}, {6.0f, 15.0f}};
+
+    for (size_t t = 0; t + 2 < out->indices.size(); t += 3) {
+        const Vec3& a = out->positions[out->indices[t]];
+        const Vec3& b = out->positions[out->indices[t + 1]];
+        const Vec3& c = out->positions[out->indices[t + 2]];
+        float nx, ny, vz;
+        const Vec3 mid = (a + b + c) * (1.0f / 3.0f);
+        if (!project(mid, nx, ny, vz)) continue;
+        if (std::fabs(nx) > 1.2f || std::fabs(ny) > 1.2f) continue;  // in-frustum only
+        const float e0 = edgePx(a, b), e1 = edgePx(b, c), e2 = edgePx(c, a);
+        if (e0 < 0 || e1 < 0 || e2 < 0) continue;
+        const float px = (e0 + e1 + e2) / 3.0f;
+        const float we = (length(b - a) + length(c - b) + length(a - c)) / 3.0f;
+        for (Band& band : bands) {
+            if (vz >= band.z0 && vz < band.z1) {
+                band.sumPx += double(px);
+                band.sumWorld += double(we);
+                ++band.n;
+                break;
+            }
+        }
+    }
+
+    float meanPx[5] = {};
+    for (int i = 0; i < 5; ++i) {
+        if (bands[i].n == 0) {
+            std::printf("  depth[%.2f-%.2f] empty\n", bands[i].z0, bands[i].z1);
+            continue;
+        }
+        meanPx[i] = float(bands[i].sumPx / double(bands[i].n));
+        const float meanW = float(bands[i].sumWorld / double(bands[i].n));
+        std::printf("  depth[%.2f-%.2f] n=%zu meanScreenEdge=%.3fpx meanWorldEdge=%.5f\n",
+                    bands[i].z0, bands[i].z1, bands[i].n, meanPx[i], meanW);
+    }
+    int first = -1, second = -1;
+    for (int i = 0; i < 5; ++i) {
+        if (bands[i].n < 32) continue;
+        if (first < 0) first = i;
+        else if (second < 0) {
+            second = i;
+            break;
+        }
+    }
+    check(first >= 0 && second >= 0, "have two populated depth bands");
+    if (first >= 0 && second >= 0) {
+        // Screen-adaptive target is uniform screen length — nearest should not be
+        // clearly coarser (larger px) than the next band.
+        std::printf("  compare nearest meanPx=%.3f vs next=%.3f\n", meanPx[first], meanPx[second]);
+        check(meanPx[first] <= meanPx[second] * 1.12f,
+              "nearest in-frustum band is not coarser in screen space (no near dip)");
+    }
+}
+
 void testMaterialXNoiseAndTriplanar() {
     std::printf("materialx-noise-triplanar\n");
     if (!materialXAvailable()) {
@@ -4076,6 +4193,7 @@ int main() {
         testFrustumLocalItersNotClampedOnDenseCage();
         testScreenAdaptiveTessellation();
         testScreenAdaptiveQualityCoarse();
+        testScreenAdaptiveNearDensityDip();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -4111,6 +4229,7 @@ int main() {
     testFrustumLocalItersNotClampedOnDenseCage();
     testScreenAdaptiveTessellation();
     testScreenAdaptiveQualityCoarse();
+    testScreenAdaptiveNearDensityDip();
     testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();
     testRockDisplacementExr();

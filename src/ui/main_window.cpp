@@ -290,7 +290,8 @@ void MainWindow::createActions() {
     renderAction_->setChecked(false);
     renderAction_->setShortcut(QKeySequence("F5"));
     renderAction_->setToolTip("Start cook + render (F5). Stays pressed — graph edits auto-restart "
-                              "the render. Re-tessellates displacement dicing on each Start.");
+                              "the render. Displacement dicing re-runs only when you press Start "
+                              "(changing Dicing Quality / Subdiv / Screen Adaptive does not).");
     renderControlGroup->addAction(renderAction_);
     connect(renderAction_, &QAction::triggered, this, &MainWindow::onStartRender);
 
@@ -391,6 +392,13 @@ void MainWindow::createMenus() {
 void MainWindow::createToolBar() {
     QToolBar* toolBar = addToolBar("Render");
     toolBar->setMovable(false);
+    // Same yellow checked affordance as Local/World on the viewport strip.
+    toolBar->setStyleSheet(
+        "QToolButton { min-width: 48px; font-size: 11px; font-weight: 600; "
+        "background: #3a3e44; border: 1px solid #4a4f57; color: #e8eaed; padding: 3px 8px; }"
+        "QToolButton:checked { background: rgba(255, 190, 90, 90); border-color: #ffbe5a; color: #fff; }"
+        "QToolButton:hover { background: #474c54; }"
+        "QToolButton:checked:hover { background: rgba(255, 190, 90, 120); }");
     // T/R/S live on the viewport chrome bar above the framebuffer.
     toolBar->addAction(renderAction_);
     toolBar->addAction(stopAction_);
@@ -483,6 +491,56 @@ void MainWindow::createDocks() {
         renderView_->setTransformTarget(node && node->findParameter("translate") ? node : nullptr);
     };
 
+    // True when this tabified dock is the raised (visible) tab.
+    auto dockTabRaised = [](QDockWidget* dock) -> bool {
+        return dock && dock->isVisible() && !dock->visibleRegion().isEmpty();
+    };
+
+    auto syncParamsFromSceneNetwork = [this, syncTransformTarget] {
+        Node* node = networkView_->selectedNode();
+        if (!node) {
+            parameterPanel_->clearSelection();
+            syncTransformTarget(nullptr);
+            sceneGraphPanel_->selectBySourceNode(QString());
+            return;
+        }
+        parameterPanel_->setNode(node);
+        syncTransformTarget(node);
+        sceneGraphPanel_->selectBySourceNode(node->name());
+    };
+
+    auto syncParamsFromMaterialNetwork = [this, syncTransformTarget] {
+        MaterialXSelection mtlx;
+        if (materialNetworkView_->selectedMaterialX(mtlx)) {
+            parameterPanel_->setMaterialXSelection(mtlx);
+            syncTransformTarget(nullptr);
+            return;
+        }
+        if (materialNetworkView_->isInsideMaterial()) {
+            Node* host = materialNetworkView_->currentMaterial();
+            if (host) {
+                parameterPanel_->setNode(host);
+                syncTransformTarget(nullptr);
+                return;
+            }
+        } else if (Node* node = materialNetworkView_->selectedLopNode()) {
+            parameterPanel_->setNode(node);
+            syncTransformTarget(node);
+            return;
+        }
+        parameterPanel_->clearSelection();
+        syncTransformTarget(nullptr);
+    };
+
+    connect(networkDock, &QDockWidget::visibilityChanged, this,
+            [dockTabRaised, networkDock, syncParamsFromSceneNetwork](bool visible) {
+                if (visible && dockTabRaised(networkDock)) syncParamsFromSceneNetwork();
+            });
+    connect(materialNetworkDock, &QDockWidget::visibilityChanged, this,
+            [dockTabRaised, materialNetworkDock, syncParamsFromMaterialNetwork](bool visible) {
+                if (visible && dockTabRaised(materialNetworkDock)) syncParamsFromMaterialNetwork();
+            });
+
     auto selectNodeForEditing = [this, syncTransformTarget](Node* node, bool centerNetwork = false) {
         parameterPanel_->setNode(node);
         syncTransformTarget(node);
@@ -536,33 +594,19 @@ void MainWindow::createDocks() {
         }
     });
 
-    connect(networkView_, &NodeGraphView::nodeSelected, this, [this, syncTransformTarget](Node* node) {
-        // Scene Network is the selection source — don't let Material Network steal it.
-        parameterPanel_->setNode(node);
-        syncTransformTarget(node);
-        sceneGraphPanel_->selectBySourceNode(node ? node->name() : QString());
-    });
+    connect(networkView_, &NodeGraphView::nodeSelected, this,
+            [this, networkDock, dockTabRaised, syncTransformTarget, syncParamsFromSceneNetwork](Node*) {
+                // Only drive Parameters while Scene Network is the raised tab.
+                if (!dockTabRaised(networkDock)) return;
+                syncParamsFromSceneNetwork();
+            });
     connect(networkView_, &NodeGraphView::statusMessage, this,
             [this](const QString& message) { statusBar()->showMessage(message, 3000); });
-    connect(materialNetworkView_, &MaterialNetworkView::selectionChanged, this, [this, syncTransformTarget] {
-        // Only push Material Network selection when that view actually has one.
-        MaterialXSelection mtlx;
-        if (materialNetworkView_->selectedMaterialX(mtlx)) {
-            parameterPanel_->setMaterialXSelection(mtlx);
-            syncTransformTarget(nullptr);
-            return;
-        }
-        if (!materialNetworkView_->isInsideMaterial()) {
-            Node* node = materialNetworkView_->selectedLopNode();
-            if (!node) return;  // empty container selection must not clear Parameters
-            parameterPanel_->setNode(node);
-            syncTransformTarget(node);
-        } else {
-            // Inside a material with no MaterialX node selected — show the container.
-            parameterPanel_->setNode(materialNetworkView_->currentMaterial());
-            syncTransformTarget(nullptr);
-        }
-    });
+    connect(materialNetworkView_, &MaterialNetworkView::selectionChanged, this,
+            [materialNetworkDock, dockTabRaised, syncParamsFromMaterialNetwork] {
+                if (!dockTabRaised(materialNetworkDock)) return;
+                syncParamsFromMaterialNetwork();
+            });
     connect(materialNetworkView_, &MaterialNetworkView::materialEdited, this, [this](Node*) {
         scheduleCook();
     });
@@ -911,14 +955,12 @@ void MainWindow::cookNow() {
     const std::string tessKey = tessellationFingerprint(*builtScene);
     bool needTess = renderRequested_;
     if (!needTess && !tessCache_.empty() && tessKey != tessCacheFingerprint_) {
-        // Screen Adaptive / Subdiv Type / Iterations / frustum / etc. changed —
-        // cached densify is stale. Re-dice immediately while Start is armed;
-        // otherwise drop the cache so the viewport shows cages until Start.
-        tessCache_.clear();
-        tessCacheFingerprint_.clear();
-        if (renderArmed()) {
-            needTess = true;
-            statusBar()->showMessage("Subdivision settings changed — re-tessellating", 2500);
+        // Subdiv / Screen Adaptive / Dicing Quality / frustum / etc. changed.
+        // Keep the previous densify on screen — only an explicit Start re-dices
+        // (renderRequested_). While Stopped, drop the cache so cages show.
+        if (!renderArmed()) {
+            tessCache_.clear();
+            tessCacheFingerprint_.clear();
         }
     }
 
