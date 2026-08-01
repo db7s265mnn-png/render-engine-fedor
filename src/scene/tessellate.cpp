@@ -591,14 +591,6 @@ void markFacesInFrustumProjected(const Mesh& mesh, const std::vector<VertProj>& 
     for (uint8_t m : faceMark) markedCount += m ? 1u : 0u;
 }
 
-// Screen-edge length → binary dice depth (RenderMan/Karma-style).
-uint8_t edgeLevelFromPixels(float px, float targetPx, int maxLevel) {
-    if (!(px > targetPx) || maxLevel <= 0) return 0;
-    const float ratio = px / std::max(targetPx, 1.0e-6f);
-    int level = int(std::ceil(std::log2(std::max(ratio, 1.0f))));
-    return uint8_t(std::clamp(level, 0, maxLevel));
-}
-
 void expandFaceMarksOneRing(const Mesh& mesh, std::vector<uint8_t>& faceMark) {
     const size_t triCount = mesh.indices.size() / 3;
     if (faceMark.size() != triCount) return;
@@ -758,23 +750,18 @@ bool diceMeshByFaceLevels(Mesh& mesh, const std::vector<uint8_t>& faceLevel, siz
     return true;
 }
 
-// Per-edge screen rate (NOT per-face max flood) — distance falloff in world density.
-float collectEdgeLevelsProjected(const Mesh& mesh, const std::vector<uint8_t>& faceMark,
-                                 const std::vector<VertProj>& proj, float targetPx, int resX, int resY,
-                                 int maxLevel, ThreadPool* pool,
-                                 std::unordered_map<EdgeKey, uint8_t, EdgeHash>& edgeLevel) {
+// Collect edges of marked faces whose screen length exceeds targetPx.
+float collectLongEdgesForAdaptive(const Mesh& mesh, const std::vector<uint8_t>& faceMark,
+                                  const std::vector<VertProj>& proj, float targetPx, int resX, int resY,
+                                  ThreadPool* pool, std::unordered_map<EdgeKey, char, EdgeHash>& splitEdge) {
     const size_t triCount = mesh.indices.size() / 3;
     const size_t nPos = proj.size();
-    edgeLevel.clear();
+    splitEdge.clear();
 
     const int workers = pool ? std::max(1, pool->threadCount()) : 1;
-    struct LocalEdge {
-        EdgeKey key;
-        uint8_t level;
-    };
-    std::vector<std::vector<LocalEdge>> local(size_t(workers + 1));
+    std::vector<std::vector<EdgeKey>> local(size_t(workers + 1));
     std::vector<float> localMax(size_t(workers + 1), 0.0f);
-    for (auto& v : local) v.reserve(triCount / size_t(std::max(1, workers)) + 16);
+    for (auto& v : local) v.reserve(triCount / size_t(std::max(1, workers)) * 2 + 16);
 
     auto consider = [&](size_t t, int tid) {
         if (!faceMark[t]) return;
@@ -783,15 +770,14 @@ float collectEdgeLevelsProjected(const Mesh& mesh, const std::vector<uint8_t>& f
         const uint32_t i2 = mesh.indices[t * 3 + 2];
         if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) return;
         const int slot = std::clamp(tid, 0, workers);
-        auto push = [&](uint32_t a, uint32_t b) {
+        auto pushIfLong = [&](uint32_t a, uint32_t b) {
             const float px = screenEdgePixelsFromProj(proj[a], proj[b], resX, resY);
             localMax[size_t(slot)] = std::max(localMax[size_t(slot)], px);
-            const uint8_t L = edgeLevelFromPixels(px, targetPx, maxLevel);
-            if (L) local[size_t(slot)].push_back(LocalEdge{makeEdgeKey(a, b), L});
+            if (px > targetPx) local[size_t(slot)].push_back(makeEdgeKey(a, b));
         };
-        push(i0, i1);
-        push(i1, i2);
-        push(i2, i0);
+        pushIfLong(i0, i1);
+        pushIfLong(i1, i2);
+        pushIfLong(i2, i0);
     };
 
     constexpr size_t kParallelMin = 256;
@@ -802,157 +788,15 @@ float collectEdgeLevelsProjected(const Mesh& mesh, const std::vector<uint8_t>& f
     }
 
     float maxPx = 0.0f;
+    size_t total = 0;
     for (size_t i = 0; i < local.size(); ++i) {
         maxPx = std::max(maxPx, localMax[i]);
-        for (const LocalEdge& e : local[i]) {
-            uint8_t& slot = edgeLevel[e.key];
-            if (e.level > slot) slot = e.level;
-        }
+        total += local[i].size();
     }
+    splitEdge.reserve(total / 2 + 8);
+    for (const auto& v : local)
+        for (const EdgeKey& k : v) splitEdge[k] = 1;
     return maxPx;
-}
-
-void clampEdgeLevelsToBudget(const Mesh& mesh, std::unordered_map<EdgeKey, uint8_t, EdgeHash>& edgeLevel,
-                             size_t polyBudget) {
-    if (edgeLevel.empty()) return;
-    auto estimate = [&]() {
-        size_t est = 0;
-        const size_t nPos = mesh.positions.size();
-        for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
-            const uint32_t i0 = mesh.indices[t + 0];
-            const uint32_t i1 = mesh.indices[t + 1];
-            const uint32_t i2 = mesh.indices[t + 2];
-            if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
-            auto get = [&](uint32_t a, uint32_t b) -> int {
-                const auto it = edgeLevel.find(makeEdgeKey(a, b));
-                return it == edgeLevel.end() ? 0 : int(it->second);
-            };
-            const int L01 = get(i0, i1), L12 = get(i1, i2), L20 = get(i2, i0);
-            if (L01 + L12 + L20 == 0) {
-                est += 1;
-                continue;
-            }
-            // Centroid fan: ~ 2^L01 + 2^L12 + 2^L20 tris.
-            est += size_t((1 << std::min(L01, 14)) + (1 << std::min(L12, 14)) + (1 << std::min(L20, 14)));
-        }
-        return est;
-    };
-    while (estimate() > polyBudget) {
-        uint8_t maxL = 0;
-        for (const auto& kv : edgeLevel) maxL = std::max(maxL, kv.second);
-        if (maxL == 0) break;
-        for (auto& kv : edgeLevel) {
-            if (kv.second >= maxL) --kv.second;
-        }
-    }
-}
-
-// Watertight per-edge multilevel dice: shared mids, centroid fan. Far edges keep
-// L=0 so world density falls with distance (true screen-adaptive).
-bool diceMeshByEdgeLevels(Mesh& mesh, std::unordered_map<EdgeKey, uint8_t, EdgeHash>& edgeLevel,
-                          size_t polyBudget) {
-    if (edgeLevel.empty()) return false;
-    clampEdgeLevelsToBudget(mesh, edgeLevel, polyBudget);
-    bool any = false;
-    for (const auto& kv : edgeLevel) {
-        if (kv.second) {
-            any = true;
-            break;
-        }
-    }
-    if (!any) return false;
-
-    const size_t triCount = mesh.indices.size() / 3;
-    const size_t nPos = mesh.positions.size();
-    const bool hasN = mesh.normals.size() == nPos;
-    const bool hasUv = mesh.uvs.size() == nPos;
-    std::unordered_map<EdgeKey, uint32_t, EdgeHash> mid;
-    mid.reserve(edgeLevel.size() * 4 + 8);
-
-    auto ensureMid = [&](uint32_t i0, uint32_t i1) -> uint32_t {
-        const EdgeKey key = makeEdgeKey(i0, i1);
-        const auto it = mid.find(key);
-        if (it != mid.end()) return it->second;
-        const Vec3 p = (mesh.positions[i0] + mesh.positions[i1]) * 0.5f;
-        const uint32_t id = uint32_t(mesh.positions.size());
-        mesh.positions.push_back(p);
-        if (hasN) {
-            Vec3 n = mesh.normals[i0] + mesh.normals[i1];
-            const float len = length(n);
-            mesh.normals.push_back(len > 1e-8f ? n / len : mesh.normals[i0]);
-        }
-        if (hasUv) mesh.uvs.push_back((mesh.uvs[i0] + mesh.uvs[i1]) * 0.5f);
-        mid.emplace(key, id);
-        return id;
-    };
-
-    // Interior points along a→b at binary depth L (shared via ensureMid).
-    std::function<void(uint32_t, uint32_t, int, std::vector<uint32_t>&)> appendInterior;
-    appendInterior = [&](uint32_t a, uint32_t b, int L, std::vector<uint32_t>& pts) {
-        if (L <= 0) return;
-        const uint32_t m = ensureMid(a, b);
-        appendInterior(a, m, L - 1, pts);
-        pts.push_back(m);
-        appendInterior(m, b, L - 1, pts);
-    };
-
-    auto edgeLevelOf = [&](uint32_t a, uint32_t b) -> int {
-        const auto it = edgeLevel.find(makeEdgeKey(a, b));
-        return it == edgeLevel.end() ? 0 : int(it->second);
-    };
-
-    std::vector<uint32_t> newIdx;
-    newIdx.reserve(triCount * 12);
-
-    for (size_t t = 0; t < triCount; ++t) {
-        const uint32_t i0 = mesh.indices[t * 3 + 0];
-        const uint32_t i1 = mesh.indices[t * 3 + 1];
-        const uint32_t i2 = mesh.indices[t * 3 + 2];
-        if (!indexInRange(i0, nPos) || !indexInRange(i1, nPos) || !indexInRange(i2, nPos)) continue;
-        const int L01 = edgeLevelOf(i0, i1);
-        const int L12 = edgeLevelOf(i1, i2);
-        const int L20 = edgeLevelOf(i2, i0);
-        if (L01 + L12 + L20 == 0) {
-            newIdx.push_back(i0);
-            newIdx.push_back(i1);
-            newIdx.push_back(i2);
-            continue;
-        }
-
-        std::vector<uint32_t> ring;
-        ring.reserve(size_t(3 + (1 << std::min(L01, 6)) + (1 << std::min(L12, 6)) + (1 << std::min(L20, 6))));
-        ring.push_back(i0);
-        appendInterior(i0, i1, L01, ring);
-        ring.push_back(i1);
-        appendInterior(i1, i2, L12, ring);
-        ring.push_back(i2);
-        appendInterior(i2, i0, L20, ring);
-
-        // Face centroid (unique) — fan keeps shared edge points watertight.
-        const Vec3 c = (mesh.positions[i0] + mesh.positions[i1] + mesh.positions[i2]) * (1.0f / 3.0f);
-        const uint32_t ic = uint32_t(mesh.positions.size());
-        mesh.positions.push_back(c);
-        if (hasN) {
-            Vec3 n = mesh.normals[i0] + mesh.normals[i1] + mesh.normals[i2];
-            const float len = length(n);
-            mesh.normals.push_back(len > 1e-8f ? n / len : mesh.normals[i0]);
-        }
-        if (hasUv) mesh.uvs.push_back((mesh.uvs[i0] + mesh.uvs[i1] + mesh.uvs[i2]) * (1.0f / 3.0f));
-
-        const size_t nRing = ring.size();
-        for (size_t i = 0; i < nRing; ++i) {
-            newIdx.push_back(ic);
-            newIdx.push_back(ring[i]);
-            newIdx.push_back(ring[(i + 1) % nRing]);
-        }
-    }
-
-    mesh.indices.swap(newIdx);
-    mesh.restPositions.clear();
-    mesh.restNormals.clear();
-    mesh.motionPositions.clear();
-    mesh.motionPositionsPacked_.clear();
-    return true;
 }
 
 float adaptiveMeshFrac(float startMaxPx, float curMaxPx, float targetPx) {
@@ -1015,8 +859,9 @@ void refineLinearFrustumLocal(Mesh& mesh, int maxIter, float dicingQuality, size
     if (rt) rt->reportMeshFrac(1.0f, mesh.triangleCount());
 }
 
-// Screen Adaptive: per-edge pixel rate → multilevel edge dice. World density
-// falls with distance because far edges project shorter and get L=0 sooner.
+// Screen Adaptive: split only edges longer than targetPx (red-green, shared mids).
+// Far edges fall below target first → world density drops with distance.
+// No centroid fans (those cracked displace / Pref / reflections).
 void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget,
                               const Mat4& objToWorld, const CameraData& cam, const Mat4& worldToCam,
                               float aspect, int resX, int resY, float padFrac, TessRuntime* rt) {
@@ -1026,8 +871,7 @@ void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget
     }
     const float quality = std::max(1.0e-3f, dicingQuality);
     const float targetPx = 1.0f / quality;
-    constexpr int kSafetyPasses = 8;
-    constexpr int kMaxLevelPerPass = 4;
+    constexpr int kSafetyPasses = 48;
     constexpr int kTailPasses = 2;
     ThreadPool* pool = rt ? rt->pool : nullptr;
     std::vector<VertProj> proj;
@@ -1050,16 +894,21 @@ void refineScreenAdaptiveDice(Mesh& mesh, float dicingQuality, size_t polyBudget
             if (pass == 0) expandFaceMarksOneRing(mesh, faceMark);
         }
 
-        std::unordered_map<EdgeKey, uint8_t, EdgeHash> edgeLevel;
-        const float maxPx = collectEdgeLevelsProjected(mesh, faceMark, proj, targetPx, resX, resY,
-                                                       kMaxLevelPerPass, pool, edgeLevel);
+        std::unordered_map<EdgeKey, char, EdgeHash> splitEdge;
+        const float maxPx =
+            collectLongEdgesForAdaptive(mesh, faceMark, proj, targetPx, resX, resY, pool, splitEdge);
         if (startMaxPx < 0.0f) startMaxPx = std::max(maxPx, targetPx);
         if (rt) rt->reportMeshFrac(adaptiveMeshFrac(startMaxPx, maxPx, targetPx), mesh.triangleCount());
-        if (edgeLevel.empty()) break;
+        if (splitEdge.empty()) break;
 
         const size_t before = mesh.triangleCount();
-        if (!diceMeshByEdgeLevels(mesh, edgeLevel, polyBudget)) break;
+        if (!subdivideMarkedEdgesOnce(mesh, splitEdge)) break;
         if (mesh.triangleCount() <= before) break;
+        if (mesh.triangleCount() >= polyBudget) {
+            logWarning("tessellate: Screen Adaptive stopped at Dicing Poly Limit (" +
+                       std::to_string(polyBudget) + " tris)");
+            break;
+        }
     }
     if (rt) rt->reportMeshFrac(1.0f, mesh.triangleCount());
 }
