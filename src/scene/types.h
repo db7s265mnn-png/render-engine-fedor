@@ -372,6 +372,7 @@ enum IntegratorMode : int {
     kIntegratorDirectLighting = 2,
     kIntegratorAmbientOcclusion = 3,
     kIntegratorSpectralPath = 4,  // PT Spectral (CPU / Embree)
+    kIntegratorSpectralBdpt = 5,  // BDPT Spectral (CPU / Embree)
 };
 
 // How refractive / reflective caustics are estimated when settings.caustics != 0.

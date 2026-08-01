@@ -15,6 +15,7 @@
 #include "render/integrator.h"
 #include "render/integrator_base.h"
 #include "render/integrator_bdpt.h"
+#include "render/integrator_bdpt_spectral.h"
 #include "render/integrator_mnee.h"
 #include "render/integrator_spectral.h"
 #include "render/photon_map.h"
@@ -244,14 +245,17 @@ public:
         const uint32_t frameSeed = uint32_t(settings.seed) * 9781u + uint32_t(sampleIndex) * 6271u;
 
         const bool pathTracer = settings.integrator == kIntegratorPathTracer;
-        const bool useBdpt = settings.integrator == kIntegratorBdpt;
-        const bool useSpectral = settings.integrator == kIntegratorSpectralPath;
-        // Automatic / MNEE+Photon routes rough refractive casters to Photon, delta-only to MNEE.
-        const bool usePhoton = !useSpectral && causticsUsePhotonMap(settings, &scene);
+        const bool useSpectralBdpt = settings.integrator == kIntegratorSpectralBdpt;
+        const bool useBdpt = settings.integrator == kIntegratorBdpt || useSpectralBdpt;
+        const bool useSpectralPt = settings.integrator == kIntegratorSpectralPath;
+        const bool useSpectral = useSpectralPt || useSpectralBdpt;
+        // MNEE+Photon routes rough refractive casters to Photon, delta-only to MNEE.
+        // PT Spectral has no MNEE/photon; BDPT Spectral keeps BDPT caustic estimators.
+        const bool usePhoton = !useSpectralPt && causticsUsePhotonMap(settings, &scene);
         const bool useMnee = pathTracer && causticsUseMnee(settings, &scene);
 #if SOLSTICE_HAVE_OPENPGL
-        // OpenPGL guides eye-path diffuse sampling on PT and BDPT. Specular /
-        // near-spec vertices are recorded as delta (radiance propagates for
+        // OpenPGL guides eye-path diffuse sampling on PT and BDPT (RGB + Spectral).
+        // Specular / near-spec vertices are recorded as delta (radiance propagates for
         // caustic training) but never guide-sampled; MNEE/photon energy trains
         // diffuse receivers when Indirect Guides is on.
         const bool useGuiding = settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() &&
@@ -284,7 +288,13 @@ public:
         }
 
         if (sampleIndex == 0) {
-            if (useSpectral)
+            if (useSpectralBdpt)
+                logInfo(std::string("Integrator: BDPT Spectral (hero λ=") +
+                        std::to_string(std::clamp(settings.spectralSamples, 2, 16)) + ", bins=" +
+                        std::to_string(std::clamp(settings.spectralBins, 8, 32)) + ")" +
+                        (useGuiding ? " + OpenPGL guiding" : "") +
+                        (usePhoton ? " + Photon caustics" : " + LT/MNEE caustics"));
+            else if (useSpectralPt)
                 logInfo(std::string("Integrator: PT Spectral (hero λ=") +
                         std::to_string(std::clamp(settings.spectralSamples, 2, 16)) + ", bins=" +
                         std::to_string(std::clamp(settings.spectralBins, 8, 32)) + ")");
@@ -379,7 +389,10 @@ public:
                 }
                 ctx.guiding = guidingPtr;
                 Vec3 radiance(0.0f);
-                if (useSpectral) {
+                if (useSpectralBdpt) {
+                    SpectralBdptIntegrator<EmbreeTracer> integ;
+                    radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
+                } else if (useSpectralPt) {
                     SpectralPathIntegrator<EmbreeTracer> integ;
                     radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
                 } else if (useBdpt) {
@@ -394,7 +407,10 @@ public:
                 (void)threadId;
                 (void)useGuiding;
                 Vec3 radiance(0.0f);
-                if (useSpectral) {
+                if (useSpectralBdpt) {
+                    SpectralBdptIntegrator<EmbreeTracer> integ;
+                    radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
+                } else if (useSpectralPt) {
                     SpectralPathIntegrator<EmbreeTracer> integ;
                     radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
                 } else if (useBdpt) {

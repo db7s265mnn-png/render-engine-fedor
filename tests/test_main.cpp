@@ -423,11 +423,14 @@ void testRender() {
     smokeIntegrator(kIntegratorPathTracer, 1, "PT + MNEE caustics");
     smokeIntegrator(kIntegratorPathTracer, 0, "PT caustics off");
     smokeIntegrator(kIntegratorBdpt, 1, "BDPT integrator");
+    smokeIntegrator(kIntegratorSpectralPath, 1, "PT Spectral");
+    smokeIntegrator(kIntegratorSpectralBdpt, 1, "BDPT Spectral");
     // Path guiding smoke: same scene with OpenPGL training enabled (no-op when
     // the build lacks OpenPGL).
     scene->settings.pathGuiding = 1;
     smokeIntegrator(kIntegratorPathTracer, 1, "PT + guiding");
     smokeIntegrator(kIntegratorBdpt, 1, "BDPT + guiding");
+    smokeIntegrator(kIntegratorSpectralBdpt, 1, "BDPT Spectral + guiding");
     scene->settings.pathGuiding = 0;
     scene->settings.integrator = kIntegratorPathTracer;
     scene->settings.caustics = 1;

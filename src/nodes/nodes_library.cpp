@@ -786,13 +786,15 @@ public:
                                                           "GPU (OptiX) will fall back to Embree.")));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
-                                          "Ambient Occlusion", "PT Spectral"},
+                                          "Ambient Occlusion", "PT Spectral", "BDPT Spectral"},
                                          0)
                          .withGroup("Engine")
                          .withTooltip("Path Tracer: unidirectional (+ MNEE or Photon caustics).\n"
                                       "BDPT: bidirectional + light-tracing / Photon caustics "
                                       "(CPU only — OptiX falls back to Path Tracer).\n"
                                       "PT Spectral: hero-wavelength path tracer (CPU / Embree).\n"
+                                      "BDPT Spectral: bidirectional + spectral transport "
+                                      "(LT / MNEE / Photon + Indirect Guides; CPU / Embree).\n"
                                       "Pick the caustics estimator under Caustics Engine.\n"
                                       "The log reports which caustics mode is active."));
         // Hidden migration marker: legacy menu was PT / DL / AO / BDPT.
@@ -800,19 +802,19 @@ public:
         addParameter(Parameter::makeBool("_integrator_menu_v2", "", true));
         addParameter(Parameter::makeInt("spectralsamples", "Spectral Samples", 4, 2, 16)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==4")
-                         .withTooltip("PT Spectral only: number of hero wavelengths per path "
+                         .withVisibleWhen("integrator==4||integrator==5")
+                         .withTooltip("Spectral integrators: number of hero wavelengths per path "
                                       "(2–16, default 4). Higher = cleaner colour, slower."));
         addParameter(Parameter::makeInt("spectralbins", "Spectral Bins", 16, 8, 32)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==4")
-                         .withTooltip("PT Spectral: fixed wavelength bins for multilayer spectral "
+                         .withVisibleWhen("integrator==4||integrator==5")
+                         .withTooltip("Spectral: fixed wavelength bins for multilayer spectral "
                                       "EXR / false-color (8–32)."));
         addParameter(Parameter::makeBool("spectralexr", "Write Spectral EXR Layers", false)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==4")
-                         .withTooltip("When saving EXR with PT Spectral, also write fixed spectral "
-                                      "bin layers (S0..Sn)."));
+                         .withVisibleWhen("integrator==4||integrator==5")
+                         .withTooltip("When saving EXR with a spectral integrator, also write "
+                                      "fixed spectral bin layers (S0..Sn)."));
         addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
@@ -833,7 +835,7 @@ public:
                          .withVisibleWhen("integrator==3"));
         addParameter(Parameter::makeBool("caustics", "Caustics", true)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1")
+                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
                          .withTooltip("Enable caustic light transport (light focused through glass "
                                       "and off mirrors).\n"
                                       "Engine picks the estimator (MNEE / MNEE+Photon / Photon).\n"
@@ -843,7 +845,7 @@ public:
         addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
                                          {"MNEE (manifolds)", "MNEE+Photon", "Photon / VCM"}, 1)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1")
+                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
                          .withTooltip("MNEE: manifold next-event — best for near-delta glass + "
                                       "area lights.\n"
                                       "MNEE+Photon: delta glass → MNEE; rough refractive casters → "
@@ -865,7 +867,7 @@ public:
                                       "map. Shrinks as samples accumulate."));
         addParameter(Parameter::makeFloat("causticclamp", "Caustic Firefly Clamp", 0.0, 0.0, 1000.0, false)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1")
+                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
                          .withTooltip("Extra cap on paths that look through glass/mirrors at a light "
                                       "(the sparkle inside refractive objects).\n"
                                       "Even at 0, a safety cap of 10 is applied to those paths — they "
@@ -875,7 +877,7 @@ public:
                          "dispersionmode", "Dispersion Mode",
                          {"Hero (default)", "Optimized", "Spectral RGB ×3", "Fake tint"}, 0)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator!=4")
+                         .withVisibleWhen("integrator!=4&&integrator!=5")
                          .withTooltip(
                              "How chromatic dispersion (dispersion_abbe) is sampled.\n"
                              "Hero: one random RGB channel per sample; masks the whole path "
@@ -887,14 +889,15 @@ public:
                              "Fake tint: no ray bending — chromatic transmission tint only."));
         addParameter(Parameter::makeInt("dispersionmaxiface", "Dispersion Max Interfaces", 2, 1, 16)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator!=4&&dispersionmode==1")
+                         .withVisibleWhen("integrator!=4&&integrator!=5&&dispersionmode==1")
                          .withTooltip("Optimized mode only: how many dispersing glass interfaces "
                                       "may change IOR (enter+exit of one pane ≈ 2)."));
         addParameter(Parameter::makeBool("pathguiding", "Indirect Guides (OpenPGL)", false)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1")
+                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
                          .withTooltip("Learn incident radiance while rendering and guide eye-path "
-                                      "BSDF samples (CPU / Embree). Works with Path Tracer and BDPT.\n"
+                                      "BSDF samples (CPU / Embree). Works with Path Tracer, BDPT, "
+                                      "and BDPT Spectral.\n"
                                       "Diffuse receivers only — glass/mirrors stay BSDF-sampled; "
                                       "caustic radiance (MNEE / photons / paths through glass) trains "
                                       "the field at the floor so guides learn bright caustic regions.\n"
@@ -955,12 +958,12 @@ public:
         addParameter(Parameter::makeBool("envvisible", "Environment Visible To Camera", true).withGroup("Film"));
         addParameter(Parameter::makeBool("filmfalsecolor", "Spectral False Color", false)
                          .withGroup("Film")
-                         .withVisibleWhen("integrator==4")
-                         .withTooltip("PT Spectral: visualise one spectral bin as false-color "
-                                      "instead of beauty RGB (debug)."));
+                         .withVisibleWhen("integrator==4||integrator==5")
+                         .withTooltip("Spectral integrators: visualise one spectral bin as "
+                                      "false-color instead of beauty RGB (debug)."));
         addParameter(Parameter::makeInt("filmfalsecolorbin", "False Color Bin", 0, 0, 31)
                          .withGroup("Film")
-                         .withVisibleWhen("integrator==4&&filmfalsecolor==1")
+                         .withVisibleWhen("(integrator==4||integrator==5)&&filmfalsecolor==1")
                          .withTooltip("Which spectral bin to show when Spectral False Color is on."));
 
         addParameter(Parameter::makeBool("enabletxcache", "Convert Textures to TX", true)
