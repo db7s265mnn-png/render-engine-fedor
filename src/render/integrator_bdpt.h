@@ -57,6 +57,11 @@ struct Vert {
     bool mediumScatter = false;
     float mediumG = 0.0f;
     int mediumIndex = -1;
+#if SOLSTICE_HAVE_OPENPGL
+    // OpenPGL segment opened at this eye vertex — NEE/connection radiance is
+    // attributed here (not to the last bounce's currentSegment_).
+    void* guideSeg = nullptr;
+#endif
 };
 
 SR_INL float remap0(float f) { return f > 0.0f ? f : 1.0f; }
@@ -440,6 +445,15 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         bool haveSample = false;
         Vec3 wiWorld;
 
+#if SOLSTICE_HAVE_OPENPGL
+        // Open a guiding segment before NEE-style training / BSDF sampling so
+        // BDPT connections can attribute radiance to this vertex later.
+        if (cfg.eyePath && cfg.guiding && cfg.guiding->active()) {
+            cfg.guiding->beginSegment(cur.p, cur.wo);
+            cur.guideSeg = cfg.guiding->segmentHandle();
+        }
+#endif
+
         // Subsurface: same Standard Surface mix lottery as the path tracer.
         // Eye paths run the Chiang volume walk and relocate the vertex to the
         // exit; light paths only keep the specular entry layer (eye owns BSSRDF).
@@ -490,8 +504,12 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         }
 
 #if SOLSTICE_HAVE_OPENPGL
+        // Guide only diffuse-ish eye vertices — near-spec / delta glass is owned
+        // by MNEE / light tracing; mixing a guide PDF there fights MIS.
         bool guideReady = false;
-        if (!haveSample && cfg.eyePath && cfg.guiding && cfg.guiding->active() && !cur.delta) {
+        const LobeWeights curLw = computeLobes(cur.mat);
+        if (!haveSample && cfg.eyePath && cfg.guiding && cfg.guiding->active() && !cur.delta &&
+            !cur.nearSpec && curLw.diffuse > 1e-4f) {
             guideReady = cfg.guiding->prepare(cur.p, cur.ns, rng);
             if (guideReady && rng.nextFloat() < cfg.guiding->guideProbability()) {
                 float gPdf = 0.0f;
@@ -540,7 +558,9 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         }
 
 #if SOLSTICE_HAVE_OPENPGL
-        if (cfg.eyePath && cfg.guiding && cfg.guiding->active()) {
+        // Train only non-specular bounces (same as PT) — keeps the field for
+        // indirect diffuse, not MNEE / light-trace caustic families.
+        if (cfg.eyePath && cfg.guiding && cfg.guiding->active() && !bs.specular) {
             cfg.guiding->recordBounce(cur.ns, wiWorld, bs.pdf, bs.weight, bs.specular, cur.mat.roughness,
                                       computeLobes(cur.mat).eta, 1.0f);
         }
@@ -943,8 +963,10 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (E.nearSpec) c = clampContribution(c, settings.causticClamp);
             L += c;
 #if SOLSTICE_HAVE_OPENPGL
-            if (guiding && guiding->active())
-                guiding->addScattered(f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf));
+            if (guiding && guiding->active() && E.guideSeg && !E.nearSpec)
+                guiding->addScatteredAt(
+                    E.guideSeg,
+                    f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf));
 #endif
             continue;
         }
@@ -1049,13 +1071,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (settings.causticClamp > 0.0f) c = clampContribution(c, settings.causticClamp);
             if (!isFinite(c)) continue;
             L += c;
-#if SOLSTICE_HAVE_OPENPGL
-            if (guiding && guiding->active() && !isBlack(E.beta)) {
-                const Vec3 local(c.x / srMax(1e-8f, E.beta.x), c.y / srMax(1e-8f, E.beta.y),
-                                 c.z / srMax(1e-8f, E.beta.z));
-                guiding->addScattered(local);
-            }
-#endif
+            // Do not train OpenPGL on MNEE caustic energy — same partition as PT.
             continue;
         }
 
@@ -1106,10 +1122,10 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         if (!isFinite(c)) continue;
         L += c;
 #if SOLSTICE_HAVE_OPENPGL
-        if (guiding && guiding->active() && !isBlack(E.beta)) {
+        if (guiding && guiding->active() && E.guideSeg && !E.nearSpec && !isBlack(E.beta)) {
             const Vec3 local(c.x / srMax(1e-8f, E.beta.x), c.y / srMax(1e-8f, E.beta.y),
                              c.z / srMax(1e-8f, E.beta.z));
-            guiding->addScattered(local);
+            guiding->addScatteredAt(E.guideSeg, local);
         }
 #endif
     }

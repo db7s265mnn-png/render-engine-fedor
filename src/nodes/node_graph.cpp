@@ -290,11 +290,13 @@ bool NodeGraph::fromJson(const QJsonObject& json, QString& error) {
 
         const QJsonArray parametersArray = nodeJson.value("parameters").toArray();
         bool sawIntegratorMenuV2 = false;
+        bool sawCausticsEngineMenuV2 = false;
         for (const QJsonValue& parameterValue : parametersArray) {
             const QJsonObject parameterJson = parameterValue.toObject();
-            if (parameterJson.value("name").toString() == QLatin1String("_integrator_menu_v2"))
-                sawIntegratorMenuV2 = true;
-            Parameter* parameter = node->findParameter(parameterJson.value("name").toString());
+            const QString pname = parameterJson.value("name").toString();
+            if (pname == QLatin1String("_integrator_menu_v2")) sawIntegratorMenuV2 = true;
+            if (pname == QLatin1String("_caustics_engine_menu_v2")) sawCausticsEngineMenuV2 = true;
+            Parameter* parameter = node->findParameter(pname);
             if (parameter) parameter->fromJson(parameterJson);
         }
         // Legacy integrator menu was PT / DL / AO / BDPT (indices 0..3).
@@ -308,6 +310,18 @@ bool NodeGraph::fromJson(const QJsonObject& json, QString& error) {
             }
             node->setParameterValue("integrator", idx, false);
             node->setParameterValue("_integrator_menu_v2", true, false);
+        }
+        // Legacy caustics engine menu was Automatic / MNEE / Photon (0/1/2).
+        // New order: MNEE / MNEE+Photon / Photon (0/1/2).
+        if (!sawCausticsEngineMenuV2 && node->typeName() == QLatin1String("rendersettings")) {
+            int idx = node->intValue("causticsengine", 0);
+            switch (idx) {
+                case 0: idx = 1; break;  // Automatic → MNEE+Photon
+                case 1: idx = 0; break;  // MNEE stays first
+                default: break;          // Photon unchanged
+            }
+            node->setParameterValue("causticsengine", idx, false);
+            node->setParameterValue("_caustics_engine_menu_v2", true, false);
         }
         node->extraStateFromJson(nodeJson.value("state").toObject());
 
@@ -428,11 +442,13 @@ QList<Node*> NodeGraph::pasteNodesFromClipboardJson(const QJsonObject& json, QPo
 
         const QJsonArray parametersArray = nodeJson.value("parameters").toArray();
         bool sawIntegratorMenuV2 = false;
+        bool sawCausticsEngineMenuV2 = false;
         for (const QJsonValue& parameterValue : parametersArray) {
             const QJsonObject parameterJson = parameterValue.toObject();
-            if (parameterJson.value("name").toString() == QLatin1String("_integrator_menu_v2"))
-                sawIntegratorMenuV2 = true;
-            Parameter* parameter = node->findParameter(parameterJson.value("name").toString());
+            const QString pname = parameterJson.value("name").toString();
+            if (pname == QLatin1String("_integrator_menu_v2")) sawIntegratorMenuV2 = true;
+            if (pname == QLatin1String("_caustics_engine_menu_v2")) sawCausticsEngineMenuV2 = true;
+            Parameter* parameter = node->findParameter(pname);
             if (parameter) parameter->fromJson(parameterJson);
         }
         // Legacy integrator menu was PT / DL / AO / BDPT (indices 0..3).
@@ -446,6 +462,17 @@ QList<Node*> NodeGraph::pasteNodesFromClipboardJson(const QJsonObject& json, QPo
             }
             node->setParameterValue("integrator", idx, false);
             node->setParameterValue("_integrator_menu_v2", true, false);
+        }
+        // Legacy caustics engine menu was Automatic / MNEE / Photon (0/1/2).
+        if (!sawCausticsEngineMenuV2 && node->typeName() == QLatin1String("rendersettings")) {
+            int idx = node->intValue("causticsengine", 0);
+            switch (idx) {
+                case 0: idx = 1; break;  // Automatic → MNEE+Photon
+                case 1: idx = 0; break;  // MNEE
+                default: break;
+            }
+            node->setParameterValue("causticsengine", idx, false);
+            node->setParameterValue("_caustics_engine_menu_v2", true, false);
         }
         node->extraStateFromJson(nodeJson.value("state").toObject());
         positions.append(node->position());

@@ -52,8 +52,12 @@ public:
         bool sample(float u1, float u2, Vec3& wiWorld, float& guidePdf) const;
 
         void beginSegment(Vec3 p, Vec3 wo);
+        // Opaque handle for the segment opened by the last beginSegment() — used by
+        // BDPT to attribute NEE / connection radiance to the correct eye vertex.
+        void* segmentHandle() const { return currentSegment_; }
         void recordEmission(Vec3 Le, float misWeight);
         void addScattered(Vec3 contrib);
+        void addScatteredAt(void* segment, Vec3 contrib);
         void recordBounce(Vec3 n, Vec3 wi, float pdf, Vec3 weight, bool delta, float roughness,
                           float eta, float rrSurvival);
         void setRussianRoulette(float rrSurvival);

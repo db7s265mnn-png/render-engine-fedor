@@ -112,8 +112,12 @@ void PathGuiding::ThreadState::recordEmission(Vec3 Le, float misWeight) {
 }
 
 void PathGuiding::ThreadState::addScattered(Vec3 contrib) {
-    if (!currentSegment_) return;
-    auto* seg = static_cast<openpgl::cpp::PathSegment*>(currentSegment_);
+    addScatteredAt(currentSegment_, contrib);
+}
+
+void PathGuiding::ThreadState::addScatteredAt(void* segment, Vec3 contrib) {
+    if (!segment) return;
+    auto* seg = static_cast<openpgl::cpp::PathSegment*>(segment);
     openpgl::cpp::AddScatteredContribution(seg, toPgl(contrib));
 }
 

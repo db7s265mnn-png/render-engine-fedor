@@ -375,12 +375,13 @@ enum IntegratorMode : int {
 };
 
 // How refractive / reflective caustics are estimated when settings.caustics != 0.
+// Menu order matches these values: MNEE, MNEE+Photon, Photon / VCM.
 enum CausticsEngine : int {
-    // Path Tracer → Auto picks MNEE (delta glass) or Photon (rough casters);
-    // BDPT → light-tracing splats + MNEE through glass (Photon when Auto+rough).
-    kCausticsEngineAuto = 0,
     // Manifold next-event (PT) / BDPT LT+MNEE — best for near-delta glass.
-    kCausticsEngineMnee = 1,
+    kCausticsEngineMnee = 0,
+    // Smart pick: delta glass → MNEE; rough refractive casters → Photon.
+    // BDPT keeps light-tracing; MNEE upgrades under-glass SDS when not Photon.
+    kCausticsEngineAuto = 1,  // UI label: MNEE+Photon
     // Caustic-only photon map gather (VCM-style density estimation) — better for
     // rough glass and caustics seen through thick refractive bases.
     kCausticsEnginePhoton = 2,
@@ -432,12 +433,12 @@ struct RenderSettingsData {
     int threads = 0;               // 0 = hardware concurrency
 
     float aoDistance = 1.0f;
-    int pathGuiding = 0;           // OpenPGL on CPU (Embree); ignored on OptiX
+    int pathGuiding = 0;           // OpenPGL indirect guides (CPU / Embree); PT + BDPT
     // Enable caustic light transport (specular→diffuse). Off = dark glass shadows
     // (soften per-material with shadow_opacity / contribute_caustics).
     int caustics = 1;
     // Which estimator carries caustics when enabled (see CausticsEngine).
-    int causticsEngine = kCausticsEngineAuto;
+    int causticsEngine = kCausticsEngineAuto;  // MNEE+Photon smart pick
     // Firefly cap for paths that look through glass/mirrors at a light (SDS).
     // Those never converge with more samples when the light is small; a safety
     // cap of 10 is always applied even when this is left at 0. Raise it to

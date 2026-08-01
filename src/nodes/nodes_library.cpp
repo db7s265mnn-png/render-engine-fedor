@@ -836,21 +836,23 @@ public:
                          .withVisibleWhen("integrator==0||integrator==1")
                          .withTooltip("Enable caustic light transport (light focused through glass "
                                       "and off mirrors).\n"
-                                      "Engine picks the estimator (Auto / MNEE / Photon).\n"
+                                      "Engine picks the estimator (MNEE / MNEE+Photon / Photon).\n"
                                       "Per-light and per-material Contribute to Caustics can disable "
                                       "individual sources or casters.\n"
                                       "Off: glass casts dark shadows (soften with shadow_opacity)."));
         addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
-                                         {"Automatic", "MNEE (manifolds)", "Photon / VCM"}, 0)
+                                         {"MNEE (manifolds)", "MNEE+Photon", "Photon / VCM"}, 1)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==0||integrator==1")
-                         .withTooltip("Automatic: delta glass → MNEE; rough refractive casters → "
+                         .withTooltip("MNEE: manifold next-event — best for near-delta glass + "
+                                      "area lights.\n"
+                                      "MNEE+Photon: delta glass → MNEE; rough refractive casters → "
                                       "Photon / VCM (any roughness). BDPT always keeps light "
                                       "tracing; MNEE upgrades under-glass SDS.\n"
-                                      "MNEE: manifold next-event — best for near-delta glass + "
-                                      "area lights.\n"
                                       "Photon / VCM: caustic-only photon map gather — better for "
                                       "rough glass and black bases seen through refraction."));
+        // Hidden migration: legacy menu was Automatic / MNEE / Photon (0/1/2).
+        addParameter(Parameter::makeBool("_caustics_engine_menu_v2", "", true));
         addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)
                          .withGroup("Engine")
                          .withVisibleWhen("caustics==1&&causticsengine==2")
@@ -888,12 +890,14 @@ public:
                          .withVisibleWhen("integrator!=4&&dispersionmode==1")
                          .withTooltip("Optimized mode only: how many dispersing glass interfaces "
                                       "may change IOR (enter+exit of one pane ≈ 2)."));
-        addParameter(Parameter::makeBool("pathguiding", "Path Guiding (OpenPGL)", false)
+        addParameter(Parameter::makeBool("pathguiding", "Indirect Guides (OpenPGL)", false)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==0")
-                         .withTooltip("Learn incident radiance while rendering and guide BSDF "
-                                      "samples (CPU / Embree). Kicks in after the first training "
-                                      "passes; helps indirect-heavy scenes."));
+                         .withVisibleWhen("integrator==0||integrator==1")
+                         .withTooltip("Learn incident radiance while rendering and guide eye-path "
+                                      "BSDF samples (CPU / Embree). Works with Path Tracer and BDPT "
+                                      "(eye subpath only — does not fight light tracing / MNEE).\n"
+                                      "Kicks in after the first training passes; helps indirect-"
+                                      "heavy scenes."));
         addParameter(Parameter::makeBool("motionblur", "Enable Motion Blur", false)
                          .withGroup("Motion Blur")
                          .withTooltip("Camera and geometry motion blur across the shutter "
@@ -987,7 +991,7 @@ public:
         settings.aoDistance = float(floatValue("aodistance", 1.0));
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
-        settings.causticsEngine = intValue("causticsengine", 0);
+        settings.causticsEngine = intValue("causticsengine", 1);
         settings.causticClamp = float(floatValue("causticclamp", 0.0));
         settings.dispersionMode = intValue("dispersionmode", 0);
         settings.dispersionMaxInterfaces = std::max(1, intValue("dispersionmaxiface", 2));

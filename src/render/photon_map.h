@@ -262,7 +262,7 @@ private:
 };
 
 // True when any material can cast refractive caustics that are too rough for
-// delta MNEE (α > kDeltaAlpha). Used by Automatic caustics routing.
+// delta MNEE (α > kDeltaAlpha). Used by MNEE+Photon (Auto) caustics routing.
 SR_INL bool sceneHasRoughCausticCaster(const SceneView& scene) {
     for (int i = 0; i < scene.materialCount; ++i) {
         const Material& m = scene.materials[i];
@@ -275,7 +275,7 @@ SR_INL bool sceneHasRoughCausticCaster(const SceneView& scene) {
 }
 
 // True when the active caustics engine should use the photon map.
-// Automatic: Photon when the scene has rough refractive casters; else MNEE.
+// MNEE+Photon (Auto): Photon when the scene has rough refractive casters; else MNEE.
 SR_INL bool causticsUsePhotonMap(const RenderSettingsData& s, const SceneView* scene = nullptr) {
     if (s.caustics == 0) return false;
     if (s.causticsEngine == kCausticsEnginePhoton) return true;
@@ -284,13 +284,13 @@ SR_INL bool causticsUsePhotonMap(const RenderSettingsData& s, const SceneView* s
     return false;
 }
 
-// True when MNEE should run (explicit MNEE, or Auto on delta-only glass scenes).
+// True when MNEE should run (explicit MNEE, or MNEE+Photon on delta-only glass).
 SR_INL bool causticsUseMnee(const RenderSettingsData& s, const SceneView* scene = nullptr) {
     if (s.caustics == 0) return false;
     if (s.causticsEngine == kCausticsEnginePhoton) return false;
     if (s.causticsEngine == kCausticsEngineMnee) return true;
     if (s.causticsEngine == kCausticsEngineAuto) {
-        // Auto + rough glass → photons; Auto + delta-only → MNEE.
+        // MNEE+Photon + rough glass → photons; + delta-only → MNEE.
         return !causticsUsePhotonMap(s, scene);
     }
     return false;

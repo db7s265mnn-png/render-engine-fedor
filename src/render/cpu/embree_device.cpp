@@ -246,16 +246,14 @@ public:
         const bool pathTracer = settings.integrator == kIntegratorPathTracer;
         const bool useBdpt = settings.integrator == kIntegratorBdpt;
         const bool useSpectral = settings.integrator == kIntegratorSpectralPath;
-        // Automatic routes rough refractive casters to Photon, delta-only to MNEE.
+        // Automatic / MNEE+Photon routes rough refractive casters to Photon, delta-only to MNEE.
         const bool usePhoton = !useSpectral && causticsUsePhotonMap(settings, &scene);
         const bool useMnee = pathTracer && causticsUseMnee(settings, &scene);
 #if SOLSTICE_HAVE_OPENPGL
-        // Guiding trains on unidirectional path streams; BDPT's bidirectional
-        // recording produced malformed OpenPGL segment chains (heap corruption on
-        // repeated field resets), and its caustics are carried by light-tracing
-        // splats anyway — so guiding stays a Path Tracer feature.
-        const bool useGuiding =
-            settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() && pathTracer;
+        // OpenPGL guides eye-path diffuse sampling on PT and BDPT. Light subpaths
+        // and MNEE/photon caustic families stay unguided so MIS partitions hold.
+        const bool useGuiding = settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() &&
+                                (pathTracer || useBdpt);
 #else
         const bool useGuiding = false;
 #endif
@@ -292,13 +290,13 @@ public:
                 logInfo(std::string("Caustics: Photon map (VCM-style gather, ") +
                         std::to_string(photonMap_.size()) + " photons, r=" +
                         std::to_string(settings.photonRadius) +
-                        (settings.causticsEngine == kCausticsEngineAuto ? ", Auto→rough)" : ")"));
+                        (settings.causticsEngine == kCausticsEngineAuto ? ", MNEE+Photon→rough)" : ")"));
             else if (useBdpt)
                 logInfo(std::string("Caustics: BDPT (bidirectional + light-tracing splats)") +
                         (useGuiding ? " + OpenPGL guiding" : ""));
             else if (useMnee)
                 logInfo(std::string("Caustics: MNEE (manifold next-event, refractive)") +
-                        (settings.causticsEngine == kCausticsEngineAuto ? " [Auto→delta]" : "") +
+                        (settings.causticsEngine == kCausticsEngineAuto ? " [MNEE+Photon→delta]" : "") +
                         (useGuiding ? " + OpenPGL guiding" : ""));
             else if (pathTracer)
                 logInfo("Caustics: off (dark shadows through glass; shadow_opacity fakes)");
