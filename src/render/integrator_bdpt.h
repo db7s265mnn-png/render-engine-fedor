@@ -432,7 +432,9 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
             const LobeWeights lw = computeLobes(mat);
             v.delta = lw.delta && lw.diffuse < 1e-4f;
             v.connectable = !v.delta;
-            v.nearSpec = v.delta || isNearSpecularLobe(lw);
+            // Include rough refractive casters so Photon/LT family partition matches
+            // the photon map (not only α ≤ kCausticAlpha).
+            v.nearSpec = v.delta || isNearSpecularLobe(lw) || isPhotonCausticCasterLobe(lw);
         }
         path[count++] = v;
         if (count >= maxVerts) break;
@@ -467,7 +469,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
                 cur.mat = specMat;
                 cur.delta = specLw.delta && specLw.diffuse < 1e-4f;
                 cur.connectable = !cur.delta;
-                cur.nearSpec = cur.delta || isNearSpecularLobe(specLw);
+                cur.nearSpec = cur.delta || isNearSpecularLobe(specLw) || isPhotonCausticCasterLobe(specLw);
                 cur.beta = beta;
                 const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
                 bs = bsdfSampleLocal(specMat, woLocal, uSpec, rng.nextFloat(), rng.nextFloat(),
@@ -908,9 +910,9 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (j >= 1 && !eye[j].nearSpec && !eye[1].nearSpec) {
                 if (doSplats || photonEngine) break;
             }
-            // SDS under glass (eye[1] near-spec): s=1 MNEE owns this when MNEE is
-            // active — suppress s=0 so the two estimators do not double-count.
-            if (j >= 1 && !eye[j].nearSpec && eye[1].nearSpec && !photonEngine) break;
+            // SDS under glass (eye[1] near-spec): MNEE owns when active; with Photon
+            // engine drop s=0 so estimators do not stack on the same family.
+            if (j >= 1 && !eye[j].nearSpec && eye[1].nearSpec) break;
         }
 
         MisOverride ov;

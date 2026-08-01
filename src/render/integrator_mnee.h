@@ -536,6 +536,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
     // delta-transmissive chain — the family MNEE covers for finite lights.
     bool sawNonSpecular = false;
     bool mneeFamily = false;
+    bool photonFamily = false;  // diffuse → photon-caster → … (owned by photon map)
     int familyChainLen = 0;
     Vec3 anchorP(0.0f);  // last non-specular surface vertex (MNEE launch point)
     Vec3 anchorN(0.0f, 1.0f, 0.0f);
@@ -604,8 +605,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             const LightData& light = scene.lights[si.lightIndex];
             const bool finiteLight = light.type == kLightRect || light.type == kLightDisk ||
                                      light.type == kLightSphere || light.type == kLightPoint;
-            // Photon engine owns the caustic family even when this pass deposited
+            // Photon map owns the caustic family even when this pass deposited
             // zero photons (e.g. all casters have Contribute to Caustics off).
+            if (photonEngine && photonFamily && finiteLight) break;
             if (photonEngine && sawNonSpecular && specularBounce && finiteLight &&
                 lightContributesCaustics(light))
                 break;
@@ -937,11 +939,17 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         }
         if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
 
-        // Track the MNEE-covered family on the caustic-transport material.
+        // Track caustic families. MNEE covers delta transmission only; the photon
+        // engine also owns rough refractive casters (isPhotonCausticCasterLobe).
         const bool deltaTransmit = bs.specular && bs.transmitted && mnee::isCausticCaster(matCau);
-        if (!bs.specular) {
+        const bool photonCasterBounce =
+            isPhotonCausticCasterLobe(lw) &&
+            (materialContributesCaustics(matCau) ||
+             (bs.transmitted && matCau.transmission > 0.25f));  // non-contrib glass still suppresses
+        if (!bs.specular && !isNearSpecularLobe(lw) && !isPhotonCausticCasterLobe(lw)) {
             sawNonSpecular = true;
             mneeFamily = false;
+            photonFamily = false;
             familyChainLen = 0;
             anchorP = si.p;
             anchorN = si.ns;
@@ -949,6 +957,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             anchorWo = wo;
             anchorMat = mat;
         } else if (sawNonSpecular && settings.caustics != 0) {
+            if (photonEngine && photonCasterBounce) {
+                photonFamily = true;
+            }
             if (deltaTransmit) {
                 ++familyChainLen;
                 mneeFamily = familyChainLen <= mnee::kMaxChain;
@@ -961,7 +972,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 if (nonContribGlass) {
                     mneeFamily = true;
                     familyChainLen = 0;
-                } else {
+                    if (photonEngine) photonFamily = true;
+                } else if (!photonCasterBounce) {
                     mneeFamily = false;
                     familyChainLen = 0;
                 }
@@ -970,11 +982,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         // Caustics disabled: suppress all diffuse→specular→light transport.
         if (settings.caustics == 0 && bs.specular && sawNonSpecular) mneeFamily = true;
 
-        Vec3 weight = bs.weight;
-        if (settings.clampIndirect > 0.0f) {
-            const float m = maxComponent(weight);
-            if (m > settings.clampIndirect) weight *= settings.clampIndirect / m;
-        }
+        // Indirect Clamp is pixel-radiance only (see clampContribution) — do not
+        // crush BSDF weights mid-path (that forced users toward clamp ≈ 1e6).
+        const Vec3 weight = bs.weight;
 
         const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
         if (!shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) break;

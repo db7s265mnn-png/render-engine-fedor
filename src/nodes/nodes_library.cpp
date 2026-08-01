@@ -821,10 +821,13 @@ public:
                          .withGroup("Engine")
                          .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
                                       "Higher = less light/reflection noise, slower."));
-        addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000.0, false)
+        addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Engine")
-                         .withTooltip("Caps bright indirect path contributions (fireflies). "
-                                      "0 disables. Lower = cleaner, slightly darker caustics."));
+                         .withTooltip("Caps each indirect sample’s contribution in linear pixel "
+                                      "radiance (Arnold/Karma style). Default 10 is typical.\n"
+                                      "Applies to path contributions only — not BSDF weights.\n"
+                                      "0 disables. Lower = fewer fireflies, slightly darker "
+                                      "highlights/caustics."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Engine"));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
@@ -848,11 +851,12 @@ public:
                          .withVisibleWhen("integrator==0||integrator==1||integrator==5")
                          .withTooltip("MNEE: manifold next-event — best for near-delta glass + "
                                       "area lights.\n"
-                                      "MNEE+Photon: delta glass → MNEE; rough refractive casters → "
-                                      "Photon / VCM (any roughness). BDPT always keeps light "
-                                      "tracing; MNEE upgrades under-glass SDS.\n"
-                                      "Photon / VCM: caustic-only photon map gather — better for "
-                                      "rough glass and black bases seen through refraction."));
+                                      "MNEE+Photon: picks one estimator for the scene — delta-only "
+                                      "glass → MNEE; if any rough refractive caster exists → "
+                                      "Photon / VCM. When Photon is active, MNEE / LT / eye-path "
+                                      "BSDF caustics are turned off (no stacking).\n"
+                                      "Photon / VCM: caustic-only photon map — rough glass and "
+                                      "black bases through refraction."));
         // Hidden migration: legacy menu was Automatic / MNEE / Photon (0/1/2).
         addParameter(Parameter::makeBool("_caustics_engine_menu_v2", "", true));
         addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)

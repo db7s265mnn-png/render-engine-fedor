@@ -172,7 +172,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
             const LobeWeights lw = computeLobes(mat);
             v.delta = lw.delta && lw.diffuse < 1e-4f;
             v.connectable = !v.delta;
-            v.nearSpec = v.delta || isNearSpecularLobe(lw);
+            v.nearSpec = v.delta || isNearSpecularLobe(lw) || isPhotonCausticCasterLobe(lw);
         }
         path[count] = v;
         betaPath[count] = beta;
@@ -202,7 +202,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
             cur.mat = specMat;
             cur.delta = specLw.delta && specLw.diffuse < 1e-4f;
             cur.connectable = !cur.delta;
-            cur.nearSpec = cur.delta || isNearSpecularLobe(specLw);
+            cur.nearSpec = cur.delta || isNearSpecularLobe(specLw) || isPhotonCausticCasterLobe(specLw);
             cur.beta = spectrumToRgb(beta, waves);
             betaPath[count - 1] = beta;
             const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
@@ -511,7 +511,8 @@ inline Vec3 traceRadianceBdptSpectral(
             if (j >= 1 && !eye[j].nearSpec && !eye[1].nearSpec &&
                 (doSplats || photonEngine))
                 break;
-            if (j >= 1 && !eye[j].nearSpec && eye[1].nearSpec && !photonEngine) break;
+            // SDS: MNEE owns when active; with Photon engine drop s=0 to avoid stacking.
+            if (j >= 1 && !eye[j].nearSpec && eye[1].nearSpec) break;
         }
 
         MisOverride ov;

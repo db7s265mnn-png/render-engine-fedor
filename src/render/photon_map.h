@@ -74,8 +74,7 @@ public:
         if (lw.delta && lw.diffuse < 1e-4f) return Vec3(0.0f);
 
         const float r2 = radius * radius;
-        const float area = kPi * r2;
-        if (area <= 1e-20f) return Vec3(0.0f);
+        if (r2 <= 1e-20f) return Vec3(0.0f);
 
         Vec3 sum(0.0f);
         const Vec3 cellF = (p - origin_) * invCellSize_;
@@ -93,18 +92,24 @@ public:
                     for (uint32_t i = start; i < end; ++i) {
                         const CausticPhoton& ph = photons_[cells_[i]];
                         const Vec3 d = ph.p - p;
-                        if (dot(d, d) > r2) continue;
+                        const float dist2 = dot(d, d);
+                        if (dist2 > r2) continue;
                         if (dot(ph.n, n) <= 0.1f) continue;  // opposite-facing deposit
                         const float cosI = fabsf(dot(n, ph.wi));
                         if (cosI <= 1e-6f) continue;
-                        // Lambertian-style BRDF * flux (caustic photons land on diffuse).
+                        // Epanechnikov kernel (1-u)² — soft falloff removes the hard-disk
+                        // "square / blob" tiling that a constant kernel shows in shadows.
+                        const float u = dist2 / r2;
+                        const float kern = (1.0f - u);
+                        const float kern2 = kern * kern;
                         const Frame fr(n);
                         const BsdfEval be = bsdfEvalLocal(mat, fr.toLocal(wo), fr.toLocal(ph.wi));
                         if (be.pdf <= 0.0f || isBlack(be.f)) continue;
-                        sum += be.f * ph.power;
+                        sum += be.f * ph.power * kern2;
                     }
                 }
-        return sum * (1.0f / area);
+        // ∫₀ᴿ (1-(r/R)²)² 2πr dr = π R² / 3  →  normalize by 3/(π R²).
+        return sum * (3.0f / (kPi * r2));
     }
 
 private:
@@ -120,7 +125,7 @@ private:
         h ^= h >> 16;
         h *= 0x7feb352du;
         h ^= h >> 15;
-        return h & 4095u;  // 4096 slots
+        return h & 65535u;  // 65536 slots — fewer collisions → less structured noise
     }
 
     void buildGrid_(float gatherRadiusHint) {
@@ -136,7 +141,7 @@ private:
         invCellSize_ = 1.0f / cell;
         origin_ = b.lo - Vec3(cell);
 
-        constexpr int kSlots = 4096;
+        constexpr int kSlots = 65536;
         std::vector<uint32_t> counts(kSlots, 0);
         for (const CausticPhoton& ph : photons_) {
             const Vec3 c = (ph.p - origin_) * invCellSize_;
@@ -222,10 +227,14 @@ private:
             }
 
             const LobeWeights lw = computeLobes(mat);
-            const bool nearSpec = (lw.delta || isNearSpecularLobe(lw)) && materialContributesCaustics(mat);
-            const bool diffuseHit = lw.diffuse > 1e-4f || (!lw.delta && !nearSpec);
+            // Photon map owns all refractive casters (any roughness) plus near-spec
+            // mirrors — not only α ≤ kCausticAlpha. Otherwise Auto→Photon picked for
+            // rough glass while emit skipped those lobes → empty map + BSDF leak.
+            const bool causticLink =
+                isPhotonCausticCasterLobe(lw) && materialContributesCaustics(mat);
+            const bool diffuseHit = lw.diffuse > 1e-4f || (!lw.delta && !causticLink);
 
-            if (nearSpec) {
+            if (causticLink) {
                 causticChain = true;
                 const Frame frame(si.ns);
                 const Vec3 woLocal = frame.toLocal(-d);
@@ -269,7 +278,8 @@ SR_INL bool sceneHasRoughCausticCaster(const SceneView& scene) {
         if (!materialContributesCaustics(m)) continue;
         if (m.transmission <= 0.25f) continue;
         const LobeWeights lw = computeLobes(m);
-        if (lw.transmission > 0.25f && !lw.delta && lw.diffuse < 1e-3f) return true;
+        // Rough refractive: photon map, not MNEE.
+        if (isPhotonCausticCasterLobe(lw) && !lw.delta) return true;
     }
     return false;
 }

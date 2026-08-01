@@ -663,6 +663,16 @@ SR_INL SR_HD bool isNearSpecularLobe(const LobeWeights& lw) {
     return lw.alpha <= kCausticAlpha && lw.diffuse < 1e-3f;
 }
 
+// Casters owned by the photon / VCM map: delta + near-spec mirrors/glass, and also
+// rough refractive glass (any α). MNEE cannot solve rough refraction; when the
+// Photon engine is active these lobes must continue the light→…→diffuse chain and
+// eye-path BSDF hits of the same family must be suppressed (no double-count).
+SR_INL SR_HD bool isPhotonCausticCasterLobe(const LobeWeights& lw) {
+    if (lw.diffuse >= 1e-3f) return false;
+    if (lw.delta || isNearSpecularLobe(lw)) return true;
+    return lw.transmission > 0.25f;
+}
+
 // Interpolated shading normals disagree with the geometry near silhouettes and on
 // intricate meshes. When the two normals disagree about whether a direction pair is
 // a reflection or a transmission, the BSDF describes transport the geometry cannot

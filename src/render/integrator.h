@@ -1025,12 +1025,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         }
         if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
 
-        Vec3 weight = bs.weight;
-        // Clamp bounce weights even on the first hit — glossy→sun fireflies start here.
-        if (settings.clampIndirect > 0.0f) {
-            const float m = maxComponent(weight);
-            if (m > settings.clampIndirect) weight *= settings.clampIndirect / m;
-        }
+        // Indirect Clamp applies only to path *contributions* (pixel radiance), like
+        // Arnold/Karma — never to BSDF bounce weights (those are not in pixel units).
+        const Vec3 weight = bs.weight;
 
         const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
         if (!shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) break;

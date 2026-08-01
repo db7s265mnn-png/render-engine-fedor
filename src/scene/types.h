@@ -423,7 +423,9 @@ struct RenderSettingsData {
     int seed = 0;
     int integrator = kIntegratorPathTracer;
 
-    float clampIndirect = 10.0f;   // <= 0 disables firefly clamping of indirect contribs
+    // Caps indirect path contributions in linear pixel radiance (Arnold/Karma).
+    // <= 0 disables. Does not clamp BSDF bounce weights.
+    float clampIndirect = 10.0f;
     float exposure = 0.0f;
     float gamma = 2.2f;
     int toneMapper = kToneAces;

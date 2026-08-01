@@ -156,15 +156,10 @@ public:
             if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
 
             const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
-            // Match RGB PT: clamp bounce weights so glass/glossy fireflies cannot
-            // compound unboundedly when Indirect Clamp is raised.
-            Vec3 weightRgb = bs.weight;
-            if (settings.clampIndirect > 0.0f) {
-                const float m = maxComponent(weightRgb);
-                if (m > settings.clampIndirect) weightRgb *= settings.clampIndirect / m;
-            }
+            // Indirect Clamp is applied to path contributions only (Arnold-style
+            // pixel radiance) — not to BSDF bounce weights.
             SampledSpectrum wSpec =
-                liftBsdfWeight(mat, frame, wo, wiWorld, weightRgb, waves, baseIor, heroIdx);
+                liftBsdfWeight(mat, frame, wo, wiWorld, bs.weight, waves, baseIor, heroIdx);
             throughput *= wSpec;
             bsdfPdf = bs.pdf;
             specularBounce = bs.specular;
