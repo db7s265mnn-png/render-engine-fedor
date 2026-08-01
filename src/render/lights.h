@@ -459,4 +459,159 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
     return scene.lightCount - 1;
 }
 
+// ---------------------------------------------------------------------------
+// BVH-accelerated light sampling (position-aware importance)
+// ---------------------------------------------------------------------------
+
+// Minimum squared distance from refP to a BVH node's AABB (0 when inside).
+SR_INL SR_HD float bvhNodeDist2(const LightBvhNode& node, Vec3 refP) {
+    const float dx = srMax(0.0f, srMax(node.bMin.x - refP.x, refP.x - node.bMax.x));
+    const float dy = srMax(0.0f, srMax(node.bMin.y - refP.y, refP.y - node.bMax.y));
+    const float dz = srMax(0.0f, srMax(node.bMin.z - refP.z, refP.z - node.bMax.z));
+    return dx * dx + dy * dy + dz * dz;
+}
+
+// Importance of a BVH node from refP: power / max(dist², ε).
+SR_INL SR_HD float bvhNodeImportance(const LightBvhNode& node, Vec3 refP) {
+    if (node.power <= 0.f) return 0.f;
+    const float d2 = bvhNodeDist2(node, refP);
+    return node.power / srMax(d2, 1e-4f);
+}
+
+// Returns true if the BVH subtree rooted at `nodeIdx` contains `lightIdx`.
+// Iterative DFS; stack depth ≤ tree height (≤ log2(N)+1 for a balanced tree).
+SR_INL SR_HD bool bvhContainsLight(const LightBvhNode* nodes, int nodeCount,
+                                   int nodeIdx, int lightIdx) {
+    int stack[64];
+    int top = 0;
+    if (nodeIdx >= 0 && nodeIdx < nodeCount) stack[top++] = nodeIdx;
+    while (top > 0) {
+        const int idx = stack[--top];
+        const LightBvhNode& n = nodes[idx];
+        if (n.isLeaf) {
+            if (n.childOrLight == lightIdx) return true;
+        } else {
+            // Safe: tree height h ≤ log2(N), so max stack depth ≤ h + 1 ≤ 64.
+            const int lc = n.childOrLight;
+            const int rc = n.rightChild;
+            if (lc >= 0 && lc < nodeCount && top < 63) stack[top++] = lc;
+            if (rc >= 0 && rc < nodeCount && top < 63) stack[top++] = rc;
+        }
+    }
+    return false;
+}
+
+// Position-aware light selection: sample a light index with importance
+// proportional to `power / max(dist² to AABB, ε)` using the prebuilt BVH.
+// Infinite lights (dome/distant) are weighted by flux and kept outside the BVH.
+// Falls back to the flux-only overload when the BVH is unavailable.
+SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, float& pdf) {
+    if (scene.lightCount <= 0) { pdf = 0.f; return -1; }
+
+    if (!scene.lightBvh || scene.lightBvhNodeCount == 0)
+        return sampleLightIndex(scene, u, pdf);
+
+    const float wInf = scene.infiniteLightPower;
+    const float wFin = bvhNodeImportance(scene.lightBvh[0], refP);
+    const float wTotal = wInf + wFin;
+    if (wTotal <= 1e-30f) return sampleLightIndex(scene, u, pdf);
+
+    float r = clampf(u, 0.f, 0.999999f) * wTotal;
+
+    // -- Infinite-light branch --------------------------------------------------
+    if (r < wInf && scene.infiniteLightCount > 0) {
+        float cumW = 0.f;
+        for (int i = 0; i < scene.infiniteLightCount; ++i) {
+            const int   idx = scene.infiniteLightIndices[i];
+            const float w   = lightFluxWeight(scene, idx);
+            cumW += w;
+            if (r < cumW || i == scene.infiniteLightCount - 1) {
+                pdf = (wInf > 0.f ? w / wInf : 1.f) * (wInf / wTotal);
+                if (pdf <= 0.f) { pdf = 0.f; return -1; }
+                return idx;
+            }
+        }
+    }
+
+    // -- Finite-light branch: traverse BVH -------------------------------------
+    if (wFin <= 0.f) {
+        pdf = 0.f; return -1;
+    }
+    float uFin = clampf((r - wInf) / wFin, 0.f, 0.999999f);
+    float travPdf = wFin / wTotal;
+
+    int nodeIdx = 0;
+    for (int depth = 0; depth < 64 && !scene.lightBvh[nodeIdx].isLeaf; ++depth) {
+        const LightBvhNode& nd = scene.lightBvh[nodeIdx];
+        const int lc = nd.childOrLight;
+        const int rc = nd.rightChild;
+        if (lc < 0 || lc >= scene.lightBvhNodeCount ||
+            rc < 0 || rc >= scene.lightBvhNodeCount) break;
+
+        const float wL    = bvhNodeImportance(scene.lightBvh[lc], refP);
+        const float wR    = bvhNodeImportance(scene.lightBvh[rc], refP);
+        const float wSum  = wL + wR;
+        const float pLeft = wSum > 0.f ? wL / wSum : 0.5f;
+
+        if (uFin < pLeft) {
+            travPdf *= pLeft;
+            uFin = pLeft > 0.f ? uFin / pLeft : 0.5f;
+            nodeIdx = lc;
+        } else {
+            travPdf *= (1.f - pLeft);
+            const float rem = 1.f - pLeft;
+            uFin = rem > 0.f ? (uFin - pLeft) / rem : 0.5f;
+            nodeIdx = rc;
+        }
+        uFin = clampf(uFin, 0.f, 0.999999f);
+    }
+
+    pdf = travPdf;
+    if (pdf <= 0.f) { pdf = 0.f; return -1; }
+    return scene.lightBvh[nodeIdx].childOrLight;
+}
+
+// Position-aware selection PDF for a specific light index.
+// Must be called with the same `refP` used during sampling for MIS correctness.
+SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int lightIndex) {
+    if (!scene.lightBvh || scene.lightBvhNodeCount == 0 ||
+        lightIndex < 0 || lightIndex >= scene.lightCount)
+        return lightSelectionPdfIndex(scene, lightIndex);
+
+    const float wInf   = scene.infiniteLightPower;
+    const float wFin   = bvhNodeImportance(scene.lightBvh[0], refP);
+    const float wTotal = wInf + wFin;
+    if (wTotal <= 1e-30f) return lightSelectionPdfIndex(scene, lightIndex);
+
+    const LightData& l = scene.lights[lightIndex];
+    if (l.type == kLightDome || l.type == kLightDistant) {
+        return lightFluxWeight(scene, lightIndex) / wTotal;
+    }
+
+    // Walk BVH path to the leaf containing lightIndex.
+    float travPdf = wFin / wTotal;
+    int nodeIdx = 0;
+    for (int depth = 0; depth < 64 && !scene.lightBvh[nodeIdx].isLeaf; ++depth) {
+        const LightBvhNode& nd = scene.lightBvh[nodeIdx];
+        const int lc = nd.childOrLight;
+        const int rc = nd.rightChild;
+        if (lc < 0 || lc >= scene.lightBvhNodeCount ||
+            rc < 0 || rc >= scene.lightBvhNodeCount) break;
+
+        const float wL    = bvhNodeImportance(scene.lightBvh[lc], refP);
+        const float wR    = bvhNodeImportance(scene.lightBvh[rc], refP);
+        const float wSum  = wL + wR;
+        const float pLeft = wSum > 0.f ? wL / wSum : 0.5f;
+
+        if (bvhContainsLight(scene.lightBvh, scene.lightBvhNodeCount, lc, lightIndex)) {
+            travPdf *= pLeft;
+            nodeIdx = lc;
+        } else {
+            travPdf *= (1.f - pLeft);
+            nodeIdx = rc;
+        }
+    }
+    return travPdf;
+}
+
 }  // namespace sol
