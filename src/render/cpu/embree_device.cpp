@@ -10,7 +10,6 @@
 #include "core/log.h"
 #include "core/thread_pool.h"
 #include "render/blue_noise.h"
-#include "render/sobol.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
 #include "render/integrator_base.h"
@@ -321,14 +320,12 @@ public:
             EmbreeTracer tracer{topScene_};
             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
             Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
-            // Pixel/lens: Owen-Sobol (dims 0–3). Path RNG stays PCG — feeding the
-            // whole path from Sobol made high-variance regions (caustic shadows,
-            // MNEE fireflies) show a visible square/grid sampling structure.
-            // Pixel stratification is enough; path dimensions prefer white-noise look.
+            // Arnold-style blue-noise dither for pixel AA / DoF (Georgiev & Fajardo).
+            // Path bounce RNG stays PCG white noise — BN is for screen-space error.
             float jx = 0.5f, jy = 0.5f;
-            pixelSample(x, y, sampleIndex, jx, jy);
+            blueNoisePixelJitter(x, y, sampleIndex, jx, jy);
             float lensU = 0.5f, lensV = 0.5f;
-            lensSample(x, y, sampleIndex, lensU, lensV);
+            blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
 
             // Light-tracing splats assume the pinhole/thin-lens projection —
             // polynomial optics rays and camera motion blur bypass it.
