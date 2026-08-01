@@ -578,7 +578,7 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     if (scene.lightCount <= 0) return result;
 
     float selectPdf = 0.0f;
-    const int lightIndex = sampleLightIndex(scene, rng.nextFloat(), selectPdf);
+    const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
     if (lightIndex < 0 || selectPdf <= 0.0f) return result;
 
     LightSample ls;
@@ -672,12 +672,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 const bool primary = depth == 0 && passThrough == 0;
                 if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
                     Vec3 envL = domeRadiance(scene, dome, direction);
-                    if (!isBlack(envL)) {
+                        if (!isBlack(envL)) {
                         float weight = 1.0f;
                         if (!specularBounce) {
                             const float lp = lightPdfDirection(scene, scene.domeLightIndex, origin, direction,
                                                                origin, direction) *
-                                             lightSelectionPdfIndex(scene, scene.domeLightIndex);
+                                             lightSelectionPdfIndex(scene, origin, scene.domeLightIndex);
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         Vec3 contrib = throughput * envL * weight;
@@ -725,7 +725,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 float weight = 1.0f;
                 if (!specularBounce) {
                     const float lp = lightPdfDirection(scene, si.lightIndex, origin, direction, si.p, lightN) *
-                                     lightSelectionPdfIndex(scene, si.lightIndex);
+                                     lightSelectionPdfIndex(scene, origin, si.lightIndex);
                     weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                 }
                 Vec3 contrib = throughput * emitted * weight;

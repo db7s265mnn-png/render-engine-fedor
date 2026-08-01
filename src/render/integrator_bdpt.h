@@ -108,10 +108,21 @@ SR_INL float lightArea(const LightData& l) {
     }
 }
 
-// Area pdf of sampling the emission origin on this light (light selection included).
+// Area pdf of sampling the emission origin on this light (flux-only selection).
+// Used for light-path-start strategies (no reference point available).
 SR_INL float pdfLightOrigin(const SceneView& scene, const LightData& l, int lightIndex) {
     const float select = lightSelectionPdfIndex(scene, lightIndex);
     if (l.type == kLightPoint) return select;  // delta position — only used in ratios
+    const float area = lightArea(l);
+    return area > 1e-12f ? select / area : 0.0f;
+}
+
+// Position-aware overload for BDPT s=0 vs s=1 MIS consistency.
+// Use `refP = eye[t-2].p` (the surface vertex the s=1 strategy would connect from).
+SR_INL float pdfLightOrigin(const SceneView& scene, const LightData& l, int lightIndex,
+                             Vec3 refP) {
+    const float select = lightSelectionPdfIndex(scene, refP, lightIndex);
+    if (l.type == kLightPoint) return select;
     const float area = lightArea(l);
     return area > 1e-12f ? select / area : 0.0f;
 }
@@ -750,7 +761,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                 const Vert& prev = eye[t - 2];
                 if (t > 2 && !prev.delta && prev.type == VType::Surface) {
                     const float lp = lightPdfDirection(scene, v.lightIndex, prev.p, dirW, prev.p, dirW) *
-                                     lightSelectionPdfIndex(scene, v.lightIndex);
+                                     lightSelectionPdfIndex(scene, prev.p, v.lightIndex);
                     w = powerHeuristic(1.0f, v.pdfFwd, 1.0f, lp);  // pdfFwd = solid-angle here
                 }
                 Vec3 c = v.beta * Le * w;
@@ -793,7 +804,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         MisOverride ov;
         ov.splatStrategy = doSplats;
         ov.lightOriginDelta = false;
-        ov.eyeLastRev = pdfLightOrigin(scene, l, v.lightIndex);
+        ov.eyeLastRev = pdfLightOrigin(scene, l, v.lightIndex, eye[t - 2].p);
         const Vec3 emitToPrev = normalize(eye[t - 2].p - v.p);
         ov.eyePrevRev = toAreaPdf(pdfLightDirSa(l, lightN, emitToPrev), v.p, eye[t - 2].p,
                                   eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
@@ -820,7 +831,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         if (E.type != VType::Surface || !E.connectable) continue;
 
         float selectPdf = 0.0f;
-        const int li = sampleLightIndex(scene, rng.nextFloat(), selectPdf);
+        const int li = sampleLightIndex(scene, E.p, rng.nextFloat(), selectPdf);
         if (li < 0 || selectPdf <= 0.0f) continue;
         const LightData& l = scene.lights[li];
 

@@ -143,7 +143,7 @@ public:
                                 const float lp =
                                     lightPdfDirection(scene, scene.domeLightIndex, origin, direction, origin,
                                                       direction) *
-                                    lightSelectionPdfIndex(scene, scene.domeLightIndex);
+                                    lightSelectionPdfIndex(scene, origin, scene.domeLightIndex);
                                 weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                             }
                             SampledSpectrum contrib = throughput * upsampleRgb(envL, waves) * weight;
@@ -178,7 +178,7 @@ public:
                     if (!specularBounce) {
                         const float lp =
                             lightPdfDirection(scene, si.lightIndex, origin, direction, si.p, lightN) *
-                            lightSelectionPdfIndex(scene, si.lightIndex);
+                            lightSelectionPdfIndex(scene, origin, si.lightIndex);
                         weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                     }
                     SampledSpectrum contrib = throughput * upsampleRgb(emitted, waves) * weight;

@@ -566,7 +566,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         if (!specularBounce) {
                             const float lp = lightPdfDirection(scene, scene.domeLightIndex, origin, direction,
                                                                origin, direction) *
-                                             lightSelectionPdfIndex(scene, scene.domeLightIndex);
+                                             lightSelectionPdfIndex(scene, origin, scene.domeLightIndex);
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         Vec3 contrib = throughput * envL * weight;
@@ -633,7 +633,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                                         const float r = sphereLightRadius(light);
                                         area = 4.0f * kPi * r * r;
                                     }
-                                    const float pM = lightSelectionPdfIndex(scene, si.lightIndex) /
+                                    const float pM = lightSelectionPdfIndex(scene, anchorP, si.lightIndex) /
                                                      srMax(1e-12f, area);
                                     const float pB = mnee::bsdfPdfOnLightArea(
                                         anchorMat, anchorN, anchorWo, anchorDir, lightNHit, bm.sol, false);
@@ -654,7 +654,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 float weight = misScale;
                 if (!specularBounce) {
                     const float lp = lightPdfDirection(scene, si.lightIndex, origin, direction, si.p, lightN) *
-                                     lightSelectionPdfIndex(scene, si.lightIndex);
+                                     lightSelectionPdfIndex(scene, origin, si.lightIndex);
                     weight *= powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                 }
                 Vec3 contrib = throughput * emitted * weight;
@@ -731,7 +731,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             Vec3 neeSum(0.0f);
             for (int ls = 0; ls < nLightSamples; ++ls) {
                 float selectPdf = 0.0f;
-                const int li = sampleLightIndex(scene, rng.nextFloat(), selectPdf);
+                const int li = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
                 if (li < 0 || selectPdf <= 0.0f) continue;
                 const LightData& l = scene.lights[li];
 
