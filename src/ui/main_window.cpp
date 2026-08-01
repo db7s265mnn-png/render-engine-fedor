@@ -410,8 +410,12 @@ void MainWindow::createTimeline() {
     if (!timelineBar_) return;
     connect(timelineBar_, &TimelineBar::frameChanged, this, &MainWindow::onTimelineFrameChanged);
     // After scrubbing / stop, cook once more with full Embree quality when needed.
+    // Must keep timelineFrameCook_: a plain click is press+release, and scrubFinished
+    // used to schedule a second cook without the flag — that full-applied the Start
+    // densify cache and froze Alembic poses until the next Start.
     auto qualityCook = [this] {
         if (!graph_.markTimeDependentDirty()) return;
+        timelineFrameCook_ = true;
         scheduleCook(0);
     };
     connect(timelineBar_, &TimelineBar::playbackStopped, this, qualityCook);
@@ -1064,6 +1068,9 @@ void MainWindow::cookNow() {
             }
         }
         if (rediceTimed) runTess(true);
+        // Always refresh tessCache_ for timeDependent meshes (cages or re-diced).
+        // Otherwise a later cook without frameCook pastes the Start-frame character.
+        mergeTessellationCache(*builtScene);
     } else if (displaceOn) {
         applyTessellationCache(*builtScene, /*skipTimeDependent=*/false);
     }

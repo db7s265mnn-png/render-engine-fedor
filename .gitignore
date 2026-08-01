@@ -21,3 +21,6 @@ examples/*.hdr
 # Local conversion scratch
 assets/*.obj
 assets/
+
+# Local agent test assets (never ship)
+.test_assets/
