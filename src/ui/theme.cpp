@@ -135,7 +135,7 @@ void applyDarkTheme(QApplication& application) {
             width: 0px; border: none;
         }
         QPushButton {
-            background: #3a3e44; border: 1px solid #4a4f57; border-radius: 2px; padding: 4px 10px;
+            background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; padding: 4px 10px;
         }
         QPushButton:hover { background: #474c54; }
         QPushButton:pressed { background: #2b2e33; }

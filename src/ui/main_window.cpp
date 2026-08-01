@@ -393,7 +393,7 @@ void MainWindow::createMenus() {
 void MainWindow::createToolBar() {
     QToolBar* toolBar = addToolBar("Render");
     toolBar->setMovable(false);
-    // Minimal 2px radius — same language as viewport Local/World / T/R/S.
+    // Same 6px radius as viewport Local/World / T/R/S.
     toolBar->setStyleSheet(
         "QToolButton {"
         "  min-width: 48px;"
@@ -402,7 +402,7 @@ void MainWindow::createToolBar() {
         "  font-weight: 600;"
         "  background: #3a3e44;"
         "  border: 1px solid #4a4f57;"
-        "  border-radius: 2px;"
+        "  border-radius: 6px;"
         "  color: #e8eaed;"
         "  padding: 3px 8px;"
         "}"
