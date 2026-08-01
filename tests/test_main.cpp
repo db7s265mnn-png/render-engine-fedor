@@ -2920,6 +2920,18 @@ void testSpectralHeroBasics() {
               std::fabs(hdriOut.z - hdri.z) < 0.15f,
           "HDRI round-trip");
     check(std::fabs((hdriOut.x / hdriOut.y) - (hdri.x / hdri.y)) < 0.05f, "HDRI not pink");
+    // Linear path-weight upsample must conserve energy under multiply (glass enter×exit).
+    {
+        const float eta = 1.5f;
+        const Vec3 wEnter(1.0f / (eta * eta));
+        const Vec3 wExit(eta * eta);
+        SampledSpectrum t = rgbToSpectrumLinear(wEnter, w);
+        t *= rgbToSpectrumLinear(wExit, w);
+        Vec3 round = spectrumToRgb(t, w);
+        check(std::fabs(round.x - 1.0f) < 0.08f && std::fabs(round.y - 1.0f) < 0.08f &&
+                  std::fabs(round.z - 1.0f) < 0.08f,
+              "glass enter×exit linear upsample ~1");
+    }
     // Abbe IOR must vary with λ (geometric dispersion).
     const float nBlue = dielectricIorFromAbbe(1.5f, 30.0f, 450.0f);
     const float nRed = dielectricIorFromAbbe(1.5f, 30.0f, 650.0f);

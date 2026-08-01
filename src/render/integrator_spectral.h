@@ -51,7 +51,9 @@ struct SpectralBinBuffer {
 };
 
 inline SampledSpectrum upsampleRgb(Vec3 rgb, const SampledWavelengths& w) {
-    return rgbToSpectrumEmission(rgb, w);
+    // Hybrid RGB-BSDF spectral PT multiplies these spectra along the path.
+    // Linear lobes keep energy: Jakob sigmoid does not (see spectrum_rgb.h).
+    return rgbToSpectrumLinear(rgb, w);
 }
 
 // Lift an RGB BSDF weight; conductors use η/κ, dispersing dielectrics get per-λ Fresnel.
@@ -59,7 +61,7 @@ inline SampledSpectrum upsampleRgb(Vec3 rgb, const SampledWavelengths& w) {
 inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, Vec3 wo, Vec3 wi,
                                       Vec3 rgbWeight, const SampledWavelengths& w, float baseIor,
                                       int heroIdx) {
-    SampledSpectrum base = upsampleRgb(rgbWeight, w);
+    SampledSpectrum base = rgbToSpectrumLinear(rgbWeight, w);
     const bool useConductor =
         mat.metallic >= 0.5f && (mat.conductorK.x + mat.conductorK.y + mat.conductorK.z) > 1e-4f;
     if (useConductor) {
@@ -242,8 +244,15 @@ public:
             if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
 
             const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
+            // Match RGB PT: clamp bounce weights so glass/glossy fireflies cannot
+            // compound unboundedly when Indirect Clamp is raised.
+            Vec3 weightRgb = bs.weight;
+            if (settings.clampIndirect > 0.0f) {
+                const float m = maxComponent(weightRgb);
+                if (m > settings.clampIndirect) weightRgb *= settings.clampIndirect / m;
+            }
             SampledSpectrum wSpec =
-                liftBsdfWeight(mat, frame, wo, wiWorld, bs.weight, waves, baseIor, heroIdx);
+                liftBsdfWeight(mat, frame, wo, wiWorld, weightRgb, waves, baseIor, heroIdx);
             throughput *= wSpec;
             bsdfPdf = bs.pdf;
             specularBounce = bs.specular;
