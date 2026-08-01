@@ -2913,14 +2913,27 @@ void testSpectralHeroBasics() {
     Vec3 greyOut = spectrumToRgb(rgbToSpectrumReflectance(greyIn, w), w);
     check(std::fabs(greyOut.x - 0.8f) < 0.08f && std::fabs(greyOut.y - greyOut.x) < 0.05f,
           "grey 0.8 round-trip");
+    // HDRI-like emission must not pick up a pink cast.
+    Vec3 hdri(4.2f, 4.1f, 4.3f);
+    Vec3 hdriOut = spectrumToRgb(rgbToSpectrumEmission(hdri, w), w);
+    check(std::fabs(hdriOut.x - hdri.x) < 0.15f && std::fabs(hdriOut.y - hdri.y) < 0.15f &&
+              std::fabs(hdriOut.z - hdri.z) < 0.15f,
+          "HDRI round-trip");
+    check(std::fabs((hdriOut.x / hdriOut.y) - (hdri.x / hdri.y)) < 0.05f, "HDRI not pink");
+    // Abbe IOR must vary with λ (geometric dispersion).
+    const float nBlue = dielectricIorFromAbbe(1.5f, 30.0f, 450.0f);
+    const float nRed = dielectricIorFromAbbe(1.5f, 30.0f, 650.0f);
+    check(nBlue > nRed + 0.01f, "dispersion IOR blue > red");
     // RGB η/κ seed from metal table.
     Vec3 eta, k;
     metalNkRgbPreset("Au", eta, k);
     check(eta.x > 0.0f && k.x > 0.0f, "Au η/κ rgb seed");
     SpectralNk nk550 = nkFromRgb(eta, k, 550.0f);
     check(nk550.eta > 0.0f && nk550.k > 0.0f, "nkFromRgb");
-    std::printf("  spectral hero ok rgb=(%.3f,%.3f,%.3f) grey=(%.3f,%.3f,%.3f)\n", rgb.x, rgb.y, rgb.z,
-                greyOut.x, greyOut.y, greyOut.z);
+    std::printf("  spectral hero ok rgb=(%.3f,%.3f,%.3f) grey=(%.3f,%.3f,%.3f) hdri=(%.3f,%.3f,%.3f) "
+                "nB=%.4f nR=%.4f\n",
+                rgb.x, rgb.y, rgb.z, greyOut.x, greyOut.y, greyOut.z, hdriOut.x, hdriOut.y, hdriOut.z,
+                nBlue, nRed);
 }
 
 void testScreenAdaptiveNearDensityDip() {
@@ -4330,6 +4343,7 @@ int main() {
     testEnableDisplacementMasterSwitch();
     testTimeDependentStamp();
     testScreenAdaptiveNearDensityDip();
+    testSpectralHeroBasics();
     testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();
     testRockDisplacementExr();

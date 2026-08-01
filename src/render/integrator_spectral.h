@@ -54,25 +54,46 @@ inline SampledSpectrum upsampleRgb(Vec3 rgb, const SampledWavelengths& w) {
     return rgbToSpectrumEmission(rgb, w);
 }
 
-// Lift an RGB BSDF weight; conductors with authored η/κ use spectral Fresnel.
-inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& /*frame*/, Vec3 wo, Vec3 wi,
-                                      Vec3 rgbWeight, const SampledWavelengths& w) {
+// Lift an RGB BSDF weight; conductors use η/κ, dispersing dielectrics get per-λ Fresnel.
+// baseIor = undispersed IOR; heroIdx selects the wavelength that drove refraction sampling.
+inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, Vec3 wo, Vec3 wi,
+                                      Vec3 rgbWeight, const SampledWavelengths& w, float baseIor,
+                                      int heroIdx) {
     SampledSpectrum base = upsampleRgb(rgbWeight, w);
-    // Spectral metals: use conductor_eta / conductor_k when metalness is high.
-    // κ≈0 (default white diffuse) keeps the RGB upsample path.
     const bool useConductor =
         mat.metallic >= 0.5f && (mat.conductorK.x + mat.conductorK.y + mat.conductorK.z) > 1e-4f;
-    if (!useConductor) return base;
-    const Vec3 wh = normalize(wo + wi);
-    if (length(wh) < 1e-6f) return base;
-    SampledSpectrum s(w.n);
-    for (int i = 0; i < w.n; ++i) {
-        const SpectralNk nk = nkFromRgb(mat.conductorEta, mat.conductorK, w.lambda[i]);
-        const float F = conductorFresnel(dot(wh, wo), nk.eta, nk.k);
-        const float mag = (rgbWeight.x + rgbWeight.y + rgbWeight.z) * (1.0f / 3.0f);
-        s.values[i] = mag * (0.25f + 0.75f * F);
+    if (useConductor) {
+        const Vec3 wh = normalize(wo + wi);
+        if (length(wh) < 1e-6f) return base;
+        SampledSpectrum s(w.n);
+        for (int i = 0; i < w.n; ++i) {
+            const SpectralNk nk = nkFromRgb(mat.conductorEta, mat.conductorK, w.lambda[i]);
+            const float F = conductorFresnel(dot(wh, wo), nk.eta, nk.k);
+            const float mag = (rgbWeight.x + rgbWeight.y + rgbWeight.z) * (1.0f / 3.0f);
+            s.values[i] = mag * (0.25f + 0.75f * F);
+        }
+        return s;
     }
-    return s;
+
+    // Chromatic dispersion: path bent with hero λ; scale other λ by relative Fresnel.
+    if (mat.dispersionAbbe > 1e-3f && mat.transmission > 1e-4f && w.n > 0) {
+        const bool transmitted = (dot(wo, frame.n) * dot(wi, frame.n)) < 0.0f;
+        heroIdx = std::clamp(heroIdx, 0, w.n - 1);
+        const float cosTheta = clampf(dot(wo, frame.n), -1.0f, 1.0f);
+        auto lobe = [&](float etaAbs) {
+            const float f = fresnelDielectric(cosTheta, etaAbs);
+            return transmitted ? srMax(1e-4f, 1.0f - f) : srMax(1e-4f, f);
+        };
+        const float heroLobe =
+            lobe(dielectricIorFromAbbe(baseIor, mat.dispersionAbbe, w.lambda[heroIdx]));
+        SampledSpectrum s = base;
+        for (int i = 0; i < w.n; ++i) {
+            const float eta = dielectricIorFromAbbe(baseIor, mat.dispersionAbbe, w.lambda[i]);
+            s.values[i] *= lobe(eta) / heroLobe;
+        }
+        return s;
+    }
+    return base;
 }
 
 template <typename Tracer>
@@ -92,6 +113,10 @@ public:
 
         const int nLambda = std::clamp(settings.spectralSamples, 2, kMaxSpectrumSamples);
         const SampledWavelengths waves = SampledWavelengths::sampleUniform(nLambda, rng.nextFloat());
+        // Hero λ for geometric dispersion (same role as RGB hero channel). Average λ
+        // collapses Abbe to ~nd and kills visible rainbows — pick one sample instead.
+        const int heroIdx = std::clamp(int(rng.nextFloat() * float(waves.n)), 0, waves.n - 1);
+        const float heroLambda = waves.lambda[heroIdx];
 
         SampledSpectrum radiance = SampledSpectrum::zero(waves.n);
         SampledSpectrum throughput = SampledSpectrum::constant(waves.n, 1.0f);
@@ -194,12 +219,10 @@ public:
             const Vec3 wo = -direction;
             const Frame frame(si.ns);
 
-            // Apply spectral IOR for dispersing glass at this hero set (average λ).
-            if (mat.dispersionAbbe > 0.0f && mat.transmission > 1e-4f && waves.n > 0) {
-                float avgLam = 0.0f;
-                for (int i = 0; i < waves.n; ++i) avgLam += waves.lambda[i];
-                avgLam /= float(waves.n);
-                mat.ior = dielectricIorFromAbbe(mat.ior, mat.dispersionAbbe, avgLam);
+            // Geometric dispersion: bend with hero λ (per-path). Keep base IOR for spectral lift.
+            const float baseIor = mat.ior;
+            if (mat.dispersionAbbe > 0.0f && mat.transmission > 1e-4f) {
+                mat.ior = dielectricIorFromAbbe(baseIor, mat.dispersionAbbe, heroLambda);
             }
 
             const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng);
@@ -219,7 +242,8 @@ public:
             if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
 
             const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
-            SampledSpectrum wSpec = liftBsdfWeight(mat, frame, wo, wiWorld, bs.weight, waves);
+            SampledSpectrum wSpec =
+                liftBsdfWeight(mat, frame, wo, wiWorld, bs.weight, waves, baseIor, heroIdx);
             throughput *= wSpec;
             bsdfPdf = bs.pdf;
             specularBounce = bs.specular;
