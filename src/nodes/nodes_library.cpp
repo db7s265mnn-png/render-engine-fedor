@@ -857,12 +857,12 @@ public:
         addParameter(Parameter::makeBool("_caustics_engine_menu_v2", "", true));
         addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)
                          .withGroup("Engine")
-                         .withVisibleWhen("caustics==1&&causticsengine==2")
+                         .withVisibleWhen("caustics==1&&causticsengine==1||caustics==1&&causticsengine==2")
                          .withTooltip("Photons emitted per progressive pass when Caustics Engine "
-                                      "is Photon / VCM."));
+                                      "is Photon / VCM or MNEE+Photon (Auto→Photon)."));
         addParameter(Parameter::makeFloat("photonradius", "Photon Radius", 0.08, 0.001, 10.0, false)
                          .withGroup("Engine")
-                         .withVisibleWhen("caustics==1&&causticsengine==2")
+                         .withVisibleWhen("caustics==1&&causticsengine==1||caustics==1&&causticsengine==2")
                          .withTooltip("Initial gather radius (scene units) for the caustic photon "
                                       "map. Shrinks as samples accumulate."));
         addParameter(Parameter::makeFloat("causticclamp", "Caustic Firefly Clamp", 0.0, 0.0, 1000.0, false)
@@ -963,7 +963,7 @@ public:
                                       "false-color instead of beauty RGB (debug)."));
         addParameter(Parameter::makeInt("filmfalsecolorbin", "False Color Bin", 0, 0, 31)
                          .withGroup("Film")
-                         .withVisibleWhen("(integrator==4||integrator==5)&&filmfalsecolor==1")
+                         .withVisibleWhen("integrator==4&&filmfalsecolor==1||integrator==5&&filmfalsecolor==1")
                          .withTooltip("Which spectral bin to show when Spectral False Color is on."));
 
         addParameter(Parameter::makeBool("enabletxcache", "Convert Textures to TX", true)
@@ -984,7 +984,7 @@ public:
         settings.resolutionY = intValue("resy", 540);
         settings.samplesPerPixel = intValue("samples", 128);
         settings.backend = intValue("backend", 0) == 1 ? kBackendGpuOptix : kBackendCpuEmbree;
-        settings.integrator = intValue("integrator", 0);
+        settings.integrator = std::clamp(intValue("integrator", 0), 0, 5);
         settings.maxDepth = intValue("maxdepth", 8);
         settings.rrStartDepth = intValue("rrdepth", 3);
         settings.lightSamples = std::max(1, intValue("lightsamples", 2));
@@ -995,7 +995,7 @@ public:
         settings.aoDistance = float(floatValue("aodistance", 1.0));
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
-        settings.causticsEngine = intValue("causticsengine", 1);
+        settings.causticsEngine = std::clamp(intValue("causticsengine", 1), 0, 2);
         settings.causticClamp = float(floatValue("causticclamp", 0.0));
         settings.dispersionMode = intValue("dispersionmode", 0);
         settings.dispersionMaxInterfaces = std::max(1, intValue("dispersionmaxiface", 2));

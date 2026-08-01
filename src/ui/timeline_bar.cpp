@@ -318,7 +318,7 @@ TimelineBar::TimelineBar(QWidget* parent) : QWidget(parent) {
         "QToolButton {"
         "  background: #3a3e44;"
         "  border: 1px solid #4a4f57;"
-        "  border-radius: 3px;"
+        "  border-radius: 2px;"
         "  padding: 0;"
         "}"
         "QToolButton:hover { background: #474c54; }"

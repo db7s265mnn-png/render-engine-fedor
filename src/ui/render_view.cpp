@@ -252,7 +252,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         "  color: #e8eaed;"
         "  background: #3a3e44;"
         "  border: 1px solid #4a4f57;"
-        "  border-radius: 4px;"
+        "  border-radius: 2px;"
         "  min-width: 28px;"
         "  min-height: 24px;"
         "  font-weight: 700;"
@@ -277,9 +277,13 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     cameraMenuButton_->setPopupMode(QToolButton::InstantPopup);
     cameraMenuButton_->setAutoRaise(true);
     cameraMenuButton_->setStyleSheet(
-        "QToolButton { min-width: 72px; max-width: 140px; font-size: 10px; font-weight: 600; "
-        "text-align: left; padding-left: 6px; padding-right: 6px; "
-        "background: #3a3e44; border: 1px solid #4a4f57; color: #e8eaed; }"
+        "QToolButton {"
+        "  min-width: 72px; max-width: 140px;"
+        "  min-height: 24px;"
+        "  font-size: 10px; font-weight: 600;"
+        "  text-align: left; padding-left: 6px; padding-right: 6px;"
+        "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 2px; color: #e8eaed;"
+        "}"
         "QToolButton:hover { background: #474c54; }"
         "QToolButton::menu-indicator { width: 10px; }");
     stripLayout->addWidget(cameraMenuButton_);
@@ -290,8 +294,11 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     homeButton_->setToolTip(QStringLiteral("Home — frame all geometry (H)"));
     homeButton_->setAutoRaise(true);
     homeButton_->setStyleSheet(
-        "QToolButton { min-width: 44px; font-size: 10px; font-weight: 600; "
-        "background: #3a3e44; border: 1px solid #4a4f57; color: #e8eaed; }"
+        "QToolButton {"
+        "  min-width: 44px; min-height: 24px;"
+        "  font-size: 10px; font-weight: 600;"
+        "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 2px; color: #e8eaed;"
+        "}"
         "QToolButton:hover { background: #474c54; }");
     stripLayout->addWidget(homeButton_);
     connect(homeButton_, &QToolButton::clicked, this, [this] { frameAll(); });
@@ -339,9 +346,14 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         button->setToolTip(tip);
         button->setAutoRaise(true);
         button->setStyleSheet(
-            "QToolButton { min-width: 42px; font-size: 10px; font-weight: 600; "
-            "background: #3a3e44; border: 1px solid #4a4f57; color: #e8eaed; }"
-            "QToolButton:checked { background: rgba(255, 190, 90, 90); border-color: #ffbe5a; color: #fff; }"
+            "QToolButton {"
+            "  min-width: 42px; min-height: 24px;"
+            "  font-size: 10px; font-weight: 600;"
+            "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 2px; color: #e8eaed;"
+            "}"
+            "QToolButton:checked {"
+            "  background: rgba(255, 190, 90, 90); border-color: #ffbe5a; color: #ffffff;"
+            "}"
             "QToolButton:hover { background: #474c54; }");
         spaceGroup->addButton(button);
         stripLayout->addWidget(button);

@@ -393,11 +393,24 @@ void MainWindow::createMenus() {
 void MainWindow::createToolBar() {
     QToolBar* toolBar = addToolBar("Render");
     toolBar->setMovable(false);
-    // Same yellow checked affordance as Local/World on the viewport strip.
+    // Minimal 2px radius — same language as viewport Local/World / T/R/S.
     toolBar->setStyleSheet(
-        "QToolButton { min-width: 48px; font-size: 11px; font-weight: 600; "
-        "background: #3a3e44; border: 1px solid #4a4f57; color: #e8eaed; padding: 3px 8px; }"
-        "QToolButton:checked { background: rgba(255, 190, 90, 90); border-color: #ffbe5a; color: #fff; }"
+        "QToolButton {"
+        "  min-width: 48px;"
+        "  min-height: 24px;"
+        "  font-size: 11px;"
+        "  font-weight: 600;"
+        "  background: #3a3e44;"
+        "  border: 1px solid #4a4f57;"
+        "  border-radius: 2px;"
+        "  color: #e8eaed;"
+        "  padding: 3px 8px;"
+        "}"
+        "QToolButton:checked {"
+        "  background: rgba(255, 190, 90, 90);"
+        "  border-color: #ffbe5a;"
+        "  color: #ffffff;"
+        "}"
         "QToolButton:hover { background: #474c54; }"
         "QToolButton:checked:hover { background: rgba(255, 190, 90, 120); }");
     // T/R/S live on the viewport chrome bar above the framebuffer.

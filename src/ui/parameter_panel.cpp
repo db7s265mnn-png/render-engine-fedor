@@ -404,9 +404,17 @@ void ParameterPanel::setFocusPickActive(bool active) {
 void ParameterPanel::rebuild() {
     updating_ = true;
     focusPickButton_ = nullptr;
+    // Tear down editors with signals blocked. QComboBox emits
+    // currentIndexChanged(-1) on destroy; without a block that writes -1 into
+    // integrator / causticsengine and silently kills MNEE/Photon/BDPT.
     QLayoutItem* child = nullptr;
     while ((child = contentLayout_->takeAt(0)) != nullptr) {
-        if (child->widget()) child->widget()->deleteLater();
+        if (QWidget* w = child->widget()) {
+            w->setUpdatesEnabled(false);
+            const auto buttons = w->findChildren<QComboBox*>();
+            for (QComboBox* combo : buttons) combo->blockSignals(true);
+            w->deleteLater();
+        }
         delete child;
     }
     nameEdit_ = nullptr;
@@ -1019,8 +1027,12 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                 combo->addItem(label, item);
                 combo->setItemData(combo->count() - 1, item, Qt::ToolTipRole);
             }
-            combo->setCurrentIndex(parameter.toInt());
-            connect(combo, &QComboBox::currentIndexChanged, this, [notify](int index) { notify(index); });
+            combo->setCurrentIndex(std::clamp(parameter.toInt(), 0, std::max(0, combo->count() - 1)));
+            connect(combo, &QComboBox::currentIndexChanged, this, [notify](int index) {
+                // Ignore teardown (-1) and empty combos — see ParameterPanel::rebuild.
+                if (index < 0) return;
+                notify(index);
+            });
             return combo;
         }
         case ParamType::Label: {
