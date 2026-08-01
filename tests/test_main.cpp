@@ -30,8 +30,11 @@
 #include "render/cpu/polynomial_optics.h"
 #include "render/framebuffer.h"
 #include "render/integrator.h"
+#include "render/metal_spectra.h"
 #include "render/render_session.h"
 #include "render/shading.h"
+#include "render/spectrum.h"
+#include "render/spectrum_rgb.h"
 #include "scene/scene.h"
 #include "scene/displace.h"
 #include "scene/tessellate.h"
@@ -2887,6 +2890,24 @@ void testTimeDependentStamp() {
     std::printf("  timeDependent ok tris=%zu\n", out->triangleCount());
 }
 
+void testSpectralHeroBasics() {
+    std::printf("spectral-hero-basics\n");
+    SampledWavelengths w = SampledWavelengths::sampleUniform(4, 0.25f);
+    check(w.n == 4, "hero sample count");
+    check(w.lambda[0] >= kSpectrumLambdaMin && w.lambda[3] <= kSpectrumLambdaMax, "lambda range");
+    SampledSpectrum white = rgbToSpectrumReflectance(Vec3(1, 1, 1), w);
+    check(spectrumAvg(white) > 0.5f, "white upsample energy");
+    SampledSpectrum gold = SampledSpectrum::zero(w.n);
+    for (int i = 0; i < w.n; ++i) {
+        SpectralNk nk = metalNk("Au", w.lambda[i]);
+        gold.values[i] = conductorFresnel(0.5f, nk.eta, nk.k);
+    }
+    check(spectrumAvg(gold) > 0.1f, "gold fresnel");
+    Vec3 rgb = spectrumToRgb(white, w);
+    check(rgb.x > 0.0f && rgb.y > 0.0f && rgb.z > 0.0f, "spectrumToRgb white");
+    std::printf("  spectral hero ok rgb=(%.3f,%.3f,%.3f)\n", rgb.x, rgb.y, rgb.z);
+}
+
 void testScreenAdaptiveNearDensityDip() {
     std::printf("screen-adaptive-near-density-dip\n");
     // Check whether mean *screen* edge length is non-monotonic with view depth
@@ -4255,6 +4276,7 @@ int main() {
         testEnableDisplacementMasterSwitch();
         testTimeDependentStamp();
         testScreenAdaptiveNearDensityDip();
+        testSpectralHeroBasics();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }

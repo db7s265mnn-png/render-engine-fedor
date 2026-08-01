@@ -76,12 +76,15 @@ private:
     void onContainerSelectionChanged();
     void onMaterialXSelectionChanged();
     void onGraphTopologyChanged();
+    void showPresetsMenu();
+    void applyPreset(const QString& presetId);
 
     NodeGraph* graph_ = nullptr;
     Node* currentMaterial_ = nullptr;
     MaterialContainerGraphView* containerView_ = nullptr;
     MaterialNetworkGraphView* graphView_ = nullptr;
     QToolButton* backButton_ = nullptr;
+    QToolButton* presetsButton_ = nullptr;
     QLabel* pathLabel_ = nullptr;
     QMetaObject::Connection nodeAddedConnection_;
     QMetaObject::Connection nodeRemovedConnection_;

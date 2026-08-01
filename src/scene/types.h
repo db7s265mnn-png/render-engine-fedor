@@ -106,7 +106,8 @@ struct Material {
     int subdivIterations = 0;   // authored on geometry; densify may ignore under Screen Adaptive
     int autobump = 1;           // Pref-space displace normal (Arnold-like), all ray types
     int displacementVector = 0; // 0 = along normal (float), 1 = vector displace
-    int _padDisp = 0;
+    // PT Spectral metal η/κ preset: 0=none, 1=Au, 2=Ag, 3=Cu, 4=Al.
+    int spectralMetalPreset = 0;
 
     // Chromatic dispersion of the transmission lobe (Abbe number, Arnold-style
     // `dispersion_abbe`): 0 = off; typical glass 20–60, lower = stronger rainbow.
@@ -336,6 +337,7 @@ enum IntegratorMode : int {
     kIntegratorBdpt = 1,
     kIntegratorDirectLighting = 2,
     kIntegratorAmbientOcclusion = 3,
+    kIntegratorSpectralPath = 4,  // PT Spectral (CPU / Embree)
 };
 
 // How refractive / reflective caustics are estimated when settings.caustics != 0.
@@ -430,6 +432,14 @@ struct RenderSettingsData {
     int dicingPolyLimitM = 10;
     // Master switch: off = render cages, skip subdiv + geometric displacement.
     int enableDisplacement = 1;
+
+    // PT Spectral (hero-wavelength). Only used when integrator == Spectral Path.
+    int spectralSamples = 4;      // hero λ count (UI: 2..16)
+    int spectralBins = 16;        // fixed bins for multilayer spectral EXR (8..32)
+    int spectralExr = 0;          // write spectral multilayer EXR on save when set
+    // Film: false-color debug from spectral bins (PT Spectral).
+    int filmFalseColor = 0;
+    int filmFalseColorBin = 0;    // which bin to visualise (0 .. spectralBins-1)
 };
 
 // ---------------------------------------------------------------------------

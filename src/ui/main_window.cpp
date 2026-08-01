@@ -814,7 +814,20 @@ void MainWindow::onSaveImage() {
     }
     std::string error;
     const RenderSettingsData settings = scene_ ? scene_->settings : RenderSettingsData();
-    if (!saveImageAuto(path.toStdString(), linear, settings, error)) {
+    bool ok = false;
+    if (settings.spectralExr != 0 && path.endsWith(".exr", Qt::CaseInsensitive)) {
+        int w = 0, h = 0, bins = 0;
+        std::vector<float> accum;
+        if (session_.copySpectralBins(w, h, bins, accum) && bins > 0) {
+            ok = saveImageExrSpectral(path.toStdString(), linear, w, h, bins, accum,
+                                      session_.framebuffer().sampleCount(), error);
+        } else {
+            ok = saveImageAuto(path.toStdString(), linear, settings, error);
+        }
+    } else {
+        ok = saveImageAuto(path.toStdString(), linear, settings, error);
+    }
+    if (!ok) {
         appMessageBox(this, "Save image", QString::fromStdString(error));
         return;
     }

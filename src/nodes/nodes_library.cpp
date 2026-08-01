@@ -415,6 +415,12 @@ public:
                          .withGroup("MaterialX"));
         // Hidden from the parameter panel; edited by MaterialNetworkView.
         addParameter(Parameter::makeString("mtlx", "MaterialX Document", ""));
+        addParameter(Parameter::makeMenu("spectralmetalpreset", "Spectral Metal Preset",
+                                         {"None", "Gold (Au)", "Silver (Ag)", "Copper (Cu)", "Aluminium (Al)"},
+                                         0)
+                         .withGroup("Spectral")
+                         .withTooltip("PT Spectral: use tabulated η/κ for metals. "
+                                      "Also set via Material Network → Presets."));
     }
 
     void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
@@ -435,6 +441,7 @@ public:
                 evaluated.procedurals.clear();
                 evaluated.proceduralImages.clear();
             }
+            evaluated.material.spectralMetalPreset = intValue("spectralmetalpreset", 0);
 
             // Drop dangling procedural roots (corrupt XML / failed partial compiles).
             auto sanitizeProc = [&](int& idx) {
@@ -736,17 +743,30 @@ public:
                                                           "GPU (OptiX) will fall back to Embree.")));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
-                                          "Ambient Occlusion"},
+                                          "Ambient Occlusion", "PT Spectral"},
                                          0)
                          .withGroup("Engine")
                          .withTooltip("Path Tracer: unidirectional (+ MNEE or Photon caustics).\n"
                                       "BDPT: bidirectional + light-tracing / Photon caustics "
                                       "(CPU only — OptiX falls back to Path Tracer).\n"
+                                      "PT Spectral: hero-wavelength path tracer (CPU / Embree).\n"
                                       "Pick the caustics estimator under Caustics Engine.\n"
                                       "The log reports which caustics mode is active."));
         // Hidden migration marker: legacy menu was PT / DL / AO / BDPT.
         // New nodes default to v2; legacy files without this key are remapped on load.
         addParameter(Parameter::makeBool("_integrator_menu_v2", "", true));
+        addParameter(Parameter::makeInt("spectralsamples", "Spectral Samples", 4, 2, 16)
+                         .withGroup("Engine")
+                         .withTooltip("PT Spectral only: number of hero wavelengths per path "
+                                      "(2–16, default 4). Higher = cleaner colour, slower."));
+        addParameter(Parameter::makeInt("spectralbins", "Spectral Bins", 16, 8, 32)
+                         .withGroup("Engine")
+                         .withTooltip("PT Spectral: fixed wavelength bins for multilayer spectral "
+                                      "EXR / false-color (8–32)."));
+        addParameter(Parameter::makeBool("spectralexr", "Write Spectral EXR Layers", false)
+                         .withGroup("Engine")
+                         .withTooltip("When saving EXR with PT Spectral, also write fixed spectral "
+                                      "bin layers (S0..Sn)."));
         addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
@@ -870,6 +890,13 @@ public:
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -8.0, 8.0).withGroup("Film"));
         addParameter(Parameter::makeFloat("gamma", "Gamma", 2.2, 1.0, 4.0).withGroup("Film"));
         addParameter(Parameter::makeBool("envvisible", "Environment Visible To Camera", true).withGroup("Film"));
+        addParameter(Parameter::makeBool("filmfalsecolor", "Spectral False Color", false)
+                         .withGroup("Film")
+                         .withTooltip("PT Spectral: visualise one spectral bin as false-color "
+                                      "instead of beauty RGB (debug)."));
+        addParameter(Parameter::makeInt("filmfalsecolorbin", "False Color Bin", 0, 0, 31)
+                         .withGroup("Film")
+                         .withTooltip("Which spectral bin to show when Spectral False Color is on."));
     }
 
     void cook(CookContext&, const std::vector<StagePtr>&, Stage& stage) override {
@@ -905,10 +932,15 @@ public:
         settings.dicingPolyLimitM = std::clamp(intValue("dicingpolylimitm", 10), 1, 200);
         settings.dicingCameraMode =
             intValue("dicingcamera", 0) == 1 ? kDicingCameraCustom : kDicingCameraRender;
+        settings.spectralSamples = std::clamp(intValue("spectralsamples", 4), 2, 16);
+        settings.spectralBins = std::clamp(intValue("spectralbins", 16), 8, 32);
+        settings.spectralExr = boolValue("spectralexr", false) ? 1 : 0;
         settings.toneMapper = intValue("tonemap", 2);
         settings.exposure = float(floatValue("exposure", 0.0));
         settings.gamma = float(floatValue("gamma", 2.2));
         settings.envVisibleCamera = boolValue("envvisible", true) ? 1 : 0;
+        settings.filmFalseColor = boolValue("filmfalsecolor", false) ? 1 : 0;
+        settings.filmFalseColorBin = std::clamp(intValue("filmfalsecolorbin", 0), 0, 31);
         stage.settings = settings;
         stage.settingsAuthored = true;
         stage.dicingCameraPath = stringValue("dicingcamerapath");

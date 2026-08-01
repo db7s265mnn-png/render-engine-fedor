@@ -12,8 +12,10 @@
 #include "render/blue_noise.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
+#include "render/integrator_base.h"
 #include "render/integrator_bdpt.h"
 #include "render/integrator_mnee.h"
+#include "render/integrator_spectral.h"
 #include "render/photon_map.h"
 #include "render/render_device.h"
 #include "solstice_config.h"
@@ -242,7 +244,8 @@ public:
 
         const bool pathTracer = settings.integrator == kIntegratorPathTracer;
         const bool useBdpt = settings.integrator == kIntegratorBdpt;
-        const bool usePhoton = causticsUsePhotonMap(settings);
+        const bool useSpectral = settings.integrator == kIntegratorSpectralPath;
+        const bool usePhoton = !useSpectral && causticsUsePhotonMap(settings);
         // Path Tracer + Auto/MNEE: manifold next-event. Photon engine skips MNEE.
         const bool useMnee = pathTracer && causticsUseMnee(settings);
 #if SOLSTICE_HAVE_OPENPGL
@@ -255,6 +258,13 @@ public:
 #else
         const bool useGuiding = false;
 #endif
+
+        if (useSpectral) {
+            const int bins = std::clamp(settings.spectralBins, 8, 32);
+            if (spectralBins_.width != width || spectralBins_.height != height || spectralBins_.bins != bins)
+                spectralBins_.resize(width, height, bins);
+            if (sampleIndex == 0) spectralBins_.clear();
+        }
 
         const CausticPhotonMap* photonPtr = nullptr;
         if (usePhoton) {
@@ -270,7 +280,11 @@ public:
         }
 
         if (sampleIndex == 0) {
-            if (usePhoton)
+            if (useSpectral)
+                logInfo(std::string("Integrator: PT Spectral (hero λ=") +
+                        std::to_string(std::clamp(settings.spectralSamples, 2, 16)) + ", bins=" +
+                        std::to_string(std::clamp(settings.spectralBins, 8, 32)) + ")");
+            else if (usePhoton)
                 logInfo(std::string("Caustics: Photon map (VCM-style gather, ") +
                         std::to_string(photonMap_.size()) + " photons, r=" +
                         std::to_string(settings.photonRadius) + ")");
@@ -326,37 +340,50 @@ public:
                 return ctx;
             };
 
-            auto traceOnce = [&](Rng& r, Vec3 o, Vec3 d, DispersionContext* disp) -> Vec3 {
-                Vec3 radiance;
+            auto traceOnce = [&](Rng& r, Vec3 o, Vec3 d, DispersionContext* disp, int px, int py) -> Vec3 {
+                IntegratorSampleContext<EmbreeTracer> ctx;
+                ctx.scene = &scene;
+                ctx.tracer = &tracer;
+                ctx.origin = o;
+                ctx.direction = d;
+                ctx.rng = &r;
+                ctx.dispersion = disp;
+                ctx.splatFb = splatFbFor(disp);
+                ctx.photons = photonPtr;
 #if SOLSTICE_HAVE_OPENPGL
+                PathGuiding::ThreadState* guidingPtr = nullptr;
                 if (useGuiding) {
                     PathGuiding::ThreadState& guiding = pathGuiding_->thread(threadId);
                     guiding.beginPath();
-                    if (useBdpt)
-                        radiance = traceRadianceBdpt(scene, tracer, o, d, r, &guiding, splatFbFor(disp),
-                                                     disp, photonPtr);
-                    else if (useMnee || usePhoton)
-                        radiance = traceRadiancePtMnee(scene, tracer, o, d, r, &guiding, disp, photonPtr);
-                    else
-                        radiance = traceRadiance(scene, tracer, o, d, r, &guiding, disp);
-                    guiding.endPath();
-                } else if (useBdpt) {
-                    radiance =
-                        traceRadianceBdpt(scene, tracer, o, d, r, nullptr, splatFbFor(disp), disp, photonPtr);
-                } else if (useMnee || usePhoton) {
-                    radiance = traceRadiancePtMnee(scene, tracer, o, d, r, disp, photonPtr);
-                } else {
-                    radiance = traceRadiance(scene, tracer, o, d, r, disp);
+                    guidingPtr = &guiding;
                 }
+                ctx.guiding = guidingPtr;
+                Vec3 radiance(0.0f);
+                if (useSpectral) {
+                    SpectralPathIntegrator<EmbreeTracer> integ;
+                    radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
+                } else if (useBdpt) {
+                    radiance = BdptIntegrator<EmbreeTracer>{}.Li(ctx);
+                } else if (useMnee || usePhoton) {
+                    radiance = PathMneeIntegrator<EmbreeTracer>{}.Li(ctx);
+                } else {
+                    radiance = PathIntegrator<EmbreeTracer>{}.Li(ctx);
+                }
+                if (guidingPtr) guidingPtr->endPath();
 #else
                 (void)threadId;
                 (void)useGuiding;
-                if (useBdpt)
-                    radiance = traceRadianceBdpt(scene, tracer, o, d, r, splatFbFor(disp), disp, photonPtr);
-                else if (useMnee || usePhoton)
-                    radiance = traceRadiancePtMnee(scene, tracer, o, d, r, disp, photonPtr);
-                else
-                    radiance = traceRadiance(scene, tracer, o, d, r, disp);
+                Vec3 radiance(0.0f);
+                if (useSpectral) {
+                    SpectralPathIntegrator<EmbreeTracer> integ;
+                    radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
+                } else if (useBdpt) {
+                    radiance = BdptIntegrator<EmbreeTracer>{}.Li(ctx);
+                } else if (useMnee || usePhoton) {
+                    radiance = PathMneeIntegrator<EmbreeTracer>{}.Li(ctx);
+                } else {
+                    radiance = PathIntegrator<EmbreeTracer>{}.Li(ctx);
+                }
 #endif
                 return radiance;
             };
@@ -405,7 +432,7 @@ public:
                     DispersionContext ctx = makeDispCtx(ch);
                     const float shutterTime = sampleShutter(rCh);
                     if (!generateRay(rCh, ch, origin, direction, lensTau, shutterTime)) continue;
-                    Vec3 r = traceOnce(rCh, origin, direction, &ctx);
+                    Vec3 r = traceOnce(rCh, origin, direction, &ctx, x, y);
                     r = r * std::max(0.0f, lensTau);
                     if (ctx.used) r = heroMask(r, ch);
                     radiance = radiance + r * (1.0f / 3.0f);
@@ -418,7 +445,7 @@ public:
                     fb.addSample(x, y, Vec3(0.0f));
                     return;
                 }
-                radiance = traceOnce(rng, origin, direction, &ctx);
+                radiance = traceOnce(rng, origin, direction, &ctx, x, y);
                 radiance = radiance * std::max(0.0f, lensTau);
 
                 if (chromaticChannel >= 0) {
@@ -429,6 +456,19 @@ public:
                         ctx.used;
                     if (doMask) radiance = heroMask(radiance, chromaticChannel);
                 }
+            }
+
+            if (useSpectral && settings.filmFalseColor != 0 && spectralBins_.bins > 0) {
+                // Replace beauty with this sample's contribution to the selected bin.
+                const int bin = std::clamp(settings.filmFalseColorBin, 0, spectralBins_.bins - 1);
+                // LiPixel already deposited into bins; approximate per-sample bin energy
+                // by using returned RGB luminance (stable progressive display).
+                const float lum = 0.2126f * radiance.x + 0.7152f * radiance.y + 0.0722f * radiance.z;
+                const float span = kSpectrumLambdaMax - kSpectrumLambdaMin;
+                const float lam =
+                    kSpectrumLambdaMin + (float(bin) + 0.5f) / float(spectralBins_.bins) * span;
+                radiance = wavelengthToFalseColor(lam) * lum;
+                (void)bin;
             }
 
             fb.addSample(x, y, radiance);
@@ -489,6 +529,15 @@ public:
         }
     }
 
+    bool copySpectralBins(int& width, int& height, int& bins, std::vector<float>& accum) const override {
+        if (spectralBins_.bins <= 0 || spectralBins_.width <= 0) return false;
+        width = spectralBins_.width;
+        height = spectralBins_.height;
+        bins = spectralBins_.bins;
+        accum = spectralBins_.accum;
+        return true;
+    }
+
     void release() override { releaseScene(); }
 
 private:
@@ -520,6 +569,7 @@ private:
     std::unique_ptr<ThreadPool> pool_;
     int threadCount_ = 0;
     CausticPhotonMap photonMap_;
+    SpectralBinBuffer spectralBins_;
 #if SOLSTICE_HAVE_OPENPGL
     std::unique_ptr<PathGuiding> pathGuiding_;
 #endif

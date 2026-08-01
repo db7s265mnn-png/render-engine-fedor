@@ -2641,6 +2641,14 @@ MaterialNetworkView::MaterialNetworkView(QWidget* parent) : QWidget(parent) {
     connect(backButton_, &QToolButton::clicked, this, &MaterialNetworkView::goUp);
     chromeLayout->addWidget(backButton_);
 
+    presetsButton_ = new QToolButton(chrome);
+    presetsButton_->setText("Presets");
+    presetsButton_->setToolTip("Apply material presets (metals / glass) to the selected "
+                               "standard_surface node");
+    presetsButton_->setEnabled(false);
+    connect(presetsButton_, &QToolButton::clicked, this, &MaterialNetworkView::showPresetsMenu);
+    chromeLayout->addWidget(presetsButton_);
+
     pathLabel_ = new QLabel("Materials", chrome);
     pathLabel_->setStyleSheet("color: #c8ccd2; font-weight: 600;");
     chromeLayout->addWidget(pathLabel_, 1);
@@ -2732,6 +2740,13 @@ void MaterialNetworkView::goUp() {
 void MaterialNetworkView::updateChrome() {
     const bool inside = currentMaterial_ != nullptr;
     backButton_->setEnabled(inside);
+    bool canPreset = false;
+    if (inside && graphView_) {
+        const MaterialNetworkGraphView::MtlxNode* n = graphView_->selectedNode();
+        canPreset = n && (n->category == "standard_surface" || n->category == "dielectric_bsdf" ||
+                          n->category == "conductor_bsdf");
+    }
+    if (presetsButton_) presetsButton_->setEnabled(canPreset);
     if (inside)
         pathLabel_->setText(QString("Materials  /  %1").arg(currentMaterial_->name()));
     else
@@ -2740,7 +2755,101 @@ void MaterialNetworkView::updateChrome() {
 
 void MaterialNetworkView::onContainerSelectionChanged() { emit selectionChanged(); }
 
-void MaterialNetworkView::onMaterialXSelectionChanged() { emit selectionChanged(); }
+void MaterialNetworkView::onMaterialXSelectionChanged() {
+    updateChrome();
+    emit selectionChanged();
+}
+
+void MaterialNetworkView::showPresetsMenu() {
+    if (!presetsButton_ || !presetsButton_->isEnabled()) return;
+    QMenu menu(this);
+    auto* metals = menu.addMenu("Metals (spectral η/κ)");
+    metals->addAction("Gold (Au)", this, [this] { applyPreset("Au"); });
+    metals->addAction("Silver (Ag)", this, [this] { applyPreset("Ag"); });
+    metals->addAction("Copper (Cu)", this, [this] { applyPreset("Cu"); });
+    metals->addAction("Aluminium (Al)", this, [this] { applyPreset("Al"); });
+    auto* glass = menu.addMenu("Glass / Dielectric");
+    glass->addAction("Clear Glass (IOR 1.5, Abbe 55)", this, [this] { applyPreset("glass_clear"); });
+    glass->addAction("Crown Glass (IOR 1.52, Abbe 60)", this, [this] { applyPreset("glass_crown"); });
+    glass->addAction("Flint Glass (IOR 1.65, Abbe 33)", this, [this] { applyPreset("glass_flint"); });
+    glass->addAction("Acrylic (IOR 1.49, Abbe 55)", this, [this] { applyPreset("glass_acrylic"); });
+    menu.addSeparator();
+    menu.addAction("Clear Spectral Metal Preset", this, [this] { applyPreset("none"); });
+    menu.exec(presetsButton_->mapToGlobal(QPoint(0, presetsButton_->height())));
+}
+
+void MaterialNetworkView::applyPreset(const QString& presetId) {
+    if (!graphView_ || !currentMaterial_) return;
+    const MaterialNetworkGraphView::MtlxNode* node = graphView_->selectedNode();
+    if (!node) return;
+    const QString name = node->name;
+
+    auto setIn = [&](const QString& input, const QString& value) {
+        graphView_->setInputValue(name, input, value);
+    };
+
+    int metalPreset = 0;
+    if (presetId == "Au") {
+        metalPreset = 1;
+        setIn("base_color", "1, 0.71, 0.29");
+        setIn("metalness", "1");
+        setIn("specular_roughness", "0.2");
+        setIn("transmission", "0");
+    } else if (presetId == "Ag") {
+        metalPreset = 2;
+        setIn("base_color", "0.97, 0.96, 0.91");
+        setIn("metalness", "1");
+        setIn("specular_roughness", "0.15");
+        setIn("transmission", "0");
+    } else if (presetId == "Cu") {
+        metalPreset = 3;
+        setIn("base_color", "0.95, 0.64, 0.54");
+        setIn("metalness", "1");
+        setIn("specular_roughness", "0.25");
+        setIn("transmission", "0");
+    } else if (presetId == "Al") {
+        metalPreset = 4;
+        setIn("base_color", "0.91, 0.92, 0.92");
+        setIn("metalness", "1");
+        setIn("specular_roughness", "0.2");
+        setIn("transmission", "0");
+    } else if (presetId == "glass_clear") {
+        setIn("base_color", "1, 1, 1");
+        setIn("metalness", "0");
+        setIn("specular_roughness", "0.0");
+        setIn("transmission", "1");
+        setIn("specular_IOR", "1.5");
+        setIn("dispersion_abbe", "55");
+    } else if (presetId == "glass_crown") {
+        setIn("base_color", "1, 1, 1");
+        setIn("metalness", "0");
+        setIn("specular_roughness", "0.0");
+        setIn("transmission", "1");
+        setIn("specular_IOR", "1.52");
+        setIn("dispersion_abbe", "60");
+    } else if (presetId == "glass_flint") {
+        setIn("base_color", "1, 1, 1");
+        setIn("metalness", "0");
+        setIn("specular_roughness", "0.0");
+        setIn("transmission", "1");
+        setIn("specular_IOR", "1.65");
+        setIn("dispersion_abbe", "33");
+    } else if (presetId == "glass_acrylic") {
+        setIn("base_color", "1, 1, 1");
+        setIn("metalness", "0");
+        setIn("specular_roughness", "0.0");
+        setIn("transmission", "1");
+        setIn("specular_IOR", "1.49");
+        setIn("dispersion_abbe", "55");
+    } else {
+        metalPreset = 0;
+    }
+
+    if (currentMaterial_->findParameter("spectralmetalpreset"))
+        currentMaterial_->setParameterValue("spectralmetalpreset", metalPreset);
+    emit materialEdited(currentMaterial_);
+    emit statusMessage(QString("Applied preset: %1").arg(presetId));
+}
 
 void MaterialNetworkView::onGraphTopologyChanged() {
     if (currentMaterial_ && graph_ && !graph_->findNode(currentMaterial_->name())) {

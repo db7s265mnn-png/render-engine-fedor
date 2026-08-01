@@ -49,6 +49,10 @@ public:
     Image displayImage() const;
     Image linearImage() const;
 
+    bool copySpectralBins(int& width, int& height, int& bins, std::vector<float>& accum) const {
+        return device_ ? device_->copySpectralBins(width, height, bins, accum) : false;
+    }
+
     // Called from the render thread whenever new samples are available.
     void setUpdateCallback(std::function<void()> callback);
     // Called once a render finishes or is cancelled.

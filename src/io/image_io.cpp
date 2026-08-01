@@ -232,6 +232,55 @@ bool writeExr(const std::string& path, const Image& image, std::string& error) {
         return false;
     }
 }
+
+bool writeExrSpectral(const std::string& path, const Image& image, int width, int height, int bins,
+                      const std::vector<float>& binAccum, int sampleCount, std::string& error) {
+    try {
+        if (width <= 0 || height <= 0 || bins <= 0) return writeExr(path, image, error);
+        Imf::Header header(width, height);
+        header.channels().insert("R", Imf::Channel(Imf::FLOAT));
+        header.channels().insert("G", Imf::Channel(Imf::FLOAT));
+        header.channels().insert("B", Imf::Channel(Imf::FLOAT));
+        for (int b = 0; b < bins; ++b) {
+            const std::string name = "S" + std::to_string(b);
+            header.channels().insert(name.c_str(), Imf::Channel(Imf::FLOAT));
+        }
+        const size_t npix = size_t(width) * size_t(height);
+        std::vector<float> R(npix), G(npix), B(npix);
+        std::vector<std::vector<float>> S(size_t(bins), std::vector<float>(npix, 0.0f));
+        const float invS = 1.0f / float(std::max(1, sampleCount));
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const size_t i = size_t(y) * size_t(width) + size_t(x);
+                const Vec3 c = (x < image.width() && y < image.height()) ? image.rgb(x, y) : Vec3(0.0f);
+                R[i] = c.x;
+                G[i] = c.y;
+                B[i] = c.z;
+                for (int b = 0; b < bins; ++b) {
+                    const size_t bi = i * size_t(bins) + size_t(b);
+                    if (bi < binAccum.size()) S[size_t(b)][i] = binAccum[bi] * invS;
+                }
+            }
+        }
+        Imf::OutputFile file(path.c_str(), header);
+        Imf::FrameBuffer fb;
+        fb.insert("R", Imf::Slice(Imf::FLOAT, (char*)R.data(), sizeof(float), sizeof(float) * size_t(width)));
+        fb.insert("G", Imf::Slice(Imf::FLOAT, (char*)G.data(), sizeof(float), sizeof(float) * size_t(width)));
+        fb.insert("B", Imf::Slice(Imf::FLOAT, (char*)B.data(), sizeof(float), sizeof(float) * size_t(width)));
+        for (int b = 0; b < bins; ++b) {
+            const std::string name = "S" + std::to_string(b);
+            fb.insert(name.c_str(),
+                      Imf::Slice(Imf::FLOAT, (char*)S[size_t(b)].data(), sizeof(float),
+                                 sizeof(float) * size_t(width)));
+        }
+        file.setFrameBuffer(fb);
+        file.writePixels(height);
+        return true;
+    } catch (const std::exception& e) {
+        error = std::string("OpenEXR spectral: ") + e.what();
+        return false;
+    }
+}
 #endif
 
 bool loadLdr(const std::string& path, Image& out, std::string& error, bool srgbColor) {
@@ -696,6 +745,20 @@ bool saveImageExr(const std::string& path, const Image& linearImage, std::string
     (void)linearImage;
     error = "this build has no OpenEXR support";
     return false;
+#endif
+}
+
+bool saveImageExrSpectral(const std::string& path, const Image& linearImage, int width, int height, int bins,
+                          const std::vector<float>& binAccum, int sampleCount, std::string& error) {
+#if SOLSTICE_HAVE_OPENEXR
+    return writeExrSpectral(path, linearImage, width, height, bins, binAccum, sampleCount, error);
+#else
+    (void)width;
+    (void)height;
+    (void)bins;
+    (void)binAccum;
+    (void)sampleCount;
+    return saveImageExr(path, linearImage, error);
 #endif
 }
 
