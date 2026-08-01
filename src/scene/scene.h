@@ -79,6 +79,12 @@ public:
     std::vector<ProceduralNode> procedurals;
     std::vector<PrimRecord> prims;
 
+    // Participating media authored on geometry prims.
+    std::vector<MediumData> media;
+    // Host-side VDB file paths, indexed by MediumData::volumeIndex.
+    // Populated during Stage::toScene; the volume integrator loads these on demand.
+    std::vector<std::string> volumePaths;
+
     CameraData camera;
     RenderSettingsData settings;
     bool cameraAuthored = false;
@@ -98,6 +104,8 @@ public:
     int addMaterial(const Material& material);
     int addEnvMap(std::shared_ptr<EnvironmentMap> env);
     int addTexture(std::shared_ptr<Image> image);
+    // Add a medium entry; returns the index. Deduplicates by volumeIndex for VDB media.
+    int addMedium(const MediumData& medium, const std::string& vdbPath = {});
 
     // Generates renderable proxy geometry for area lights, recomputes bounds
     // and prepares the flat arrays consumed by SceneView.
@@ -115,12 +123,19 @@ public:
 
 private:
     void buildLightProxies();
+    void buildLightBvh();
 
     Bounds3 bounds_;
     std::vector<MeshView> meshViews_;
     std::vector<EnvMapView> envViews_;
     std::vector<TextureView> textureViews_;
     int domeLightIndex_ = -1;
+
+    // Light BVH data built in finalize(); exposed via view().
+    std::vector<LightBvhNode> lightBvhNodes_;
+    std::vector<int>          infiniteLightIndices_;
+    float                     infiniteLightPower_ = 0.f;
+    float                     finiteLightPower_   = 0.f;
 };
 
 using ScenePtr = std::shared_ptr<Scene>;

@@ -197,6 +197,20 @@ struct TextureView {
 };
 
 // ---------------------------------------------------------------------------
+// Participating media
+// ---------------------------------------------------------------------------
+struct MediumData {
+    int type = 0;            // 0 = none, 1 = homogeneous, 2 = OpenVDB
+    int volumeIndex = -1;    // index into scene volume / VDB path table (-1 = none)
+    Vec3 sigmaA{0.0f};       // absorption coefficient (homogeneous)
+    Vec3 sigmaS{0.0f};       // scattering coefficient (homogeneous)
+    float g = 0.0f;          // Henyey-Greenstein asymmetry parameter [-1, 1]
+    float density = 1.0f;    // density scale (multiplies sigmaA/sigmaS)
+    int pad0 = 0;
+    int pad1 = 0;
+};
+
+// ---------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------
 // A view onto triangle mesh data. The pointers live either in host memory
@@ -238,6 +252,9 @@ struct InstanceData {
     // Transform motion blur: indices into SceneView::motionXforms.
     int motionKeyOffset = 0;
     int motionKeyCount = 1;
+    // Index into SceneView::media; -1 = no participating medium on this instance.
+    int mediumIndex = -1;
+    int padInst = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -300,6 +317,21 @@ struct LightData {
     int contributeCaustics = 1;
 
     SR_HD Vec3 emittedRadiance() const { return color * (intensity * exp2f(exposure)); }
+};
+
+// ---------------------------------------------------------------------------
+// Light BVH (PBRT-style; finite lights only — dome/distant kept separately)
+// ---------------------------------------------------------------------------
+// Flat binary BVH node.  Leaf: childOrLight = scene light index, rightChild = -1.
+// Interior: childOrLight = left child index, rightChild = right child index.
+// All fields are plain int / float so the struct is GPU-safe.
+struct LightBvhNode {
+    Vec3  bMin{0.0f, 0.0f, 0.0f};   // world AABB min
+    Vec3  bMax{0.0f, 0.0f, 0.0f};   // world AABB max
+    float power       = 0.f;          // total emitted power in this subtree
+    int   childOrLight = -1;          // leaf: scene light index; interior: left child node index
+    int   rightChild   = -1;          // interior only; -1 for leaves
+    int   isLeaf       = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -442,6 +474,13 @@ struct RenderSettingsData {
     // Film: false-color debug from spectral bins (PT Spectral).
     int filmFalseColor = 0;
     int filmFalseColorBin = 0;    // which bin to visualise (0 .. spectralBins-1)
+
+    // Texture TX cache (Ch.10): convert source textures to .tx mipmaps at cook time.
+    // 1 = enabled; conversion runs via maketx/oiiotool before image load.
+    int enableTxCache = 1;
+    // Relative or absolute directory for converted .tx files.
+    // Empty string or default "tx_cache" means a tx_cache/ folder next to the cwd.
+    char txCacheDir[256] = "tx_cache";
 };
 
 // ---------------------------------------------------------------------------
@@ -455,6 +494,7 @@ struct SceneView {
     const EnvMapView* envMaps = nullptr;
     const TextureView* textures = nullptr;
     const ProceduralNode* procedurals = nullptr;
+    const MediumData* media = nullptr;
 
     int meshCount = 0;
     int instanceCount = 0;
@@ -463,6 +503,7 @@ struct SceneView {
     int envMapCount = 0;
     int textureCount = 0;
     int proceduralCount = 0;
+    int mediumCount = 0;
     int domeLightIndex = -1;  // first dome light, used for ray misses
     // Any material with dispersionAbbe > 0 — enables hero-channel sampling.
     int hasDispersion = 0;
@@ -475,6 +516,17 @@ struct SceneView {
     const Mat4* motionXforms = nullptr;        // packed: instance keys via InstanceData offsets
     const Mat4* cameraMotionXforms = nullptr;  // camera keys across shutter [0,1]
     int cameraMotionKeyCount = 1;
+
+    // Light BVH for position-aware light selection (finite lights only).
+    // Null on the OptiX GPU path — sampling falls back to the flux-only code.
+    const LightBvhNode* lightBvh          = nullptr;
+    int                 lightBvhNodeCount  = 0;
+    // Infinite lights (dome, distant) are kept outside the BVH.
+    const int* infiniteLightIndices        = nullptr;
+    int        infiniteLightCount          = 0;
+    // Precomputed total-power sums used for the infinite-vs-finite split decision.
+    float infiniteLightPower               = 0.f;
+    float finiteLightPower                 = 0.f;
 };
 
 }  // namespace sol

@@ -138,13 +138,39 @@ void EnvironmentMap::buildSamplingTables() {
     const int w = image.width();
     const int h = image.height();
     luminanceFunc.resize(size_t(w) * size_t(h));
+    double sum = 0.0;
     for (int y = 0; y < h; ++y) {
         // sin(theta) accounts for the equirectangular solid angle distortion.
         const float theta = (float(y) + 0.5f) / float(h) * kPi;
         const float sinTheta = std::sin(theta);
         for (int x = 0; x < w; ++x) {
             const Vec3 c = image.rgb(x, y);
-            luminanceFunc[size_t(y) * w + x] = std::max(0.0f, luminance(c)) * sinTheta;
+            const float v = std::max(0.0f, luminance(c)) * sinTheta;
+            luminanceFunc[size_t(y) * w + x] = v;
+            sum += double(v);
+        }
+    }
+    // PBRT MIS compensation (Ch.2 / §12.5): sharpen the env sampling PDF by
+    // subtracting the mean so bright regions are not undersampled relative to
+    // BSDF sampling. Uniform leftover mass is recovered via BSDF→env MIS.
+    const size_t n = luminanceFunc.size();
+    if (n > 0 && sum > 0.0) {
+        const float c = float(sum / double(n));
+        double sum2 = 0.0;
+        for (float& v : luminanceFunc) {
+            v = std::max(0.0f, v - c);
+            sum2 += double(v);
+        }
+        // Degenerate HDRI (flat): keep the original distribution.
+        if (sum2 <= 1e-20) {
+            for (int y = 0; y < h; ++y) {
+                const float theta = (float(y) + 0.5f) / float(h) * kPi;
+                const float sinTheta = std::sin(theta);
+                for (int x = 0; x < w; ++x) {
+                    const Vec3 col = image.rgb(x, y);
+                    luminanceFunc[size_t(y) * w + x] = std::max(0.0f, luminance(col)) * sinTheta;
+                }
+            }
         }
     }
     distribution.build(luminanceFunc, w, h);
@@ -190,6 +216,28 @@ int Scene::addTexture(std::shared_ptr<Image> image) {
     return static_cast<int>(textures.size()) - 1;
 }
 
+int Scene::addMedium(const MediumData& medium, const std::string& vdbPath) {
+    MediumData m = medium;
+    if (!vdbPath.empty()) {
+        // Assign a volumeIndex pointing at the vdbPath entry.
+        // Deduplicate by path so the same VDB file is not loaded twice.
+        int vi = -1;
+        for (int i = 0; i < int(volumePaths.size()); ++i) {
+            if (volumePaths[size_t(i)] == vdbPath) {
+                vi = i;
+                break;
+            }
+        }
+        if (vi < 0) {
+            vi = int(volumePaths.size());
+            volumePaths.push_back(vdbPath);
+        }
+        m.volumeIndex = vi;
+    }
+    media.push_back(m);
+    return static_cast<int>(media.size()) - 1;
+}
+
 size_t Scene::totalTriangles() const {
     size_t total = 0;
     for (const InstanceData& inst : instances) {
@@ -232,6 +280,181 @@ void Scene::buildLightProxies() {
         inst.visibilityMask = light.selfShadowEnable ? kVisAll : kVisPrimary;
         instances.push_back(inst);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Light BVH construction helpers (host-only, scene.cpp internal)
+// ---------------------------------------------------------------------------
+
+// Approximate emitted power for one light (same formula as lightFluxWeight in lights.h).
+static float lightPowerForBvh(const LightData& l,
+                               const std::vector<std::shared_ptr<EnvironmentMap>>& envMaps) {
+    const Vec3 emitted = l.emittedRadiance();
+    const float intens = std::max(1e-8f, (emitted.x + emitted.y + emitted.z) * (1.0f / 3.0f));
+    switch (l.type) {
+        case kLightDome:
+            if (l.envIndex >= 0 && l.envIndex < int(envMaps.size()) && envMaps[l.envIndex] &&
+                envMaps[l.envIndex]->distribution.valid())
+                return intens * std::max(1e-4f, envMaps[l.envIndex]->distribution.integral());
+            return intens * 4.0f;
+        case kLightRect: {
+            const Vec3 ax = transformVector(l.xform, Vec3(l.width,  0.0f, 0.0f));
+            const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.height, 0.0f));
+            return intens * std::max(1e-6f, length(cross(ax, ay)));
+        }
+        case kLightDisk: {
+            const Vec3 ax = transformVector(l.xform, Vec3(l.radius, 0.0f, 0.0f));
+            const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.radius, 0.0f));
+            return intens * std::max(1e-6f, kPi * length(cross(ax, ay)));
+        }
+        case kLightSphere: {
+            const float sx = length(transformVector(l.xform, Vec3(1.0f, 0.0f, 0.0f)));
+            const float sy = length(transformVector(l.xform, Vec3(0.0f, 1.0f, 0.0f)));
+            const float sz = length(transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f)));
+            const float r = l.radius * (sx + sy + sz) * (1.0f / 3.0f);
+            return intens * std::max(1e-6f, 4.0f * kPi * r * r);
+        }
+        case kLightDistant: {
+            const float halfAngle = (l.angle * kPi / 180.0f) * 0.5f;
+            if (halfAngle < 1e-4f) return intens;
+            return intens * std::max(1e-6f, kTwoPi * (1.0f - std::cos(halfAngle)));
+        }
+        case kLightPoint:
+        default:
+            return intens;
+    }
+}
+
+// World-space AABB for a finite light (point, sphere, rect, disk).
+static Bounds3 lightWorldBounds(const LightData& l) {
+    Bounds3 b;
+    const Vec3 origin = transformPoint(l.xform, Vec3(0.0f, 0.0f, 0.0f));
+    switch (l.type) {
+        case kLightSphere: {
+            const float sx = length(transformVector(l.xform, Vec3(1.0f, 0.0f, 0.0f)));
+            const float sy = length(transformVector(l.xform, Vec3(0.0f, 1.0f, 0.0f)));
+            const float sz = length(transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f)));
+            const float r = l.radius * (sx + sy + sz) * (1.0f / 3.0f);
+            b.extend(origin - Vec3(r));
+            b.extend(origin + Vec3(r));
+            break;
+        }
+        case kLightRect: {
+            const float hw = l.width  * 0.5f;
+            const float hh = l.height * 0.5f;
+            b.extend(transformPoint(l.xform, Vec3(-hw, -hh, 0.0f)));
+            b.extend(transformPoint(l.xform, Vec3( hw, -hh, 0.0f)));
+            b.extend(transformPoint(l.xform, Vec3( hw,  hh, 0.0f)));
+            b.extend(transformPoint(l.xform, Vec3(-hw,  hh, 0.0f)));
+            break;
+        }
+        case kLightDisk: {
+            const float r = l.radius;
+            b.extend(transformPoint(l.xform, Vec3(-r, -r, 0.0f)));
+            b.extend(transformPoint(l.xform, Vec3( r, -r, 0.0f)));
+            b.extend(transformPoint(l.xform, Vec3( r,  r, 0.0f)));
+            b.extend(transformPoint(l.xform, Vec3(-r,  r, 0.0f)));
+            break;
+        }
+        default: // point and anything else: tiny box around origin
+            break;
+    }
+    if (!b.valid()) {
+        // Point light or degenerate: a small box around the origin
+        b.extend(origin - Vec3(1e-3f));
+        b.extend(origin + Vec3(1e-3f));
+    }
+    return b;
+}
+
+void Scene::buildLightBvh() {
+    lightBvhNodes_.clear();
+    infiniteLightIndices_.clear();
+    infiniteLightPower_ = 0.f;
+    finiteLightPower_   = 0.f;
+
+    struct BuildEntry {
+        int     lightIdx;
+        Bounds3 bounds;
+        Vec3    center;
+        float   power;
+    };
+    std::vector<BuildEntry> finites;
+    finites.reserve(lights.size());
+
+    for (int i = 0; i < int(lights.size()); ++i) {
+        const LightData& l = lights[i];
+        const float pw = lightPowerForBvh(l, envMaps);
+        if (l.type == kLightDome || l.type == kLightDistant) {
+            infiniteLightIndices_.push_back(i);
+            infiniteLightPower_ += pw;
+        } else {
+            BuildEntry e;
+            e.lightIdx = i;
+            e.bounds   = lightWorldBounds(l);
+            e.center   = (e.bounds.lo + e.bounds.hi) * 0.5f;
+            e.power    = pw;
+            finiteLightPower_ += pw;
+            finites.push_back(e);
+        }
+    }
+
+    if (finites.empty()) return;
+
+    // Pre-allocate: a full binary tree with N leaves has at most 2*N - 1 nodes.
+    lightBvhNodes_.reserve(2 * finites.size());
+
+    // Recursive median-split builder (iterative via std::function to avoid ABI issues).
+    std::function<int(int, int)> build = [&](int first, int count) -> int {
+        const int nodeIdx = int(lightBvhNodes_.size());
+        lightBvhNodes_.push_back(LightBvhNode{});
+
+        // Compute subtree AABB and total power.
+        Bounds3 bbox;
+        float   totalPow = 0.f;
+        for (int i = first; i < first + count; ++i) {
+            bbox.extend(finites[i].bounds);
+            totalPow += finites[i].power;
+        }
+        lightBvhNodes_[nodeIdx].bMin  = bbox.valid() ? bbox.lo : Vec3(-1.f);
+        lightBvhNodes_[nodeIdx].bMax  = bbox.valid() ? bbox.hi : Vec3( 1.f);
+        lightBvhNodes_[nodeIdx].power = totalPow;
+
+        if (count == 1) {
+            lightBvhNodes_[nodeIdx].childOrLight = finites[first].lightIdx;
+            lightBvhNodes_[nodeIdx].rightChild   = -1;
+            lightBvhNodes_[nodeIdx].isLeaf       = 1;
+            return nodeIdx;
+        }
+
+        // Split along the longest axis of light centers.
+        Bounds3 centerBounds;
+        for (int i = first; i < first + count; ++i)
+            centerBounds.extend(finites[i].center);
+        const Vec3 ext = centerBounds.valid() ? centerBounds.extent() : Vec3(1.f);
+        int axis = 0;
+        if (ext.y > ext.x) axis = 1;
+        if (ext.z > (axis == 0 ? ext.x : ext.y)) axis = 2;
+
+        const int mid = first + count / 2;
+        std::nth_element(finites.begin() + first,
+                         finites.begin() + mid,
+                         finites.begin() + first + count,
+                         [axis](const BuildEntry& a, const BuildEntry& b) {
+                             return a.center[axis] < b.center[axis];
+                         });
+
+        lightBvhNodes_[nodeIdx].isLeaf = 0;
+        // Recurse; use nodeIdx to write back afterwards (vector may grow but
+        // reserve above ensures no reallocation, so indices stay valid).
+        const int leftIdx  = build(first,       mid - first);
+        const int rightIdx = build(mid,   (first + count) - mid);
+        lightBvhNodes_[nodeIdx].childOrLight = leftIdx;
+        lightBvhNodes_[nodeIdx].rightChild   = rightIdx;
+        return nodeIdx;
+    };
+
+    build(0, int(finites.size()));
 }
 
 void Scene::finalize() {
@@ -290,6 +513,9 @@ void Scene::finalize() {
         }
         textureViews_.push_back(view);
     }
+
+    // Build light BVH after env views are ready (lightPowerForBvh uses them).
+    buildLightBvh();
 }
 
 void Scene::refreshMeshViews() {
@@ -307,6 +533,7 @@ SceneView Scene::view() const {
     v.envMaps = envViews_.data();
     v.textures = textureViews_.data();
     v.procedurals = procedurals.data();
+    v.media = media.empty() ? nullptr : media.data();
     v.meshCount = static_cast<int>(meshViews_.size());
     v.instanceCount = static_cast<int>(instances.size());
     v.materialCount = static_cast<int>(materials.size());
@@ -314,6 +541,7 @@ SceneView Scene::view() const {
     v.envMapCount = static_cast<int>(envViews_.size());
     v.textureCount = static_cast<int>(textureViews_.size());
     v.proceduralCount = static_cast<int>(procedurals.size());
+    v.mediumCount = static_cast<int>(media.size());
     v.domeLightIndex = domeLightIndex_;
     v.hasDispersion = 0;
     for (const Material& m : materials) {
@@ -328,6 +556,12 @@ SceneView Scene::view() const {
     v.motionXforms = motionXforms.empty() ? nullptr : motionXforms.data();
     v.cameraMotionXforms = cameraMotionXforms.empty() ? nullptr : cameraMotionXforms.data();
     v.cameraMotionKeyCount = cameraMotionXforms.empty() ? 1 : int(cameraMotionXforms.size());
+    v.lightBvh           = lightBvhNodes_.empty() ? nullptr : lightBvhNodes_.data();
+    v.lightBvhNodeCount  = int(lightBvhNodes_.size());
+    v.infiniteLightIndices = infiniteLightIndices_.empty() ? nullptr : infiniteLightIndices_.data();
+    v.infiniteLightCount   = int(infiniteLightIndices_.size());
+    v.infiniteLightPower   = infiniteLightPower_;
+    v.finiteLightPower     = finiteLightPower_;
     return v;
 }
 
