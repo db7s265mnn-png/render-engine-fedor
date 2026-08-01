@@ -1035,9 +1035,14 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
         if (!shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) break;
 #if !defined(__CUDACC__)
-        if (guiding && guiding->active() && !bs.specular)
-            guiding->recordBounce(si.ns, wiWorld, bs.pdf, weight, bs.specular, mat.roughness, lw.eta,
+        // Always record the bounce so radiance can propagate through delta /
+        // near-spec glass (OpenPGL needs isDelta segments). Sampling the guide
+        // still stays diffuse-only (guideReady above).
+        if (guiding && guiding->active()) {
+            const bool deltaSeg = bs.specular || isNearSpecularLobe(lw);
+            guiding->recordBounce(si.ns, wiWorld, bs.pdf, weight, deltaSeg, mat.roughness, lw.eta,
                                   1.0f);
+        }
 #endif
 
         throughput *= weight;

@@ -894,10 +894,11 @@ public:
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==0||integrator==1")
                          .withTooltip("Learn incident radiance while rendering and guide eye-path "
-                                      "BSDF samples (CPU / Embree). Works with Path Tracer and BDPT "
-                                      "(eye subpath only — does not fight light tracing / MNEE).\n"
-                                      "Kicks in after the first training passes; helps indirect-"
-                                      "heavy scenes."));
+                                      "BSDF samples (CPU / Embree). Works with Path Tracer and BDPT.\n"
+                                      "Diffuse receivers only — glass/mirrors stay BSDF-sampled; "
+                                      "caustic radiance (MNEE / photons / paths through glass) trains "
+                                      "the field at the floor so guides learn bright caustic regions.\n"
+                                      "Kicks in after the first training passes."));
         addParameter(Parameter::makeBool("motionblur", "Enable Motion Blur", false)
                          .withGroup("Motion Blur")
                          .withTooltip("Camera and geometry motion blur across the shutter "

@@ -250,8 +250,10 @@ public:
         const bool usePhoton = !useSpectral && causticsUsePhotonMap(settings, &scene);
         const bool useMnee = pathTracer && causticsUseMnee(settings, &scene);
 #if SOLSTICE_HAVE_OPENPGL
-        // OpenPGL guides eye-path diffuse sampling on PT and BDPT. Light subpaths
-        // and MNEE/photon caustic families stay unguided so MIS partitions hold.
+        // OpenPGL guides eye-path diffuse sampling on PT and BDPT. Specular /
+        // near-spec vertices are recorded as delta (radiance propagates for
+        // caustic training) but never guide-sampled; MNEE/photon energy trains
+        // diffuse receivers when Indirect Guides is on.
         const bool useGuiding = settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() &&
                                 (pathTracer || useBdpt);
 #else

@@ -719,18 +719,19 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 
 #if !defined(__CUDACC__)
         bool guideReady = false;
+        bool trainGuide = false;
         if (guiding && guiding->active()) {
             // Always open a segment so recordBounce cannot overwrite a prior
             // diffuse vertex when we hit delta glass (was corrupting OpenPGL chains).
             guiding->beginSegment(si.p, wo);
-            // Do not guide specular / near-specular / caustic casters — OpenPGL
-            // best practice; MNEE / LT / photons own that family.
-            const bool guideable =
-                !lw.delta && !isNearSpecularLobe(lw) && lw.diffuse > 1e-4f;
-            if (guideable) guideReady = guiding->prepare(si.p, si.ns, rng);
+            // Do not guide-sample specular / near-specular / caustic casters.
+            // Still train at diffuse receivers (including caustic energy below).
+            trainGuide = !lw.delta && !isNearSpecularLobe(lw) && lw.diffuse > 1e-4f;
+            if (trainGuide) guideReady = guiding->prepare(si.p, si.ns, rng);
         }
 #else
         const bool guideReady = false;
+        const bool trainGuide = false;
         (void)guiding;
 #endif
 
@@ -744,11 +745,16 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     if (depth > 0 && !specularBounce)
                         contrib = clampContribution(contrib, settings.clampIndirect);
                     radiance += contrib;
+#if !defined(__CUDACC__)
+                    // Photons are the caustic estimator — teach the guide at this
+                    // diffuse receiver so later eye samples favour bright regions.
+                    if (trainGuide) guiding->addScattered(g);
+#endif
                 }
             }
             const int nLightSamples = srMax(1, settings.lightSamples);
             Vec3 neeSum(0.0f);
-            Vec3 neeSumGuide(0.0f);  // clear-path only — do not train guiding on MNEE
+            Vec3 neeSumGuide(0.0f);  // clear-path + MNEE at diffuse receivers
             for (int ls = 0; ls < nLightSamples; ++ls) {
                 float selectPdf = 0.0f;
                 const int li = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
@@ -869,7 +875,10 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                                                      ? settings.clampIndirect * 4.0f
                                                      : 0.0f);  // caustics keep more energy
                         neeSum += c;
-                        // Do NOT add MNEE into OpenPGL — it already owns this family.
+                        // Train the diffuse receiver (floor under glass). Do not
+                        // guide-sample on the glass itself — only learn incident
+                        // caustic radiance here when Indirect Guides is on.
+                        if (trainGuide) neeSumGuide += c;
                     }
                 }
             }
@@ -970,9 +979,13 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
         if (!shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) break;
 #if !defined(__CUDACC__)
-        // Specular / near-spec bounces are not guided — skip training on them.
-        if (guiding && guiding->active() && !bs.specular && !isNearSpecularLobe(lw))
-            guiding->recordBounce(si.ns, wiWorld, bs.pdf, weight, bs.specular, mat.roughness, lw.eta, 1.0f);
+        // Record every bounce: delta/near-spec flagged so OpenPGL propagates
+        // caustic radiance back to the diffuse receiver. Guide sampling stays
+        // diffuse-only (see guideReady / guideable above).
+        if (guiding && guiding->active()) {
+            const bool deltaSeg = bs.specular || isNearSpecularLobe(lw);
+            guiding->recordBounce(si.ns, wiWorld, bs.pdf, weight, deltaSeg, mat.roughness, lw.eta, 1.0f);
+        }
 #endif
 
         throughput *= weight;

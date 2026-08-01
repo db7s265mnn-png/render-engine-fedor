@@ -558,10 +558,11 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         }
 
 #if SOLSTICE_HAVE_OPENPGL
-        // Train only non-specular bounces (same as PT) — keeps the field for
-        // indirect diffuse, not MNEE / light-trace caustic families.
-        if (cfg.eyePath && cfg.guiding && cfg.guiding->active() && !bs.specular) {
-            cfg.guiding->recordBounce(cur.ns, wiWorld, bs.pdf, bs.weight, bs.specular, cur.mat.roughness,
+        // Record every bounce (delta/near-spec flagged) so caustic radiance
+        // propagates back to diffuse receivers. Guide sampling stays diffuse-only.
+        if (cfg.eyePath && cfg.guiding && cfg.guiding->active()) {
+            const bool deltaSeg = bs.specular || cur.nearSpec;
+            cfg.guiding->recordBounce(cur.ns, wiWorld, bs.pdf, bs.weight, deltaSeg, cur.mat.roughness,
                                       computeLobes(cur.mat).eta, 1.0f);
         }
 #endif
@@ -750,6 +751,10 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (t > 2) c = clampContribution(c, settings.clampIndirect);
             if (!isFinite(c)) continue;
             L += c;
+#if SOLSTICE_HAVE_OPENPGL
+            if (guiding && guiding->active() && E.guideSeg)
+                guiding->addScatteredAt(E.guideSeg, g);
+#endif
         }
     }
 
@@ -1071,7 +1076,15 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (settings.causticClamp > 0.0f) c = clampContribution(c, settings.causticClamp);
             if (!isFinite(c)) continue;
             L += c;
-            // Do not train OpenPGL on MNEE caustic energy — same partition as PT.
+#if SOLSTICE_HAVE_OPENPGL
+            // Teach Indirect Guides at the diffuse SDS receiver (floor under
+            // glass). Do not sample the guide on near-spec glass itself.
+            if (guiding && guiding->active() && E.guideSeg && !E.nearSpec && !isBlack(E.beta)) {
+                const Vec3 local(c.x / srMax(1e-8f, E.beta.x), c.y / srMax(1e-8f, E.beta.y),
+                                 c.z / srMax(1e-8f, E.beta.z));
+                guiding->addScatteredAt(E.guideSeg, local);
+            }
+#endif
             continue;
         }
 
