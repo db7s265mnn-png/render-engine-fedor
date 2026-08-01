@@ -41,6 +41,7 @@
 #include "render/scene_picker.h"
 #include "scene/scene.h"
 #include "scene/tessellate.h"
+#include "scene/displace.h"
 #include "solstice_config.h"
 #include "ui/log_panel.h"
 #include "ui/material_network_view.h"
@@ -425,6 +426,7 @@ void MainWindow::onTimelineFrameChanged(int) {
     }
     // Scrubbing coalesces via the single-shot cook timer; clicks/play are immediate.
     const int delay = (timelineBar_ && timelineBar_->isScrubbing()) ? 8 : 0;
+    timelineFrameCook_ = true;
     scheduleCook(delay);
 }
 
@@ -953,8 +955,35 @@ void MainWindow::cookNow() {
 
     // Publish only after motion keys are fully installed.
     const std::string tessKey = tessellationFingerprint(*builtScene);
-    bool needTess = renderRequested_;
-    if (!needTess && !tessCache_.empty() && tessKey != tessCacheFingerprint_) {
+    const bool frameCook = timelineFrameCook_;
+    timelineFrameCook_ = false;
+    const bool displaceOn = builtScene->settings.enableDisplacement != 0;
+
+    bool needTess = renderRequested_ && displaceOn;
+    bool partialTimedTess = false;
+    if (!needTess && frameCook && renderArmed() && displaceOn) {
+        // Play / scrub: re-dice only animated displace meshes; static grounds keep cache.
+        for (size_t mi = 0; mi < builtScene->meshes.size(); ++mi) {
+            const MeshPtr& m = builtScene->meshes[mi];
+            if (!m || !m->timeDependent) continue;
+            for (const InstanceData& inst : builtScene->instances) {
+                if (inst.meshIndex != int(mi)) continue;
+                if (inst.materialIndex < 0 ||
+                    size_t(inst.materialIndex) >= builtScene->materials.size())
+                    break;
+                if (materialHasGeometricDisplacement(builtScene->materials[size_t(inst.materialIndex)])) {
+                    partialTimedTess = true;
+                    break;
+                }
+            }
+            if (partialTimedTess) break;
+        }
+    }
+    if (!displaceOn) {
+        // Cages only — drop any densify so we never apply stale Pref meshes.
+        tessCache_.clear();
+        tessCacheFingerprint_.clear();
+    } else if (!needTess && !partialTimedTess && !tessCache_.empty() && tessKey != tessCacheFingerprint_) {
         // Subdiv / Screen Adaptive / Dicing Quality / frustum / etc. changed.
         // Keep the previous densify on screen — only an explicit Start re-dices
         // (renderRequested_). While Stopped, drop the cache so cages show.
@@ -964,13 +993,12 @@ void MainWindow::cookNow() {
         }
     }
 
-    if (!needTess) applyTessellationCache(*builtScene);
-    else {
-        // Free BVH / cooked scene / accum RAM before densify, but keep the last
-        // beauty in displayHold_ + RenderView so Stop→Start does not flash black.
+    auto runTess = [&](bool onlyTimeDependent) {
         session_.releaseDeviceKeepDisplay();
-        tessCache_.clear();
-        tessCacheFingerprint_.clear();
+        if (!onlyTimeDependent) {
+            tessCache_.clear();
+            tessCacheFingerprint_.clear();
+        }
         scene_.reset();
         const CameraData diceCam = [&]() {
             CameraData cam = builtScene->camera;
@@ -986,23 +1014,25 @@ void MainWindow::cookNow() {
             return cam;
         }();
         try {
-            // Fingerprint authored cages before meshes are replaced.
-            tessCacheFingerprint_ = tessellationFingerprint(*builtScene);
+            if (!onlyTimeDependent) tessCacheFingerprint_ = tessellationFingerprint(*builtScene);
             auto lastUi = std::chrono::steady_clock::now();
-            tessellateSceneForRender(*builtScene, diceCam, [&](const std::string& msg) {
-                if (!renderView_) return;
-                renderView_->setStatusTextRight(QString::fromStdString(msg));
-                const auto now = std::chrono::steady_clock::now();
-                if (now - lastUi < std::chrono::milliseconds(50)) return;
-                lastUi = now;
-                // Keep UI alive during long dice without re-entering Start/Stop.
-                QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
-            });
+            tessellateSceneForRender(
+                *builtScene, diceCam,
+                [&](const std::string& msg) {
+                    if (!renderView_) return;
+                    renderView_->setStatusTextRight(QString::fromStdString(msg));
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - lastUi < std::chrono::milliseconds(50)) return;
+                    lastUi = now;
+                    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+                },
+                onlyTimeDependent);
             if (renderView_) renderView_->setStatusTextRight(QString());
-            storeTessellationCache(*builtScene);
+            if (onlyTimeDependent) mergeTessellationCache(*builtScene);
+            else storeTessellationCache(*builtScene);
         } catch (const std::bad_alloc&) {
             if (renderView_) renderView_->setStatusTextRight(QString());
-            tessCacheFingerprint_.clear();
+            if (!onlyTimeDependent) tessCacheFingerprint_.clear();
             logError("Render tessellation ran out of memory — using undisplaced cages");
             appMessageBox(this, QStringLiteral("Render"),
                           QStringLiteral("Tessellation ran out of memory.\n"
@@ -1010,12 +1040,22 @@ void MainWindow::cookNow() {
                           QMessageBox::Ok);
         } catch (const std::exception& ex) {
             if (renderView_) renderView_->setStatusTextRight(QString());
-            tessCacheFingerprint_.clear();
+            if (!onlyTimeDependent) tessCacheFingerprint_.clear();
             logError(std::string("Render tessellation failed: ") + ex.what());
             appMessageBox(this, QStringLiteral("Render"),
                           QStringLiteral("Tessellation failed:\n%1").arg(ex.what()),
                           QMessageBox::Ok);
         }
+    };
+
+    if (needTess) {
+        runTess(false);
+    } else if (partialTimedTess) {
+        // Restore densify for static meshes, then dice only timeDependent cages.
+        applyTessellationCache(*builtScene, /*skipTimeDependent=*/true);
+        runTess(true);
+    } else if (displaceOn) {
+        applyTessellationCache(*builtScene, /*skipTimeDependent=*/false);
     }
 
     scene_ = builtScene;
@@ -1025,7 +1065,7 @@ void MainWindow::cookNow() {
     updateStatusBar();
     if (!timelineInteractive) refreshViewportCameraMenu();
 
-    if (renderRequested_ || needTess) {
+    if (renderRequested_ || needTess || partialTimedTess) {
         if (renderRequested_ || renderArmed()) setRenderArmed(true);
         restartRender();
     } else if (renderArmed()) {
@@ -1034,16 +1074,19 @@ void MainWindow::cookNow() {
     }
 }
 
-void MainWindow::applyTessellationCache(Scene& scene) const {
+void MainWindow::applyTessellationCache(Scene& scene, bool skipTimeDependent) const {
     if (tessCache_.empty()) return;
     bool swapped = false;
     for (const PrimRecord& prim : scene.prims) {
         if (prim.instanceIndex < 0 || size_t(prim.instanceIndex) >= scene.instances.size()) continue;
         InstanceData& inst = scene.instances[size_t(prim.instanceIndex)];
         if (inst.meshIndex < 0 || size_t(inst.meshIndex) >= scene.meshes.size()) continue;
+        MeshPtr& mesh = scene.meshes[size_t(inst.meshIndex)];
+        if (!mesh) continue;
+        if (skipTimeDependent && mesh->timeDependent) continue;
         for (const auto& entry : tessCache_) {
             if (entry.first != prim.path || !entry.second) continue;
-            scene.meshes[size_t(inst.meshIndex)] = entry.second;
+            mesh = entry.second;
             swapped = true;
             break;
         }
@@ -1059,6 +1102,24 @@ void MainWindow::storeTessellationCache(const Scene& scene) {
         const InstanceData& inst = scene.instances[size_t(prim.instanceIndex)];
         if (inst.meshIndex < 0 || size_t(inst.meshIndex) >= scene.meshes.size()) continue;
         tessCache_.push_back({prim.path, scene.meshes[size_t(inst.meshIndex)]});
+    }
+}
+
+void MainWindow::mergeTessellationCache(const Scene& scene) {
+    for (const PrimRecord& prim : scene.prims) {
+        if (prim.instanceIndex < 0 || size_t(prim.instanceIndex) >= scene.instances.size()) continue;
+        const InstanceData& inst = scene.instances[size_t(prim.instanceIndex)];
+        if (inst.meshIndex < 0 || size_t(inst.meshIndex) >= scene.meshes.size()) continue;
+        const MeshPtr& mesh = scene.meshes[size_t(inst.meshIndex)];
+        if (!mesh || !mesh->timeDependent) continue;
+        bool found = false;
+        for (auto& entry : tessCache_) {
+            if (entry.first != prim.path) continue;
+            entry.second = mesh;
+            found = true;
+            break;
+        }
+        if (!found) tessCache_.push_back({prim.path, mesh});
     }
 }
 

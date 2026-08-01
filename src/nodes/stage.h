@@ -28,6 +28,8 @@ struct StagePrim {
     int subdivIterations = 3;
     float dicingQuality = 1.0f;
     float boundsPadding = 0.0f;
+    // Animated Alembic/USD (deform and/or xform) — timeline Play re-dices these.
+    bool timeDependent = false;
     Material material;
     bool materialAssigned = false;
     QString materialName;

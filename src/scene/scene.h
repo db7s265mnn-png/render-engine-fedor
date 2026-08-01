@@ -28,6 +28,9 @@ struct Mesh {
     int subdivType = kSubdivCatclark;
     int subdivIterations = 3;
     float dicingQuality = 1.0f;
+    // True when cage/xform changes with the timeline (animated Alembic/USD).
+    // Static grounds stay false so Play re-dices only deforming assets.
+    bool timeDependent = false;
     // Deformation motion blur: positions for keys 1..N-1 (key 0 is `positions`).
     // Each entry must match `positions.size()` when used.
     std::vector<std::vector<Vec3>> motionPositions;

@@ -124,6 +124,7 @@ public:
             out.type = PrimType::Mesh;
             out.mesh = prim.mesh;
             out.xform = nodeTransform * prim.transform;
+            out.timeDependent = prim.timeDependent;
             out.sourceNode = name();
             QString leaf = QString::fromStdString(prim.path);
             if (leaf.startsWith('/')) leaf.remove(0, 1);
@@ -228,6 +229,9 @@ public:
                 out.type = PrimType::Mesh;
                 out.mesh = prim.mesh;
                 out.xform = nodeTransform * prim.transform;
+                // USD loader has weak timeSamples support; treat as animated until
+                // proven static (staticReuseOk_).
+                out.timeDependent = !staticReuseOk_;
                 out.sourceNode = name();
                 out.path = (meshRoot.endsWith('/') ? meshRoot : meshRoot + "/") + leaf;
                 out.material = Material();
@@ -841,7 +845,14 @@ public:
                              "edge length ≈ 1/DicingQuality pixels (Quality 1 ≈ 1 micropolygon per "
                              "pixel). Only camera-visible faces (plus Frustum Padding). "
                              "Per-mesh Subdiv Iterations are ignored — density comes from Quality. "
-                             "Re-tessellates only on Start."));
+                             "Re-tessellates on Start; animated Alembic/USD also re-dice on frame "
+                             "change while Start is armed."));
+        addParameter(Parameter::makeBool("enabledisplacement", "Enable Displacement", true)
+                         .withGroup("Subdivision")
+                         .withTooltip(
+                             "Master switch for geometric displacement and densify/dicing. "
+                             "Off: render authored cages with no subdiv and no displace "
+                             "(fast Play / lookdev). On: normal tessellation + displace."));
         addParameter(Parameter::makeInt("dicingpolylimitm", "Dicing Poly Limit (M)", 10, 1, 200)
                          .withGroup("Subdivision")
                          .withTooltip("Safety fuse: stop densify / Screen Adaptive once the mesh "
@@ -890,6 +901,7 @@ public:
         settings.frustumCull = boolValue("frustumcull", true) ? 1 : 0;
         settings.frustumPadding = float(floatValue("frustumpadding", 10.0));
         settings.screenAdaptive = boolValue("screenadaptive", false) ? 1 : 0;
+        settings.enableDisplacement = boolValue("enabledisplacement", true) ? 1 : 0;
         settings.dicingPolyLimitM = std::clamp(intValue("dicingpolylimitm", 10), 1, 200);
         settings.dicingCameraMode =
             intValue("dicingcamera", 0) == 1 ? kDicingCameraCustom : kDicingCameraRender;

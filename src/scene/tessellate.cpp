@@ -1199,10 +1199,8 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
     const size_t polyBudget = tessTriangleBudget(rs);
 
     const bool needDisp = materialHasGeometricDisplacement(mat);
-    // Tessellation exists to feed displacement (and Pref). Without a displace
-    // shader, leave the authored cage alone — default catclark/3 must not explode
-    // every primitive in the default scene.
-    if (!needDisp) {
+    // Master switch: skip subdiv + displace entirely (cages only).
+    if (rs.enableDisplacement == 0 || !needDisp) {
         return std::make_shared<Mesh>(std::move(cage));
     }
 
@@ -1224,6 +1222,7 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
     const int authoredSubdivIterations = cage.subdivIterations;
     const float authoredDicingQuality = cage.dicingQuality;
     const float authoredPad = cage.boundsPadding;
+    const bool authoredTimeDependent = cage.timeDependent;
 
     // Steal cage storage — no parallel cage+work copy while refining.
     auto work = std::make_shared<Mesh>(std::move(cage));
@@ -1279,13 +1278,16 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
             displaced->subdivType = authoredSubdivType;
             displaced->subdivIterations = authoredSubdivIterations;
             displaced->dicingQuality = authoredDicingQuality;
+            displaced->timeDependent = authoredTimeDependent;
             return displaced;
         } catch (const std::bad_alloc&) {
             logWarning("tessellate: displace OOM — returning densified cage without Pref lock");
+            work->timeDependent = authoredTimeDependent;
             work->computeBounds();
             return work;
         }
     }
+    work->timeDependent = authoredTimeDependent;
     work->computeBounds();
     return work;
 }
@@ -1293,8 +1295,12 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
 }  // namespace
 
 void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera,
-                              const TessProgressFn& progress) {
+                              const TessProgressFn& progress, bool onlyTimeDependent) {
     if (scene.meshes.empty() || scene.instances.empty()) return;
+    if (scene.settings.enableDisplacement == 0) {
+        scene.finalize();
+        return;
+    }
 
     std::vector<std::vector<const InstanceData*>> byMesh(scene.meshes.size());
     for (const InstanceData& inst : scene.instances) {
@@ -1308,6 +1314,7 @@ void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera,
     for (size_t mi = 0; mi < scene.meshes.size(); ++mi) {
         MeshPtr& mesh = scene.meshes[mi];
         if (!mesh || byMesh[mi].empty()) continue;
+        if (onlyTimeDependent && !mesh->timeDependent) continue;
         const int matIndex = byMesh[mi][0]->materialIndex;
         Material mat;
         if (matIndex >= 0 && size_t(matIndex) < scene.materials.size())
@@ -1420,6 +1427,8 @@ std::string tessellationFingerprint(const Scene& scene) {
     key += std::to_string(rs.frustumPadding);
     key += ";sa=";
     key += std::to_string(rs.screenAdaptive);
+    key += ";ed=";
+    key += std::to_string(rs.enableDisplacement);
     key += ";dpl=";
     key += std::to_string(rs.dicingPolyLimitM);
     key += ";dc=";

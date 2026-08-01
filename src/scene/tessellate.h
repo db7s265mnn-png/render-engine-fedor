@@ -17,8 +17,11 @@ using TessProgressFn = std::function<void(const std::string& message)>;
 // Apply tessellation + displacement to every mesh that needs it.
 // Mutates `scene.meshes` in place. Call once at Render / headless start.
 // Uses CPU threads from Render Settings, reserving 2 cores for UI/OS.
+// If onlyTimeDependent is true, only meshes with Mesh::timeDependent are diced
+// (static grounds keep their prior densify from the tess cache).
 void tessellateSceneForRender(Scene& scene, const CameraData& dicingCamera,
-                              const TessProgressFn& progress = {});
+                              const TessProgressFn& progress = {},
+                              bool onlyTimeDependent = false);
 
 // Authored tessellation inputs (Render Settings + per-mesh subdiv attrs +
 // displacement bindings). When this changes, the tess cache is stale.

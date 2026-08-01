@@ -269,13 +269,15 @@ Mat4 interpolatedLocalXform(IXformSchema& schema, double time) {
     return lerpMat4(a, b, blend.alpha);
 }
 
-void traverse(const IObject& object, const Mat4& parentTransform, LoadContext& context) {
+void traverse(const IObject& object, const Mat4& parentTransform, bool parentXformAnimated,
+              LoadContext& context) {
     const size_t childCount = object.getNumChildren();
     for (size_t i = 0; i < childCount; ++i) {
         IObject child(object, object.getChildHeader(i).getName());
         if (!child.valid()) continue;
 
         Mat4 transform = parentTransform;
+        bool xformAnimated = parentXformAnimated;
         const ObjectHeader& header = child.getHeader();
         const std::string path = child.getFullName();
 
@@ -283,21 +285,25 @@ void traverse(const IObject& object, const Mat4& parentTransform, LoadContext& c
             IXform xform(child, kWrapExisting);
             IXformSchema& schema = xform.getSchema();
             updateTimeRange(*context.out, schema.getTimeSampling(), schema.getNumSamples());
+            if (schema.getNumSamples() > 1) xformAnimated = true;
             const Mat4 local = interpolatedLocalXform(schema, context.options.time);
             transform = schema.getInheritsXforms() ? parentTransform * local : local;
         } else if (IPolyMesh::matches(header)) {
             IPolyMesh polyMesh(child, kWrapExisting);
             IPolyMeshSchema& schema = polyMesh.getSchema();
             if (context.options.pathFilter.empty() || globMatch(context.options.pathFilter, path)) {
+                const bool meshAnimated = schema.getNumSamples() > 1;
                 MeshPtr mesh = readPolygonSchema(schema, context, false);
                 if (mesh) {
                     mesh->name = child.getName();
+                    mesh->timeDependent = meshAnimated || xformAnimated;
                     mesh->validate();
                     AlembicPrim prim;
                     prim.path = path;
                     prim.name = child.getName();
                     prim.mesh = std::move(mesh);
                     prim.transform = transform;
+                    prim.timeDependent = meshAnimated || xformAnimated;
                     context.out->prims.push_back(std::move(prim));
                 } else {
                     ++context.skipped;
@@ -307,9 +313,11 @@ void traverse(const IObject& object, const Mat4& parentTransform, LoadContext& c
             ISubD subd(child, kWrapExisting);
             ISubDSchema& schema = subd.getSchema();
             if (context.options.pathFilter.empty() || globMatch(context.options.pathFilter, path)) {
+                const bool meshAnimated = schema.getNumSamples() > 1;
                 MeshPtr mesh = readPolygonSchema(schema, context, true);
                 if (mesh) {
                     mesh->name = child.getName();
+                    mesh->timeDependent = meshAnimated || xformAnimated;
                     mesh->validate();
                     AlembicPrim prim;
                     prim.path = path;
@@ -317,6 +325,7 @@ void traverse(const IObject& object, const Mat4& parentTransform, LoadContext& c
                     prim.mesh = std::move(mesh);
                     prim.transform = transform;
                     prim.isSubd = true;
+                    prim.timeDependent = meshAnimated || xformAnimated;
                     context.out->prims.push_back(std::move(prim));
                 } else {
                     ++context.skipped;
@@ -327,7 +336,7 @@ void traverse(const IObject& object, const Mat4& parentTransform, LoadContext& c
             ++context.skipped;
         }
 
-        traverse(child, transform, context);
+        traverse(child, transform, xformAnimated, context);
     }
 }
 
@@ -366,7 +375,7 @@ bool loadAlembic(const std::string& filePath, const AlembicLoadOptions& options,
         context.out = &out;
 
         out.archiveInfo = archive.getName();
-        traverse(archive.getTop(), Mat4::identity(), context);
+        traverse(archive.getTop(), Mat4::identity(), false, context);
 
         if (out.prims.empty()) {
             error = "no polygonal geometry found in " + filePath;

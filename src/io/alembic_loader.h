@@ -26,6 +26,8 @@ struct AlembicPrim {
     MeshPtr mesh;
     Mat4 transform;      // world transform at the requested time
     bool isSubd = false;
+    // Deforming mesh and/or animated ancestor xform → timeline must re-dice.
+    bool timeDependent = false;
 };
 
 struct AlembicContents {

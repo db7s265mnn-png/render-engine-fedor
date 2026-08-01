@@ -2828,6 +2828,65 @@ void testScreenAdaptiveQualityCoarse() {
     std::printf("  Q=0.01 close-up tris=%zu (limit would be 50M)\n", tris);
 }
 
+void testEnableDisplacementMasterSwitch() {
+    std::printf("enable-displacement-master-switch\n");
+    auto ground = makeGridMesh(4.0f, 4.0f, 2, 2);
+    check(ground != nullptr, "ground cage");
+    ground->subdivType = kSubdivLinear;
+    ground->subdivIterations = 3;
+    ground->dicingQuality = 1.0f;
+    const size_t cageTris = ground->triangleCount();
+
+    Material mat;
+    mat.displacementHeight = 0.1f;
+    mat.displacementScale = 1.0f;
+    mat.displacementZeroValue = 0.0f;
+
+    Scene on;
+    on.settings.screenAdaptive = 0;
+    on.settings.frustumCull = 0;
+    on.settings.enableDisplacement = 1;
+    MeshPtr densified = tessDisplaceForTest(ground, mat, on, 3);
+    check(densified && densified->triangleCount() > cageTris, "displace on densifies");
+
+    auto ground2 = makeGridMesh(4.0f, 4.0f, 2, 2);
+    ground2->subdivType = kSubdivLinear;
+    ground2->subdivIterations = 3;
+    Scene off;
+    off.settings.screenAdaptive = 0;
+    off.settings.frustumCull = 0;
+    off.settings.enableDisplacement = 0;
+    MeshPtr cages = tessDisplaceForTest(ground2, mat, off, 3);
+    check(cages && cages->triangleCount() == cageTris, "displace off keeps cage tris");
+    check(cages->restPositions.empty(), "displace off has no Pref lock");
+    std::printf("  on=%zu off=%zu cage=%zu\n", densified->triangleCount(), cages->triangleCount(),
+                cageTris);
+}
+
+void testTimeDependentStamp() {
+    std::printf("time-dependent-mesh-stamp\n");
+    auto m = std::make_shared<Mesh>();
+    m->positions = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 1, 0)};
+    m->indices = {0, 1, 2};
+    m->computeNormalsIfMissing();
+    m->timeDependent = true;
+    m->subdivType = kSubdivLinear;
+    m->subdivIterations = 2;
+
+    Material mat;
+    mat.displacementHeight = 0.01f;
+    mat.displacementScale = 1.0f;
+
+    Scene scene;
+    scene.settings.enableDisplacement = 1;
+    scene.settings.frustumCull = 0;
+    scene.settings.screenAdaptive = 0;
+    MeshPtr out = tessDisplaceForTest(m, mat, scene, 2);
+    check(out != nullptr, "timeDependent tess mesh");
+    check(out->timeDependent, "timeDependent preserved through tess+displace");
+    std::printf("  timeDependent ok tris=%zu\n", out->triangleCount());
+}
+
 void testScreenAdaptiveNearDensityDip() {
     std::printf("screen-adaptive-near-density-dip\n");
     // Check whether mean *screen* edge length is non-monotonic with view depth
@@ -4193,6 +4252,8 @@ int main() {
         testFrustumLocalItersNotClampedOnDenseCage();
         testScreenAdaptiveTessellation();
         testScreenAdaptiveQualityCoarse();
+        testEnableDisplacementMasterSwitch();
+        testTimeDependentStamp();
         testScreenAdaptiveNearDensityDip();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
@@ -4229,6 +4290,8 @@ int main() {
     testFrustumLocalItersNotClampedOnDenseCage();
     testScreenAdaptiveTessellation();
     testScreenAdaptiveQualityCoarse();
+    testEnableDisplacementMasterSwitch();
+    testTimeDependentStamp();
     testScreenAdaptiveNearDensityDip();
     testTriplanarDisplacementArtifacts();
     testDefaultGroundDisplacement();

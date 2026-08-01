@@ -190,6 +190,7 @@ ScenePtr Stage::toScene() const {
                     renderMesh->subdivIterations = prim.subdivIterations;
                     renderMesh->dicingQuality = prim.dicingQuality;
                     renderMesh->boundsPadding = prim.boundsPadding;
+                    renderMesh->timeDependent = prim.timeDependent;
                 }
                 if (materialHasGeometricDisplacement(material)) {
                     // Unique mesh entry so Render can tessellate without sharing cages.
@@ -198,6 +199,7 @@ ScenePtr Stage::toScene() const {
                     cageCopy->subdivIterations = prim.subdivIterations;
                     cageCopy->dicingQuality = prim.dicingQuality;
                     cageCopy->boundsPadding = prim.boundsPadding;
+                    cageCopy->timeDependent = prim.timeDependent;
                     meshIndex = scene->addMesh(cageCopy);
                     renderMesh = cageCopy;
                 } else {

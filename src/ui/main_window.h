@@ -73,8 +73,9 @@ private:
     void cookNow();
     void restartRender();
     void enterIdlePlaceholder();
-    void applyTessellationCache(Scene& scene) const;
+    void applyTessellationCache(Scene& scene, bool skipTimeDependent = false) const;
     void storeTessellationCache(const Scene& scene);
+    void mergeTessellationCache(const Scene& scene);
     CameraData resolveDicingCamera(const Scene& scene) const;
     // Start pressed (Stop not): edits may cook + restart the session.
     bool renderArmed() const;
@@ -121,6 +122,8 @@ private:
     std::atomic<bool> framePending_{false};
     bool cameraOverride_ = false;
     bool renderRequested_ = false;
+    // Set by onTimelineFrameChanged; cookNow re-dices only timeDependent meshes.
+    bool timelineFrameCook_ = false;
     // Empty = free persp; otherwise Scene Network camera node name (look-through).
     QString lookThroughCameraName_;
     // Source LOP node name for viewport F / framing (survives Select-tool picks).

@@ -428,6 +428,8 @@ struct RenderSettingsData {
     int dicingCameraMode = kDicingCameraRender;  // render camera or custom
     // Safety fuse for Screen Adaptive / densify (millions of triangles). Default 10M.
     int dicingPolyLimitM = 10;
+    // Master switch: off = render cages, skip subdiv + geometric displacement.
+    int enableDisplacement = 1;
 };
 
 // ---------------------------------------------------------------------------
