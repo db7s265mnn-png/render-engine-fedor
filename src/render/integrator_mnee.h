@@ -719,6 +719,92 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         const Frame frame(si.ns);
         const LobeWeights lw = computeLobes(mat);
 
+        // Arnold / Autodesk Standard Surface base mix — same lottery as PathIntegrator.
+        // PathMnee previously skipped SSS entirely whenever caustics were on.
+        const float sssWeight = saturatef(mat.subsurface);
+        if (materialSupportsSss(mat) && rng.nextFloat() < sssWeight) {
+            Material specMat = sssSpecularEntryMaterial(mat);
+            const Vec3 woLocalEntry = frame.toLocal(wo);
+            const LobeWeights specLw = computeLobes(specMat);
+            const float pSpec = sssEntrySpecularProb(specMat, woLocalEntry);
+
+            if (pSpec > 0.0f) {
+                const Vec3 nee =
+                    nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding);
+                Vec3 contrib = throughput * nee;
+                if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
+                radiance += contrib;
+#if !defined(__CUDACC__)
+                if (guiding && guiding->active()) guiding->addScattered(nee);
+#endif
+            }
+
+            if (pSpec > 0.0f && rng.nextFloat() < pSpec) {
+                throughput /= pSpec;
+                const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
+                const BsdfSample specBs =
+                    bsdfSampleLocal(specMat, woLocalEntry, uSpec, rng.nextFloat(), rng.nextFloat(),
+                                    rng.nextFloat());
+                if (specBs.pdf > 0.0f && !isBlack(specBs.weight)) {
+                    const Vec3 wiWorld = normalize(frame.toWorld(specBs.wi));
+#if !defined(__CUDACC__)
+                    if (guiding && guiding->active())
+                        guiding->recordBounce(si.ns, wiWorld, specBs.pdf, specBs.weight, true,
+                                              mat.roughness, computeLobes(specMat).eta, 1.0f);
+#endif
+                    throughput *= specBs.weight;
+                    origin = offsetRayOrigin(si.p, si.ng, wiWorld);
+                    direction = wiWorld;
+                    bsdfPdf = specBs.pdf;
+                    specularBounce = specBs.specular;
+                    rayKind = nextRayShadeKind(specBs, specLw);
+                    ++depth;
+                    continue;
+                }
+                break;
+            }
+            if (pSpec > 0.0f && pSpec < 0.999f) throughput /= (1.0f - pSpec);
+
+            const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
+            Material lambert = sssExitLambertMaterial();
+            SurfaceInteraction ssSi = si;
+            ssSi.p = walk.exitP;
+            ssSi.ns = walk.exitN;
+            ssSi.ng = walk.exitN;
+            const Frame ssFrame(walk.exitN);
+            const Vec3 nee =
+                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding);
+            Vec3 contrib = throughput * walk.pathWeight * nee;
+            if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
+            radiance += contrib;
+#if !defined(__CUDACC__)
+            if (guiding && guiding->active()) guiding->addScattered(walk.pathWeight * nee);
+#endif
+            const BsdfSample ssBs =
+                bsdfSampleLocal(lambert, ssFrame.toLocal(walk.exitWo), rng.nextFloat(), rng.nextFloat(),
+                                rng.nextFloat(), rng.nextFloat());
+            if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
+                const Vec3 wiWorld = normalize(ssFrame.toWorld(ssBs.wi));
+#if !defined(__CUDACC__)
+                if (guiding && guiding->active())
+                    guiding->recordBounce(walk.exitN, wiWorld, ssBs.pdf, walk.pathWeight * ssBs.weight,
+                                          false, 1.0f, 1.0f, 1.0f);
+#endif
+                throughput *= walk.pathWeight * ssBs.weight;
+                origin = offsetRayOrigin(walk.exitP, walk.exitN, wiWorld);
+                direction = wiWorld;
+                bsdfPdf = ssBs.pdf;
+                specularBounce = false;
+                rayKind = RayShadeKind::DiffuseReflection;
+                sawNonSpecular = true;
+                mneeFamily = false;
+                photonFamily = false;
+                ++depth;
+                continue;
+            }
+            break;
+        }
+
 #if !defined(__CUDACC__)
         bool guideReady = false;
         bool trainGuide = false;

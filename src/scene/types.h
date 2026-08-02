@@ -397,8 +397,8 @@ enum PixelSampler : int {
 
 // Path bounce / NEE / BSDF RNG after camera dims.
 enum PathSampler : int {
-    kPathSamplerPcg = 0,        // classic white PCG — blotchier at low spp
-    kPathSamplerOwenSobol = 1,  // PBRT/Cycles-style Owen Sobol from dim 4+
+    kPathSamplerPcg = 0,        // classic white PCG — default; no screen-grid aliasing
+    kPathSamplerOwenSobol = 1,  // PBRT/Cycles-style Owen Sobol from dim 4+ (can quilt on caustics)
 };
 
 // How the image is scheduled / seeded / written (Render Settings → Sampling Engine).
@@ -468,7 +468,7 @@ struct RenderSettingsData {
     int envVisibleCamera = 1;
     int tileSize = 32;             // FilmTile bucket size; 0 = PBRT-style auto
     int pixelSampler = kPixelSamplerSobol;  // camera AA / DoF generator
-    int pathSampler = kPathSamplerOwenSobol;  // path bounce RNG (PCG or Owen Sobol)
+    int pathSampler = kPathSamplerPcg;  // path bounce RNG (PCG default — Owen optional)
     int samplingEngine = kSamplingEngineFilmTile;  // Legacy / FilmTile / Progressive
     int threads = 0;               // 0 = hardware concurrency
 
