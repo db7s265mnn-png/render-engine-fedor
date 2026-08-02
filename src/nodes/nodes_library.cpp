@@ -980,13 +980,28 @@ public:
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -8.0, 8.0).withGroup("Film"));
         addParameter(Parameter::makeFloat("gamma", "Gamma", 2.2, 1.0, 4.0).withGroup("Film"));
         addParameter(Parameter::makeBool("envvisible", "Environment Visible To Camera", true).withGroup("Film"));
+
+        addParameter(Parameter::makeMenu("samplingdebug", "Sampling Debug",
+                                         {"Off", "Pixel Jitter XY", "Path RNG u0", "Bucket ID",
+                                          "Pixel Hash"},
+                                         0)
+                         .withGroup("Diagnostic")
+                         .withTooltip("Replace beauty with a sampling/seed visualisation "
+                                      "(no light transport).\n"
+                                      "Pixel Jitter XY: R=jx G=jy from Pixel Sampler — Blue Noise "
+                                      "shows a 64px period; Sobol/White should not.\n"
+                                      "Path RNG u0: first PCG float from makePixelRng — look for "
+                                      "faint seams from correlated seeds.\n"
+                                      "Bucket ID: color by Bucket Size tiles (threading only).\n"
+                                      "Pixel Hash: RGB from the per-pixel seed hash.\n"
+                                      "Tip: set Tone Map to None for a clearer view."));
         addParameter(Parameter::makeBool("filmfalsecolor", "Spectral False Color", false)
-                         .withGroup("Film")
+                         .withGroup("Diagnostic")
                          .withVisibleWhen("integrator==4||integrator==5")
                          .withTooltip("Spectral integrators: visualise one spectral bin as "
                                       "false-color instead of beauty RGB (debug)."));
         addParameter(Parameter::makeInt("filmfalsecolorbin", "False Color Bin", 0, 0, 31)
-                         .withGroup("Film")
+                         .withGroup("Diagnostic")
                          .withVisibleWhen("integrator==4&&filmfalsecolor==1||integrator==5&&filmfalsecolor==1")
                          .withTooltip("Which spectral bin to show when Spectral False Color is on."));
 
@@ -1046,6 +1061,7 @@ public:
         settings.envVisibleCamera = boolValue("envvisible", true) ? 1 : 0;
         settings.filmFalseColor = boolValue("filmfalsecolor", false) ? 1 : 0;
         settings.filmFalseColorBin = std::clamp(intValue("filmfalsecolorbin", 0), 0, 31);
+        settings.samplingDebug = std::clamp(intValue("samplingdebug", 0), 0, 4);
         settings.enableTxCache = boolValue("enabletxcache", true) ? 1 : 0;
         {
             const std::string dir = stringValue("txcachedir", "tx_cache").toStdString();

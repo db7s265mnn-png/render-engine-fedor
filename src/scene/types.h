@@ -395,6 +395,15 @@ enum PixelSampler : int {
     kPixelSamplerWhite = 2,      // Independent PCG per pixel
 };
 
+// Render Settings → Diagnostic: replace beauty with a sampling/seed field.
+enum SamplingDebug : int {
+    kSamplingDebugOff = 0,
+    kSamplingDebugPixelJitter = 1,  // R=jx G=jy — shows BN period vs Sobol/White
+    kSamplingDebugPathRng = 2,      // first path-RNG float as gray — seed seams
+    kSamplingDebugBucket = 3,       // color by render bucket (tileSize)
+    kSamplingDebugPixelHash = 4,    // RGB from hashPixelSample(x,y,spp,seed)
+};
+
 // Chromatic dispersion sampling (material dispersion_abbe / lens CA).
 enum DispersionMode : int {
     // Current: one random hero RGB channel per sample; mask whole path to that channel.
@@ -486,9 +495,11 @@ struct RenderSettingsData {
     int spectralSamples = 4;      // hero λ count (UI: 2..16)
     int spectralBins = 16;        // fixed bins for multilayer spectral EXR (8..32)
     int spectralExr = 0;          // write spectral multilayer EXR on save when set
-    // Film: false-color debug from spectral bins (PT Spectral).
+    // Film: false-color debug from spectral bins (PT Spectral). Diagnostic group.
     int filmFalseColor = 0;
     int filmFalseColorBin = 0;    // which bin to visualise (0 .. spectralBins-1)
+    // Sampling / seed diagnostics (skip light transport; write debug RGB).
+    int samplingDebug = 0;        // SamplingDebug enum
 
     // Texture TX cache (Ch.10): convert source textures to .tx mipmaps at cook time.
     // 1 = enabled; conversion runs via maketx/oiiotool before image load.

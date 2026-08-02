@@ -318,6 +318,11 @@ public:
             else if (settings.pixelSampler == kPixelSamplerWhite) samplerName = "White";
             logInfo(std::string("Pixel Sampler: ") + samplerName +
                     " (camera AA/DoF); bucket " + std::to_string(tileSize) + "px");
+            if (settings.samplingDebug != kSamplingDebugOff) {
+                static const char* kDiagNames[] = {"Off", "PixelJitter", "PathRng", "Bucket", "PixelHash"};
+                const int d = std::clamp(settings.samplingDebug, 0, 4);
+                logInfo(std::string("Diagnostic: Sampling Debug = ") + kDiagNames[d]);
+            }
         }
 
         const int dispersionMode = settings.dispersionMode;
@@ -343,6 +348,45 @@ public:
                 // Default: Owen-scrambled Sobol (no fixed screen-space period).
                 pixelSample(x, y, sampleIndex, jx, jy);
                 lensSample(x, y, sampleIndex, lensU, lensV);
+            }
+
+            // Diagnostic: skip light transport and visualise sampler / seed fields.
+            if (settings.samplingDebug != kSamplingDebugOff) {
+                Vec3 diag(0.0f);
+                switch (settings.samplingDebug) {
+                    case kSamplingDebugPixelJitter:
+                        diag = Vec3(jx, jy, 0.25f);
+                        break;
+                    case kSamplingDebugPathRng: {
+                        // Dedicated stream so White camera's consumed floats do not bias this.
+                        const float u0 = makePixelRng(x, y, sampleIndex, frameSeed, 0xD1A60001u).nextFloat();
+                        diag = Vec3(u0, u0, u0);
+                        break;
+                    }
+                    case kSamplingDebugBucket: {
+                        const int tx = x / tileSize;
+                        const int ty = y / tileSize;
+                        const uint32_t h = hashUint(uint32_t(tx) * 0x9e3779b9u ^ uint32_t(ty));
+                        diag = Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
+                                    float((h >> 16) & 255u)) *
+                               (1.0f / 255.0f);
+                        // Brighten pixels on bucket edges so seams are obvious.
+                        const bool edge = (x % tileSize) == 0 || (y % tileSize) == 0;
+                        if (edge) diag = Vec3(1.0f, 1.0f, 0.2f);
+                        break;
+                    }
+                    case kSamplingDebugPixelHash: {
+                        const uint64_t h = hashPixelSample(x, y, uint32_t(sampleIndex), frameSeed);
+                        diag = Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
+                                    float((h >> 16) & 255u)) *
+                               (1.0f / 255.0f);
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                fb.addSample(x, y, diag);
+                return;
             }
 
             // Light-tracing splats assume the pinhole/thin-lens projection —
