@@ -97,7 +97,7 @@ parameters, and *Look Through Camera Node* goes back to the authored camera.
 | Group | Parameters |
 | --- | --- |
 | Image | Resolution X/Y, Samples Per Pixel |
-| Engine | Render Backend (CPU Embree or GPU OptiX), Integrator (Path Tracer, Direct Lighting, Ambient Occlusion), Max Ray Depth, Russian Roulette Depth, Indirect Clamp, Seed, CPU Threads, Tile Size, AO Distance |
+| Engine | Render Backend (CPU Embree or GPU OptiX), Integrator (Path Tracer, Direct Lighting, Ambient Occlusion), Max Ray Depth, Russian Roulette Depth, Direct Clamp, Indirect Clamp, Seed, CPU Threads, Tile Size, AO Distance |
 | Film | Tone Map (None, Reinhard, ACES), Exposure, Gamma, Environment Visible To Camera |
 
 Film settings are applied when the framebuffer is displayed or written to an LDR file; `.exr`

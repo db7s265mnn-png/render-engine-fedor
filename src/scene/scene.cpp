@@ -407,6 +407,13 @@ void Scene::buildLightBvh() {
 
     if (finites.empty()) return;
 
+    // Few finite lights: skip the BVH. Position-aware AABB importance
+    // (power / dist²_to_box) imprints axis-aligned "buckets" on diffuse floors
+    // under area lights — visible as square caustic sampling structure on every
+    // integrator. Flux-only selection is unbiased and cheaper for small N.
+    constexpr int kLightBvhMinFinites = 32;
+    if (int(finites.size()) < kLightBvhMinFinites) return;
+
     // Pre-allocate: a full binary tree with N leaves has at most 2*N - 1 nodes.
     lightBvhNodes_.reserve(2 * finites.size());
 

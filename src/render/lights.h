@@ -471,11 +471,17 @@ SR_INL SR_HD float bvhNodeDist2(const LightBvhNode& node, Vec3 refP) {
     return dx * dx + dy * dy + dz * dz;
 }
 
-// Importance of a BVH node from refP: power / max(dist², ε).
+// Importance of a BVH node from refP. Uses distance to the AABB *center*
+// softened by the node's extent — not min-distance-to-box (that is zero under
+// the entire footprint and jumps at AABB faces → axis-aligned "bucket" noise
+// in caustic shadows on floors).
 SR_INL SR_HD float bvhNodeImportance(const LightBvhNode& node, Vec3 refP) {
     if (node.power <= 0.f) return 0.f;
-    const float d2 = bvhNodeDist2(node, refP);
-    return node.power / srMax(d2, 1e-4f);
+    const Vec3 center = (node.bMin + node.bMax) * 0.5f;
+    const Vec3 ext = node.bMax - node.bMin;
+    const float r2 = 0.25f * (ext.x * ext.x + ext.y * ext.y + ext.z * ext.z) + 1e-4f;
+    const float d2 = lengthSquared(refP - center);
+    return node.power / (d2 + r2);
 }
 
 // Returns true if the BVH subtree rooted at `nodeIdx` contains `lightIdx`.
