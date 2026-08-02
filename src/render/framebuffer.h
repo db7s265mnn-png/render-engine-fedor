@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/image.h"
+#include "render/film_tile.h"
 #include "scene/types.h"
 
 namespace sol {
@@ -27,9 +28,9 @@ public:
     void markHasData() { hasData_.store(true, std::memory_order_relaxed); }
 
     // Accumulates one sample. Safe as long as different threads own different
-    // pixels, which is how the tile scheduler works. The UI resolves the buffer
-    // while workers write to it; a preview frame may therefore mix samples from
-    // two passes, which is invisible in practice and avoids a per pixel lock.
+    // pixels, which is how the tile scheduler works. Prefer FilmTile + merge
+    // (PBRT ImageTileIntegrator) for the main loop; this remains for splats /
+    // tests / single-pixel writes.
     void addSample(int x, int y, Vec3 radiance) {
         Vec4& px = accum_[size_t(y) * size_t(width_) + size_t(x)];
         px.x += radiance.x;
@@ -38,6 +39,10 @@ public:
         px.w += 1.0f;
         hasData_.store(true, std::memory_order_relaxed);
     }
+
+    // PBRT MergeFilmTile: fold a completed bucket into the film. Tile pixels are
+    // exclusive to one worker, so no lock is required on the beauty plane.
+    void mergeFilmTile(const FilmTile& tile);
 
     void setPixel(int x, int y, Vec3 radiance, float weight) {
         Vec4& px = accum_[size_t(y) * size_t(width_) + size_t(x)];

@@ -10,6 +10,7 @@
 #include "core/log.h"
 #include "core/thread_pool.h"
 #include "render/blue_noise.h"
+#include "render/film_tile.h"
 #include "render/sobol.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
@@ -235,7 +236,9 @@ public:
         const int height = fb.height();
         if (width <= 0 || height <= 0) return;
 
-        const int tileSize = std::clamp(settings.tileSize, 8, 256);
+        const int tileSize = settings.tileSize <= 0
+                                 ? chooseFilmTileSize(width, height, pool_->threadCount())
+                                 : std::clamp(settings.tileSize, 8, 256);
         const int tilesX = (width + tileSize - 1) / tileSize;
         const int tilesY = (height + tileSize - 1) / tileSize;
         const int tileCount = tilesX * tilesY;
@@ -317,7 +320,8 @@ public:
             if (settings.pixelSampler == kPixelSamplerBlueNoise) samplerName = "BlueNoise64";
             else if (settings.pixelSampler == kPixelSamplerWhite) samplerName = "White";
             logInfo(std::string("Pixel Sampler: ") + samplerName +
-                    " (camera AA/DoF); bucket " + std::to_string(tileSize) + "px");
+                    " (camera AA/DoF); PBRT FilmTile buckets " + std::to_string(tileSize) + "px" +
+                    (settings.tileSize <= 0 ? " (auto)" : ""));
             if (settings.samplingDebug != kSamplingDebugOff) {
                 static const char* kDiagNames[] = {"Off", "PixelJitter", "PathRng", "Bucket", "PixelHash"};
                 const int d = std::clamp(settings.samplingDebug, 0, 4);
@@ -328,7 +332,7 @@ public:
         const int dispersionMode = settings.dispersionMode;
         const int dispersionMaxIfaces = srMax(1, settings.dispersionMaxInterfaces);
 
-        auto shadePixel = [&](int x, int y, int threadId) {
+        auto evaluatePixelSample = [&](int x, int y, int threadId) -> Vec3 {
             EmbreeTracer tracer{topScene_};
             // Strong per-pixel PCG streams (x,y,spp) — not linear pixelIndex.
             Rng rng = makePixelRng(x, y, sampleIndex, frameSeed);
@@ -352,41 +356,30 @@ public:
 
             // Diagnostic: skip light transport and visualise sampler / seed fields.
             if (settings.samplingDebug != kSamplingDebugOff) {
-                Vec3 diag(0.0f);
                 switch (settings.samplingDebug) {
-                    case kSamplingDebugPixelJitter:
-                        diag = Vec3(jx, jy, 0.25f);
-                        break;
-                    case kSamplingDebugPathRng: {
-                        // Dedicated stream so White camera's consumed floats do not bias this.
-                        const float u0 = makePixelRng(x, y, sampleIndex, frameSeed, 0xD1A60001u).nextFloat();
-                        diag = Vec3(u0, u0, u0);
-                        break;
-                    }
                     case kSamplingDebugBucket: {
                         const int tx = x / tileSize;
                         const int ty = y / tileSize;
                         const uint32_t h = hashUint(uint32_t(tx) * 0x9e3779b9u ^ uint32_t(ty));
-                        diag = Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
+                        return Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
                                     float((h >> 16) & 255u)) *
                                (1.0f / 255.0f);
-                        // Brighten pixels on bucket edges so seams are obvious.
-                        const bool edge = (x % tileSize) == 0 || (y % tileSize) == 0;
-                        if (edge) diag = Vec3(1.0f, 1.0f, 0.2f);
-                        break;
                     }
                     case kSamplingDebugPixelHash: {
                         const uint64_t h = hashPixelSample(x, y, uint32_t(sampleIndex), frameSeed);
-                        diag = Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
+                        return Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
                                     float((h >> 16) & 255u)) *
                                (1.0f / 255.0f);
-                        break;
+                    }
+                    case kSamplingDebugPixelJitter:
+                        return Vec3(jx, jy, 0.25f);
+                    case kSamplingDebugPathRng: {
+                        const float u0 = makePixelRng(x, y, sampleIndex, frameSeed, 0xD1A60001u).nextFloat();
+                        return Vec3(u0, u0, u0);
                     }
                     default:
-                        break;
+                        return Vec3(0.0f);
                 }
-                fb.addSample(x, y, diag);
-                return;
             }
 
             // Light-tracing splats assume the pinhole/thin-lens projection —
@@ -526,8 +519,7 @@ public:
                 DispersionContext ctx = makeDispCtx(chromaticChannel);
                 const float shutterTime = sampleShutter(rng);
                 if (!generateRay(rng, chromaticChannel, origin, direction, lensTau, shutterTime)) {
-                    fb.addSample(x, y, Vec3(0.0f));
-                    return;
+                    return Vec3(0.0f);
                 }
                 radiance = traceOnce(rng, origin, direction, &ctx, x, y);
                 radiance = radiance * std::max(0.0f, lensTau);
@@ -555,7 +547,33 @@ public:
                 (void)bin;
             }
 
-            fb.addSample(x, y, radiance);
+            return radiance;
+        };
+
+        // PBRT ImageTileIntegrator-style loop: each worker owns a FilmTile, evaluates
+        // every pixel sample into the tile, then MergeFilmTile into the Film.
+        // Splats (BDPT AddSplat) still go to the global atomic splat plane.
+        auto renderOneTile = [&](int tileIndex, int threadId, int bootstrapPhase, bool useBootstrap) {
+            if (cancel.load(std::memory_order_relaxed)) return;
+            const int tx = tileIndex % tilesX;
+            const int ty = tileIndex / tilesX;
+            const int x0 = tx * tileSize;
+            const int y0 = ty * tileSize;
+            const int x1 = std::min(x0 + tileSize, width);
+            const int y1 = std::min(y0 + tileSize, height);
+            FilmTile tile(x0, y0, x1, y1);
+            for (int y = y0; y < y1; ++y) {
+                if (cancel.load(std::memory_order_relaxed)) break;
+                for (int x = x0; x < x1; ++x) {
+                    if (useBootstrap) {
+                        constexpr int kBootstrapStep = 2;
+                        if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) != bootstrapPhase)
+                            continue;
+                    }
+                    tile.addSample(x, y, evaluatePixelSample(x, y, threadId));
+                }
+            }
+            fb.mergeFilmTile(tile);
         };
 
         // First sample: interleaved 2×2 bootstrap so the whole frame appears
@@ -566,38 +584,13 @@ public:
             for (int phase = 0; phase < phaseCount; ++phase) {
                 if (cancel.load(std::memory_order_relaxed)) break;
                 pool_->parallelFor(tileCount, [&](int tileIndex, int threadId) {
-                    if (cancel.load(std::memory_order_relaxed)) return;
-                    const int tx = tileIndex % tilesX;
-                    const int ty = tileIndex / tilesX;
-                    const int x0 = tx * tileSize;
-                    const int y0 = ty * tileSize;
-                    const int x1 = std::min(x0 + tileSize, width);
-                    const int y1 = std::min(y0 + tileSize, height);
-                    for (int y = y0; y < y1; ++y) {
-                        if (cancel.load(std::memory_order_relaxed)) return;
-                        for (int x = x0; x < x1; ++x) {
-                            if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) != phase)
-                                continue;
-                            shadePixel(x, y, threadId);
-                        }
-                    }
+                    renderOneTile(tileIndex, threadId, phase, true);
                 });
                 if (midProgress) midProgress();
             }
         } else {
             pool_->parallelFor(tileCount, [&](int tileIndex, int threadId) {
-                if (cancel.load(std::memory_order_relaxed)) return;
-                const int tx = tileIndex % tilesX;
-                const int ty = tileIndex / tilesX;
-                const int x0 = tx * tileSize;
-                const int y0 = ty * tileSize;
-                const int x1 = std::min(x0 + tileSize, width);
-                const int y1 = std::min(y0 + tileSize, height);
-
-                for (int y = y0; y < y1; ++y) {
-                    if (cancel.load(std::memory_order_relaxed)) return;
-                    for (int x = x0; x < x1; ++x) shadePixel(x, y, threadId);
-                }
+                renderOneTile(tileIndex, threadId, 0, false);
             });
         }
 

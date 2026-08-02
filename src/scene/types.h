@@ -450,7 +450,7 @@ struct RenderSettingsData {
 
     int backend = kBackendCpuEmbree;
     int envVisibleCamera = 1;
-    int tileSize = 32;             // render bucket size in pixels (threading / IPR order)
+    int tileSize = 32;             // FilmTile bucket size; 0 = PBRT-style auto
     int pixelSampler = kPixelSamplerSobol;  // camera AA / DoF generator
     int threads = 0;               // 0 = hardware concurrency
 

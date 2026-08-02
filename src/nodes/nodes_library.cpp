@@ -845,14 +845,14 @@ public:
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
-        addParameter(Parameter::makeInt("tilesize", "Bucket Size (px)", 32, 8, 256, false)
+        addParameter(Parameter::makeInt("tilesize", "Bucket Size (px)", 32, 0, 256, false)
                          .withGroup("Engine")
-                         .withTooltip("Render bucket / tile size in pixels (default 32).\n"
-                                      "Only affects how work is split across CPU threads and the "
-                                      "order of progressive IPR updates — not the sampling pattern.\n"
-                                      "The square quilt in caustic shadows comes from Pixel Sampler "
-                                      "(Blue Noise 64), not from this bucket size.\n"
-                                      "Try 16 / 32 / 64 / 128 to confirm buckets are unrelated."));
+                         .withTooltip("PBRT-style FilmTile bucket size in pixels.\n"
+                                      "0 = Auto (ParallelFor2D-style: ~8× threads tiles, "
+                                      "side clamped to 8/16/32/64).\n"
+                                      "Otherwise fixed bucket size (8–256, default 32).\n"
+                                      "Buckets only schedule work + local FilmTile merge — "
+                                      "sampling stays per-pixel (no per-bucket seed)."));
         addParameter(Parameter::makeFloat("aodistance", "AO Distance", 1.0, 0.01, 100.0, false)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==3"));
@@ -1031,7 +1031,7 @@ public:
         settings.clampIndirect = float(floatValue("clamp", 10.0));
         settings.seed = intValue("seed", 0);
         settings.threads = intValue("threads", 0);
-        settings.tileSize = std::clamp(intValue("tilesize", 32), 8, 256);
+        settings.tileSize = std::clamp(intValue("tilesize", 32), 0, 256);
         settings.pixelSampler = std::clamp(intValue("pixelsampler", 0), 0, 2);
         settings.aoDistance = float(floatValue("aodistance", 1.0));
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;

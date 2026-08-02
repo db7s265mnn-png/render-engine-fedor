@@ -1,4 +1,5 @@
 #include "render/framebuffer.h"
+#include "render/film_tile.h"
 
 #include <algorithm>
 #include <cmath>
@@ -38,6 +39,30 @@ void Framebuffer::release() {
     splatPaths_.store(0, std::memory_order_relaxed);
     samples_.store(0, std::memory_order_relaxed);
     hasData_.store(false, std::memory_order_relaxed);
+}
+
+void Framebuffer::mergeFilmTile(const FilmTile& tile) {
+    if (tile.empty() || tile.pixels.empty()) return;
+    const int tw = tile.width();
+    const int th = tile.height();
+    bool wrote = false;
+    for (int ty = 0; ty < th; ++ty) {
+        const int y = tile.y0 + ty;
+        if (y < 0 || y >= height_) continue;
+        for (int tx = 0; tx < tw; ++tx) {
+            const int x = tile.x0 + tx;
+            if (x < 0 || x >= width_) continue;
+            const Vec4& src = tile.pixels[size_t(ty) * size_t(tw) + size_t(tx)];
+            if (src.w <= 0.0f) continue;
+            Vec4& dst = accum_[size_t(y) * size_t(width_) + size_t(x)];
+            dst.x += src.x;
+            dst.y += src.y;
+            dst.z += src.z;
+            dst.w += src.w;
+            wrote = true;
+        }
+    }
+    if (wrote) hasData_.store(true, std::memory_order_relaxed);
 }
 
 Image Framebuffer::resolveLinear() const {
