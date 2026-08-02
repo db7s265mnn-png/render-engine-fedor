@@ -423,8 +423,10 @@ struct RenderSettingsData {
     int seed = 0;
     int integrator = kIntegratorPathTracer;
 
-    // Caps eye-path indirect contributions in linear pixel radiance (Arnold/Karma).
-    // <= 0 disables. Does not clamp BDPT light-tracing splat deposits (camera-PDF units).
+    // Arnold-style sample clamps in linear pixel radiance (<= 0 disables).
+    // Direct Clamp: eye-path contributions (PT/BDPT eye, NEE, MNEE, photons).
+    // Indirect Clamp: BDPT light-tracing splat deposits (converted to radiance via / (W·H)).
+    float clampDirect = 10.0f;
     float clampIndirect = 10.0f;
     float exposure = 0.0f;
     float gamma = 2.2f;

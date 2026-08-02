@@ -538,6 +538,7 @@ void testCausticsGlassSphere() {
         scene->settings.caustics = caustics;
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
         scene->settings.clampIndirect = 0.0f;  // unbiased comparison
         scene->camera.cameraToWorld =
             lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
@@ -677,6 +678,7 @@ void testBdptCausticThroughRefraction() {
         scene->settings.caustics = caustics;
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
         scene->settings.clampIndirect = 0.0f;
         scene->settings.lightSamples = 2;
         // Top-down: primary hits are glass over the silhouette center.
@@ -781,6 +783,7 @@ void testPhotonCaustics() {
         scene->settings.photonRadius = 0.15f;
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
         scene->settings.clampIndirect = 0.0f;
         scene->camera.cameraToWorld =
             lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
@@ -877,6 +880,7 @@ void testRoughGlassCaustics() {
         scene->settings.caustics = 1;
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
         scene->settings.clampIndirect = 0.0f;  // unbiased: fireflies stay visible
         scene->settings.causticClamp = causticClamp;
         scene->camera.cameraToWorld =
@@ -988,6 +992,7 @@ void testRefractionSparkleClamp() {
         scene->settings.caustics = 1;
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
         scene->settings.clampIndirect = 0.0f;
         scene->settings.causticClamp = causticClamp;
         scene->camera.cameraToWorld =
@@ -1174,6 +1179,7 @@ void testDispersionAndThinFilm() {
         scene->settings.caustics = 1;
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
         scene->settings.clampIndirect = 0.0f;
         scene->camera.cameraToWorld =
             lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
@@ -4119,6 +4125,7 @@ void testBdptShadersAndSss() {
         scene->settings.maxDepth = 6;
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 10.0f;
         scene->settings.clampIndirect = 10.0f;
         scene->camera.cameraToWorld =
             lookAtMatrix(Vec3(2.2f, 2.0f, 2.2f), Vec3(0.0f, 0.6f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));

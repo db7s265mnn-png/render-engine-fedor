@@ -526,6 +526,15 @@ SR_INL SR_HD Vec3 clampContribution(Vec3 contrib, float clampValue) {
     return contrib;
 }
 
+// BDPT light-tracing deposits include cameraPdfOmega; resolve divides by W·H paths.
+// Map Arnold-style Indirect Clamp (pixel radiance) → raw splat threshold.
+SR_INL SR_HD float lightTraceSplatClamp(const RenderSettingsData& settings) {
+    if (settings.clampIndirect <= 0.0f) return 0.0f;
+    const int w = settings.resolutionX > 0 ? settings.resolutionX : 1;
+    const int h = settings.resolutionY > 0 ? settings.resolutionY : 1;
+    return settings.clampIndirect * float(w) * float(h);
+}
+
 // Multi-hit shadow visibility (Embree filter-function style): opaque surfaces
 // block fully; transmissive surfaces attenuate by Material::shadowOpacity when
 // refractive caustics are enabled (MaterialX / Arnold fake-caustics control).
@@ -707,7 +716,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                                 if (ls.distance < 1.0e7f)
                                     contrib = contrib * mediumShadowTr(*med, ls.distance);
                                 if (depth > 0)
-                                    contrib = clampContribution(contrib, settings.clampIndirect);
+                                    contrib = clampContribution(contrib, settings.clampDirect);
                                 radiance += contrib;
                             }
                         }
@@ -747,7 +756,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         }
                         Vec3 contrib = throughput * envL * weight;
                         if (depth > 0 && !specularBounce)
-                            contrib = clampContribution(contrib, settings.clampIndirect);
+                            contrib = clampContribution(contrib, settings.clampDirect);
                         radiance += contrib;
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active())
@@ -796,7 +805,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 Vec3 contrib = throughput * emitted * weight;
                 // Caustic paths (specular chain) keep more energy — clamp less aggressively.
                 if (depth > 0 && !specularBounce)
-                    contrib = clampContribution(contrib, settings.clampIndirect);
+                    contrib = clampContribution(contrib, settings.clampDirect);
                 radiance += contrib;
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active())
@@ -885,7 +894,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding,
                                         currentMedium);
                 Vec3 contrib = throughput * nee;
-                if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
+                if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
                 radiance += contrib;
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active()) guiding->addScattered(nee);
@@ -931,7 +940,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding,
                                     currentMedium);
             Vec3 contrib = throughput * walk.pathWeight * nee;
-            if (depth > 0) contrib = clampContribution(contrib, settings.clampIndirect);
+            if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;
 #if !defined(__CUDACC__)
             if (guiding && guiding->active()) guiding->addScattered(walk.pathWeight * nee);
@@ -975,7 +984,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                                                  currentMedium);
             Vec3 contrib = throughput * nee;
             if (depth > 0 && !specularBounce)
-                contrib = clampContribution(contrib, settings.clampIndirect);
+                contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;
 #if !defined(__CUDACC__)
             if (guiding && guiding->active()) guiding->addScattered(nee);

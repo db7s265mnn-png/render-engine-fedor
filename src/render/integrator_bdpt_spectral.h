@@ -367,7 +367,7 @@ inline Vec3 traceRadianceBdptSpectral(
             const Vec3 gather = photons->gather(E.p, E.ns, E.wo, E.mat, photonRadius);
             if (isBlack(gather) || !isFinite(gather)) continue;
             SampledSpectrum c = eyeBeta[t - 1] * upsampleRgb(gather, waves);
-            if (t > 2) c = clampSpectrumIndirect(c, settings.clampIndirect);
+            if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
             if (!spectrumIsFinite(c)) continue;
             radiance += c;
 #if SOLSTICE_HAVE_OPENPGL
@@ -423,7 +423,8 @@ inline Vec3 traceRadianceBdptSpectral(
             Vert cameraVert = eye[0];
             cameraVert.p = camProj.camPos;
             c *= misWeight(&cameraVert, 1, light, s, ov);
-            // LT splat carries cameraPdfOmega — not radiance. Do not Indirect-Clamp.
+            // Indirect Clamp (LT): radiance-scaled via W·H (see lightTraceSplatClamp).
+            if (s > 2) c = clampSpectrumIndirect(c, lightTraceSplatClamp(settings));
             if (!spectrumIsFinite(c)) continue;
             const Vec3 rgb = spectrumToRgb(c, waves);
             if (isFinite(rgb)) splatFb->addSplat(int(px), int(py), rgb);
@@ -440,7 +441,7 @@ inline Vec3 traceRadianceBdptSpectral(
                     SampledSpectrum c =
                         eyeBeta[t - 1] *
                         upsampleRgb(v.mat.emissionColor * v.mat.emissionStrength, waves);
-                    if (t > 2) c = clampSpectrumIndirect(c, settings.clampIndirect);
+                    if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
                     if (spectrumIsFinite(c)) radiance += c;
                 }
             }
@@ -476,7 +477,7 @@ inline Vec3 traceRadianceBdptSpectral(
                     w = powerHeuristic(1.0f, v.pdfFwd, 1.0f, lightPdf);
                 }
                 SampledSpectrum c = eyeBeta[t - 1] * upsampleRgb(Le, waves) * w;
-                if (t > 2) c = clampSpectrumIndirect(c, settings.clampIndirect);
+                if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
                 if (spectrumIsFinite(c)) radiance += c;
 #if SOLSTICE_HAVE_OPENPGL
                 if (guiding && guiding->active())
@@ -518,7 +519,7 @@ inline Vec3 traceRadianceBdptSpectral(
                       eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
         SampledSpectrum c =
             eyeBeta[t - 1] * upsampleRgb(Le, waves) * misWeight(eye, t, light, 0, ov);
-        if (t > 2) c = clampSpectrumIndirect(c, settings.clampIndirect);
+        if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
         if (specularToLight) {
             const float cap = settings.causticClamp > 0.0f ? settings.causticClamp : 10.0f;
             c = clampSpectrumIndirect(c, cap);
@@ -563,7 +564,7 @@ inline Vec3 traceRadianceBdptSpectral(
                 upsampleRgb(f, waves) * upsampleRgb(ls.radiance, waves) *
                 (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf);
             SampledSpectrum c = eyeBeta[t - 1] * local;
-            if (t > 2) c = clampSpectrumIndirect(c, settings.clampIndirect);
+            if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
             if (E.nearSpec) c = clampSpectrumIndirect(c, settings.causticClamp);
             if (!spectrumIsFinite(c)) continue;
             radiance += c;
@@ -662,7 +663,7 @@ inline Vec3 traceRadianceBdptSpectral(
             if (!mr.solved || isBlack(mr.contribution)) continue;
             SampledSpectrum local = upsampleRgb(mr.contribution, waves);
             SampledSpectrum c = eyeBeta[t - 1] * local;
-            if (t > 2) c = clampSpectrumIndirect(c, settings.clampIndirect);
+            if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
             if (settings.causticClamp > 0.0f)
                 c = clampSpectrumIndirect(c, settings.causticClamp);
             if (!spectrumIsFinite(c)) continue;
@@ -712,7 +713,7 @@ inline Vec3 traceRadianceBdptSpectral(
         const float w = misWeight(eye, t, oneLight, 1, ov);
         local *= w;
         SampledSpectrum c = eyeBeta[t - 1] * local;
-        if (t > 2) c = clampSpectrumIndirect(c, settings.clampIndirect);
+        if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
         if (E.nearSpec) c = clampSpectrumIndirect(c, settings.causticClamp);
         if (!spectrumIsFinite(c)) continue;
         radiance += c;
@@ -786,7 +787,7 @@ inline Vec3 traceRadianceBdptSpectral(
             SampledSpectrum c =
                 eyeBeta[t - 1] * upsampleRgb(fE, waves) * upsampleRgb(fL, waves) *
                 lightBeta[s - 1] * (G * misWeight(eye, t, light, s, ov));
-            c = clampSpectrumIndirect(c, settings.clampIndirect);
+            c = clampSpectrumIndirect(c, settings.clampDirect);
             if (lightPrefixCaustic || Lv.nearSpec || E.nearSpec)
                 c = clampSpectrumIndirect(c, settings.causticClamp);
             if (spectrumIsFinite(c)) radiance += c;

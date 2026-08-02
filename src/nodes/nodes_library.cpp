@@ -821,14 +821,18 @@ public:
                          .withGroup("Engine")
                          .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
                                       "Higher = less light/reflection noise, slower."));
+        addParameter(Parameter::makeFloat("clampdirect", "Direct Clamp", 10.0, 0.0, 1000000.0, false)
+                         .withGroup("Engine")
+                         .withTooltip("Caps eye-path sample contributions in linear pixel radiance "
+                                      "(Arnold Direct Clamp). Applies to PT/BDPT eye paths, NEE, "
+                                      "MNEE, and photon gather.\n"
+                                      "Default 10; ~100 is a soft look. 0 disables."));
         addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Engine")
-                         .withTooltip("Caps each eye-path indirect sample in linear pixel radiance "
-                                      "(Arnold/Karma style). Default 10; ~100 is a soft look.\n"
-                                      "Does not clamp BDPT light-tracing splat deposits (those "
-                                      "carry camera PDF, not radiance — clamping them killed "
-                                      "caustics at Arnold-scale values).\n"
-                                      "0 disables. Lower = fewer fireflies."));
+                         .withTooltip("Caps BDPT light-tracing splat contributions in linear pixel "
+                                      "radiance (Arnold Indirect Clamp). Raw LT deposits carry "
+                                      "camera PDF — they are scaled to radiance before clamping.\n"
+                                      "Affects BDPT / BDPT Spectral caustics from LT. 0 disables."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Engine"));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
@@ -993,6 +997,7 @@ public:
         settings.maxDepth = intValue("maxdepth", 8);
         settings.rrStartDepth = intValue("rrdepth", 3);
         settings.lightSamples = std::max(1, intValue("lightsamples", 2));
+        settings.clampDirect = float(floatValue("clampdirect", 10.0));
         settings.clampIndirect = float(floatValue("clamp", 10.0));
         settings.seed = intValue("seed", 0);
         settings.threads = intValue("threads", 0);

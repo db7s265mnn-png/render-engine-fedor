@@ -750,7 +750,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             Vec3 g = photons->gather(E.p, E.ns, E.wo, E.mat, photonRadius);
             if (isBlack(g) || !isFinite(g)) continue;
             Vec3 c = E.beta * g;
-            if (t > 2) c = clampContribution(c, settings.clampIndirect);
+            if (t > 2) c = clampContribution(c, settings.clampDirect);
             if (!isFinite(c)) continue;
             L += c;
 #if SOLSTICE_HAVE_OPENPGL
@@ -813,9 +813,9 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             camVert.p = camProj.camPos;
             const float w = misWeight(&camVert, 1, light, s, ov);
             c = c * w;
-            // Light-tracing deposits include cameraPdfOmega (~1e6); they are NOT
-            // linear pixel radiance. Indirect Clamp must not touch them — doing so
-            // at Arnold-scale values (10–1000) wipes BDPT floor caustics.
+            // Indirect Clamp on LT in pixel-radiance units (raw splat × camera PDF
+            // → threshold scaled by W·H so resolve /N matches Arnold Indirect).
+            if (s > 2) c = clampContribution(c, lightTraceSplatClamp(settings));
             if (!isFinite(c)) continue;
             if (dispersion && dispersion->heroChannel >= 0 && dispersion->used &&
                 (dispersion->mode == kDispersionHero || dispersion->mode == kDispersionOptimized ||
@@ -841,7 +841,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                 const bool front = dot(v.ns, v.wo) > 0.0f;
                 if (front || v.mat.doubleSided) {
                     Vec3 c = v.beta * v.mat.emissionColor * v.mat.emissionStrength;
-                    if (t > 2) c = clampContribution(c, settings.clampIndirect);
+                    if (t > 2) c = clampContribution(c, settings.clampDirect);
                     L += c;
                 }
             }
@@ -876,7 +876,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                     w = powerHeuristic(1.0f, v.pdfFwd, 1.0f, lp);  // pdfFwd = solid-angle here
                 }
                 Vec3 c = v.beta * Le * w;
-                if (t > 2) c = clampContribution(c, settings.clampIndirect);
+                if (t > 2) c = clampContribution(c, settings.clampDirect);
                 L += c;
 #if SOLSTICE_HAVE_OPENPGL
                 if (guiding && guiding->active()) guiding->recordBackground(eye[t - 2].p, dirW, Le, w);
@@ -926,7 +926,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                                   eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
         const float w = misWeight(eye, t, light, 0, ov);
         Vec3 c = v.beta * Le * w;
-        if (t > 2) c = clampContribution(c, settings.clampIndirect);
+        if (t > 2) c = clampContribution(c, settings.clampDirect);
         // SDS / specular→light: always capped. causticClamp tightens further; when it
         // is left at 0 we still apply a safety cap so roughness-0 glass does not keep
         // permanent fireflies that more samples will never clean.
@@ -968,7 +968,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             const float lightPdf = ls.pdf * selectPdf;
             const float w = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdf);
             Vec3 c = E.beta * f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf);
-            if (t > 2) c = clampContribution(c, settings.clampIndirect);
+            if (t > 2) c = clampContribution(c, settings.clampDirect);
             if (E.nearSpec) c = clampContribution(c, settings.causticClamp);
             L += c;
 #if SOLSTICE_HAVE_OPENPGL
@@ -1076,7 +1076,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (!mr.solved || isBlack(mr.contribution)) continue;
             Vec3 c = E.beta * mr.contribution;
             // Single radiance-scale clamp (same threshold as other eye strategies).
-            if (t > 2) c = clampContribution(c, settings.clampIndirect);
+            if (t > 2) c = clampContribution(c, settings.clampDirect);
             if (settings.causticClamp > 0.0f) c = clampContribution(c, settings.causticClamp);
             if (!isFinite(c)) continue;
             L += c;
@@ -1132,7 +1132,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         Vert lightArr[1] = {Ls};
         const float w = misWeight(eye, t, lightArr, 1, ov);
         c = c * w;
-        if (t > 2) c = clampContribution(c, settings.clampIndirect);
+        if (t > 2) c = clampContribution(c, settings.clampDirect);
         // Resolving a light through a near-specular lobe by connection: the direction
         // almost never lands in the lobe and the rare hit is enormous.
         if (E.nearSpec) c = clampContribution(c, settings.causticClamp);
@@ -1207,7 +1207,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 
             const float w = misWeight(eye, t, light, s, ov);
             Vec3 c = E.beta * fE * G * fL * Lv.beta * w;
-            c = clampContribution(c, settings.clampIndirect);
+            c = clampContribution(c, settings.clampDirect);
             // Connecting through a near-specular lobe means the connection direction
             // almost never lands in it, and the rare hit is enormous. Those spikes are
             // the sparkle seen inside glass; the light-tracing copy stays uncapped.
