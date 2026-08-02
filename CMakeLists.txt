@@ -46,6 +46,7 @@ option(SOLSTICE_ENABLE_OPENVDB "Build with OpenVDB volume support (optional)" ON
 option(SOLSTICE_BUILD_TESTS "Build unit tests" ON)
 option(SOLSTICE_BUILD_APP "Build the Qt desktop application" ON)
 option(SOLSTICE_BUILD_TOOLS "Build helper tools (test scene generators)" ON)
+option(SOLSTICE_ENABLE_OCIO "Build with OpenColorIO display views (system lib)" ON)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -116,6 +117,45 @@ if(SOLSTICE_ENABLE_OPENEXR)
         set(SOLSTICE_HAVE_OPENEXR_01 1)
     else()
         message(WARNING "OpenEXR not found - .exr images will be disabled")
+    endif()
+endif()
+
+# OpenColorIO — Nuke-style Display/View for the viewport (optional; Windows CI may omit).
+set(SOLSTICE_HAVE_OCIO_01 0)
+set(SOLSTICE_OCIO_TARGET "")
+if(SOLSTICE_ENABLE_OCIO)
+    find_package(OpenColorIO CONFIG QUIET)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(OCIO_PKG QUIET IMPORTED_TARGET OpenColorIO)
+    endif()
+    if(TARGET OpenColorIO::OpenColorIO)
+        # Debian/Ubuntu OpenColorIOConfig can leave include as "/include".
+        get_target_property(_sol_ocio_incs OpenColorIO::OpenColorIO INTERFACE_INCLUDE_DIRECTORIES)
+        set(_sol_ocio_inc_ok FALSE)
+        foreach(_d IN LISTS _sol_ocio_incs)
+            if(EXISTS "${_d}/OpenColorIO/OpenColorIO.h")
+                set(_sol_ocio_inc_ok TRUE)
+            endif()
+        endforeach()
+        if(NOT _sol_ocio_inc_ok AND EXISTS "/usr/include/OpenColorIO/OpenColorIO.h")
+            set_property(TARGET OpenColorIO::OpenColorIO APPEND PROPERTY
+                         INTERFACE_INCLUDE_DIRECTORIES "/usr/include")
+            set(_sol_ocio_inc_ok TRUE)
+        endif()
+        if(_sol_ocio_inc_ok)
+            set(SOLSTICE_HAVE_OCIO_01 1)
+            set(SOLSTICE_OCIO_TARGET OpenColorIO::OpenColorIO)
+        endif()
+    endif()
+    if(NOT SOLSTICE_HAVE_OCIO_01 AND TARGET PkgConfig::OCIO_PKG)
+        set(SOLSTICE_HAVE_OCIO_01 1)
+        set(SOLSTICE_OCIO_TARGET PkgConfig::OCIO_PKG)
+    endif()
+    if(SOLSTICE_HAVE_OCIO_01)
+        message(STATUS "OpenColorIO found — Display/View enabled")
+    else()
+        message(STATUS "OpenColorIO not found — viewport Display/View falls back to passthrough")
     endif()
 endif()
 
@@ -391,6 +431,7 @@ set(SOLSTICE_LIB_SOURCES
     src/io/image_io.cpp
     src/io/tx_cache.cpp
     src/io/tx_convert.cpp
+    src/io/ocio_util.cpp
     src/io/alembic_loader.cpp
     src/io/usd_loader.cpp
     src/io/materialx_graph.cpp
@@ -430,6 +471,7 @@ set(SOLSTICE_LIB_HEADERS
     src/io/image_io.h
     src/io/tx_cache.h
     src/io/tx_convert.h
+    src/io/ocio_util.h
     src/io/alembic_loader.h
     src/io/usd_loader.h
     src/io/materialx_graph.h
@@ -464,6 +506,9 @@ if(SOLSTICE_HAVE_ALEMBIC_01)
 endif()
 if(SOLSTICE_HAVE_OPENEXR_01)
     target_link_libraries(solstice_lib PUBLIC OpenEXR::OpenEXR)
+endif()
+if(SOLSTICE_HAVE_OCIO_01 AND SOLSTICE_OCIO_TARGET)
+    target_link_libraries(solstice_lib PUBLIC ${SOLSTICE_OCIO_TARGET})
 endif()
 if(SOLSTICE_HAVE_TIFF_01)
     target_link_libraries(solstice_lib PUBLIC TIFF::TIFF)
@@ -624,6 +669,7 @@ message(STATUS "  Qt              : ${Qt6_VERSION}")
 message(STATUS "  Embree          : ${EMBREE_VERSION}")
 message(STATUS "  Alembic support : ${SOLSTICE_HAVE_ALEMBIC_01}")
 message(STATUS "  OpenEXR support : ${SOLSTICE_HAVE_OPENEXR_01}")
+message(STATUS "  OpenColorIO     : ${SOLSTICE_HAVE_OCIO_01}")
 message(STATUS "  TIFF /.tx mips  : ${SOLSTICE_HAVE_TIFF_01}")
 message(STATUS "  OpenVDB volumes : ${SOLSTICE_HAVE_OPENVDB_01}")
 message(STATUS "  MaterialX       : ${SOLSTICE_HAVE_MATERIALX_01}")

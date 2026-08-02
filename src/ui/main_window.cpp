@@ -36,6 +36,7 @@
 #include "core/log.h"
 #include "core/math.h"
 #include "io/image_io.h"
+#include "io/ocio_util.h"
 #include "io/tx_cache.h"
 #include "nodes/node_registry.h"
 #include "nodes/node.h"
@@ -876,6 +877,9 @@ void MainWindow::onParameterAction(Node* node, const QString& parameterName) {
 
 void MainWindow::startStillFrameRender(Node* renderSettings) {
     if (!renderSettings) return;
+    ocioLogStatus(renderSettings->boolValue("ociousenv", true),
+                  renderSettings->stringValue("ocioconfig", "").toStdString());
+
     QString path = renderSettings->stringValue("outputpath", "render.exr").trimmed();
     if (path.isEmpty()) path = QStringLiteral("render.exr");
     if (QFileInfo(path).suffix().isEmpty()) path += QStringLiteral(".exr");
@@ -1300,6 +1304,19 @@ void MainWindow::mergeTessellationCache(const Scene& scene) {
 }
 
 void MainWindow::onStartRender() {
+    // Log OCIO availability every time rendering starts.
+    {
+        bool useEnv = true;
+        std::string cfg;
+        for (const NodePtr& node : graph_.nodes()) {
+            if (!node || node->typeName() != QLatin1String("rendersettings")) continue;
+            useEnv = node->boolValue("ociousenv", true);
+            cfg = node->stringValue("ocioconfig", "").toStdString();
+            break;
+        }
+        ocioLogStatus(useEnv, cfg);
+    }
+
     const bool fromPlaceholder = renderView_ && renderView_->isShowingPlaceholder();
     setRenderArmed(true);
     if (renderView_) {

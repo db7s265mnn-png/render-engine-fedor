@@ -6,6 +6,7 @@
 #include <string>
 
 #include "core/log.h"
+#include "io/ocio_util.h"
 
 namespace sol {
 
@@ -47,6 +48,9 @@ RenderProgress RenderSession::progress() const {
 Image RenderSession::displayImage() const {
     ScenePtr scene = this->scene();
     RenderSettingsData settings = scene ? scene->settings : RenderSettingsData();
+
+    // Keep OCIO config in sync with Film settings for Nuke-style views.
+    ocioEnsureConfig(settings.ocioUseEnv != 0, settings.ocioConfigPath);
 
     // After a clear / restart / re-dice, keep the last finished preview until the
     // first bootstrap pixels land — avoids a harsh black flash.

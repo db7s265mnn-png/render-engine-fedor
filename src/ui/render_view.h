@@ -209,7 +209,7 @@ private:
     QToolButton* localSpaceButton_ = nullptr;
     QToolButton* worldSpaceButton_ = nullptr;
     QComboBox* viewTransformCombo_ = nullptr;
-    int viewTransform_ = 1;  // kViewSrgb
+    int viewTransform_ = 0;  // kViewSrgbAces
     QStringList cameraMenuNames_;
     QString activeCameraName_;
 

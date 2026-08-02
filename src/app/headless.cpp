@@ -9,6 +9,7 @@
 #include "app/document.h"
 #include "core/log.h"
 #include "io/image_io.h"
+#include "io/ocio_util.h"
 #include "io/tx_cache.h"
 #include "nodes/node_registry.h"
 #include "render/motion_blur.h"
@@ -71,6 +72,9 @@ int runHeadless(const HeadlessOptions& options) {
     struct TxGuard {
         ~TxGuard() { setActiveTxCacheSettings(nullptr); }
     } txGuard;
+
+    // OCIO status at headless render start (library + config).
+    ocioLogStatus(txArm.ocioUseEnv != 0, txArm.ocioConfigPath);
 
     StagePtr stage = graph.cookDisplay(context);
     if (!stage) {

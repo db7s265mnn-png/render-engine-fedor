@@ -806,11 +806,12 @@ bool saveImageAuto(const std::string& path, const Image& linear, const RenderSet
     if (ext == "hdr") return saveImageHdr(path, linear, error);
     if (ext == "exr") return saveImageExr(path, linear, error, settings.bitDepth);
 
-    Image display(linear.width(), linear.height());
+    // LDR: write working-space values (no viewer process) — Nuke/Arnold beauty save style.
+    Image out(linear.width(), linear.height());
     for (int y = 0; y < linear.height(); ++y)
         for (int x = 0; x < linear.width(); ++x)
-            display.setRgb(x, y, applyDisplayView(linear.rgb(x, y), settings));
-    return saveImagePng(path, display, error);
+            out.setRgb(x, y, quantizeRgb(linear.rgb(x, y), settings.bitDepth));
+    return saveImagePng(path, out, error);
 }
 
 }  // namespace sol

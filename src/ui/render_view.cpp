@@ -367,12 +367,12 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
 
     stripLayout->addSpacing(8);
     viewTransformCombo_ = new QComboBox(toolStrip_);
-    viewTransformCombo_->addItem(QStringLiteral("ACES Output - sRGB"), 0);
-    viewTransformCombo_->addItem(QStringLiteral("sRGB"), 1);
+    viewTransformCombo_->addItem(QStringLiteral("sRGB (ACES)"), 0);
+    viewTransformCombo_->addItem(QStringLiteral("rec709 (ACES)"), 1);
     viewTransformCombo_->addItem(QStringLiteral("Raw"), 2);
-    viewTransformCombo_->setCurrentIndex(1);
+    viewTransformCombo_->setCurrentIndex(0);
     viewTransformCombo_->setToolTip(
-        QStringLiteral("Display view for the framebuffer (monitor). "
+        QStringLiteral("Nuke-style OCIO viewer process. "
                        "Working space is set in Render Settings → Film."));
     viewTransformCombo_->setStyleSheet(
         "QComboBox {"

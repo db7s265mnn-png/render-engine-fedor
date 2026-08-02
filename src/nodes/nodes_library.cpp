@@ -1050,12 +1050,15 @@ public:
                          .withTooltip("Stage prim path of the custom dicing camera "
                                       "(e.g. /cameras/dice). Empty falls back to the render camera."));
         addParameter(Parameter::makeMenu("workingspace", "Working Space",
-                                         {"sRGB Linear", "ACEScg"}, 0)
+                                         {"sRGB Linear", "ACEScg"}, 1)
                          .withGroup("Film")
                          .withTooltip("Render working colour space.\n"
-                                      "ACEScg: Arnold-style ACES workflow (textures convert to ACEScg).\n"
+                                      "ACEScg (default): Arnold-style ACES workflow "
+                                      "(textures convert to ACEScg).\n"
                                       "sRGB Linear: legacy linear RGB working space.\n"
                                       "Viewport View (next to World) controls monitor display."));
+        // Marks scenes authored after ACEScg became the default working space.
+        addParameter(Parameter::makeBool("_working_space_aces_v1", "", true));
         addParameter(Parameter::makeBool("ociousenv", "Use OCIO from Environment", true)
                          .withGroup("Film")
                          .withTooltip("When on (default), read the OCIO config path from the "
@@ -1145,7 +1148,7 @@ public:
         settings.spectralSamples = std::clamp(intValue("spectralsamples", 4), 2, 16);
         settings.spectralBins = std::clamp(intValue("spectralbins", 16), 8, 32);
         settings.spectralExr = boolValue("spectralexr", false) ? 1 : 0;
-        settings.workingSpace = std::clamp(intValue("workingspace", 0), 0, 1);
+        settings.workingSpace = std::clamp(intValue("workingspace", 1), 0, 1);
         {
             // Menu indices 0/1/2 → bit depths 8/16/32.
             const int bitIdx = std::clamp(intValue("bitdepth", 1), 0, 2);

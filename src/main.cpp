@@ -8,6 +8,7 @@
 
 #include "app/headless.h"
 #include "core/log.h"
+#include "io/ocio_util.h"
 #include "nodes/node_registry.h"
 #include "solstice_config.h"
 #include "ui/main_window.h"
@@ -118,6 +119,9 @@ int main(int argc, char** argv) {
     parser.process(application);
 
     sol::applyDarkTheme(application);
+
+    // OCIO status at application start (library + OCIO env / config).
+    sol::ocioLogStatus(true, {});
 
     sol::MainWindow window;
     const QStringList positional = parser.positionalArguments();

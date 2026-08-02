@@ -429,11 +429,11 @@ enum WorkingColorSpace : int {
     kWorkingSpaceAcesCg = 1,
 };
 
-// Viewport / display view transform (chrome strip next to Local/World).
+// Viewport / display view transform (chrome strip next to Local/World). Nuke-style.
 enum ViewTransform : int {
-    kViewAcesOutputSrgb = 0,  // ACES Output - sRGB (monitor)
-    kViewSrgb = 1,            // sRGB EOTF (default)
-    kViewRaw = 2,             // no display transform
+    kViewSrgbAces = 0,     // sRGB (ACES) — default OCIO Display/View
+    kViewRec709Aces = 1,   // rec709 (ACES)
+    kViewRaw = 2,          // no display transform
 };
 
 // Framebuffer resolve / viewport quantize / EXR save bit depth (accum stays float).
@@ -484,9 +484,9 @@ struct RenderSettingsData {
     float clampDirect = 10.0f;
     float clampIndirect = 10.0f;
     // Working colour space (Film). Display view is separate (viewport chrome).
-    int workingSpace = kWorkingSpaceSrgbLinear;
+    int workingSpace = kWorkingSpaceAcesCg;
     // Viewport view transform (updated live from the render view chrome).
-    int viewTransform = kViewSrgb;
+    int viewTransform = kViewSrgbAces;
     // Resolve / save bit depth: 8, 16, or 32 (accumulation remains float).
     int bitDepth = kBitDepth16;
     // Film reconstruction filter (Box = current 1-pixel behaviour).

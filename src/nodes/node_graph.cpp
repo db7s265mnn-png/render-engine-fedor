@@ -291,11 +291,13 @@ bool NodeGraph::fromJson(const QJsonObject& json, QString& error) {
         const QJsonArray parametersArray = nodeJson.value("parameters").toArray();
         bool sawIntegratorMenuV2 = false;
         bool sawCausticsEngineMenuV2 = false;
+        bool sawWorkingSpaceAcesV1 = false;
         for (const QJsonValue& parameterValue : parametersArray) {
             const QJsonObject parameterJson = parameterValue.toObject();
             const QString pname = parameterJson.value("name").toString();
             if (pname == QLatin1String("_integrator_menu_v2")) sawIntegratorMenuV2 = true;
             if (pname == QLatin1String("_caustics_engine_menu_v2")) sawCausticsEngineMenuV2 = true;
+            if (pname == QLatin1String("_working_space_aces_v1")) sawWorkingSpaceAcesV1 = true;
             Parameter* parameter = node->findParameter(pname);
             if (parameter) parameter->fromJson(parameterJson);
         }
@@ -322,6 +324,11 @@ bool NodeGraph::fromJson(const QJsonObject& json, QString& error) {
             }
             node->setParameterValue("causticsengine", idx, false);
             node->setParameterValue("_caustics_engine_menu_v2", true, false);
+        }
+        // New default working space is ACEScg — adapt older scenes.
+        if (!sawWorkingSpaceAcesV1 && node->typeName() == QLatin1String("rendersettings")) {
+            node->setParameterValue("workingspace", 1, false);  // ACEScg
+            node->setParameterValue("_working_space_aces_v1", true, false);
         }
         node->extraStateFromJson(nodeJson.value("state").toObject());
 
@@ -443,11 +450,13 @@ QList<Node*> NodeGraph::pasteNodesFromClipboardJson(const QJsonObject& json, QPo
         const QJsonArray parametersArray = nodeJson.value("parameters").toArray();
         bool sawIntegratorMenuV2 = false;
         bool sawCausticsEngineMenuV2 = false;
+        bool sawWorkingSpaceAcesV1 = false;
         for (const QJsonValue& parameterValue : parametersArray) {
             const QJsonObject parameterJson = parameterValue.toObject();
             const QString pname = parameterJson.value("name").toString();
             if (pname == QLatin1String("_integrator_menu_v2")) sawIntegratorMenuV2 = true;
             if (pname == QLatin1String("_caustics_engine_menu_v2")) sawCausticsEngineMenuV2 = true;
+            if (pname == QLatin1String("_working_space_aces_v1")) sawWorkingSpaceAcesV1 = true;
             Parameter* parameter = node->findParameter(pname);
             if (parameter) parameter->fromJson(parameterJson);
         }
@@ -473,6 +482,10 @@ QList<Node*> NodeGraph::pasteNodesFromClipboardJson(const QJsonObject& json, QPo
             }
             node->setParameterValue("causticsengine", idx, false);
             node->setParameterValue("_caustics_engine_menu_v2", true, false);
+        }
+        if (!sawWorkingSpaceAcesV1 && node->typeName() == QLatin1String("rendersettings")) {
+            node->setParameterValue("workingspace", 1, false);
+            node->setParameterValue("_working_space_aces_v1", true, false);
         }
         node->extraStateFromJson(nodeJson.value("state").toObject());
         positions.append(node->position());

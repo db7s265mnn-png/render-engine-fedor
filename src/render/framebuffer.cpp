@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "io/ocio_util.h"
+
 namespace sol {
 
 void Framebuffer::resize(int width, int height) {
@@ -81,30 +83,16 @@ Image Framebuffer::resolveLinear() const {
 }
 
 Vec3 applyDisplayView(Vec3 linearWorking, const RenderSettingsData& settings) {
-    const int view = settings.viewTransform;
-    const int working = settings.workingSpace;
-    Vec3 display(0.0f);
-
-    if (view == kViewRaw) {
-        // Show working values clamped — no display transform.
-        display = Vec3(saturatef(linearWorking.x), saturatef(linearWorking.y),
-                       saturatef(linearWorking.z));
-    } else if (view == kViewAcesOutputSrgb) {
-        // ACES Output - sRGB: filmic RRT+ODT stand-in (Houdini/Arnold-style monitor view).
-        // When working in ACEScg, apply directly; for sRGB-linear, still run the curve
-        // so the control stays meaningful.
-        display = acesFilmic(linearWorking);
-    } else {
-        // sRGB view (default): encode for a standard monitor.
-        Vec3 linearSrgb = linearWorking;
-        if (working == kWorkingSpaceAcesCg) linearSrgb = acescgToLinearSrgb(linearWorking);
-        display = linearToSrgbVec(linearSrgb);
+    Vec3 display = linearWorking;
+    if (!ocioApplyView(linearWorking, settings.workingSpace, settings.viewTransform, display)) {
+        if (settings.viewTransform != kViewRaw) {
+            display = Vec3(saturatef(linearWorking.x), saturatef(linearWorking.y),
+                           saturatef(linearWorking.z));
+        }
     }
-
     return quantizeRgb(display, settings.bitDepth);
 }
 
-// Legacy name used by image_io save helpers.
 Vec3 applyToneMap(Vec3 color, const RenderSettingsData& settings) {
     return applyDisplayView(color, settings);
 }
@@ -117,6 +105,9 @@ Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
     constexpr int kBootstrapStep = 2;
     const Vec3 charcoal(0.07f, 0.07f, 0.08f);
     const double invPaths = invSplatPaths();
+
+    // Prepare OCIO once per frame (Nuke-style Display/View).
+    ocioPrepareView(settings.workingSpace, settings.viewTransform);
 
     for (int y = 0; y < height_; ++y) {
         for (int x = 0; x < width_; ++x) {
@@ -152,7 +143,8 @@ Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
             } else {
                 linearColor = splatPixel(x, y, invPaths);
             }
-            image.setRgb(x, y, applyDisplayView(linearColor, settings), 1.0f);
+            const Vec3 display = quantizeRgb(ocioApplyViewPrepared(linearColor), settings.bitDepth);
+            image.setRgb(x, y, display, 1.0f);
         }
     }
     return image;
