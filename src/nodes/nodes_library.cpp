@@ -826,13 +826,21 @@ public:
                          .withTooltip("Caps eye-path sample contributions in linear pixel radiance "
                                       "(Arnold Direct Clamp). Applies to PT/BDPT eye paths, NEE, "
                                       "MNEE, and photon gather.\n"
-                                      "Default 10; ~100 is a soft look. 0 disables."));
+                                      "Default 10; ~100 is a soft look. 0 disables.\n"
+                                      "Ignored when Disable All Clamps is on."));
         addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Engine")
                          .withTooltip("Caps BDPT light-tracing splat contributions in linear pixel "
                                       "radiance (Arnold Indirect Clamp). Raw LT deposits carry "
                                       "camera PDF — they are scaled to radiance before clamping.\n"
-                                      "Affects BDPT / BDPT Spectral caustics from LT. 0 disables."));
+                                      "Affects BDPT / BDPT Spectral caustics from LT. 0 disables.\n"
+                                      "Ignored when Disable All Clamps is on."));
+        addParameter(Parameter::makeBool("disableclamps", "Disable All Clamps", false)
+                         .withGroup("Engine")
+                         .withTooltip("Force Direct Clamp, Indirect Clamp, and Caustic Firefly Clamp "
+                                      "(including the hidden safety floor of 10) all off.\n"
+                                      "Use for unbiased reference / energy tests — fireflies will "
+                                      "return."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Engine"));
         addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
                                          {"Sobol (Owen)", "Blue Noise", "White (PCG)",
@@ -920,7 +928,8 @@ public:
                                       "(the sparkle inside refractive objects).\n"
                                       "Even at 0, a safety cap of 10 is applied to those paths — they "
                                       "never converge with more samples when the light is small.\n"
-                                      "Raise to tighten further; the caustic on the floor is not capped."));
+                                      "Raise to tighten further; the caustic on the floor is not capped.\n"
+                                      "Disable All Clamps turns the safety floor off too."));
         addParameter(Parameter::makeMenu(
                          "dispersionmode", "Dispersion Mode",
                          {"Hero (default)", "Optimized", "Spectral RGB ×3", "Fake tint"}, 0)
@@ -1003,6 +1012,21 @@ public:
         addParameter(Parameter::makeMenu("tonemap", "Tone Map", {"None", "Reinhard", "ACES"}, 2).withGroup("Film"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -8.0, 8.0).withGroup("Film"));
         addParameter(Parameter::makeFloat("gamma", "Gamma", 2.2, 1.0, 4.0).withGroup("Film"));
+        addParameter(Parameter::makeMenu("pixelfilter", "Pixel Filter",
+                                         {"Box", "Triangle", "Gaussian", "Mitchell"}, 0)
+                         .withGroup("Film")
+                         .withTooltip("Film reconstruction filter — how each continuous sample is "
+                                      "weighted into neighbouring pixels (PBRT / Arnold).\n"
+                                      "Box (default): hard 1×1 pixels — sharp but makes 1spp noise "
+                                      "look blocky when zoomed.\n"
+                                      "Triangle / Gaussian / Mitchell: softer AA; softens the "
+                                      "visible pixel grid at low spp.\n"
+                                      "Does not change the Pixel Sampler (Sobol / R2 / …)."));
+        addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.0, 0.0, 8.0, false)
+                         .withGroup("Film")
+                         .withTooltip("Filter support in pixels. 0 = default for the chosen filter "
+                                      "(Box 0.5, Triangle 1, Gaussian 1.5, Mitchell 2).\n"
+                                      "Larger = softer / more blur."));
         addParameter(Parameter::makeBool("envvisible", "Environment Visible To Camera", true).withGroup("Film"));
 
         addParameter(Parameter::makeMenu("samplingdebug", "Sampling Debug",
@@ -1053,6 +1077,7 @@ public:
         settings.lightSamples = std::max(1, intValue("lightsamples", 2));
         settings.clampDirect = float(floatValue("clampdirect", 10.0));
         settings.clampIndirect = float(floatValue("clamp", 10.0));
+        settings.disableClamps = boolValue("disableclamps", false) ? 1 : 0;
         settings.seed = intValue("seed", 0);
         settings.threads = intValue("threads", 0);
         settings.tileSize = std::clamp(intValue("tilesize", 32), 0, 256);
@@ -1084,6 +1109,8 @@ public:
         settings.toneMapper = intValue("tonemap", 2);
         settings.exposure = float(floatValue("exposure", 0.0));
         settings.gamma = float(floatValue("gamma", 2.2));
+        settings.pixelFilter = std::clamp(intValue("pixelfilter", 0), 0, 3);
+        settings.filterRadius = float(floatValue("filterradius", 0.0));
         settings.envVisibleCamera = boolValue("envvisible", true) ? 1 : 0;
         settings.filmFalseColor = boolValue("filmfalsecolor", false) ? 1 : 0;
         settings.filmFalseColorBin = std::clamp(intValue("filmfalsecolorbin", 0), 0, 31);

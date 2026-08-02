@@ -426,6 +426,14 @@ enum SamplingDebug : int {
     kSamplingDebugPixelHash = 4,    // RGB from hashPixelSample(x,y,spp,seed)
 };
 
+// Film reconstruction filter (how a continuous sample is weighted into pixels).
+enum PixelFilter : int {
+    kPixelFilterBox = 0,       // 1×1 box — historical default (hard pixels)
+    kPixelFilterTriangle = 1,  // tent
+    kPixelFilterGaussian = 2,  // truncated Gaussian
+    kPixelFilterMitchell = 3,  // Mitchell–Netravali B=C=1/3
+};
+
 // Chromatic dispersion sampling (material dispersion_abbe / lens CA).
 enum DispersionMode : int {
     // Current: one random hero RGB channel per sample; mask whole path to that channel.
@@ -466,9 +474,14 @@ struct RenderSettingsData {
     // Indirect Clamp: BDPT light-tracing splat deposits (converted to radiance via / (W·H)).
     float clampDirect = 10.0f;
     float clampIndirect = 10.0f;
+    // Master switch: force Direct / Indirect / Caustic (incl. safety floor) off.
+    int disableClamps = 0;
     float exposure = 0.0f;
     float gamma = 2.2f;
     int toneMapper = kToneAces;
+    // Film reconstruction filter (Box = current 1-pixel behaviour).
+    int pixelFilter = kPixelFilterBox;
+    float filterRadius = 0.5f;  // pixels; 0 = use defaultFilterRadius(pixelFilter)
 
     int backend = kBackendCpuEmbree;
     int envVisibleCamera = 1;
@@ -488,8 +501,8 @@ struct RenderSettingsData {
     // Firefly cap for paths that look through glass/mirrors at a light (SDS) and for
     // BDPT near-specular NEE/connections. Those never converge with more samples when
     // the light is small; a safety floor of 10 is always applied when this is left at 0
-    // (see causticFireflyCap). Raise it to tighten further. Light-tracing caustics on
-    // diffuse surfaces use Indirect Clamp, not this.
+    // (see causticFireflyCap) unless disableClamps is on. Raise it to tighten further.
+    // Light-tracing caustics on diffuse surfaces use Indirect Clamp, not this.
     float causticClamp = 0.0f;
     // Photon / VCM caustic map (used when causticsEngine == Photon).
     int photonCount = 100000;

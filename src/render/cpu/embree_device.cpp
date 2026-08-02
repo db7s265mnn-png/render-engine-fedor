@@ -11,6 +11,7 @@
 #include "core/thread_pool.h"
 #include "render/blue_noise.h"
 #include "render/film_tile.h"
+#include "render/pixel_filter.h"
 #include "render/rsequence.h"
 #include "render/sobol.h"
 #include "render/cpu/polynomial_optics.h"
@@ -354,6 +355,18 @@ public:
         const bool legacySeed = samplingEngine == kSamplingEngineLegacy;
         const int pathSampler = std::clamp(settings.pathSampler, 0, 2);
         const bool usePathSobol = !legacySeed && pathSampler == kPathSamplerOwenSobol;
+        const int pixelFilter = std::clamp(settings.pixelFilter, 0, 3);
+        const float filterRadius = settings.filterRadius > 0.0f
+                                       ? settings.filterRadius
+                                       : defaultFilterRadius(pixelFilter);
+        const int filterBorder = filterPixelBorder(filterRadius);
+        const bool trivialBox = isTrivialBoxFilter(pixelFilter, filterRadius);
+
+        struct PixelEval {
+            Vec3 radiance;
+            float jx = 0.5f;
+            float jy = 0.5f;
+        };
 
         auto makePathRng = [&](int x, int y, uint32_t salt = 0u) -> Rng {
             if (pathSampler == kPathSamplerXorshift32) {
@@ -377,7 +390,7 @@ public:
             return makePixelRng(x, y, sampleIndex, frameSeed, salt);
         };
 
-        auto evaluatePixelSample = [&](int x, int y, int threadId) -> Vec3 {
+        auto evaluatePixelSample = [&](int x, int y, int threadId) -> PixelEval {
             EmbreeTracer tracer{topScene_};
             Rng rng = makePathRng(x, y);
             // Camera AA / DoF — selectable Pixel Sampler.
@@ -407,6 +420,8 @@ public:
             PathSobolStream pathSobol{};
             if (usePathSobol) attachPathSobol(rng, pathSobol, x, y, sampleIndex);
 
+            auto done = [&](Vec3 L) -> PixelEval { return PixelEval{L, jx, jy}; };
+
             // Diagnostic: skip light transport and visualise sampler / seed fields.
             if (settings.samplingDebug != kSamplingDebugOff) {
                 switch (settings.samplingDebug) {
@@ -414,35 +429,35 @@ public:
                         const int tx = x / tileSize;
                         const int ty = y / tileSize;
                         const uint32_t h = hashUint(uint32_t(tx) * 0x9e3779b9u ^ uint32_t(ty));
-                        return Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
-                                    float((h >> 16) & 255u)) *
-                               (1.0f / 255.0f);
+                        return done(Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
+                                         float((h >> 16) & 255u)) *
+                                    (1.0f / 255.0f));
                     }
                     case kSamplingDebugPixelHash: {
                         if (legacySeed) {
                             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
                             const uint32_t h = hashCombine(pixelIndex, frameSeed);
-                            return Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
-                                        float((h >> 16) & 255u)) *
-                                   (1.0f / 255.0f);
+                            return done(Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
+                                             float((h >> 16) & 255u)) *
+                                        (1.0f / 255.0f));
                         }
                         const uint64_t h = hashPixelSample(x, y, uint32_t(sampleIndex), frameSeed);
-                        return Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
-                                    float((h >> 16) & 255u)) *
-                               (1.0f / 255.0f);
+                        return done(Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
+                                         float((h >> 16) & 255u)) *
+                                    (1.0f / 255.0f));
                     }
                     case kSamplingDebugPixelJitter:
-                        return Vec3(jx, jy, 0.25f);
+                        return done(Vec3(jx, jy, 0.25f));
                     case kSamplingDebugPathRng: {
                         Rng r = makePathRng(x, y, 0xD1A60001u);
                         PathSobolStream dbgSobol{};
                         if (usePathSobol)
                             attachPathSobol(r, dbgSobol, x, y, sampleIndex, 0xD1A60001u);
                         const float u0 = r.nextFloat();
-                        return Vec3(u0, u0, u0);
+                        return done(Vec3(u0, u0, u0));
                     }
                     default:
-                        return Vec3(0.0f);
+                        return done(Vec3(0.0f));
                 }
             }
 
@@ -590,7 +605,7 @@ public:
                 DispersionContext ctx = makeDispCtx(chromaticChannel);
                 const float shutterTime = sampleShutter(rng);
                 if (!generateRay(rng, chromaticChannel, origin, direction, lensTau, shutterTime)) {
-                    return Vec3(0.0f);
+                    return done(Vec3(0.0f));
                 }
                 radiance = traceOnce(rng, origin, direction, &ctx, x, y);
                 radiance = radiance * std::max(0.0f, lensTau);
@@ -618,7 +633,16 @@ public:
                 (void)bin;
             }
 
-            return radiance;
+            return done(radiance);
+        };
+
+        auto depositEval = [&](auto&& sink, int x, int y, const PixelEval& ev) {
+            if (trivialBox) {
+                sink.addSample(x, y, ev.radiance);
+            } else {
+                sink.addFilteredSample(float(x) + ev.jx, float(y) + ev.jy, ev.radiance, pixelFilter,
+                                       filterRadius, width, height);
+            }
         };
 
         // --- Sampling Engine dispatch -------------------------------------------------
@@ -642,21 +666,37 @@ public:
 
         if (samplingEngine == kSamplingEngineProgressive) {
             // True progressive: one work item = one scanline (no FilmTile / no buckets).
+            // Non-box filters use a 1-row FilmTile with border so neighbours stay local.
             runBootstrapOrFull([&](int bootstrapPhase, bool useBootstrap) {
                 pool_->parallelFor(height, [&](int y, int threadId) {
                     if (cancel.load(std::memory_order_relaxed)) return;
-                    for (int x = 0; x < width; ++x) {
-                        if (useBootstrap) {
-                            if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
-                                bootstrapPhase)
-                                continue;
+                    if (trivialBox) {
+                        for (int x = 0; x < width; ++x) {
+                            if (useBootstrap) {
+                                if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
+                                    bootstrapPhase)
+                                    continue;
+                            }
+                            const PixelEval ev = evaluatePixelSample(x, y, threadId);
+                            fb.addSample(x, y, ev.radiance);
                         }
-                        fb.addSample(x, y, evaluatePixelSample(x, y, threadId));
+                    } else {
+                        FilmTile tile(0, y, width, y + 1, filterBorder);
+                        for (int x = 0; x < width; ++x) {
+                            if (useBootstrap) {
+                                if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
+                                    bootstrapPhase)
+                                    continue;
+                            }
+                            depositEval(tile, x, y, evaluatePixelSample(x, y, threadId));
+                        }
+                        fb.mergeFilmTile(tile);
                     }
                 });
             });
         } else if (samplingEngine == kSamplingEngineLegacy) {
-            // Pre-book: same tile schedule, but write straight into the Film.
+            // Pre-book: same tile schedule, but write straight into the Film (box) or
+            // via bordered FilmTile (filtered).
             runBootstrapOrFull([&](int bootstrapPhase, bool useBootstrap) {
                 pool_->parallelFor(tileCount, [&](int tileIndex, int threadId) {
                     if (cancel.load(std::memory_order_relaxed)) return;
@@ -666,16 +706,33 @@ public:
                     const int y0 = ty * tileSize;
                     const int x1 = std::min(x0 + tileSize, width);
                     const int y1 = std::min(y0 + tileSize, height);
-                    for (int y = y0; y < y1; ++y) {
-                        if (cancel.load(std::memory_order_relaxed)) return;
-                        for (int x = x0; x < x1; ++x) {
-                            if (useBootstrap) {
-                                if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
-                                    bootstrapPhase)
-                                    continue;
+                    if (trivialBox) {
+                        for (int y = y0; y < y1; ++y) {
+                            if (cancel.load(std::memory_order_relaxed)) return;
+                            for (int x = x0; x < x1; ++x) {
+                                if (useBootstrap) {
+                                    if (((x % kBootstrapStep) +
+                                         (y % kBootstrapStep) * kBootstrapStep) != bootstrapPhase)
+                                        continue;
+                                }
+                                const PixelEval ev = evaluatePixelSample(x, y, threadId);
+                                fb.addSample(x, y, ev.radiance);
                             }
-                            fb.addSample(x, y, evaluatePixelSample(x, y, threadId));
                         }
+                    } else {
+                        FilmTile tile(x0, y0, x1, y1, filterBorder);
+                        for (int y = y0; y < y1; ++y) {
+                            if (cancel.load(std::memory_order_relaxed)) return;
+                            for (int x = x0; x < x1; ++x) {
+                                if (useBootstrap) {
+                                    if (((x % kBootstrapStep) +
+                                         (y % kBootstrapStep) * kBootstrapStep) != bootstrapPhase)
+                                        continue;
+                                }
+                                depositEval(tile, x, y, evaluatePixelSample(x, y, threadId));
+                            }
+                        }
+                        fb.mergeFilmTile(tile);
                     }
                 });
             });
@@ -689,7 +746,7 @@ public:
                 const int y0 = ty * tileSize;
                 const int x1 = std::min(x0 + tileSize, width);
                 const int y1 = std::min(y0 + tileSize, height);
-                FilmTile tile(x0, y0, x1, y1);
+                FilmTile tile(x0, y0, x1, y1, trivialBox ? 0 : filterBorder);
                 for (int y = y0; y < y1; ++y) {
                     if (cancel.load(std::memory_order_relaxed)) break;
                     for (int x = x0; x < x1; ++x) {
@@ -698,7 +755,7 @@ public:
                                 bootstrapPhase)
                                 continue;
                         }
-                        tile.addSample(x, y, evaluatePixelSample(x, y, threadId));
+                        depositEval(tile, x, y, evaluatePixelSample(x, y, threadId));
                     }
                 }
                 fb.mergeFilmTile(tile);

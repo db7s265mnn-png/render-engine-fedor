@@ -43,14 +43,14 @@ void Framebuffer::release() {
 
 void Framebuffer::mergeFilmTile(const FilmTile& tile) {
     if (tile.empty() || tile.pixels.empty()) return;
-    const int tw = tile.width();
-    const int th = tile.height();
+    const int tw = tile.storW;
+    const int th = tile.storH;
     bool wrote = false;
     for (int ty = 0; ty < th; ++ty) {
-        const int y = tile.y0 + ty;
+        const int y = tile.storY0 + ty;
         if (y < 0 || y >= height_) continue;
         for (int tx = 0; tx < tw; ++tx) {
-            const int x = tile.x0 + tx;
+            const int x = tile.storX0 + tx;
             if (x < 0 || x >= width_) continue;
             const Vec4& src = tile.pixels[size_t(ty) * size_t(tw) + size_t(tx)];
             if (src.w <= 0.0f) continue;

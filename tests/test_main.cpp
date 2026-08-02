@@ -28,8 +28,10 @@
 #include "nodes/node_registry.h"
 #include "nodes/stage.h"
 #include "render/cpu/polynomial_optics.h"
+#include "render/film_tile.h"
 #include "render/framebuffer.h"
 #include "render/integrator.h"
+#include "render/pixel_filter.h"
 #include "render/metal_spectra.h"
 #include "render/photon_map.h"
 #include "render/rsequence.h"
@@ -1131,6 +1133,49 @@ void testRefractionSparkleClamp() {
     // With the safety cap the peak stays bounded; tightening further must not raise it.
     check(peakSafe < 50.0, "safety cap keeps roughness-0 SDS fireflies bounded");
     check(peakTight <= peakSafe * 1.02, "tighter caustic clamp never raises the peak");
+
+    // Disable All Clamps must kill the safety floor (same as causticClamp < 0).
+    RenderSettingsData rs;
+    rs.causticClamp = 0.0f;
+    rs.disableClamps = 0;
+    check(causticFireflyCap(rs) == 10.0f, "default caustic safety floor is 10");
+    rs.disableClamps = 1;
+    check(causticFireflyCap(rs) == 0.0f, "Disable All Clamps kills caustic safety floor");
+    check(effectiveClampDirect(rs) == 0.0f, "Disable All Clamps kills Direct Clamp");
+    rs.disableClamps = 0;
+    rs.clampDirect = 10.0f;
+    check(effectiveClampDirect(rs) == 10.0f, "Direct Clamp restored when master off");
+}
+
+// Film reconstruction filters: Box is 1-pixel; Gaussian spreads into neighbours.
+void testPixelFilter() {
+    std::printf("pixel-filter\n");
+    check(isTrivialBoxFilter(kPixelFilterBox, 0.5f), "Box 0.5 is trivial");
+    check(!isTrivialBoxFilter(kPixelFilterGaussian, 1.5f), "Gaussian is non-trivial");
+    check(filterPixelBorder(0.5f) == 0, "Box needs no FilmTile border");
+    check(filterPixelBorder(1.5f) >= 1, "Gaussian needs FilmTile border");
+
+    // Centered sample in pixel (2,2) of a 5×5 film: Box hits only that pixel.
+    float boxW = 0.0f;
+    int boxHits = 0;
+    splatFilteredSample(2.5f, 2.5f, Vec3(1.0f), kPixelFilterBox, 0.5f, 5, 5,
+                        [&](int, int, Vec3, float w) {
+                            boxW += w;
+                            ++boxHits;
+                        });
+    check(boxHits == 1 && std::fabs(boxW - 1.0f) < 1e-5f, "Box deposits weight 1 into one pixel");
+
+    float gaussCenter = 0.0f, gaussSum = 0.0f;
+    int gaussHits = 0;
+    splatFilteredSample(2.5f, 2.5f, Vec3(1.0f), kPixelFilterGaussian, 1.5f, 5, 5,
+                        [&](int px, int py, Vec3, float w) {
+                            gaussSum += w;
+                            ++gaussHits;
+                            if (px == 2 && py == 2) gaussCenter = w;
+                        });
+    check(gaussHits > 1, "Gaussian hits more than one pixel");
+    check(gaussCenter > 0.0f && gaussCenter < gaussSum, "Gaussian peak at center, mass spreads");
+    check(filterWeight2D(kPixelFilterMitchell, 0.0f, 0.0f, 2.0f) > 0.0f, "Mitchell peak positive");
 }
 
 // Light-tracing splats are normalized by a global path counter and accumulated in
@@ -4430,6 +4475,7 @@ int main() {
         return g_failures == 0 ? 0 : 1;
     }
     testMath();
+    testPixelFilter();
     testSampling();
     testBsdf();
     testGlob();

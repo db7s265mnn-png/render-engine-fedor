@@ -574,7 +574,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         }
                         Vec3 contrib = throughput * envL * weight;
                         if (depth > 0 && !specularBounce)
-                            contrib = clampContribution(contrib, settings.clampDirect);
+                            contrib = clampContribution(contrib, effectiveClampDirect(settings));
                         radiance += contrib;
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active())
@@ -674,7 +674,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 }
                 Vec3 contrib = throughput * emitted * weight;
                 if (depth > 0 && !specularBounce)
-                    contrib = clampContribution(contrib, settings.clampDirect);
+                    contrib = clampContribution(contrib, effectiveClampDirect(settings));
                 radiance += contrib;
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active())
@@ -732,7 +732,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 const Vec3 nee =
                     nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding);
                 Vec3 contrib = throughput * nee;
-                if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
+                if (depth > 0) contrib = clampContribution(contrib, effectiveClampDirect(settings));
                 radiance += contrib;
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active()) guiding->addScattered(nee);
@@ -775,7 +775,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             const Vec3 nee =
                 nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding);
             Vec3 contrib = throughput * walk.pathWeight * nee;
-            if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
+            if (depth > 0) contrib = clampContribution(contrib, effectiveClampDirect(settings));
             radiance += contrib;
 #if !defined(__CUDACC__)
             if (guiding && guiding->active()) guiding->addScattered(walk.pathWeight * nee);
@@ -831,7 +831,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 if (!isBlack(g) && isFinite(g)) {
                     Vec3 contrib = throughput * g;
                     if (depth > 0 && !specularBounce)
-                        contrib = clampContribution(contrib, settings.clampDirect);
+                        contrib = clampContribution(contrib, effectiveClampDirect(settings));
                     radiance += contrib;
 #if !defined(__CUDACC__)
                     // Photons are the caustic estimator — teach the guide at this
@@ -971,7 +971,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             const float invLs = 1.0f / float(srMax(1, settings.lightSamples));
             const Vec3 nee = neeSum * invLs;
             Vec3 contrib = throughput * nee;
-            if (depth > 0 && !specularBounce) contrib = clampContribution(contrib, settings.clampDirect);
+            if (depth > 0 && !specularBounce) contrib = clampContribution(contrib, effectiveClampDirect(settings));
             radiance += contrib;
 #if !defined(__CUDACC__)
             if (guiding && guiding->active()) guiding->addScattered(neeSumGuide * invLs);
