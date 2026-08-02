@@ -480,10 +480,11 @@ struct RenderSettingsData {
     int caustics = 1;
     // Which estimator carries caustics when enabled (see CausticsEngine).
     int causticsEngine = kCausticsEngineAuto;  // MNEE+Photon smart pick
-    // Firefly cap for paths that look through glass/mirrors at a light (SDS).
-    // Those never converge with more samples when the light is small; a safety
-    // cap of 10 is always applied even when this is left at 0. Raise it to
-    // tighten further. The light-tracing caustic on diffuse surfaces is not capped.
+    // Firefly cap for paths that look through glass/mirrors at a light (SDS) and for
+    // BDPT near-specular NEE/connections. Those never converge with more samples when
+    // the light is small; a safety floor of 10 is always applied when this is left at 0
+    // (see causticFireflyCap). Raise it to tighten further. Light-tracing caustics on
+    // diffuse surfaces use Indirect Clamp, not this.
     float causticClamp = 0.0f;
     // Photon / VCM caustic map (used when causticsEngine == Photon).
     int photonCount = 100000;

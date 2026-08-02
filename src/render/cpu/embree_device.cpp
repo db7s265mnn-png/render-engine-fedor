@@ -308,6 +308,8 @@ public:
                         (settings.causticsEngine == kCausticsEngineAuto ? ", MNEE+Photon→rough)" : ")"));
             else if (useBdpt)
                 logInfo(std::string("Caustics: BDPT (bidirectional + light-tracing splats)") +
+                        (settings.caustics == 0 ? " [caustics flag off — specular chains suppressed]"
+                                                : "") +
                         (useGuiding ? " + OpenPGL guiding" : ""));
             else if (useMnee)
                 logInfo(std::string("Caustics: MNEE (manifold next-event, refractive)") +

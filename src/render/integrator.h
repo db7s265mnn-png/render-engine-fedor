@@ -526,6 +526,13 @@ SR_INL SR_HD Vec3 clampContribution(Vec3 contrib, float clampValue) {
     return contrib;
 }
 
+// SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
+// a safety floor of 10 still applies — otherwise `clampContribution(..., 0)` is a
+// no-op and roughness-0 glass / BDPT near-spec NEE keep permanent sparkles.
+SR_INL SR_HD float causticFireflyCap(const RenderSettingsData& settings) {
+    return settings.causticClamp > 0.0f ? settings.causticClamp : 10.0f;
+}
+
 // BDPT light-tracing deposits include cameraPdfOmega; resolve divides by W·H paths.
 // Map Arnold-style Indirect Clamp (pixel radiance) → raw splat threshold.
 SR_INL SR_HD float lightTraceSplatClamp(const RenderSettingsData& settings) {

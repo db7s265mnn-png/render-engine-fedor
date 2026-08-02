@@ -750,7 +750,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             Vec3 g = photons->gather(E.p, E.ns, E.wo, E.mat, photonRadius);
             if (isBlack(g) || !isFinite(g)) continue;
             Vec3 c = E.beta * g;
-            if (t > 2) c = clampContribution(c, settings.clampDirect);
+            if (t >= 2) c = clampContribution(c, settings.clampDirect);
             if (!isFinite(c)) continue;
             L += c;
 #if SOLSTICE_HAVE_OPENPGL
@@ -815,7 +815,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             c = c * w;
             // Indirect Clamp on LT in pixel-radiance units (raw splat × camera PDF
             // → threshold scaled by W·H so resolve /N matches Arnold Indirect).
-            if (s > 2) c = clampContribution(c, lightTraceSplatClamp(settings));
+            if (s >= 2) c = clampContribution(c, lightTraceSplatClamp(settings));
             if (!isFinite(c)) continue;
             if (dispersion && dispersion->heroChannel >= 0 && dispersion->used &&
                 (dispersion->mode == kDispersionHero || dispersion->mode == kDispersionOptimized ||
@@ -931,8 +931,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         // is left at 0 we still apply a safety cap so roughness-0 glass does not keep
         // permanent fireflies that more samples will never clean.
         if (specularToLight) {
-            const float cap = settings.causticClamp > 0.0f ? settings.causticClamp : 10.0f;
-            c = clampContribution(c, cap);
+            c = clampContribution(c, causticFireflyCap(settings));
         }
         L += c;
 #if SOLSTICE_HAVE_OPENPGL
@@ -968,8 +967,8 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             const float lightPdf = ls.pdf * selectPdf;
             const float w = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdf);
             Vec3 c = E.beta * f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf);
-            if (t > 2) c = clampContribution(c, settings.clampDirect);
-            if (E.nearSpec) c = clampContribution(c, settings.causticClamp);
+            if (t >= 2) c = clampContribution(c, settings.clampDirect);
+            if (E.nearSpec) c = clampContribution(c, causticFireflyCap(settings));
             L += c;
 #if SOLSTICE_HAVE_OPENPGL
             if (guiding && guiding->active() && E.guideSeg && !E.nearSpec)
@@ -1076,8 +1075,8 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             if (!mr.solved || isBlack(mr.contribution)) continue;
             Vec3 c = E.beta * mr.contribution;
             // Single radiance-scale clamp (same threshold as other eye strategies).
-            if (t > 2) c = clampContribution(c, settings.clampDirect);
-            if (settings.causticClamp > 0.0f) c = clampContribution(c, settings.causticClamp);
+            if (t >= 2) c = clampContribution(c, settings.clampDirect);
+            c = clampContribution(c, causticFireflyCap(settings));  // was opt-in; safety floor when 0
             if (!isFinite(c)) continue;
             L += c;
 #if SOLSTICE_HAVE_OPENPGL
@@ -1132,10 +1131,10 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         Vert lightArr[1] = {Ls};
         const float w = misWeight(eye, t, lightArr, 1, ov);
         c = c * w;
-        if (t > 2) c = clampContribution(c, settings.clampDirect);
+        if (t >= 2) c = clampContribution(c, settings.clampDirect);
         // Resolving a light through a near-specular lobe by connection: the direction
         // almost never lands in the lobe and the rare hit is enormous.
-        if (E.nearSpec) c = clampContribution(c, settings.causticClamp);
+        if (E.nearSpec) c = clampContribution(c, causticFireflyCap(settings));
         if (!isFinite(c)) continue;
         L += c;
 #if SOLSTICE_HAVE_OPENPGL
@@ -1212,7 +1211,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             // almost never lands in it, and the rare hit is enormous. Those spikes are
             // the sparkle seen inside glass; the light-tracing copy stays uncapped.
             if (lightPrefixCaustic || Lv.nearSpec || E.nearSpec)
-                c = clampContribution(c, settings.causticClamp);
+                c = clampContribution(c, causticFireflyCap(settings));
             if (!isFinite(c)) continue;
             L += c;
         }
