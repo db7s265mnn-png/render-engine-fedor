@@ -529,7 +529,9 @@ SR_INL SR_HD Vec3 clampContribution(Vec3 contrib, float clampValue) {
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
 // a safety floor of 10 still applies — otherwise `clampContribution(..., 0)` is a
 // no-op and roughness-0 glass / BDPT near-spec NEE keep permanent sparkles.
+// Test-only: causticClamp < 0 disables the safety floor (unbiased energy compares).
 SR_INL SR_HD float causticFireflyCap(const RenderSettingsData& settings) {
+    if (settings.causticClamp < 0.0f) return 0.0f;
     return settings.causticClamp > 0.0f ? settings.causticClamp : 10.0f;
 }
 
