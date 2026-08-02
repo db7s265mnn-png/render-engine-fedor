@@ -18,6 +18,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QShortcut>
+#include <QDateTime>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QToolBar>
@@ -1263,14 +1264,10 @@ void MainWindow::onCameraMoved() {
     if (Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
         // Looking through: navigation authors the camera node (Houdini lock-to-camera).
         writeViewToCameraNode(cam);
+        if (parameterPanel_->node() == cam && !parameterPanel_->showingMaterialX()) {
+            // Avoid rebuilding the whole panel every mouse move — refresh on next cook.
+        }
     }
-
-    // While the mouse button is down, do NOT touch RenderSession. updateSceneData()
-    // and start() both stop()+join() the render thread on the UI thread — on a heavy
-    // scene that hitch turns orbit/pan/dolly into hard jerks. ViewCamera already
-    // moved; IPR catches up on release (mouseRelease emits cameraMoved again).
-    if (renderView_->isNavigating()) return;
-
     if (!scene_) return;
     const Mat4 camXform = renderView_->camera().toMatrix();
     scene_->camera.cameraToWorld = camXform;
@@ -1285,6 +1282,23 @@ void MainWindow::onCameraMoved() {
         applyLensFromCameraNode(cam, scene_->camera);
     }
 
+    // With motion blur, each sample is expensive. Joining the render thread on every
+    // mouse-move freezes orbit — only push camera + restart on a throttle / release.
+    const bool navigating = renderView_->isNavigating();
+    const bool heavyMb = scene_->settings.motionBlur != 0;
+    if (heavyMb && navigating) {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - lastMbNavIprRestartMs_ >= 80) {
+            lastMbNavIprRestartMs_ = now;
+            mbNavIprPending_ = false;
+            session_.updateSceneData();
+            session_.start();
+        } else {
+            mbNavIprPending_ = true;
+        }
+        return;
+    }
+    mbNavIprPending_ = false;
     session_.updateSceneData();
     session_.start();
 }
