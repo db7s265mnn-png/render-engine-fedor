@@ -65,19 +65,10 @@ Image RenderSession::displayImage() const {
                      Vec4(0.07f, 0.07f, 0.08f, 1.0f));
     }
 
-    // During sample-0 bootstrap, skip updating the held preview on every fade tick
-    // until at least one full progressive sample finishes — slow BDPT Spectral
-    // otherwise freezes sparse black tile bands on screen for seconds.
-    const bool bootstrapSparse = framebuffer_.sampleCount() == 0;
     Image image = framebuffer_.resolveDisplay(settings);
-    if (!bootstrapSparse) {
+    {
         std::lock_guard<std::mutex> lock(displayHoldMutex_);
         displayHold_ = image;
-    } else {
-        // Still show the live resolve (now charcoal-filled), but keep prior hold
-        // as fallback if resolve is somehow empty.
-        std::lock_guard<std::mutex> lock(displayHoldMutex_);
-        if (displayHold_.empty()) displayHold_ = image;
     }
     return image;
 }

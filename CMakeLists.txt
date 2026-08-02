@@ -3,6 +3,35 @@ project(Solstice VERSION 0.9.0 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Bob_Render" CACHE STRING "User-visible application name")
 
+# Build identity: PROJECT_VERSION + short git SHA so exe / Help can be traced.
+set(SOLSTICE_GIT_SHA "unknown")
+set(SOLSTICE_GIT_DIRTY "")
+find_package(Git QUIET)
+if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE SOLSTICE_GIT_SHA
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" status --porcelain
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        OUTPUT_VARIABLE _solstice_git_status
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(_solstice_git_status)
+        set(SOLSTICE_GIT_DIRTY "-dirty")
+    endif()
+endif()
+string(TIMESTAMP SOLSTICE_BUILD_DATE "%Y%m%d" UTC)
+set(SOLSTICE_BUILD_ID "${PROJECT_VERSION}-${SOLSTICE_GIT_SHA}${SOLSTICE_GIT_DIRTY}")
+# Human-readable string for Help → About / window title.
+set(SOLSTICE_VERSION_FULL "${PROJECT_VERSION} (${SOLSTICE_GIT_SHA}${SOLSTICE_GIT_DIRTY}, ${SOLSTICE_BUILD_DATE})")
+# Exe / artifact basename, e.g. Bob_Render-0.9.0-dc870a4
+set(SOLSTICE_OUTPUT_NAME "${SOLSTICE_APP_DISPLAY_NAME}-${SOLSTICE_BUILD_ID}")
+message(STATUS "Build id: ${SOLSTICE_BUILD_ID}")
+
 # ---------------------------------------------------------------------------
 # Options
 # ---------------------------------------------------------------------------
@@ -532,9 +561,12 @@ if(SOLSTICE_BUILD_APP)
         ${SOLSTICE_APP_ICON_SOURCES})
     target_link_libraries(Solstice PRIVATE solstice_lib Qt6::Widgets)
     set_target_properties(Solstice PROPERTIES
-        OUTPUT_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
+        OUTPUT_NAME "${SOLSTICE_OUTPUT_NAME}"
         MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.sonya.render")
+    # Write build id next to the binary so packaging / CI can discover the exe name.
+    file(WRITE "${CMAKE_BINARY_DIR}/solstice_build_id.txt" "${SOLSTICE_BUILD_ID}\n")
+    file(WRITE "${CMAKE_BINARY_DIR}/solstice_output_name.txt" "${SOLSTICE_OUTPUT_NAME}\n")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -568,7 +600,7 @@ if(WIN32 AND SOLSTICE_BUILD_APP)
     find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS "${SOLSTICE_QT_BIN_DIR}" ${Qt6_DIR}/../../../bin)
     if(WINDEPLOYQT_EXECUTABLE)
         add_custom_target(deploy
-            COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to ${SOLSTICE_APP_DISPLAY_NAME}"
+            COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to ${SOLSTICE_OUTPUT_NAME}"
             COMMAND ${WINDEPLOYQT_EXECUTABLE} --release --no-translations --no-system-d3d-compiler
                     --compiler-runtime $<TARGET_FILE:Solstice>
             DEPENDS Solstice)
@@ -576,7 +608,8 @@ if(WIN32 AND SOLSTICE_BUILD_APP)
 endif()
 
 message(STATUS "")
-message(STATUS "${SOLSTICE_APP_DISPLAY_NAME} ${PROJECT_VERSION}")
+message(STATUS "${SOLSTICE_APP_DISPLAY_NAME} ${SOLSTICE_VERSION_FULL}")
+message(STATUS "  Output name     : ${SOLSTICE_OUTPUT_NAME}")
 message(STATUS "  Compiler        : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "  Qt              : ${Qt6_VERSION}")
 message(STATUS "  Embree          : ${EMBREE_VERSION}")

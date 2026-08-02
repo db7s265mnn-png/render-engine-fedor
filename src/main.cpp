@@ -74,7 +74,7 @@ int main(int argc, char** argv) {
         attachParentConsole();
         QCoreApplication application(argc, argv);
         QCoreApplication::setApplicationName(SOLSTICE_APP_NAME);
-        QCoreApplication::setApplicationVersion(SOLSTICE_VERSION);
+        QCoreApplication::setApplicationVersion(SOLSTICE_VERSION_FULL);
 
         QCommandLineParser parser;
         configureParser(parser);
@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
     QApplication application(argc, argv);
     QCoreApplication::setApplicationName(SOLSTICE_APP_NAME);
     QCoreApplication::setOrganizationName("Bob");
-    QCoreApplication::setApplicationVersion(SOLSTICE_VERSION);
+    QCoreApplication::setApplicationVersion(SOLSTICE_VERSION_FULL);
     QGuiApplication::setApplicationDisplayName(QString::fromUtf8(SOLSTICE_APP_NAME));
     // Window / taskbar / message-box icon (exe icon on Windows comes from app_icon.rc).
     {

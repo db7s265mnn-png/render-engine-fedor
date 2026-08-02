@@ -1440,7 +1440,7 @@ void MainWindow::onCopyViewToCameraNode() {
 void MainWindow::updateWindowTitle() {
     const QString file = graph_.filePath().isEmpty() ? QString("untitled") : QFileInfo(graph_.filePath()).fileName();
     setWindowTitle(QString("%1 %2 - %3%4")
-                       .arg(SOLSTICE_APP_NAME, SOLSTICE_VERSION, file, graph_.isModified() ? "*" : ""));
+                       .arg(SOLSTICE_APP_NAME, SOLSTICE_BUILD_ID, file, graph_.isModified() ? "*" : ""));
 }
 
 void MainWindow::updateStatusBar() {
@@ -1486,15 +1486,19 @@ void MainWindow::onShowAbout() {
     about.setIconPixmap(QPixmap(QStringLiteral(":/icons/app_icon_64.png")));
     about.setTextFormat(Qt::RichText);
     about.setText(
-        QString("<h3>%1 %2</h3>"
+        QString("<h3>%1</h3>"
+                "<p><b>Version</b> %2<br/>"
+                "<b>Build</b> %3<br/>"
+                "<b>Executable</b> %4</p>"
                 "<p>A node based path tracer in the spirit of Houdini Solaris.</p>"
                 "<ul>"
                 "<li>Alembic and USD geometry import</li>"
                 "<li>Area, distant and HDRI dome lights</li>"
                 "<li>Progressive path tracing on the CPU with Intel Embree</li>"
-                "<li>GPU path tracing with NVIDIA OptiX%3</li>"
+                "<li>GPU path tracing with NVIDIA OptiX%5</li>"
                 "</ul>")
-            .arg(SOLSTICE_APP_NAME, SOLSTICE_VERSION,
+            .arg(SOLSTICE_APP_NAME, SOLSTICE_VERSION_FULL, SOLSTICE_BUILD_ID,
+                 SOLSTICE_OUTPUT_NAME,
                  optixBackendCompiledIn() ? "" : " (not compiled into this build)"));
     about.exec();
 }

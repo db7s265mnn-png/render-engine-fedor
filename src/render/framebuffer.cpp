@@ -72,39 +72,13 @@ Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
     Image image(width_, height_);
     const bool bootstrap = samples_.load(std::memory_order_relaxed) == 0 &&
                            hasData_.load(std::memory_order_relaxed);
-    // Soft charcoal when a bootstrap cell has no finished neighbor yet — avoids
-    // pure-black horizontal tile bars during slow BDPT Spectral phase 0.
+    // Keep bootstrap cheap (2×2). The 9851876 multi-radius (…32) hole-fill
+    // scanned up to ~65² neighbors per empty pixel on every IPR tick while
+    // sampleCount==0 — after every camera clear that made orbit hitch hard.
+    // Soft charcoal still avoids pure-black tile bars on sparse phase 0.
+    constexpr int kBootstrapStep = 2;
     const Vec3 charcoal(0.07f, 0.07f, 0.08f);
     const double invPaths = invSplatPaths();
-
-    auto gatherBootstrap = [&](int x, int y) -> Vec3 {
-        // Expand search so unfinished 32px tiles borrow from finished ones.
-        static const int kRadii[] = {2, 8, 16, 32};
-        for (int radius : kRadii) {
-            Vec3 sum(0.0f);
-            float wSum = 0.0f;
-            const int x0 = std::max(0, x - radius);
-            const int y0 = std::max(0, y - radius);
-            const int x1 = std::min(width_, x + radius + 1);
-            const int y1 = std::min(height_, y + radius + 1);
-            for (int sy = y0; sy < y1; ++sy) {
-                for (int sx = x0; sx < x1; ++sx) {
-                    const Vec4& q = accum_[size_t(sy) * size_t(width_) + size_t(sx)];
-                    if (q.w <= 0.0f) continue;
-                    const float dx = float(sx - x);
-                    const float dy = float(sy - y);
-                    const float w = 1.0f / (1.0f + dx * dx + dy * dy);
-                    sum += q.xyz() * (w / q.w);
-                    wSum += w;
-                }
-            }
-            if (wSum > 0.0f) return sum * (1.0f / wSum) + splatPixel(x, y, invPaths);
-        }
-        // Splat-only pixel (eye sample not yet there) or empty cell.
-        const Vec3 splat = splatPixel(x, y, invPaths);
-        if (splat.x > 0.0f || splat.y > 0.0f || splat.z > 0.0f) return splat;
-        return charcoal;
-    };
 
     for (int y = 0; y < height_; ++y) {
         for (int x = 0; x < width_; ++x) {
@@ -113,7 +87,30 @@ Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
             if (px.w > 0.0f) {
                 linearColor = px.xyz() * (1.0f / px.w) + splatPixel(x, y, invPaths);
             } else if (bootstrap) {
-                linearColor = gatherBootstrap(x, y);
+                const int x0 = x - (x % kBootstrapStep);
+                const int y0 = y - (y % kBootstrapStep);
+                const int x1 = std::min(x0 + kBootstrapStep, width_);
+                const int y1 = std::min(y0 + kBootstrapStep, height_);
+                Vec3 sum(0.0f);
+                float wSum = 0.0f;
+                for (int sy = y0; sy < y1; ++sy) {
+                    for (int sx = x0; sx < x1; ++sx) {
+                        const Vec4& q = accum_[size_t(sy) * size_t(width_) + size_t(sx)];
+                        if (q.w <= 0.0f) continue;
+                        const float dx = float(sx - x);
+                        const float dy = float(sy - y);
+                        const float w = 1.0f / (1.0f + dx * dx + dy * dy);
+                        sum += q.xyz() * (w / q.w);
+                        wSum += w;
+                    }
+                }
+                if (wSum > 0.0f) {
+                    linearColor = sum * (1.0f / wSum) + splatPixel(x, y, invPaths);
+                } else {
+                    const Vec3 splat = splatPixel(x, y, invPaths);
+                    linearColor = (splat.x > 0.0f || splat.y > 0.0f || splat.z > 0.0f) ? splat
+                                                                                        : charcoal;
+                }
             } else {
                 // After sample 0 every eye pixel should have w>0; still show splats.
                 linearColor = splatPixel(x, y, invPaths);
