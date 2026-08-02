@@ -866,10 +866,11 @@ public:
                                       "Triangle / Gaussian / Mitchell: softer AA; softens the "
                                       "visible pixel grid at low spp.\n"
                                       "Does not change the Pixel Sampler (Sobol / GenPnt2D / …)."));
-        addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.0, 0.0, 8.0, false)
+        addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.5, 0.0, 8.0, false)
                          .withGroup("Sampling")
-                         .withTooltip("Filter support in pixels. 0 = default for the chosen filter "
-                                      "(Box 0.5, Triangle 1, Gaussian 1.5, Mitchell 2).\n"
+                         .withTooltip("Filter support in pixels. Changing Pixel Filter fills the "
+                                      "recommended radius (Box 0.5, Triangle 1, Gaussian 1.5, "
+                                      "Mitchell 2). You can still override.\n"
                                       "Larger = softer / more blur."));
 
         // --- Engine -------------------------------------------------------------------

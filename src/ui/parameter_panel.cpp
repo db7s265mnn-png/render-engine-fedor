@@ -31,6 +31,7 @@
 #include <functional>
 
 #include "nodes/node_registry.h"
+#include "render/pixel_filter.h"
 #include "ui/numeric_editors.h"
 #include "ui/theme.h"
 
@@ -1062,10 +1063,17 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                 combo->setItemData(combo->count() - 1, item, Qt::ToolTipRole);
             }
             combo->setCurrentIndex(std::clamp(parameter.toInt(), 0, std::max(0, combo->count() - 1)));
-            connect(combo, &QComboBox::currentIndexChanged, this, [notify](int index) {
+            connect(combo, &QComboBox::currentIndexChanged, this, [this, notify, name](int index) {
                 // Ignore teardown (-1) and empty combos — see ParameterPanel::rebuild.
                 if (index < 0) return;
                 notify(index);
+                // Pixel Filter → fill recommended Filter Radius (artist can still override).
+                if (name == QLatin1String("pixelfilter") && node_) {
+                    const float radius = defaultFilterRadius(index);
+                    node_->setParameterValue(QStringLiteral("filterradius"), double(radius));
+                    emit parameterEdited(node_, QStringLiteral("filterradius"));
+                    QTimer::singleShot(0, this, [this] { refresh(); });
+                }
             });
             return combo;
         }
