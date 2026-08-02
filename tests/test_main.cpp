@@ -264,7 +264,8 @@ void testSampling() {
         r2PixelJitter(11, 20, 0, 960, kR2IndexSpp, jx2, jy2);
         check(std::fabs(jx - jx2) > 1e-6f || std::fabs(jy - jy2) > 1e-6f,
               "R2 per-pixel CP differs neighbors at spp0");
-        check(isR2PixelSampler(3) && isR2PixelSampler(5) && !isR2PixelSampler(0), "R2 sampler range");
+        check(isR2PixelSampler(3) && !isR2PixelSampler(5) && !isR2PixelSampler(0),
+              "GenPnt2D is sampler index 3");
     }
 }
 
@@ -1134,17 +1135,13 @@ void testRefractionSparkleClamp() {
     check(peakSafe < 50.0, "safety cap keeps roughness-0 SDS fireflies bounded");
     check(peakTight <= peakSafe * 1.02, "tighter caustic clamp never raises the peak");
 
-    // Disable All Clamps must kill the safety floor (same as causticClamp < 0).
     RenderSettingsData rs;
     rs.causticClamp = 0.0f;
-    rs.disableClamps = 0;
     check(causticFireflyCap(rs) == 10.0f, "default caustic safety floor is 10");
-    rs.disableClamps = 1;
-    check(causticFireflyCap(rs) == 0.0f, "Disable All Clamps kills caustic safety floor");
-    check(effectiveClampDirect(rs) == 0.0f, "Disable All Clamps kills Direct Clamp");
-    rs.disableClamps = 0;
-    rs.clampDirect = 10.0f;
-    check(effectiveClampDirect(rs) == 10.0f, "Direct Clamp restored when master off");
+    rs.causticClamp = -1.0f;
+    check(causticFireflyCap(rs) == 0.0f, "causticClamp < 0 disables safety floor");
+    rs.causticClamp = 2.0f;
+    check(causticFireflyCap(rs) == 2.0f, "explicit caustic clamp is used as-is");
 }
 
 // Film reconstruction filters: Box is 1-pixel; Gaussian spreads into neighbours.

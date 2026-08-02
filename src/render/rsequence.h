@@ -109,15 +109,12 @@ SR_INL SR_HD float r2ShutterSample(int x, int y, int sampleIndex, int width, int
     return wrap01Add(genPnt1D(n), r2PixelPhase(x, y, 4u));
 }
 
-SR_INL SR_HD int r2IndexModeFromPixelSampler(int pixelSampler) {
-    // PixelSampler enum lives in types.h — values 3/4/5 are the R2 modes.
-    if (pixelSampler == 4) return kR2IndexSppPixelSalt;
-    if (pixelSampler == 5) return kR2IndexLinearSpp;
-    return kR2IndexSpp;
+SR_INL SR_HD int r2IndexModeFromPixelSampler(int /*pixelSampler*/) {
+    return kR2IndexSpp;  // GenPnt2D uses n = sampleIndex only
 }
 
 SR_INL SR_HD bool isR2PixelSampler(int pixelSampler) {
-    return pixelSampler >= 3 && pixelSampler <= 5;
+    return pixelSampler == 3;  // kPixelSamplerGenPnt2D
 }
 
 }  // namespace sol

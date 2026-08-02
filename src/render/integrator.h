@@ -526,24 +526,19 @@ SR_INL SR_HD Vec3 clampContribution(Vec3 contrib, float clampValue) {
     return contrib;
 }
 
-// Effective Direct Clamp (honours Disable All Clamps).
-SR_INL SR_HD float effectiveClampDirect(const RenderSettingsData& settings) {
-    return settings.disableClamps != 0 ? 0.0f : effectiveClampDirect(settings);
-}
-
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
 // a safety floor of 10 still applies — otherwise `clampContribution(..., 0)` is a
 // no-op and roughness-0 glass / BDPT near-spec NEE keep permanent sparkles.
-// disableClamps / causticClamp < 0: no safety floor (unbiased / reference).
+// Test-only: causticClamp < 0 disables the safety floor (unbiased energy compares).
 SR_INL SR_HD float causticFireflyCap(const RenderSettingsData& settings) {
-    if (settings.disableClamps != 0 || settings.causticClamp < 0.0f) return 0.0f;
+    if (settings.causticClamp < 0.0f) return 0.0f;
     return settings.causticClamp > 0.0f ? settings.causticClamp : 10.0f;
 }
 
 // BDPT light-tracing deposits include cameraPdfOmega; resolve divides by W·H paths.
 // Map Arnold-style Indirect Clamp (pixel radiance) → raw splat threshold.
 SR_INL SR_HD float lightTraceSplatClamp(const RenderSettingsData& settings) {
-    if (settings.disableClamps != 0 || settings.clampIndirect <= 0.0f) return 0.0f;
+    if (settings.clampIndirect <= 0.0f) return 0.0f;
     const int w = settings.resolutionX > 0 ? settings.resolutionX : 1;
     const int h = settings.resolutionY > 0 ? settings.resolutionY : 1;
     return settings.clampIndirect * float(w) * float(h);
@@ -730,7 +725,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                                 if (ls.distance < 1.0e7f)
                                     contrib = contrib * mediumShadowTr(*med, ls.distance);
                                 if (depth > 0)
-                                    contrib = clampContribution(contrib, effectiveClampDirect(settings));
+                                    contrib = clampContribution(contrib, settings.clampDirect);
                                 radiance += contrib;
                             }
                         }
@@ -770,7 +765,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         }
                         Vec3 contrib = throughput * envL * weight;
                         if (depth > 0 && !specularBounce)
-                            contrib = clampContribution(contrib, effectiveClampDirect(settings));
+                            contrib = clampContribution(contrib, settings.clampDirect);
                         radiance += contrib;
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active())
@@ -819,7 +814,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 Vec3 contrib = throughput * emitted * weight;
                 // Caustic paths (specular chain) keep more energy — clamp less aggressively.
                 if (depth > 0 && !specularBounce)
-                    contrib = clampContribution(contrib, effectiveClampDirect(settings));
+                    contrib = clampContribution(contrib, settings.clampDirect);
                 radiance += contrib;
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active())
@@ -908,7 +903,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding,
                                         currentMedium);
                 Vec3 contrib = throughput * nee;
-                if (depth > 0) contrib = clampContribution(contrib, effectiveClampDirect(settings));
+                if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
                 radiance += contrib;
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active()) guiding->addScattered(nee);
@@ -954,7 +949,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding,
                                     currentMedium);
             Vec3 contrib = throughput * walk.pathWeight * nee;
-            if (depth > 0) contrib = clampContribution(contrib, effectiveClampDirect(settings));
+            if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;
 #if !defined(__CUDACC__)
             if (guiding && guiding->active()) guiding->addScattered(walk.pathWeight * nee);
@@ -998,7 +993,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                                                  currentMedium);
             Vec3 contrib = throughput * nee;
             if (depth > 0 && !specularBounce)
-                contrib = clampContribution(contrib, effectiveClampDirect(settings));
+                contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;
 #if !defined(__CUDACC__)
             if (guiding && guiding->active()) guiding->addScattered(nee);

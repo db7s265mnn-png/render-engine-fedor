@@ -826,65 +826,45 @@ public:
                          .withTooltip("Caps eye-path sample contributions in linear pixel radiance "
                                       "(Arnold Direct Clamp). Applies to PT/BDPT eye paths, NEE, "
                                       "MNEE, and photon gather.\n"
-                                      "Default 10; ~100 is a soft look. 0 disables.\n"
-                                      "Ignored when Disable All Clamps is on."));
+                                      "Default 10; ~100 is a soft look. 0 disables."));
         addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Engine")
                          .withTooltip("Caps BDPT light-tracing splat contributions in linear pixel "
                                       "radiance (Arnold Indirect Clamp). Raw LT deposits carry "
                                       "camera PDF — they are scaled to radiance before clamping.\n"
-                                      "Affects BDPT / BDPT Spectral caustics from LT. 0 disables.\n"
-                                      "Ignored when Disable All Clamps is on."));
-        addParameter(Parameter::makeBool("disableclamps", "Disable All Clamps", false)
-                         .withGroup("Engine")
-                         .withTooltip("Force Direct Clamp, Indirect Clamp, and Caustic Firefly Clamp "
-                                      "(including the hidden safety floor of 10) all off.\n"
-                                      "Use for unbiased reference / energy tests — fireflies will "
-                                      "return."));
+                                      "Affects BDPT / BDPT Spectral caustics from LT. 0 disables."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Engine"));
         addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
-                                         {"Sobol (Owen)", "Blue Noise", "White (PCG)",
-                                          "R2 (spp)", "R2 (spp+salt)", "R2 (linear+spp)"},
-                                         0)
+                                         {"Sobol (Owen)", "Blue Noise", "Xorshift", "GenPnt2D"}, 0)
                          .withGroup("Engine")
                          .withTooltip(
-                             "Camera AA / DoF / shutter primary samples only (path RNG is separate).\n"
-                             "Sobol: stratified per pixel — recommended; no screen period.\n"
+                             "Camera AA / DoF / shutter primary samples.\n"
+                             "Path bounces always use Owen-scrambled Sobol (PBRT4).\n"
+                             "Sobol: stratified per pixel — recommended.\n"
                              "Blue Noise: CP dither from a 64×64 mask with per-tile phase.\n"
-                             "White: independent PCG — no structure, noisier AA.\n"
-                             "R2: plastic-number quasirandom (Roberts) + per-pixel CP phase;\n"
-                             "  shutter uses golden-ratio 1D in these modes.\n"
-                             "  spp / spp+salt / linear+spp = how index n is formed (A/B).\n"
+                             "Xorshift: Marsaglia xorshift32 white jitter.\n"
+                             "GenPnt2D: plastic-number R2 (Roberts), n = sampleIndex + "
+                             "per-pixel CP phase; shutter uses golden 1D.\n"
                              "Active sampler is shown in the viewport spp overlay."));
-        addParameter(Parameter::makeMenu("pathsampler", "Path Sampler",
-                                         {"PCG (white)", "Owen Sobol (PBRT/Cycles)", "Xorshift32"}, 0)
+        // Hidden: old menu was Legacy / FilmTile / Progressive (0/1/2).
+        addParameter(Parameter::makeBool("_sampling_type_v2", "", true));
+        addParameter(Parameter::makeMenu("samplingengine", "Sampling Type",
+                                         {"Buckets", "Progressive"}, 0)
                          .withGroup("Engine")
-                         .withTooltip("Random stream for path bounces / NEE / BSDF (after camera).\n"
-                                      "PCG (default): white noise — solid general-purpose.\n"
-                                      "Owen Sobol: Cycles/PBRT-like grain, but can print a visible "
-                                      "square lattice in caustic shadows / MNEE (tile_test).\n"
-                                      "Xorshift32: Marsaglia xorshift — very fast, 4 bytes, never "
-                                      "emits 0; optional alternative white stream."));
-        addParameter(Parameter::makeMenu("samplingengine", "Sampling Engine",
-                                         {"Legacy (pre-PBRT)", "FilmTile (PBRT)", "Progressive (no buckets)"},
-                                         1)
-                         .withGroup("Engine")
-                         .withTooltip("How the frame is scheduled and seeded.\n"
-                                      "Legacy: old tiles + direct Film writes + weak "
-                                      "pixelIndex seed (before the PBRT book pass).\n"
-                                      "FilmTile: PBRT ImageTileIntegrator — local bucket "
-                                      "accum, then merge; strong (x,y,spp) seed.\n"
-                                      "Progressive: no buckets — parallel scanlines, whole "
-                                      "frame densifies evenly; strong seed."));
+                         .withTooltip("How the frame is scheduled.\n"
+                                      "Buckets: PBRT FilmTile — local bucket accum, then merge; "
+                                      "strong (x,y,spp) seed.\n"
+                                      "Progressive: no buckets — parallel scanlines, whole frame "
+                                      "densifies evenly."));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
         addParameter(Parameter::makeInt("tilesize", "Bucket Size (px)", 32, 0, 256, false)
                          .withGroup("Engine")
-                         .withVisibleWhen("samplingengine==0||samplingengine==1")
-                         .withTooltip("PBRT-style FilmTile / Legacy bucket size in pixels.\n"
+                         .withVisibleWhen("samplingengine==0")
+                         .withTooltip("Bucket size in pixels for Sampling Type = Buckets.\n"
                                       "0 = Auto (~8× threads tiles, side 8/16/32/64).\n"
-                                      "Ignored by Progressive (no buckets) engine."));
+                                      "Ignored by Progressive."));
         addParameter(Parameter::makeFloat("aodistance", "AO Distance", 1.0, 0.01, 100.0, false)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==3"));
@@ -928,8 +908,7 @@ public:
                                       "(the sparkle inside refractive objects).\n"
                                       "Even at 0, a safety cap of 10 is applied to those paths — they "
                                       "never converge with more samples when the light is small.\n"
-                                      "Raise to tighten further; the caustic on the floor is not capped.\n"
-                                      "Disable All Clamps turns the safety floor off too."));
+                                      "Raise to tighten further; the caustic on the floor is not capped."));
         addParameter(Parameter::makeMenu(
                          "dispersionmode", "Dispersion Mode",
                          {"Hero (default)", "Optimized", "Spectral RGB ×3", "Fake tint"}, 0)
@@ -1021,7 +1000,7 @@ public:
                                       "look blocky when zoomed.\n"
                                       "Triangle / Gaussian / Mitchell: softer AA; softens the "
                                       "visible pixel grid at low spp.\n"
-                                      "Does not change the Pixel Sampler (Sobol / R2 / …)."));
+                                      "Does not change the Pixel Sampler (Sobol / GenPnt2D / …)."));
         addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.0, 0.0, 8.0, false)
                          .withGroup("Film")
                          .withTooltip("Filter support in pixels. 0 = default for the chosen filter "
@@ -1037,8 +1016,8 @@ public:
                          .withTooltip("Replace beauty with a sampling/seed visualisation "
                                       "(no light transport).\n"
                                       "Pixel Jitter XY: R=jx G=jy from Pixel Sampler — Blue Noise "
-                                      "shows a 64px period; Sobol/White should not.\n"
-                                      "Path RNG u0: first PCG float from makePixelRng — look for "
+                                      "shows a 64px period; Sobol/Xorshift/GenPnt2D should not.\n"
+                                      "Path RNG u0: first Owen-Sobol / PCG float — look for "
                                       "faint seams from correlated seeds.\n"
                                       "Bucket ID: color by Bucket Size tiles (threading only).\n"
                                       "Pixel Hash: RGB from the per-pixel seed hash.\n"
@@ -1077,13 +1056,20 @@ public:
         settings.lightSamples = std::max(1, intValue("lightsamples", 2));
         settings.clampDirect = float(floatValue("clampdirect", 10.0));
         settings.clampIndirect = float(floatValue("clamp", 10.0));
-        settings.disableClamps = boolValue("disableclamps", false) ? 1 : 0;
         settings.seed = intValue("seed", 0);
         settings.threads = intValue("threads", 0);
         settings.tileSize = std::clamp(intValue("tilesize", 32), 0, 256);
-        settings.pixelSampler = std::clamp(intValue("pixelsampler", 0), 0, 5);
-        settings.pathSampler = std::clamp(intValue("pathsampler", 0), 0, 2);
-        settings.samplingEngine = std::clamp(intValue("samplingengine", 1), 0, 2);
+        // Pixel Sampler: clamp old R2 salt/linear (4/5) down to GenPnt2D (3).
+        settings.pixelSampler = std::clamp(intValue("pixelsampler", 0), 0, 3);
+        // Sampling Type v2: Buckets=0 / Progressive=1.
+        // Old menu was Legacy=0 / FilmTile=1 / Progressive=2.
+        if (!boolValue("_sampling_type_v2", false)) {
+            const int old = intValue("samplingengine", 1);
+            settings.samplingEngine =
+                (old == 2) ? kSamplingEngineProgressive : kSamplingEngineBuckets;
+        } else {
+            settings.samplingEngine = std::clamp(intValue("samplingengine", 0), 0, 1);
+        }
         settings.aoDistance = float(floatValue("aodistance", 1.0));
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;

@@ -1454,17 +1454,11 @@ void MainWindow::updateStatusBar() {
         const RenderSettingsData& rs = scene_->settings;
         const char* sampler = "Sobol";
         if (rs.pixelSampler == kPixelSamplerBlueNoise) sampler = "BN";
-        else if (rs.pixelSampler == kPixelSamplerWhite) sampler = "White";
-        else if (rs.pixelSampler == kPixelSamplerR2Spp) sampler = "R2spp";
-        else if (rs.pixelSampler == kPixelSamplerR2SppSalt) sampler = "R2salt";
-        else if (rs.pixelSampler == kPixelSamplerR2Linear) sampler = "R2lin";
-        const char* path = "PathPCG";
-        if (rs.pathSampler == kPathSamplerOwenSobol) path = "PathSobol";
-        else if (rs.pathSampler == kPathSamplerXorshift32) path = "PathXorshift";
-        const char* engine = "FilmTile";
-        if (rs.samplingEngine == kSamplingEngineLegacy) engine = "Legacy";
-        else if (rs.samplingEngine == kSamplingEngineProgressive) engine = "Progressive";
-        overlay += QString("   %1 · %2 · %3").arg(sampler, path, engine);
+        else if (rs.pixelSampler == kPixelSamplerXorshift) sampler = "Xorshift";
+        else if (rs.pixelSampler == kPixelSamplerGenPnt2D) sampler = "GenPnt2D";
+        const char* engine = "Buckets";
+        if (rs.samplingEngine == kSamplingEngineProgressive) engine = "Progressive";
+        overlay += QString("   %1 · PathSobol · %2").arg(sampler, engine);
     }
     renderView_->setStatusText(overlay);
 }

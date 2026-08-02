@@ -322,25 +322,19 @@ public:
 
             const char* samplerName = "Sobol";
             if (settings.pixelSampler == kPixelSamplerBlueNoise) samplerName = "BlueNoise64";
-            else if (settings.pixelSampler == kPixelSamplerWhite) samplerName = "White";
-            else if (settings.pixelSampler == kPixelSamplerR2Spp) samplerName = "R2spp";
-            else if (settings.pixelSampler == kPixelSamplerR2SppSalt) samplerName = "R2sppSalt";
-            else if (settings.pixelSampler == kPixelSamplerR2Linear) samplerName = "R2linear";
-            const char* pathName = "PathPCG";
-            if (settings.pathSampler == kPathSamplerOwenSobol) pathName = "PathOwenSobol";
-            else if (settings.pathSampler == kPathSamplerXorshift32) pathName = "PathXorshift32";
-            const char* engineName = "FilmTile";
-            if (settings.samplingEngine == kSamplingEngineLegacy) engineName = "Legacy";
-            else if (settings.samplingEngine == kSamplingEngineProgressive) engineName = "Progressive";
+            else if (settings.pixelSampler == kPixelSamplerXorshift) samplerName = "Xorshift";
+            else if (settings.pixelSampler == kPixelSamplerGenPnt2D) samplerName = "GenPnt2D";
+            const char* engineName = "Buckets";
+            if (settings.samplingEngine == kSamplingEngineProgressive) engineName = "Progressive";
             std::string engineDetail = engineName;
             if (settings.samplingEngine != kSamplingEngineProgressive) {
-                engineDetail += " buckets " + std::to_string(tileSize) + "px";
+                engineDetail += " " + std::to_string(tileSize) + "px";
                 if (settings.tileSize <= 0) engineDetail += " (auto)";
             } else {
-                engineDetail += " (no buckets, scanlines)";
+                engineDetail += " (scanlines)";
             }
-            logInfo(std::string("Sampling Engine: ") + engineDetail + "; Pixel Sampler: " + samplerName +
-                    "; " + pathName);
+            logInfo(std::string("Sampling Type: ") + engineDetail +
+                    "; Pixel Sampler: " + samplerName + "; Path: OwenSobol");
             if (settings.samplingDebug != kSamplingDebugOff) {
                 static const char* kDiagNames[] = {"Off", "PixelJitter", "PathRng", "Bucket", "PixelHash"};
                 const int d = std::clamp(settings.samplingDebug, 0, 4);
@@ -351,10 +345,8 @@ public:
         const int dispersionMode = settings.dispersionMode;
         const int dispersionMaxIfaces = srMax(1, settings.dispersionMaxInterfaces);
 
-        const int samplingEngine = std::clamp(settings.samplingEngine, 0, 2);
-        const bool legacySeed = samplingEngine == kSamplingEngineLegacy;
-        const int pathSampler = std::clamp(settings.pathSampler, 0, 2);
-        const bool usePathSobol = !legacySeed && pathSampler == kPathSamplerOwenSobol;
+        const int samplingEngine = std::clamp(settings.samplingEngine, 0, 1);
+        constexpr bool usePathSobol = true;  // PBRT4 Owen-scrambled Sobol for path dims
         const int pixelFilter = std::clamp(settings.pixelFilter, 0, 3);
         const float filterRadius = settings.filterRadius > 0.0f
                                        ? settings.filterRadius
@@ -369,24 +361,6 @@ public:
         };
 
         auto makePathRng = [&](int x, int y, uint32_t salt = 0u) -> Rng {
-            if (pathSampler == kPathSamplerXorshift32) {
-                if (legacySeed) {
-                    const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
-                    const uint32_t fs = frameSeed ^ (salt * 0x9e3779b9u);
-                    Rng rng;
-                    uint32_t s = hashUint(hashCombine(pixelIndex, fs));
-                    rng.initXorshift32(s ? s : 1u);
-                    return rng;
-                }
-                return makePixelRngXorshift32(x, y, sampleIndex, frameSeed, salt);
-            }
-            if (legacySeed) {
-                // Pre-book seed: linear pixelIndex + weak hashCombine.
-                const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
-                const uint32_t fs = frameSeed ^ (salt * 0x9e3779b9u);
-                return Rng(hashCombine(pixelIndex, fs),
-                           hashUint(pixelIndex ^ (fs * 2654435761u)));
-            }
             return makePixelRng(x, y, sampleIndex, frameSeed, salt);
         };
 
@@ -400,22 +374,22 @@ public:
             if (pixelSampler == kPixelSamplerBlueNoise) {
                 blueNoisePixelJitter(x, y, sampleIndex, jx, jy);
                 blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
-            } else if (pixelSampler == kPixelSamplerWhite) {
-                jx = rng.nextFloat();
-                jy = rng.nextFloat();
-                lensU = rng.nextFloat();
-                lensV = rng.nextFloat();
-            } else if (isR2PixelSampler(pixelSampler)) {
-                const int r2Mode = r2IndexModeFromPixelSampler(pixelSampler);
-                r2PixelJitter(x, y, sampleIndex, width, r2Mode, jx, jy);
-                r2LensSample(x, y, sampleIndex, width, r2Mode, lensU, lensV);
+            } else if (pixelSampler == kPixelSamplerXorshift) {
+                Rng xrng = makePixelRngXorshift32(x, y, sampleIndex, frameSeed, 0xCA7E11u);
+                jx = xrng.nextFloat();
+                jy = xrng.nextFloat();
+                lensU = xrng.nextFloat();
+                lensV = xrng.nextFloat();
+            } else if (pixelSampler == kPixelSamplerGenPnt2D) {
+                r2PixelJitter(x, y, sampleIndex, width, kR2IndexSpp, jx, jy);
+                r2LensSample(x, y, sampleIndex, width, kR2IndexSpp, lensU, lensV);
             } else {
                 // Default: Owen-scrambled Sobol (no fixed screen-space period).
                 pixelSample(x, y, sampleIndex, jx, jy);
                 lensSample(x, y, sampleIndex, lensU, lensV);
             }
 
-            // Path dims: Owen Sobol (PBRT/Cycles) or keep PCG white.
+            // Path dims: always Owen Sobol (PBRT4).
             // Must live for this sample — qmcCtx points here.
             PathSobolStream pathSobol{};
             if (usePathSobol) attachPathSobol(rng, pathSobol, x, y, sampleIndex);
@@ -434,13 +408,6 @@ public:
                                     (1.0f / 255.0f));
                     }
                     case kSamplingDebugPixelHash: {
-                        if (legacySeed) {
-                            const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
-                            const uint32_t h = hashCombine(pixelIndex, frameSeed);
-                            return done(Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
-                                             float((h >> 16) & 255u)) *
-                                        (1.0f / 255.0f));
-                        }
                         const uint64_t h = hashPixelSample(x, y, uint32_t(sampleIndex), frameSeed);
                         return done(Vec3(float((h >> 0) & 255u), float((h >> 8) & 255u),
                                          float((h >> 16) & 255u)) *
@@ -573,9 +540,8 @@ public:
 
             auto sampleShutter = [&](Rng& r) -> float {
                 if (scene.settings.motionBlur == 0) return 0.0f;
-                if (isR2PixelSampler(pixelSampler)) {
-                    return r2ShutterSample(x, y, sampleIndex, width,
-                                           r2IndexModeFromPixelSampler(pixelSampler));
+                if (pixelSampler == kPixelSamplerGenPnt2D) {
+                    return r2ShutterSample(x, y, sampleIndex, width, kR2IndexSpp);
                 }
                 return r.nextFloat();
             };
@@ -645,10 +611,9 @@ public:
             }
         };
 
-        // --- Sampling Engine dispatch -------------------------------------------------
-        // Legacy: tiles + direct addSample + weak seed (pre-PBRT book).
-        // FilmTile: PBRT local tile accum + merge + strong seed (current default).
-        // Progressive: no buckets — parallel scanlines, direct addSample, strong seed.
+        // --- Sampling Type dispatch ---------------------------------------------------
+        // Buckets: PBRT FilmTile local accum + merge + strong seed.
+        // Progressive: no buckets — parallel scanlines, strong seed.
         constexpr int kBootstrapStep = 2;
 
         auto runBootstrapOrFull = [&](auto&& renderPass) {
@@ -694,50 +659,8 @@ public:
                     }
                 });
             });
-        } else if (samplingEngine == kSamplingEngineLegacy) {
-            // Pre-book: same tile schedule, but write straight into the Film (box) or
-            // via bordered FilmTile (filtered).
-            runBootstrapOrFull([&](int bootstrapPhase, bool useBootstrap) {
-                pool_->parallelFor(tileCount, [&](int tileIndex, int threadId) {
-                    if (cancel.load(std::memory_order_relaxed)) return;
-                    const int tx = tileIndex % tilesX;
-                    const int ty = tileIndex / tilesX;
-                    const int x0 = tx * tileSize;
-                    const int y0 = ty * tileSize;
-                    const int x1 = std::min(x0 + tileSize, width);
-                    const int y1 = std::min(y0 + tileSize, height);
-                    if (trivialBox) {
-                        for (int y = y0; y < y1; ++y) {
-                            if (cancel.load(std::memory_order_relaxed)) return;
-                            for (int x = x0; x < x1; ++x) {
-                                if (useBootstrap) {
-                                    if (((x % kBootstrapStep) +
-                                         (y % kBootstrapStep) * kBootstrapStep) != bootstrapPhase)
-                                        continue;
-                                }
-                                const PixelEval ev = evaluatePixelSample(x, y, threadId);
-                                fb.addSample(x, y, ev.radiance);
-                            }
-                        }
-                    } else {
-                        FilmTile tile(x0, y0, x1, y1, filterBorder);
-                        for (int y = y0; y < y1; ++y) {
-                            if (cancel.load(std::memory_order_relaxed)) return;
-                            for (int x = x0; x < x1; ++x) {
-                                if (useBootstrap) {
-                                    if (((x % kBootstrapStep) +
-                                         (y % kBootstrapStep) * kBootstrapStep) != bootstrapPhase)
-                                        continue;
-                                }
-                                depositEval(tile, x, y, evaluatePixelSample(x, y, threadId));
-                            }
-                        }
-                        fb.mergeFilmTile(tile);
-                    }
-                });
-            });
         } else {
-            // FilmTile (PBRT ImageTileIntegrator).
+            // Buckets (PBRT ImageTileIntegrator).
             auto renderOneTile = [&](int tileIndex, int threadId, int bootstrapPhase, bool useBootstrap) {
                 if (cancel.load(std::memory_order_relaxed)) return;
                 const int tx = tileIndex % tilesX;

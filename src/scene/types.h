@@ -388,39 +388,26 @@ enum CausticsEngine : int {
     kCausticsEnginePhoton = 2,
 };
 
-// Camera AA / DoF primary samples (path bounce RNG stays on Path Sampler).
+// Camera AA / DoF primary samples. Path bounce dims use Owen-scrambled Sobol (PBRT4).
 enum PixelSampler : int {
-    kPixelSamplerSobol = 0,       // Owen-scrambled Sobol — default, no screen period
-    kPixelSamplerBlueNoise = 1,   // 64×64 BN CP tile (can quilt in caustic shadows)
-    kPixelSamplerWhite = 2,       // Independent PCG per pixel
-    // Plastic-number R2 (Roberts) + golden 1D shutter. Per-pixel CP phase.
-    // Three index modes kept separate for A/B on tile_test / motion blur.
-    kPixelSamplerR2Spp = 3,       // n = sampleIndex
-    kPixelSamplerR2SppSalt = 4,   // n = sampleIndex + per-pixel salt
-    kPixelSamplerR2Linear = 5,    // n = y * width + x + sampleIndex
+    kPixelSamplerSobol = 0,        // Owen-scrambled Sobol
+    kPixelSamplerBlueNoise = 1,    // 64×64 BN CP tile
+    kPixelSamplerXorshift = 2,     // Marsaglia xorshift32 white jitter
+    kPixelSamplerGenPnt2D = 3,     // plastic-number R2 (Roberts), n = sampleIndex
 };
 
-// Path bounce / NEE / BSDF RNG after camera dims.
-enum PathSampler : int {
-    kPathSamplerPcg = 0,         // classic white PCG — default
-    kPathSamplerOwenSobol = 1,   // PBRT/Cycles-style Owen Sobol from dim 4+ (can quilt on caustics)
-    kPathSamplerXorshift32 = 2,  // Marsaglia xorshift32 — optional, 4-byte, never emits 0
-};
-
-// How the image is scheduled / seeded / written (Render Settings → Sampling Engine).
+// How the image is scheduled / written (Render Settings → Sampling Type).
 enum SamplingEngine : int {
-    // Pre-book: fixed tiles, direct Framebuffer::addSample, weak pixelIndex seed.
-    kSamplingEngineLegacy = 0,
-    // Current PBRT-style: FilmTile local accum + mergeFilmTile, strong (x,y,spp) seed.
-    kSamplingEngineFilmTile = 1,
-    // True progressive: no buckets — parallel scanlines, direct addSample, strong seed.
-    kSamplingEngineProgressive = 2,
+    // PBRT-style FilmTile buckets: local accum + mergeFilmTile, strong (x,y,spp) seed.
+    kSamplingEngineBuckets = 0,
+    // No buckets — parallel scanlines, strong seed.
+    kSamplingEngineProgressive = 1,
 };
 
 // Render Settings → Diagnostic: replace beauty with a sampling/seed field.
 enum SamplingDebug : int {
     kSamplingDebugOff = 0,
-    kSamplingDebugPixelJitter = 1,  // R=jx G=jy — shows BN period vs Sobol/White
+    kSamplingDebugPixelJitter = 1,  // R=jx G=jy — shows BN period vs Sobol/Xorshift
     kSamplingDebugPathRng = 2,      // first path-RNG float as gray — seed seams
     kSamplingDebugBucket = 3,       // color by render bucket (tileSize)
     kSamplingDebugPixelHash = 4,    // RGB from hashPixelSample(x,y,spp,seed)
@@ -474,8 +461,6 @@ struct RenderSettingsData {
     // Indirect Clamp: BDPT light-tracing splat deposits (converted to radiance via / (W·H)).
     float clampDirect = 10.0f;
     float clampIndirect = 10.0f;
-    // Master switch: force Direct / Indirect / Caustic (incl. safety floor) off.
-    int disableClamps = 0;
     float exposure = 0.0f;
     float gamma = 2.2f;
     int toneMapper = kToneAces;
@@ -485,10 +470,9 @@ struct RenderSettingsData {
 
     int backend = kBackendCpuEmbree;
     int envVisibleCamera = 1;
-    int tileSize = 32;             // FilmTile bucket size; 0 = PBRT-style auto
+    int tileSize = 32;             // bucket size; 0 = PBRT-style auto
     int pixelSampler = kPixelSamplerSobol;  // camera AA / DoF generator
-    int pathSampler = kPathSamplerPcg;  // path bounce RNG (PCG default — Owen optional)
-    int samplingEngine = kSamplingEngineFilmTile;  // Legacy / FilmTile / Progressive
+    int samplingEngine = kSamplingEngineBuckets;  // Buckets / Progressive
     int threads = 0;               // 0 = hardware concurrency
 
     float aoDistance = 1.0f;
@@ -501,8 +485,8 @@ struct RenderSettingsData {
     // Firefly cap for paths that look through glass/mirrors at a light (SDS) and for
     // BDPT near-specular NEE/connections. Those never converge with more samples when
     // the light is small; a safety floor of 10 is always applied when this is left at 0
-    // (see causticFireflyCap) unless disableClamps is on. Raise it to tighten further.
-    // Light-tracing caustics on diffuse surfaces use Indirect Clamp, not this.
+    // (see causticFireflyCap). Raise it to tighten further. Light-tracing caustics on
+    // diffuse surfaces use Indirect Clamp, not this.
     float causticClamp = 0.0f;
     // Photon / VCM caustic map (used when causticsEngine == Photon).
     int photonCount = 100000;

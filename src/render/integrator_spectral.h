@@ -62,7 +62,7 @@ public:
                             }
                             SampledSpectrum contrib = throughput * upsampleRgb(envL, waves) * weight;
                             if (depth > 0 && !specularBounce)
-                                contrib = clampSpectrumIndirect(contrib, effectiveClampDirect(settings));
+                                contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                             radiance += contrib;
                         }
                     }
@@ -95,7 +95,7 @@ public:
                     }
                     SampledSpectrum contrib = throughput * upsampleRgb(emitted, waves) * weight;
                     if (depth > 0 && !specularBounce)
-                        contrib = clampSpectrumIndirect(contrib, effectiveClampDirect(settings));
+                        contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                     radiance += contrib;
                 }
                 break;
@@ -138,7 +138,7 @@ public:
             const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng);
             if (!isBlack(nee)) {
                 SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
-                if (depth > 0) contrib = clampSpectrumIndirect(contrib, effectiveClampDirect(settings));
+                if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                 radiance += contrib;
             }
 
