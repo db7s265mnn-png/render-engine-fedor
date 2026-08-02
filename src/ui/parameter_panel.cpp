@@ -206,6 +206,13 @@ void materialXFloatRange(const QString& name, double& lo, double& hi) {
         hi = 10.0;
         return;
     }
+    if (n == QLatin1String("dispersion_abbe") || n == QLatin1String("abbe") ||
+        n.endsWith(QLatin1String("_abbe"))) {
+        // Arnold-style Abbe Vd: 0 = off (no dispersion). Negatives are invalid.
+        lo = 0.0;
+        hi = 200.0;
+        return;
+    }
     if (n == QLatin1String("blend")) {
         lo = 0.0;
         hi = 1.0;
@@ -711,8 +718,19 @@ void ParameterPanel::rebuildMaterialX() {
                 (input.name == QLatin1String("subsurface_scale"))
                     ? QStringLiteral("Arnold Scale in scene units (metres). "
                                      "Mean free path = Scale × Radius. 1 = 1 metre.")
-                    : QString();
-            QWidget* row = makeFreeFloatSliderRow(value, lo, hi, [commit, inputType, isInt](double v) {
+                    : (input.name == QLatin1String("dispersion_abbe"))
+                          ? QStringLiteral("Abbe number Vd (Arnold dispersion_abbe). "
+                                           "0 = off; typical glass 20–90. Lower = stronger rainbow. "
+                                           "Range starts at 0 — negatives are invalid.")
+                          : QString();
+            const QString inputName = input.name;
+            QWidget* row = makeFreeFloatSliderRow(value, lo, hi, [commit, inputType, isInt, inputName,
+                                                                 hi](double v) {
+                // Hard floor for Abbe — FreeFloat otherwise accepts any typed value.
+                if (inputName == QLatin1String("dispersion_abbe") ||
+                    inputName.endsWith(QLatin1String("_abbe"))) {
+                    v = std::clamp(v, 0.0, hi > 0.0 ? hi : 200.0);
+                }
                 if (isInt) commit(QString::number(int(std::lround(v))));
                 else commit(QString::number(v, 'g', 9));
             });

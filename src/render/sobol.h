@@ -1673,7 +1673,14 @@ SR_INL void attachPathSobol(Rng& rng, PathSobolStream& stream, int x, int y, int
     // Salt separates spectral hero channels etc. without correlating neighbors.
     stream.sampler.scrambleBase =
         uint32_t(hashPixelSample(x, y, 0u, salt, 0x50b01u));
-    stream.sampleIndex = uint32_t(sampleIndex < 0 ? 0 : sampleIndex);
+    // CRITICAL: do NOT share one global sampleIndex across the whole frame.
+    // Same Sobol index + only per-pixel Owen scramble still printed a square
+    // lattice on MNEE/caustic paths (tile_test). Decorrelate the index with a
+    // per-pixel offset (PBRT-style interval idea) while keeping spp progression.
+    const uint32_t si = uint32_t(sampleIndex < 0 ? 0 : sampleIndex);
+    const uint32_t pixelOffset =
+        uint32_t(hashPixelSample(x, y, 0u, salt, 0x51b01u) & 0xffffu);
+    stream.sampleIndex = si + pixelOffset * 65536u;  // spp in low bits of each pixel's lane
     rng.qmcCtx = &stream;
     rng.qmcFn = &pathSobolQmcFn;
     rng.sampleDim = 4u;

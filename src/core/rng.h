@@ -86,21 +86,35 @@ SR_INL SR_HD uint64_t mixBits64(uint64_t v) {
 // Decorrelated hash of pixel + progressive sample + frame seed (+ optional salt).
 // Uses (x,y) directly — never a linear pixelIndex — so row width cannot imprint
 // a lattice on the RNG streams.
+//
+// Extra avalanche passes: a previous multiply-xor mix left measurable neighbor
+// correlation in the low bits of PCG `inc` on some scenes (tile_test cell quilt).
 SR_INL SR_HD uint64_t hashPixelSample(int x, int y, uint32_t sampleIndex, uint32_t frameSeed,
                                       uint32_t salt = 0u) {
-    uint64_t h = uint64_t(uint32_t(x)) * 0x9e3779b97f4a7c15ULL;
-    h ^= uint64_t(uint32_t(y)) * 0xbf58476d1ce4e5b9ULL;
+    // Morton-ish interleave of low bits so (x+1) is not a tiny delta in the key.
+    const uint32_t ux = uint32_t(x);
+    const uint32_t uy = uint32_t(y);
+    uint64_t h = 0x243f6a8885a308d3ULL;  // nothing-up-my-sleeve
+    h ^= uint64_t(ux) * 0x9e3779b97f4a7c15ULL;
+    h = mixBits64(h);
+    h ^= uint64_t(uy) * 0xbf58476d1ce4e5b9ULL;
+    h = mixBits64(h);
     h ^= uint64_t(sampleIndex) * 0x94d049bb133111ebULL;
+    h = mixBits64(h);
     h ^= uint64_t(frameSeed) * 0x85ebca77c2b2ae63ULL;
+    h = mixBits64(h);
     h ^= uint64_t(salt) * 0xc2b2ae3d27d4eb4fULL;
+    // Fold x⊕y again so axis-aligned neighbors cannot share a near-linear key.
+    h ^= (uint64_t(ux) << 32) | uint64_t(uy);
     return mixBits64(h);
 }
 
 // Path / White-camera PCG seeded per pixel. `salt` separates spectral hero channels etc.
 SR_INL SR_HD Rng makePixelRng(int x, int y, int sampleIndex, uint32_t frameSeed, uint32_t salt = 0u) {
-    const uint64_t stream = hashPixelSample(x, y, uint32_t(sampleIndex < 0 ? 0 : sampleIndex), frameSeed, salt);
-    const uint64_t seed =
-        hashPixelSample(x, y, uint32_t(sampleIndex < 0 ? 0 : sampleIndex), frameSeed, salt ^ 0xa5a5a5a5u);
+    const uint32_t si = uint32_t(sampleIndex < 0 ? 0 : sampleIndex);
+    // Independent stream + seed — never derive one from the other with a weak xor.
+    const uint64_t stream = hashPixelSample(x, y, si, frameSeed, salt);
+    const uint64_t seed = hashPixelSample(x, y, si, frameSeed ^ 0xA511E9B3u, salt ^ 0xC2B2AE35u);
     return Rng(stream, seed);
 }
 

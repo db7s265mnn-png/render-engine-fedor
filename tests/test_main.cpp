@@ -166,6 +166,41 @@ void testSampling() {
         if (x == 3 && y == 2) ++hits;
     }
     check(hits > 12000, "distribution concentrates samples on the bright texel");
+
+    // Per-pixel PCG streams must not imprint a screen lattice (tile_test quilt).
+    // Neighbor autocorrelation of the first float should be ~0 at lags 16/32/64.
+    {
+        constexpr int W = 256, H = 128;
+        std::vector<float> field(size_t(W) * H);
+        double mean = 0.0;
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                Rng r = makePixelRng(x, y, 0, 0u);
+                const float u = r.nextFloat();
+                field[size_t(y) * W + x] = u;
+                mean += double(u);
+            }
+        }
+        mean /= double(W * H);
+        auto acLag = [&](int lag) -> double {
+            double num = 0.0, den = 0.0;
+            int n = 0;
+            for (int y = 0; y < H; ++y) {
+                for (int x = 0; x + lag < W; ++x) {
+                    const double a = double(field[size_t(y) * W + x]) - mean;
+                    const double b = double(field[size_t(y) * W + x + lag]) - mean;
+                    num += a * b;
+                    den += a * a;
+                    ++n;
+                }
+            }
+            (void)n;
+            return den > 1e-12 ? num / den : 0.0;
+        };
+        check(std::fabs(acLag(16)) < 0.05, "pixel RNG ac@16 ~ 0");
+        check(std::fabs(acLag(32)) < 0.05, "pixel RNG ac@32 ~ 0");
+        check(std::fabs(acLag(64)) < 0.05, "pixel RNG ac@64 ~ 0");
+    }
 }
 
 void testBsdf() {
