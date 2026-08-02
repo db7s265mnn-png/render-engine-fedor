@@ -1253,7 +1253,7 @@ void RenderView::mouseReleaseEvent(QMouseEvent* event) {
         mode_ = 0;
         releaseMouse();
         unsetCursor();
-        // Final camera sync / IPR restart after throttled motion-blur navigation.
+        // Final camera sync / IPR restart after drag (deferred during mouse-move).
         emit cameraMoved();
         event->accept();
         return;
