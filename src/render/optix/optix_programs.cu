@@ -2,7 +2,6 @@
 // integrator header, so the GPU and CPU backends stay in lockstep.
 #include <optix.h>
 
-#include "render/blue_noise.h"
 #include "render/integrator.h"
 #include "render/optix/launch_params.h"
 
@@ -71,10 +70,12 @@ extern "C" __global__ void __raygen__path() {
     Rng rng(hashCombine(pixelIndex, params.frameSeed),
             hashUint(pixelIndex ^ (params.frameSeed * 2654435761u)));
 
-    float jitterX = 0.5f, jitterY = 0.5f;
-    blueNoisePixelJitter(x, y, params.sampleIndex, jitterX, jitterY);
-    float lensU = 0.5f, lensV = 0.5f;
-    blueNoiseLensSample(x, y, params.sampleIndex, lensU, lensV);
+    // Match CPU: no tiled blue-noise CP (period-64 quilt in caustic shadows).
+    // Device path uses white pixel/lens samples (Sobol tables are host-heavy).
+    const float jitterX = rng.nextFloat();
+    const float jitterY = rng.nextFloat();
+    const float lensU = rng.nextFloat();
+    const float lensV = rng.nextFloat();
 
     Vec3 origin, direction;
     generateCameraRay(params.scene, float(x) + jitterX, float(y) + jitterY, lensU, lensV, origin, direction);

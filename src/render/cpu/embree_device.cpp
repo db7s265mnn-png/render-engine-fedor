@@ -9,7 +9,7 @@
 
 #include "core/log.h"
 #include "core/thread_pool.h"
-#include "render/blue_noise.h"
+#include "render/sobol.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
 #include "render/integrator_base.h"
@@ -320,12 +320,15 @@ public:
             EmbreeTracer tracer{topScene_};
             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
             Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
-            // Arnold-style blue-noise dither for pixel AA / DoF (Georgiev & Fajardo).
-            // Path bounce RNG stays PCG white noise — BN is for screen-space error.
+            // Camera AA/DoF: Owen-scrambled Sobol (per-pixel seeds). The previous
+            // Arnold-style 64×64 blue-noise CP tile made jx/jy strictly period-64
+            // in screen space — identical primary samples in every 64×64 block,
+            // which prints as a square quilt in high-variance caustic shadows.
+            // Path bounce RNG stays PCG white noise.
             float jx = 0.5f, jy = 0.5f;
-            blueNoisePixelJitter(x, y, sampleIndex, jx, jy);
+            pixelSample(x, y, sampleIndex, jx, jy);
             float lensU = 0.5f, lensV = 0.5f;
-            blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
+            lensSample(x, y, sampleIndex, lensU, lensV);
 
             // Light-tracing splats assume the pinhole/thin-lens projection —
             // polynomial optics rays and camera motion blur bypass it.
