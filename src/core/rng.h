@@ -74,4 +74,34 @@ SR_INL SR_HD uint32_t hashUint(uint32_t x) {
     return x;
 }
 
+// Strong 64-bit finalizer (SplitMix64 / PBRT MixBits family). Avoids the
+// spatial correlation that weak hashCombine(y*width+x, …) leaves in low bits —
+// neighboring pixels used to share related PCG streams and print faint seams.
+SR_INL SR_HD uint64_t mixBits64(uint64_t v) {
+    v = (v ^ (v >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    v = (v ^ (v >> 27)) * 0x94d049bb133111ebULL;
+    return v ^ (v >> 31);
+}
+
+// Decorrelated hash of pixel + progressive sample + frame seed (+ optional salt).
+// Uses (x,y) directly — never a linear pixelIndex — so row width cannot imprint
+// a lattice on the RNG streams.
+SR_INL SR_HD uint64_t hashPixelSample(int x, int y, uint32_t sampleIndex, uint32_t frameSeed,
+                                      uint32_t salt = 0u) {
+    uint64_t h = uint64_t(uint32_t(x)) * 0x9e3779b97f4a7c15ULL;
+    h ^= uint64_t(uint32_t(y)) * 0xbf58476d1ce4e5b9ULL;
+    h ^= uint64_t(sampleIndex) * 0x94d049bb133111ebULL;
+    h ^= uint64_t(frameSeed) * 0x85ebca77c2b2ae63ULL;
+    h ^= uint64_t(salt) * 0xc2b2ae3d27d4eb4fULL;
+    return mixBits64(h);
+}
+
+// Path / White-camera PCG seeded per pixel. `salt` separates spectral hero channels etc.
+SR_INL SR_HD Rng makePixelRng(int x, int y, int sampleIndex, uint32_t frameSeed, uint32_t salt = 0u) {
+    const uint64_t stream = hashPixelSample(x, y, uint32_t(sampleIndex < 0 ? 0 : sampleIndex), frameSeed, salt);
+    const uint64_t seed =
+        hashPixelSample(x, y, uint32_t(sampleIndex < 0 ? 0 : sampleIndex), frameSeed, salt ^ 0xa5a5a5a5u);
+    return Rng(stream, seed);
+}
+
 }  // namespace sol

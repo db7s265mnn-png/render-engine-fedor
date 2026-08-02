@@ -1602,9 +1602,8 @@ SR_INL SR_HD uint32_t sobolRaw(uint32_t index, uint32_t dimension) {
 }
 
 SR_INL SR_HD uint32_t pixelScrambleSeed(int x, int y) {
-    uint32_t h = uint32_t(x) * 0x85ebca6bu;
-    h ^= uint32_t(y) * 0xc2b2ae35u;
-    return hashUint(h);
+    // Match path-RNG policy: strong mix of (x,y), not a weak multiply-xor.
+    return uint32_t(hashPixelSample(x, y, 0u, 0u, 0x50b01u));
 }
 
 SR_INL SR_HD uint32_t dimensionSeed(uint32_t pixelSeed, uint32_t dimension) {

@@ -325,8 +325,8 @@ public:
 
         auto shadePixel = [&](int x, int y, int threadId) {
             EmbreeTracer tracer{topScene_};
-            const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
-            Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
+            // Strong per-pixel PCG streams (x,y,spp) — not linear pixelIndex.
+            Rng rng = makePixelRng(x, y, sampleIndex, frameSeed);
             // Camera AA / DoF — selectable Pixel Sampler (path bounce RNG stays PCG).
             float jx = 0.5f, jy = 0.5f;
             float lensU = 0.5f, lensV = 0.5f;
@@ -468,8 +468,7 @@ public:
                 (scene.hasDispersion != 0 || scene.camera.chromaticAberration != 0)) {
                 // п.4: average independent R/G/B hero traces.
                 for (int ch = 0; ch < 3; ++ch) {
-                    Rng rCh(hashCombine(pixelIndex, frameSeed ^ uint32_t(ch + 1)),
-                            hashUint(pixelIndex ^ (frameSeed * 2654435761u) ^ uint32_t(0x9e3779b9u * (ch + 1))));
+                    Rng rCh = makePixelRng(x, y, sampleIndex, frameSeed, uint32_t(ch + 1));
                     DispersionContext ctx = makeDispCtx(ch);
                     const float shutterTime = sampleShutter(rCh);
                     if (!generateRay(rCh, ch, origin, direction, lensTau, shutterTime)) continue;

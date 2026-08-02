@@ -68,8 +68,7 @@ extern "C" __global__ void __raygen__path() {
     if (x >= params.width || y >= params.height) return;
 
     const unsigned int pixelIndex = unsigned(y) * unsigned(params.width) + unsigned(x);
-    Rng rng(hashCombine(pixelIndex, params.frameSeed),
-            hashUint(pixelIndex ^ (params.frameSeed * 2654435761u)));
+    Rng rng = makePixelRng(x, y, params.sampleIndex, params.frameSeed);
 
     // Pixel Sampler (camera AA / DoF). Sobol tables are host-heavy — treat as White on GPU.
     float jitterX = 0.5f, jitterY = 0.5f;
