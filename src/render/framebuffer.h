@@ -100,7 +100,7 @@ public:
 
     // Linear HDR image with the accumulation weight divided out.
     Image resolveLinear() const;
-    // Display ready image: exposure, tone mapping and gamma applied.
+    // Display-ready: working space → view transform → bit-depth quantize.
     // Incomplete bootstrap pixels are filled from nearby samples so IPR does
     // not flash black tile holes (soft 2×2, not hard 4×4 blocks).
     Image resolveDisplay(const RenderSettingsData& settings) const;
@@ -118,6 +118,8 @@ private:
     mutable std::mutex mutex_;
 };
 
+Vec3 applyDisplayView(Vec3 linearWorking, const RenderSettingsData& settings);
+// Legacy alias used by image_io.
 Vec3 applyToneMap(Vec3 color, const RenderSettingsData& settings);
 
 }  // namespace sol

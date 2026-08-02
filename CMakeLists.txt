@@ -390,6 +390,7 @@ set(SOLSTICE_LIB_SOURCES
     src/scene/tessellate.cpp
     src/io/image_io.cpp
     src/io/tx_cache.cpp
+    src/io/tx_convert.cpp
     src/io/alembic_loader.cpp
     src/io/usd_loader.cpp
     src/io/materialx_graph.cpp
@@ -428,6 +429,7 @@ set(SOLSTICE_LIB_HEADERS
     src/scene/tessellate.h
     src/io/image_io.h
     src/io/tx_cache.h
+    src/io/tx_convert.h
     src/io/alembic_loader.h
     src/io/usd_loader.h
     src/io/materialx_graph.h
@@ -567,6 +569,13 @@ if(SOLSTICE_BUILD_APP)
     # Write build id next to the binary so packaging / CI can discover the exe name.
     file(WRITE "${CMAKE_BINARY_DIR}/solstice_build_id.txt" "${SOLSTICE_BUILD_ID}\n")
     file(WRITE "${CMAKE_BINARY_DIR}/solstice_output_name.txt" "${SOLSTICE_OUTPUT_NAME}\n")
+
+    # Standalone TX Converter (same maketx/OCIO core as auto-TX).
+    qt_add_executable(TX_Converter WIN32 MACOSX_BUNDLE
+        TX_Converter/main.cpp
+        src/ui/theme.cpp)
+    target_link_libraries(TX_Converter PRIVATE solstice_lib Qt6::Widgets)
+    set_target_properties(TX_Converter PROPERTIES OUTPUT_NAME "TX_Converter")
 endif()
 
 # ---------------------------------------------------------------------------

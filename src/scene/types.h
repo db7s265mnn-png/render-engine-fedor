@@ -362,7 +362,7 @@ struct CameraData {
 // ---------------------------------------------------------------------------
 // Render settings
 // ---------------------------------------------------------------------------
-enum ToneMapper : int { kToneNone = 0, kToneReinhard = 1, kToneAces = 2 };
+enum ToneMapper : int { kToneNone = 0, kToneReinhard = 1, kToneAces = 2 };  // legacy (removed from UI)
 enum RenderBackendType : int { kBackendCpuEmbree = 0, kBackendGpuOptix = 1 };
 // BDPT is CPU / Embree only; OptiX falls back to the unidirectional path tracer.
 // Menu order matches these values: Path Tracer, BDPT, Direct Lighting, AO.
@@ -423,6 +423,26 @@ enum PixelFilter : int {
     kPixelFilterMitchell = 3,  // Mitchell–Netravali B=C=1/3
 };
 
+// Render working colour space (Film). TX auto-convert always targets ACEScg (Arnold).
+enum WorkingColorSpace : int {
+    kWorkingSpaceSrgbLinear = 0,
+    kWorkingSpaceAcesCg = 1,
+};
+
+// Viewport / display view transform (chrome strip next to Local/World).
+enum ViewTransform : int {
+    kViewAcesOutputSrgb = 0,  // ACES Output - sRGB (monitor)
+    kViewSrgb = 1,            // sRGB EOTF (default)
+    kViewRaw = 2,             // no display transform
+};
+
+// Framebuffer resolve / viewport quantize / EXR save bit depth (accum stays float).
+enum OutputBitDepth : int {
+    kBitDepth8 = 8,
+    kBitDepth16 = 16,
+    kBitDepth32 = 32,
+};
+
 // Chromatic dispersion sampling (material dispersion_abbe / lens CA).
 enum DispersionMode : int {
     // Current: one random hero RGB channel per sample; mask whole path to that channel.
@@ -463,9 +483,12 @@ struct RenderSettingsData {
     // Indirect Clamp: BDPT light-tracing splat deposits (converted to radiance via / (W·H)).
     float clampDirect = 10.0f;
     float clampIndirect = 10.0f;
-    float exposure = 0.0f;
-    float gamma = 2.2f;
-    int toneMapper = kToneAces;
+    // Working colour space (Film). Display view is separate (viewport chrome).
+    int workingSpace = kWorkingSpaceSrgbLinear;
+    // Viewport view transform (updated live from the render view chrome).
+    int viewTransform = kViewSrgb;
+    // Resolve / save bit depth: 8, 16, or 32 (accumulation remains float).
+    int bitDepth = kBitDepth16;
     // Film reconstruction filter (Box = current 1-pixel behaviour).
     int pixelFilter = kPixelFilterBox;
     float filterRadius = 0.5f;  // pixels; 0 = use defaultFilterRadius(pixelFilter)
@@ -527,12 +550,13 @@ struct RenderSettingsData {
     // Sampling / seed diagnostics (skip light transport; write debug RGB).
     int samplingDebug = 0;        // SamplingDebug enum
 
-    // Texture TX cache (Ch.10): convert source textures to .tx mipmaps at cook time.
-    // 1 = enabled; conversion runs via maketx/oiiotool before image load.
+    // Texture TX cache: convert source textures to .tx mipmaps (maketx → ACEScg).
     int enableTxCache = 1;
-    // Relative or absolute directory for converted .tx files.
-    // Empty string or default "tx_cache" means a tx_cache/ folder next to the cwd.
     char txCacheDir[256] = "tx_cache";
+    // OCIO: when ocioUseEnv != 0, read config from the OCIO environment variable.
+    // Otherwise use ocioConfigPath (Render Settings → Film).
+    int ocioUseEnv = 1;
+    char ocioConfigPath[512] = "";
 };
 
 // ---------------------------------------------------------------------------

@@ -141,6 +141,11 @@ Parameter& Parameter::withFileSaveMode(bool enabled) {
     return *this;
 }
 
+Parameter& Parameter::withDirectoryMode(bool enabled) {
+    fileDirectoryMode = enabled;
+    return *this;
+}
+
 namespace {
 
 double paramNumericValue(const Node& node, const QString& name) {

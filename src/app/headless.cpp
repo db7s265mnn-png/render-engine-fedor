@@ -9,10 +9,13 @@
 #include "app/document.h"
 #include "core/log.h"
 #include "io/image_io.h"
+#include "io/tx_cache.h"
 #include "nodes/node_registry.h"
 #include "render/motion_blur.h"
 #include "render/render_session.h"
 #include "scene/tessellate.h"
+
+#include <cstring>
 
 namespace sol {
 
@@ -46,6 +49,29 @@ int runHeadless(const HeadlessOptions& options) {
     CookContext context;
     if (!options.scenePath.isEmpty())
         context.sceneDirectory = QFileInfo(options.scenePath).absolutePath();
+
+    RenderSettingsData txArm{};
+    bool txArmed = false;
+    for (const NodePtr& node : graph.nodes()) {
+        if (!node || node->typeName() != QLatin1String("rendersettings")) continue;
+        txArm.enableTxCache = node->boolValue("enabletxcache", true) ? 1 : 0;
+        txArm.ocioUseEnv = node->boolValue("ociousenv", true) ? 1 : 0;
+        {
+            const std::string dir = node->stringValue("txcachedir", "tx_cache").toStdString();
+            std::strncpy(txArm.txCacheDir, dir.c_str(), sizeof(txArm.txCacheDir) - 1);
+        }
+        {
+            const std::string cfg = node->stringValue("ocioconfig", "").toStdString();
+            std::strncpy(txArm.ocioConfigPath, cfg.c_str(), sizeof(txArm.ocioConfigPath) - 1);
+        }
+        txArmed = true;
+        break;
+    }
+    if (txArmed) setActiveTxCacheSettings(&txArm);
+    struct TxGuard {
+        ~TxGuard() { setActiveTxCacheSettings(nullptr); }
+    } txGuard;
+
     StagePtr stage = graph.cookDisplay(context);
     if (!stage) {
         std::fprintf(stderr, "error: nothing to render\n");

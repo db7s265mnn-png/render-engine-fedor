@@ -385,7 +385,7 @@ SR_INL SR_HD float srgbToLinear(float c) {
     return c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f);
 }
 
-// Narkowicz's ACES filmic approximation.
+// Narkowicz's ACES filmic approximation (good stand-in for ACES Output → sRGB).
 SR_INL SR_HD Vec3 acesFilmic(Vec3 c) {
     const Vec3 a = c * 2.51f + Vec3(0.03f);
     const Vec3 b = c * 2.43f + Vec3(0.59f);
@@ -396,6 +396,36 @@ SR_INL SR_HD Vec3 acesFilmic(Vec3 c) {
 
 SR_INL SR_HD Vec3 reinhard(Vec3 c) {
     return Vec3(c.x / (1.0f + c.x), c.y / (1.0f + c.y), c.z / (1.0f + c.z));
+}
+
+SR_INL SR_HD Vec3 linearToSrgbVec(Vec3 c) {
+    return Vec3(linearToSrgb(c.x), linearToSrgb(c.y), linearToSrgb(c.z));
+}
+
+// ACEScg (AP1) → linear Rec.709 / sRGB primaries (OpenColorIO / ACES utility).
+SR_INL SR_HD Vec3 acescgToLinearSrgb(Vec3 c) {
+    return Vec3(1.7050509927f * c.x + -0.6217921207f * c.y + -0.0832588720f * c.z,
+                -0.1302564175f * c.x + 1.1408047365f * c.y + -0.0105483191f * c.z,
+                -0.0240033472f * c.x + -0.1289689761f * c.y + 1.1529723230f * c.z);
+}
+
+// Quantize a display-referred channel to the configured output bit depth.
+SR_INL float quantizeChannel(float c, int bitDepth) {
+    c = saturatef(c);
+    if (bitDepth <= 8) {
+        const float q = 255.0f;
+        return std::floor(c * q + 0.5f) / q;
+    }
+    if (bitDepth <= 16) {
+        const float q = 65535.0f;
+        return std::floor(c * q + 0.5f) / q;
+    }
+    return c;  // 32-bit: leave float
+}
+
+SR_INL Vec3 quantizeRgb(Vec3 c, int bitDepth) {
+    return Vec3(quantizeChannel(c.x, bitDepth), quantizeChannel(c.y, bitDepth),
+                quantizeChannel(c.z, bitDepth));
 }
 
 }  // namespace sol

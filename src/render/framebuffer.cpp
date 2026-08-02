@@ -80,16 +80,33 @@ Image Framebuffer::resolveLinear() const {
     return image;
 }
 
-Vec3 applyToneMap(Vec3 color, const RenderSettingsData& settings) {
-    Vec3 c = color * std::exp2(settings.exposure);
-    switch (settings.toneMapper) {
-        case kToneReinhard: c = reinhard(c); break;
-        case kToneAces: c = acesFilmic(c); break;
-        default: break;
+Vec3 applyDisplayView(Vec3 linearWorking, const RenderSettingsData& settings) {
+    const int view = settings.viewTransform;
+    const int working = settings.workingSpace;
+    Vec3 display(0.0f);
+
+    if (view == kViewRaw) {
+        // Show working values clamped — no display transform.
+        display = Vec3(saturatef(linearWorking.x), saturatef(linearWorking.y),
+                       saturatef(linearWorking.z));
+    } else if (view == kViewAcesOutputSrgb) {
+        // ACES Output - sRGB: filmic RRT+ODT stand-in (Houdini/Arnold-style monitor view).
+        // When working in ACEScg, apply directly; for sRGB-linear, still run the curve
+        // so the control stays meaningful.
+        display = acesFilmic(linearWorking);
+    } else {
+        // sRGB view (default): encode for a standard monitor.
+        Vec3 linearSrgb = linearWorking;
+        if (working == kWorkingSpaceAcesCg) linearSrgb = acescgToLinearSrgb(linearWorking);
+        display = linearToSrgbVec(linearSrgb);
     }
-    const float invGamma = 1.0f / (settings.gamma > 0.0f ? settings.gamma : 2.2f);
-    return Vec3(std::pow(std::max(0.0f, c.x), invGamma), std::pow(std::max(0.0f, c.y), invGamma),
-                std::pow(std::max(0.0f, c.z), invGamma));
+
+    return quantizeRgb(display, settings.bitDepth);
+}
+
+// Legacy name used by image_io save helpers.
+Vec3 applyToneMap(Vec3 color, const RenderSettingsData& settings) {
+    return applyDisplayView(color, settings);
 }
 
 Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
@@ -97,10 +114,6 @@ Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
     Image image(width_, height_);
     const bool bootstrap = samples_.load(std::memory_order_relaxed) == 0 &&
                            hasData_.load(std::memory_order_relaxed);
-    // Keep bootstrap cheap (2×2). The 9851876 multi-radius (…32) hole-fill
-    // scanned up to ~65² neighbors per empty pixel on every IPR tick while
-    // sampleCount==0 — after every camera clear that made orbit hitch hard.
-    // Soft charcoal still avoids pure-black tile bars on sparse phase 0.
     constexpr int kBootstrapStep = 2;
     const Vec3 charcoal(0.07f, 0.07f, 0.08f);
     const double invPaths = invSplatPaths();
@@ -137,10 +150,9 @@ Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
                                                                                         : charcoal;
                 }
             } else {
-                // After sample 0 every eye pixel should have w>0; still show splats.
                 linearColor = splatPixel(x, y, invPaths);
             }
-            image.setRgb(x, y, applyToneMap(linearColor, settings), 1.0f);
+            image.setRgb(x, y, applyDisplayView(linearColor, settings), 1.0f);
         }
     }
     return image;

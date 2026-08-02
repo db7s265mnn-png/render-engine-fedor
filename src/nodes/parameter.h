@@ -45,6 +45,7 @@ public:
     QStringList menuItems;
     QString fileFilter;
     bool fileSaveMode = false;  // FilePath: save dialog instead of open
+    bool fileDirectoryMode = false;  // FilePath: choose a directory
 
     Parameter() = default;
 
@@ -66,6 +67,7 @@ public:
     Parameter& withTooltip(const QString& text);
     Parameter& withVisibleWhen(const QString& expression);
     Parameter& withFileSaveMode(bool enabled = true);
+    Parameter& withDirectoryMode(bool enabled = true);
 
     double toDouble() const { return value.toDouble(); }
     int toInt() const { return value.toInt(); }

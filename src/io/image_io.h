@@ -35,7 +35,7 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& path, const QString& searc
 
 bool saveImagePng(const std::string& path, const Image& displayImage, std::string& error);
 bool saveImageHdr(const std::string& path, const Image& linearImage, std::string& error);
-bool saveImageExr(const std::string& path, const Image& linearImage, std::string& error);
+bool saveImageExr(const std::string& path, const Image& linearImage, std::string& error, int bitDepth = 16);
 // Beauty RGB + optional spectral bin layers (Y channel per bin as mono).
 bool saveImageExrSpectral(const std::string& path, const Image& linearImage, int width, int height,
                           int bins, const std::vector<float>& binAccum, int sampleCount,

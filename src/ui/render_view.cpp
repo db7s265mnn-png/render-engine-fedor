@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QButtonGroup>
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -14,6 +15,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QResizeEvent>
+#include <QSignalBlocker>
 #include <QToolButton>
 #include <QVector3D>
 #include <QWheelEvent>
@@ -363,6 +365,31 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     worldSpaceButton_ = makeSpaceButton("World", "World transform space");
     localSpaceButton_->setChecked(true);
 
+    stripLayout->addSpacing(8);
+    viewTransformCombo_ = new QComboBox(toolStrip_);
+    viewTransformCombo_->addItem(QStringLiteral("ACES Output - sRGB"), 0);
+    viewTransformCombo_->addItem(QStringLiteral("sRGB"), 1);
+    viewTransformCombo_->addItem(QStringLiteral("Raw"), 2);
+    viewTransformCombo_->setCurrentIndex(1);
+    viewTransformCombo_->setToolTip(
+        QStringLiteral("Display view for the framebuffer (monitor). "
+                       "Working space is set in Render Settings → Film."));
+    viewTransformCombo_->setStyleSheet(
+        "QComboBox {"
+        "  min-height: 24px; max-width: 160px;"
+        "  font-size: 10px; font-weight: 600;"
+        "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
+        "  padding: 0 6px;"
+        "}"
+        "QComboBox:hover { background: #474c54; }"
+        "QComboBox::drop-down { border: none; width: 16px; }");
+    stripLayout->addWidget(viewTransformCombo_);
+    connect(viewTransformCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                if (index < 0) return;
+                setViewTransform(viewTransformCombo_->itemData(index).toInt());
+            });
+
     connect(selectButton_, &QToolButton::clicked, this, [this] {
         setTransformTool(TransformTool::Select);
     });
@@ -518,6 +545,19 @@ void RenderView::setTransformSpace(TransformSpace space) {
     hoverAxis_ = GizmoAxis::None;
     syncToolButtons();
     emit transformSpaceChanged(transformSpace_);
+    update();
+}
+
+void RenderView::setViewTransform(int view) {
+    view = std::clamp(view, 0, 2);
+    if (viewTransform_ == view) return;
+    viewTransform_ = view;
+    if (viewTransformCombo_) {
+        const QSignalBlocker block(viewTransformCombo_);
+        const int idx = viewTransformCombo_->findData(view);
+        if (idx >= 0) viewTransformCombo_->setCurrentIndex(idx);
+    }
+    emit viewTransformChanged(viewTransform_);
     update();
 }
 

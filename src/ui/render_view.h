@@ -11,6 +11,7 @@
 #include "nodes/node.h"
 
 class QToolButton;
+class QComboBox;
 
 namespace sol {
 
@@ -70,6 +71,8 @@ public:
     void setTransformTool(TransformTool tool);
     TransformSpace transformSpace() const { return transformSpace_; }
     void setTransformSpace(TransformSpace space);
+    int viewTransform() const { return viewTransform_; }
+    void setViewTransform(int view);
     void setTransformTarget(Node* node);
     Node* transformTarget() const { return transformTarget_; }
     bool isGizmoDragging() const { return mode_ == 4; }
@@ -109,6 +112,7 @@ signals:
     void transformFinished(sol::Node* node);
     void transformToolChanged(sol::TransformTool tool);
     void transformSpaceChanged(sol::TransformSpace space);
+    void viewTransformChanged(int view);
     // Viewport object pick: empty string clears selection.
     void objectSelected(const QString& sourceNode);
     // Focus-distance pick for DOF (metres along the view ray to the hit).
@@ -204,6 +208,8 @@ private:
     QToolButton* scaleButton_ = nullptr;
     QToolButton* localSpaceButton_ = nullptr;
     QToolButton* worldSpaceButton_ = nullptr;
+    QComboBox* viewTransformCombo_ = nullptr;
+    int viewTransform_ = 1;  // kViewSrgb
     QStringList cameraMenuNames_;
     QString activeCameraName_;
 

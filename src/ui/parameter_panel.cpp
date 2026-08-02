@@ -696,6 +696,31 @@ void ParameterPanel::rebuildMaterialX() {
             continue;
         }
 
+        // Arnold-style texture colour space (drives TX → ACEScg).
+        if (inputName == QLatin1String("colorspace")) {
+            auto* combo = new QComboBox();
+            combo->setEditable(true);
+            const QStringList curated = {
+                QStringLiteral("ACES - ACEScg"),
+                QStringLiteral("Utility - sRGB - Texture"),
+                QStringLiteral("Utility - Linear - sRGB"),
+                QStringLiteral("Utility - Raw"),
+                QStringLiteral("Utility - Rec.709 - Texture"),
+                QStringLiteral("Output - sRGB"),
+            };
+            combo->addItems(curated);
+            const int idx = combo->findText(input.value);
+            if (idx >= 0) combo->setCurrentIndex(idx);
+            else combo->setEditText(input.value.isEmpty() ? curated.front() : input.value);
+            combo->setToolTip("Input colour space for this texture. TX conversion always "
+                              "targets ACEScg (skip when ACEScg / Raw).");
+            connect(combo, &QComboBox::currentTextChanged, this, [commit](const QString& text) {
+                if (!text.isEmpty()) commit(text);
+            });
+            form->addRow(label, combo);
+            continue;
+        }
+
         if (type == "boolean" || type == "bool") {
             auto* box = new QCheckBox();
             box->setChecked(input.value == "true" || input.value == "1");
@@ -1027,11 +1052,17 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             layout->addWidget(browse, 0);
             const QString filter = parameter.fileFilter;
             const bool saveMode = parameter.fileSaveMode;
+            const bool dirMode = parameter.fileDirectoryMode;
             connect(edit, &QLineEdit::editingFinished, this, [notify, edit] { notify(edit->text()); });
-            connect(browse, &QPushButton::clicked, this, [this, edit, filter, notify, saveMode] {
-                const QString path =
-                    saveMode ? QFileDialog::getSaveFileName(this, "Save file", edit->text(), filter)
-                             : QFileDialog::getOpenFileName(this, "Choose file", edit->text(), filter);
+            connect(browse, &QPushButton::clicked, this, [this, edit, filter, notify, saveMode, dirMode] {
+                QString path;
+                if (dirMode) {
+                    path = QFileDialog::getExistingDirectory(this, "Choose folder", edit->text());
+                } else if (saveMode) {
+                    path = QFileDialog::getSaveFileName(this, "Save file", edit->text(), filter);
+                } else {
+                    path = QFileDialog::getOpenFileName(this, "Choose file", edit->text(), filter);
+                }
                 if (path.isEmpty()) return;
                 edit->setText(path);
                 notify(path);

@@ -27,6 +27,7 @@
 #include <QEventLoop>
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <exception>
 #include <new>
 
@@ -35,6 +36,7 @@
 #include "core/log.h"
 #include "core/math.h"
 #include "io/image_io.h"
+#include "io/tx_cache.h"
 #include "nodes/node_registry.h"
 #include "nodes/node.h"
 #include "render/motion_blur.h"
@@ -186,6 +188,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&graph_, &NodeGraph::displayNodeChanged, this, [this](Node*) { scheduleCook(0); });
 
     connect(renderView_, &RenderView::cameraMoved, this, &MainWindow::onCameraMoved);
+    connect(renderView_, &RenderView::viewTransformChanged, this, [this](int) {
+        framePending_.store(true, std::memory_order_relaxed);
+        onRenderTick();
+    });
     connect(renderView_, &RenderView::lookThroughCameraChosen, this, [this](const QString& name) {
         lookThroughCamera(name);
     });
@@ -917,24 +923,30 @@ void MainWindow::maybeSaveStillFrame() {
     }
 
     stillFramePending_ = false;
-    const Image display = session_.displayImage();
-    if (display.empty()) {
+    // Still frame: linear working-space beauty at the configured bit depth.
+    Image linear = session_.linearImage();
+    if (linear.empty()) {
         appMessageBox(this, QStringLiteral("Still frame"),
-                      QStringLiteral("Render finished but the display buffer is empty."));
+                      QStringLiteral("Render finished but the buffer is empty."));
         return;
     }
+    if (scene_) {
+        for (int y = 0; y < linear.height(); ++y)
+            for (int x = 0; x < linear.width(); ++x)
+                linear.setRgb(x, y, quantizeRgb(linear.rgb(x, y), scene_->settings.bitDepth));
+    }
 
-    // Ensure parent directory exists for relative/custom paths.
     const QFileInfo info(stillFramePath_);
     if (!info.absolutePath().isEmpty()) QDir().mkpath(info.absolutePath());
 
     std::string error;
-    if (!saveImageExr(stillFramePath_.toStdString(), display, error)) {
+    const int bitDepth = scene_ ? scene_->settings.bitDepth : 16;
+    if (!saveImageExr(stillFramePath_.toStdString(), linear, error, bitDepth)) {
         appMessageBox(this, QStringLiteral("Still frame"), QString::fromStdString(error));
         return;
     }
     statusBar()->showMessage(
-        QStringLiteral("Still frame written (tonemapped): %1").arg(stillFramePath_), 6000);
+        QStringLiteral("Still frame written: %1").arg(stillFramePath_), 6000);
 }
 
 // ---------------------------------------------------------------------------
@@ -981,6 +993,34 @@ void MainWindow::cookNow() {
     }
 
     const bool timelineInteractive = timelineBar_ && timelineBar_->isInteractive();
+
+    // Arm TX conversion for MaterialX / dome image loads during cook (Start + Render).
+    // toScene() also arms TX, but textures are decoded earlier in cookDisplay.
+    RenderSettingsData txArm{};
+    bool txArmed = false;
+    for (const NodePtr& node : graph_.nodes()) {
+        if (!node || node->typeName() != QLatin1String("rendersettings")) continue;
+        txArm.enableTxCache = node->boolValue("enabletxcache", true) ? 1 : 0;
+        txArm.ocioUseEnv = node->boolValue("ociousenv", true) ? 1 : 0;
+        {
+            const std::string dir = node->stringValue("txcachedir", "tx_cache").toStdString();
+            const size_t maxLen = sizeof(txArm.txCacheDir) - 1;
+            std::strncpy(txArm.txCacheDir, dir.c_str(), maxLen);
+            txArm.txCacheDir[maxLen] = '\0';
+        }
+        {
+            const std::string cfg = node->stringValue("ocioconfig", "").toStdString();
+            const size_t maxLen = sizeof(txArm.ocioConfigPath) - 1;
+            std::strncpy(txArm.ocioConfigPath, cfg.c_str(), maxLen);
+            txArm.ocioConfigPath[maxLen] = '\0';
+        }
+        txArmed = true;
+        break;
+    }
+    if (txArmed) setActiveTxCacheSettings(&txArm);
+    struct TxCookGuard {
+        ~TxCookGuard() { setActiveTxCacheSettings(nullptr); }
+    } txCookGuard;
 
     stage_ = graph_.cookDisplay(context);
     if (timelineBar_ && context.hasSuggestedRange)
@@ -1339,6 +1379,7 @@ void MainWindow::onRenderTick() {
     if (!pending && !fade) return;
     if (!renderView_) return;
     if (renderArmed() || fade) {
+        if (scene_) scene_->settings.viewTransform = renderView_->viewTransform();
         renderView_->setImage(toQImage(session_.displayImage()));
         updateStatusBar();
     }

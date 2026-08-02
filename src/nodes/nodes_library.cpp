@@ -783,17 +783,20 @@ public:
         addParameter(Parameter::makeButton("render", "Render")
                          .withGroup("Image")
                          .withTooltip("One full pass from scratch with the current settings. "
-                                      "When all spp finish, writes a tonemapped EXR to Output Path."));
+                                      "When all spp finish, writes a display-view EXR to Output Path."));
+        addParameter(Parameter::makeMenu("bitdepth", "Bit Depth", {"8", "16", "32"}, 1)
+                         .withGroup("Image")
+                         .withTooltip("Bit depth for viewport resolve and EXR/PNG save.\n"
+                                      "Accumulation stays float. Default 16 (half)."));
         addParameter(Parameter::makeBool("enabletxcache", "Convert Textures to TX", true)
                          .withGroup("Image")
-                         .withTooltip("Before rendering, convert source textures to .tx mipmapped "
-                                      "TIFF files using maketx or oiiotool. Cached in TX Cache "
-                                      "Directory; unchanged textures are skipped."));
-        addParameter(Parameter::makeString("txcachedir", "TX Cache Directory", "tx_cache")
+                         .withTooltip("On Start / Render, convert source textures to .tx mipmaps "
+                                      "via maketx (→ ACEScg when input colour space needs it)."));
+        addParameter(Parameter::makeFile("txcachedir", "TX Cache Directory", "tx_cache", QString())
                          .withGroup("Image")
-                         .withTooltip("Directory for converted .tx files. Relative paths are "
-                                      "resolved from the current working directory. Empty uses "
-                                      "\"tx_cache\" next to the cwd."));
+                         .withDirectoryMode(true)
+                         .withTooltip("Directory for converted .tx files (default tx_cache). "
+                                      "Names match the source basename; collisions use _copy_N."));
 
         // --- Sampling -----------------------------------------------------------------
         addParameter(Parameter::makeInt("samples", "Samples Per Pixel", 128, 1, 100000, false)
@@ -1046,9 +1049,22 @@ public:
                          .withGroup("Subdivision")
                          .withTooltip("Stage prim path of the custom dicing camera "
                                       "(e.g. /cameras/dice). Empty falls back to the render camera."));
-        addParameter(Parameter::makeMenu("tonemap", "Tone Map", {"None", "Reinhard", "ACES"}, 2).withGroup("Film"));
-        addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -8.0, 8.0).withGroup("Film"));
-        addParameter(Parameter::makeFloat("gamma", "Gamma", 2.2, 1.0, 4.0).withGroup("Film"));
+        addParameter(Parameter::makeMenu("workingspace", "Working Space",
+                                         {"sRGB Linear", "ACEScg"}, 0)
+                         .withGroup("Film")
+                         .withTooltip("Render working colour space.\n"
+                                      "ACEScg: Arnold-style ACES workflow (textures convert to ACEScg).\n"
+                                      "sRGB Linear: legacy linear RGB working space.\n"
+                                      "Viewport View (next to World) controls monitor display."));
+        addParameter(Parameter::makeBool("ociousenv", "Use OCIO from Environment", true)
+                         .withGroup("Film")
+                         .withTooltip("When on (default), read the OCIO config path from the "
+                                      "OCIO environment variable (Windows / system)."));
+        addParameter(Parameter::makeFile("ocioconfig", "OCIO Config", "",
+                                         "OCIO Config (*.ocio);;All Files (*)")
+                         .withGroup("Film")
+                         .withVisibleWhen("ociousenv==0")
+                         .withTooltip("Path to config.ocio when Use OCIO from Environment is off."));
         addParameter(Parameter::makeBool("envvisible", "Environment Visible To Camera", true).withGroup("Film"));
 
         addParameter(Parameter::makeMenu("samplingdebug", "Sampling Debug",
@@ -1064,7 +1080,7 @@ public:
                                       "faint seams from correlated seeds.\n"
                                       "Bucket ID: color by Bucket Size tiles (threading only).\n"
                                       "Pixel Hash: RGB from the per-pixel seed hash.\n"
-                                      "Tip: set Tone Map to None for a clearer view."));
+                                      "Tip: set View to Raw for a clearer diagnostic."));
         addParameter(Parameter::makeBool("filmfalsecolor", "Spectral False Color", false)
                          .withGroup("Diagnostic")
                          .withVisibleWhen("integrator==4||integrator==5")
@@ -1129,21 +1145,31 @@ public:
         settings.spectralSamples = std::clamp(intValue("spectralsamples", 4), 2, 16);
         settings.spectralBins = std::clamp(intValue("spectralbins", 16), 8, 32);
         settings.spectralExr = boolValue("spectralexr", false) ? 1 : 0;
-        settings.toneMapper = intValue("tonemap", 2);
-        settings.exposure = float(floatValue("exposure", 0.0));
-        settings.gamma = float(floatValue("gamma", 2.2));
+        settings.workingSpace = std::clamp(intValue("workingspace", 0), 0, 1);
+        {
+            // Menu indices 0/1/2 → bit depths 8/16/32.
+            const int bitIdx = std::clamp(intValue("bitdepth", 1), 0, 2);
+            settings.bitDepth = bitIdx == 0 ? 8 : (bitIdx == 2 ? 32 : 16);
+        }
         settings.pixelFilter = std::clamp(intValue("pixelfilter", 0), 0, 3);
-        settings.filterRadius = float(floatValue("filterradius", 0.0));
+        settings.filterRadius = float(floatValue("filterradius", 0.5));
         settings.envVisibleCamera = boolValue("envvisible", true) ? 1 : 0;
         settings.filmFalseColor = boolValue("filmfalsecolor", false) ? 1 : 0;
         settings.filmFalseColorBin = std::clamp(intValue("filmfalsecolorbin", 0), 0, 31);
         settings.samplingDebug = std::clamp(intValue("samplingdebug", 0), 0, 4);
         settings.enableTxCache = boolValue("enabletxcache", true) ? 1 : 0;
+        settings.ocioUseEnv = boolValue("ociousenv", true) ? 1 : 0;
         {
             const std::string dir = stringValue("txcachedir", "tx_cache").toStdString();
             const size_t maxLen = sizeof(settings.txCacheDir) - 1;
             std::strncpy(settings.txCacheDir, dir.c_str(), maxLen);
             settings.txCacheDir[maxLen] = '\0';
+        }
+        {
+            const std::string cfg = stringValue("ocioconfig", "").toStdString();
+            const size_t maxLen = sizeof(settings.ocioConfigPath) - 1;
+            std::strncpy(settings.ocioConfigPath, cfg.c_str(), maxLen);
+            settings.ocioConfigPath[maxLen] = '\0';
         }
         stage.settings = settings;
         stage.settingsAuthored = true;

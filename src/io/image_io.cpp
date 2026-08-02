@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/log.h"
+#include "core/math.h"
 #include "io/tx_cache.h"
 #include "render/framebuffer.h"
 #include "solstice_config.h"
@@ -215,18 +216,49 @@ bool loadExr(const std::string& path, Image& out, std::string& error) {
     }
 }
 
-bool writeExr(const std::string& path, const Image& image, std::string& error) {
+bool writeExr(const std::string& path, const Image& image, std::string& error, int bitDepth = 16) {
     try {
-        std::vector<Imf::Rgba> pixels(size_t(image.width()) * size_t(image.height()));
-        for (int y = 0; y < image.height(); ++y) {
-            for (int x = 0; x < image.width(); ++x) {
-                const Vec3 c = image.rgb(x, y);
-                pixels[size_t(y) * size_t(image.width()) + size_t(x)] = Imf::Rgba(c.x, c.y, c.z, 1.0f);
+        const int w = image.width();
+        const int h = image.height();
+        if (bitDepth >= 32) {
+            Imf::Header header(w, h);
+            header.channels().insert("R", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("G", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("B", Imf::Channel(Imf::FLOAT));
+            header.channels().insert("A", Imf::Channel(Imf::FLOAT));
+            std::vector<float> R(size_t(w) * size_t(h)), G(size_t(w) * size_t(h)), B(size_t(w) * size_t(h)),
+                A(size_t(w) * size_t(h), 1.0f);
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const Vec3 c = image.rgb(x, y);
+                    const size_t i = size_t(y) * size_t(w) + size_t(x);
+                    R[i] = c.x;
+                    G[i] = c.y;
+                    B[i] = c.z;
+                }
+            }
+            Imf::OutputFile file(path.c_str(), header);
+            Imf::FrameBuffer fb;
+            fb.insert("R", Imf::Slice(Imf::FLOAT, (char*)R.data(), sizeof(float), sizeof(float) * size_t(w)));
+            fb.insert("G", Imf::Slice(Imf::FLOAT, (char*)G.data(), sizeof(float), sizeof(float) * size_t(w)));
+            fb.insert("B", Imf::Slice(Imf::FLOAT, (char*)B.data(), sizeof(float), sizeof(float) * size_t(w)));
+            fb.insert("A", Imf::Slice(Imf::FLOAT, (char*)A.data(), sizeof(float), sizeof(float) * size_t(w)));
+            file.setFrameBuffer(fb);
+            file.writePixels(h);
+            return true;
+        }
+
+        std::vector<Imf::Rgba> pixels(size_t(w) * size_t(h));
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                Vec3 c = image.rgb(x, y);
+                if (bitDepth <= 8) c = quantizeRgb(c, 8);
+                pixels[size_t(y) * size_t(w) + size_t(x)] = Imf::Rgba(c.x, c.y, c.z, 1.0f);
             }
         }
-        Imf::RgbaOutputFile file(path.c_str(), image.width(), image.height(), Imf::WRITE_RGBA);
-        file.setFrameBuffer(pixels.data(), 1, size_t(image.width()));
-        file.writePixels(image.height());
+        Imf::RgbaOutputFile file(path.c_str(), w, h, Imf::WRITE_RGBA);
+        file.setFrameBuffer(pixels.data(), 1, size_t(w));
+        file.writePixels(h);
         return true;
     } catch (const std::exception& e) {
         error = std::string("OpenEXR: ") + e.what();
@@ -742,12 +774,13 @@ bool saveImageHdr(const std::string& path, const Image& linearImage, std::string
     return writeHdr(path, linearImage, error);
 }
 
-bool saveImageExr(const std::string& path, const Image& linearImage, std::string& error) {
+bool saveImageExr(const std::string& path, const Image& linearImage, std::string& error, int bitDepth) {
 #if SOLSTICE_HAVE_OPENEXR
-    return writeExr(path, linearImage, error);
+    return writeExr(path, linearImage, error, bitDepth);
 #else
     (void)path;
     (void)linearImage;
+    (void)bitDepth;
     error = "this build has no OpenEXR support";
     return false;
 #endif
@@ -771,11 +804,12 @@ bool saveImageAuto(const std::string& path, const Image& linear, const RenderSet
                    std::string& error) {
     const std::string ext = toLowerExtension(path);
     if (ext == "hdr") return saveImageHdr(path, linear, error);
-    if (ext == "exr") return saveImageExr(path, linear, error);
+    if (ext == "exr") return saveImageExr(path, linear, error, settings.bitDepth);
 
     Image display(linear.width(), linear.height());
     for (int y = 0; y < linear.height(); ++y)
-        for (int x = 0; x < linear.width(); ++x) display.setRgb(x, y, applyToneMap(linear.rgb(x, y), settings));
+        for (int x = 0; x < linear.width(); ++x)
+            display.setRgb(x, y, applyDisplayView(linear.rgb(x, y), settings));
     return saveImagePng(path, display, error);
 }
 
