@@ -842,17 +842,26 @@ public:
                                       "Blue Noise: Arnold-style 64×64 CP tile — nicer AA on smooth "
                                       "surfaces, but can print a square quilt in caustic shadows.\n"
                                       "White: independent PCG — no structure, noisier AA."));
+        addParameter(Parameter::makeMenu("samplingengine", "Sampling Engine",
+                                         {"Legacy (pre-PBRT)", "FilmTile (PBRT)", "Progressive (no buckets)"},
+                                         1)
+                         .withGroup("Engine")
+                         .withTooltip("How the frame is scheduled and seeded.\n"
+                                      "Legacy: old tiles + direct Film writes + weak "
+                                      "pixelIndex seed (before the PBRT book pass).\n"
+                                      "FilmTile: PBRT ImageTileIntegrator — local bucket "
+                                      "accum, then merge; strong (x,y,spp) seed.\n"
+                                      "Progressive: no buckets — parallel scanlines, whole "
+                                      "frame densifies evenly; strong seed."));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
         addParameter(Parameter::makeInt("tilesize", "Bucket Size (px)", 32, 0, 256, false)
                          .withGroup("Engine")
-                         .withTooltip("PBRT-style FilmTile bucket size in pixels.\n"
-                                      "0 = Auto (ParallelFor2D-style: ~8× threads tiles, "
-                                      "side clamped to 8/16/32/64).\n"
-                                      "Otherwise fixed bucket size (8–256, default 32).\n"
-                                      "Buckets only schedule work + local FilmTile merge — "
-                                      "sampling stays per-pixel (no per-bucket seed)."));
+                         .withVisibleWhen("samplingengine==0||samplingengine==1")
+                         .withTooltip("PBRT-style FilmTile / Legacy bucket size in pixels.\n"
+                                      "0 = Auto (~8× threads tiles, side 8/16/32/64).\n"
+                                      "Ignored by Progressive (no buckets) engine."));
         addParameter(Parameter::makeFloat("aodistance", "AO Distance", 1.0, 0.01, 100.0, false)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==3"));
@@ -1033,6 +1042,7 @@ public:
         settings.threads = intValue("threads", 0);
         settings.tileSize = std::clamp(intValue("tilesize", 32), 0, 256);
         settings.pixelSampler = std::clamp(intValue("pixelsampler", 0), 0, 2);
+        settings.samplingEngine = std::clamp(intValue("samplingengine", 1), 0, 2);
         settings.aoDistance = float(floatValue("aodistance", 1.0));
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;

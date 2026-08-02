@@ -395,6 +395,16 @@ enum PixelSampler : int {
     kPixelSamplerWhite = 2,      // Independent PCG per pixel
 };
 
+// How the image is scheduled / seeded / written (Render Settings → Sampling Engine).
+enum SamplingEngine : int {
+    // Pre-book: fixed tiles, direct Framebuffer::addSample, weak pixelIndex seed.
+    kSamplingEngineLegacy = 0,
+    // Current PBRT-style: FilmTile local accum + mergeFilmTile, strong (x,y,spp) seed.
+    kSamplingEngineFilmTile = 1,
+    // True progressive: no buckets — parallel scanlines, direct addSample, strong seed.
+    kSamplingEngineProgressive = 2,
+};
+
 // Render Settings → Diagnostic: replace beauty with a sampling/seed field.
 enum SamplingDebug : int {
     kSamplingDebugOff = 0,
@@ -452,6 +462,7 @@ struct RenderSettingsData {
     int envVisibleCamera = 1;
     int tileSize = 32;             // FilmTile bucket size; 0 = PBRT-style auto
     int pixelSampler = kPixelSamplerSobol;  // camera AA / DoF generator
+    int samplingEngine = kSamplingEngineFilmTile;  // Legacy / FilmTile / Progressive
     int threads = 0;               // 0 = hardware concurrency
 
     float aoDistance = 1.0f;
