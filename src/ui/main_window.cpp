@@ -18,7 +18,6 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QShortcut>
-#include <QDateTime>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QToolBar>
@@ -1264,9 +1263,6 @@ void MainWindow::onCameraMoved() {
     if (Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
         // Looking through: navigation authors the camera node (Houdini lock-to-camera).
         writeViewToCameraNode(cam);
-        if (parameterPanel_->node() == cam && !parameterPanel_->showingMaterialX()) {
-            // Avoid rebuilding the whole panel every mouse move — refresh on next cook.
-        }
     }
     if (!scene_) return;
     const Mat4 camXform = renderView_->camera().toMatrix();
@@ -1282,25 +1278,9 @@ void MainWindow::onCameraMoved() {
         applyLensFromCameraNode(cam, scene_->camera);
     }
 
-    // With motion blur, each sample is expensive. Joining the render thread on every
-    // mouse-move freezes orbit — only push camera + restart on a throttle / release.
-    const bool navigating = renderView_->isNavigating();
-    const bool heavyMb = scene_->settings.motionBlur != 0;
-    if (heavyMb && navigating) {
-        const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        if (now - lastMbNavIprRestartMs_ >= 80) {
-            lastMbNavIprRestartMs_ = now;
-            mbNavIprPending_ = false;
-            session_.updateSceneData();
-            session_.start();
-        } else {
-            mbNavIprPending_ = true;
-        }
-        return;
-    }
-    mbNavIprPending_ = false;
-    session_.updateSceneData();
-    session_.start();
+    // Live IPR during tumble: soft-restart on the render thread (no UI join).
+    // Hard updateSceneData()+start() joined every mousemove and made orbit hitch.
+    session_.pushInteractiveRestart();
 }
 
 void MainWindow::onLookThroughCameraNode() {
@@ -1432,8 +1412,10 @@ void MainWindow::writeViewToCameraNode(Node* camera) {
     camera->setParameterValue("target", QVariant::fromValue(QVector3D(target.x, target.y, target.z)),
                               false);
     camera->setParameterValue("translate", QVariant::fromValue(QVector3D(eye.x, eye.y, eye.z)), false);
-    graph_.setModified(true);
-    updateWindowTitle();
+    if (!graph_.isModified()) {
+        graph_.setModified(true);
+        updateWindowTitle();
+    }
 }
 
 void MainWindow::onCopyViewToCameraNode() {

@@ -85,9 +85,12 @@ Image RenderSession::displayImage() const {
 Image RenderSession::linearImage() const { return framebuffer_.resolveLinear(); }
 
 void RenderSession::stop() {
+    hardStop_.store(true, std::memory_order_relaxed);
     cancel_.store(true, std::memory_order_relaxed);
     if (thread_.joinable()) thread_.join();
     cancel_.store(false, std::memory_order_relaxed);
+    hardStop_.store(false, std::memory_order_relaxed);
+    softRestart_.store(false, std::memory_order_relaxed);
     rendering_.store(false, std::memory_order_relaxed);
 }
 
@@ -98,6 +101,9 @@ void RenderSession::start() {
         logWarning("Render start requested without a scene");
         return;
     }
+    hardStop_.store(false, std::memory_order_relaxed);
+    softRestart_.store(false, std::memory_order_relaxed);
+    cancel_.store(false, std::memory_order_relaxed);
     rendering_.store(true, std::memory_order_relaxed);
     thread_ = std::thread([this] { threadMain(); });
 }
@@ -118,6 +124,19 @@ void RenderSession::updateSceneData() {
     stop();
     if (device_) device_->refreshSceneData();
     framebuffer_.clear();
+}
+
+void RenderSession::pushInteractiveRestart() {
+    // Already running: ask the worker to abort the current sample and restart
+    // accumulation after refreshSceneData — UI thread must not join().
+    if (rendering_.load(std::memory_order_relaxed) && thread_.joinable()) {
+        softRestart_.store(true, std::memory_order_relaxed);
+        cancel_.store(true, std::memory_order_relaxed);
+        return;
+    }
+    // Idle: full path (stop is cheap when no thread).
+    updateSceneData();
+    start();
 }
 
 void RenderSession::discardPreviousRender() {
@@ -265,6 +284,7 @@ void RenderSession::threadMain() {
 
     const auto startTime = std::chrono::steady_clock::now();
     auto lastNotify = startTime;
+    auto sampleStartTime = startTime;
 
     auto notifyUi = [&](bool force) {
         const auto now = std::chrono::steady_clock::now();
@@ -280,7 +300,27 @@ void RenderSession::threadMain() {
         if (update) update();
     };
 
-    for (int sample = startSample; sample < targetSamples; ++sample) {
+    int sample = startSample;
+    while (sample < targetSamples) {
+        if (hardStop_.load(std::memory_order_relaxed)) break;
+
+        if (softRestart_.exchange(false, std::memory_order_relaxed)) {
+            cancel_.store(false, std::memory_order_relaxed);
+            if (device_) device_->refreshSceneData();
+            framebuffer_.clear();
+            sample = 0;
+            sampleStartTime = std::chrono::steady_clock::now();
+            {
+                std::lock_guard<std::mutex> lock(progressMutex_);
+                progress_.samplesDone = 0;
+                progress_.samplesTarget = targetSamples;
+                progress_.elapsedSeconds = 0.0;
+                progress_.samplesPerSecond = 0.0;
+            }
+            notifyUi(true);
+            continue;
+        }
+
         if (cancel_.load(std::memory_order_relaxed)) break;
 
         RenderMidProgressFn midProgress;
@@ -292,16 +332,19 @@ void RenderSession::threadMain() {
         }
 
         device_->renderSample(framebuffer_, sample, cancel_, midProgress);
+
+        if (hardStop_.load(std::memory_order_relaxed)) break;
+        if (softRestart_.load(std::memory_order_relaxed)) continue;  // handled at loop top
         if (cancel_.load(std::memory_order_relaxed)) break;
 
         framebuffer_.setSampleCount(sample + 1);
         const auto now = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(now - startTime).count();
+        const double elapsed = std::chrono::duration<double>(now - sampleStartTime).count();
         {
             std::lock_guard<std::mutex> lock(progressMutex_);
             progress_.samplesDone = sample + 1;
             progress_.elapsedSeconds = elapsed;
-            progress_.samplesPerSecond = elapsed > 0.0 ? double(sample + 1 - startSample) / elapsed : 0.0;
+            progress_.samplesPerSecond = elapsed > 0.0 ? double(sample + 1) / elapsed : 0.0;
         }
 
         // Throttle UI notifications: early samples update immediately, later
@@ -310,6 +353,7 @@ void RenderSession::threadMain() {
         if (sample < 4 || sinceNotify > 0.1 || sample + 1 == targetSamples) {
             notifyUi(true);
         }
+        ++sample;
     }
 
     {

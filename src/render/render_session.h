@@ -33,6 +33,10 @@ public:
     // Picks up in-place scene edits (camera, film settings) and resets the
     // accumulation without rebuilding acceleration structures.
     void updateSceneData();
+    // Interactive camera / film tweak while a render is running: abort the current
+    // sample and restart accumulation on the *render* thread (no UI-thread join).
+    // Call after mutating scene->camera (etc.). If idle, falls back to update+start.
+    void pushInteractiveRestart();
     // Stop the render thread and free *all* previous-render state: device BVH,
     // cooked scene, accumulation, and display hold. Call before a heavy
     // tessellation so peak RAM is not previous_render + new_tess.
@@ -79,6 +83,8 @@ private:
     mutable std::mutex displayHoldMutex_;
     std::thread thread_;
     std::atomic<bool> cancel_{false};
+    std::atomic<bool> hardStop_{false};
+    std::atomic<bool> softRestart_{false};
     std::atomic<bool> rendering_{false};
     std::atomic<bool> sceneDirty_{true};
 
