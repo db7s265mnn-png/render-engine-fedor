@@ -266,6 +266,17 @@ void testSampling() {
               "R2 per-pixel CP differs neighbors at spp0");
         check(isR2PixelSampler(3) && !isR2PixelSampler(5) && !isR2PixelSampler(0),
               "GenPnt2D is sampler index 3");
+        // Manual-Test math: center + U(-1,1)*mult, clamped.
+        {
+            const float mult = 0.25f;
+            const float ux = -1.0f, uy = 1.0f;
+            const float jx = std::min(0.999999f, std::max(0.0f, 0.5f + ux * mult));
+            const float jy = std::min(0.999999f, std::max(0.0f, 0.5f + uy * mult));
+            checkNear(jx, 0.25f, 1e-6f, "Manual-Test left edge at mult=0.25");
+            checkNear(jy, 0.75f, 1e-6f, "Manual-Test right edge at mult=0.25");
+            const float jClamp = std::min(0.999999f, std::max(0.0f, 0.5f + 1.0f * 2.0f));
+            check(jClamp <= 0.999999f && jClamp >= 0.0f, "Manual-Test clamps outside pixel");
+        }
     }
 }
 

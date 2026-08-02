@@ -394,6 +394,8 @@ enum PixelSampler : int {
     kPixelSamplerBlueNoise = 1,    // 64×64 BN CP tile
     kPixelSamplerXorshift = 2,     // Marsaglia xorshift32 white jitter
     kPixelSamplerGenPnt2D = 3,     // plastic-number R2 (Roberts), n = sampleIndex
+    // Diagnostic: pixel center + U(-1,1)*manualTestMult per axis, clamped to [0,1).
+    kPixelSamplerManualTest = 4,
 };
 
 // How the image is scheduled / written (Render Settings → Sampling Type).
@@ -472,6 +474,8 @@ struct RenderSettingsData {
     int envVisibleCamera = 1;
     int tileSize = 32;             // bucket size; 0 = PBRT-style auto
     int pixelSampler = kPixelSamplerSobol;  // camera AA / DoF generator
+    // Manual-Test only: pixel jitter = 0.5 + U(-1,1)*mult, clamped to [0,1).
+    float manualTestMult = 0.0f;
     int samplingEngine = kSamplingEngineBuckets;  // Buckets / Progressive
     int threads = 0;               // 0 = hardware concurrency
 

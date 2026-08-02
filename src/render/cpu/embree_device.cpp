@@ -324,6 +324,7 @@ public:
             if (settings.pixelSampler == kPixelSamplerBlueNoise) samplerName = "BlueNoise64";
             else if (settings.pixelSampler == kPixelSamplerXorshift) samplerName = "Xorshift";
             else if (settings.pixelSampler == kPixelSamplerGenPnt2D) samplerName = "GenPnt2D";
+            else if (settings.pixelSampler == kPixelSamplerManualTest) samplerName = "ManualTest";
             const char* engineName = "Buckets";
             if (settings.samplingEngine == kSamplingEngineProgressive) engineName = "Progressive";
             std::string engineDetail = engineName;
@@ -383,6 +384,17 @@ public:
             } else if (pixelSampler == kPixelSamplerGenPnt2D) {
                 r2PixelJitter(x, y, sampleIndex, width, kR2IndexSpp, jx, jy);
                 r2LensSample(x, y, sampleIndex, width, kR2IndexSpp, lensU, lensV);
+            } else if (pixelSampler == kPixelSamplerManualTest) {
+                // Diagnostic: exact pixel center + U(-1,1)*mult, clamped to [0,1).
+                // Lens stays centered — only pixel jitter is under test.
+                const float mult = settings.manualTestMult;
+                Rng xrng = makePixelRngXorshift32(x, y, sampleIndex, frameSeed, 0x7E57u);
+                const float ux = xrng.nextFloat() * 2.0f - 1.0f;  // (-1, 1) approx from [0,1)
+                const float uy = xrng.nextFloat() * 2.0f - 1.0f;
+                jx = std::min(0.999999f, std::max(0.0f, 0.5f + ux * mult));
+                jy = std::min(0.999999f, std::max(0.0f, 0.5f + uy * mult));
+                lensU = 0.5f;
+                lensV = 0.5f;
             } else {
                 // Default: Owen-scrambled Sobol (no fixed screen-space period).
                 pixelSample(x, y, sampleIndex, jx, jy);

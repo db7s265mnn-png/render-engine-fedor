@@ -1456,9 +1456,12 @@ void MainWindow::updateStatusBar() {
         if (rs.pixelSampler == kPixelSamplerBlueNoise) sampler = "BN";
         else if (rs.pixelSampler == kPixelSamplerXorshift) sampler = "Xorshift";
         else if (rs.pixelSampler == kPixelSamplerGenPnt2D) sampler = "GenPnt2D";
+        else if (rs.pixelSampler == kPixelSamplerManualTest) sampler = "ManualTest";
         const char* engine = "Buckets";
         if (rs.samplingEngine == kSamplingEngineProgressive) engine = "Progressive";
         overlay += QString("   %1 · PathSobol · %2").arg(sampler, engine);
+        if (rs.pixelSampler == kPixelSamplerManualTest)
+            overlay += QString("  mult=%1").arg(rs.manualTestMult, 0, 'f', 2);
     }
     renderView_->setStatusText(overlay);
 }
