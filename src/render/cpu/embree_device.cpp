@@ -11,6 +11,7 @@
 #include "core/thread_pool.h"
 #include "render/blue_noise.h"
 #include "render/film_tile.h"
+#include "render/rsequence.h"
 #include "render/sobol.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
@@ -321,6 +322,9 @@ public:
             const char* samplerName = "Sobol";
             if (settings.pixelSampler == kPixelSamplerBlueNoise) samplerName = "BlueNoise64";
             else if (settings.pixelSampler == kPixelSamplerWhite) samplerName = "White";
+            else if (settings.pixelSampler == kPixelSamplerR2Spp) samplerName = "R2spp";
+            else if (settings.pixelSampler == kPixelSamplerR2SppSalt) samplerName = "R2sppSalt";
+            else if (settings.pixelSampler == kPixelSamplerR2Linear) samplerName = "R2linear";
             const char* pathName = "PathPCG";
             if (settings.pathSampler == kPathSamplerOwenSobol) pathName = "PathOwenSobol";
             else if (settings.pathSampler == kPathSamplerXorshift32) pathName = "PathXorshift32";
@@ -388,6 +392,10 @@ public:
                 jy = rng.nextFloat();
                 lensU = rng.nextFloat();
                 lensV = rng.nextFloat();
+            } else if (isR2PixelSampler(pixelSampler)) {
+                const int r2Mode = r2IndexModeFromPixelSampler(pixelSampler);
+                r2PixelJitter(x, y, sampleIndex, width, r2Mode, jx, jy);
+                r2LensSample(x, y, sampleIndex, width, r2Mode, lensU, lensV);
             } else {
                 // Default: Owen-scrambled Sobol (no fixed screen-space period).
                 pixelSample(x, y, sampleIndex, jx, jy);
@@ -550,6 +558,10 @@ public:
 
             auto sampleShutter = [&](Rng& r) -> float {
                 if (scene.settings.motionBlur == 0) return 0.0f;
+                if (isR2PixelSampler(pixelSampler)) {
+                    return r2ShutterSample(x, y, sampleIndex, width,
+                                           r2IndexModeFromPixelSampler(pixelSampler));
+                }
                 return r.nextFloat();
             };
 

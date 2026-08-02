@@ -388,11 +388,16 @@ enum CausticsEngine : int {
     kCausticsEnginePhoton = 2,
 };
 
-// Camera AA / DoF primary samples (path bounce RNG stays PCG white noise).
+// Camera AA / DoF primary samples (path bounce RNG stays on Path Sampler).
 enum PixelSampler : int {
-    kPixelSamplerSobol = 0,      // Owen-scrambled Sobol — default, no screen period
-    kPixelSamplerBlueNoise = 1,  // 64×64 BN CP tile (can quilt in caustic shadows)
-    kPixelSamplerWhite = 2,      // Independent PCG per pixel
+    kPixelSamplerSobol = 0,       // Owen-scrambled Sobol — default, no screen period
+    kPixelSamplerBlueNoise = 1,   // 64×64 BN CP tile (can quilt in caustic shadows)
+    kPixelSamplerWhite = 2,       // Independent PCG per pixel
+    // Plastic-number R2 (Roberts) + golden 1D shutter. Per-pixel CP phase.
+    // Three index modes kept separate for A/B on tile_test / motion blur.
+    kPixelSamplerR2Spp = 3,       // n = sampleIndex
+    kPixelSamplerR2SppSalt = 4,   // n = sampleIndex + per-pixel salt
+    kPixelSamplerR2Linear = 5,    // n = y * width + x + sampleIndex
 };
 
 // Path bounce / NEE / BSDF RNG after camera dims.

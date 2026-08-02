@@ -31,6 +31,8 @@
 #include "render/framebuffer.h"
 #include "render/integrator.h"
 #include "render/metal_spectra.h"
+#include "render/photon_map.h"
+#include "render/rsequence.h"
 #include "render/render_session.h"
 #include "render/shading.h"
 #include "render/spectrum.h"
@@ -240,6 +242,27 @@ void testSampling() {
         }
         const double ac32 = den > 1e-12 ? num / den : 0.0;
         check(std::fabs(ac32) < 0.08, "xorshift pixel RNG ac@32 ~ 0");
+    }
+
+    // Plastic R2 / golden 1D (optional Pixel Sampler).
+    {
+        float x0 = 0.0f, y0 = 0.0f;
+        genPnt2D(0, x0, y0);
+        check(x0 >= 0.0f && x0 < 1.0f && y0 >= 0.0f && y0 < 1.0f, "R2(0) in unit square");
+        check(x0 < 1e-6f && y0 < 1e-6f, "R2(0) near origin");
+        float x1 = 0.0f, y1 = 0.0f;
+        genPnt2D(1, x1, y1);
+        check(std::fabs(x1 - 0.754877666f) < 1e-5f, "R2 a1 ≈ 1/plastic");
+        check(std::fabs(y1 - 0.569840291f) < 1e-5f, "R2 a2 ≈ 1/plastic^2");
+        const float g1 = genPnt1D(1);
+        check(std::fabs(g1 - float(1.0 / 1.6180339887498948482)) < 1e-5f, "golden 1D a1");
+        float jx = 0.0f, jy = 0.0f;
+        r2PixelJitter(10, 20, 0, 960, kR2IndexSpp, jx, jy);
+        float jx2 = 0.0f, jy2 = 0.0f;
+        r2PixelJitter(11, 20, 0, 960, kR2IndexSpp, jx2, jy2);
+        check(std::fabs(jx - jx2) > 1e-6f || std::fabs(jy - jy2) > 1e-6f,
+              "R2 per-pixel CP differs neighbors at spp0");
+        check(isR2PixelSampler(3) && isR2PixelSampler(5) && !isR2PixelSampler(0), "R2 sampler range");
     }
 }
 

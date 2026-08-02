@@ -835,13 +835,19 @@ public:
                                       "Affects BDPT / BDPT Spectral caustics from LT. 0 disables."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Engine"));
         addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
-                                         {"Sobol (Owen)", "Blue Noise", "White (PCG)"}, 0)
+                                         {"Sobol (Owen)", "Blue Noise", "White (PCG)",
+                                          "R2 (spp)", "R2 (spp+salt)", "R2 (linear+spp)"},
+                                         0)
                          .withGroup("Engine")
-                         .withTooltip("Camera AA / DoF primary samples only.\n"
-                                      "Sobol: stratified per pixel — recommended; no screen period.\n"
-                                      "Blue Noise: CP dither from a 64×64 mask with per-tile phase.\n"
-                                      "White: independent PCG — no structure, noisier AA.\n"
-                                      "Active sampler is shown in the viewport spp overlay."));
+                         .withTooltip(
+                             "Camera AA / DoF / shutter primary samples only (path RNG is separate).\n"
+                             "Sobol: stratified per pixel — recommended; no screen period.\n"
+                             "Blue Noise: CP dither from a 64×64 mask with per-tile phase.\n"
+                             "White: independent PCG — no structure, noisier AA.\n"
+                             "R2: plastic-number quasirandom (Roberts) + per-pixel CP phase;\n"
+                             "  shutter uses golden-ratio 1D in these modes.\n"
+                             "  spp / spp+salt / linear+spp = how index n is formed (A/B).\n"
+                             "Active sampler is shown in the viewport spp overlay."));
         addParameter(Parameter::makeMenu("pathsampler", "Path Sampler",
                                          {"PCG (white)", "Owen Sobol (PBRT/Cycles)", "Xorshift32"}, 0)
                          .withGroup("Engine")
@@ -1050,7 +1056,7 @@ public:
         settings.seed = intValue("seed", 0);
         settings.threads = intValue("threads", 0);
         settings.tileSize = std::clamp(intValue("tilesize", 32), 0, 256);
-        settings.pixelSampler = std::clamp(intValue("pixelsampler", 0), 0, 2);
+        settings.pixelSampler = std::clamp(intValue("pixelsampler", 0), 0, 5);
         settings.pathSampler = std::clamp(intValue("pathsampler", 0), 0, 2);
         settings.samplingEngine = std::clamp(intValue("samplingengine", 1), 0, 2);
         settings.aoDistance = float(floatValue("aodistance", 1.0));
