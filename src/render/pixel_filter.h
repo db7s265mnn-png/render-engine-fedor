@@ -1,4 +1,4 @@
-// Film reconstruction filters (PBRT / Arnold-style pixel filters).
+// Film reconstruction filters (PBRT-v4 PixelFilter).
 // A continuous sample at film position (fx, fy) is weighted into discrete pixels.
 #pragma once
 
@@ -9,10 +9,10 @@
 
 namespace sol {
 
-// Default radii match common DCC defaults (Arnold / PBRT).
+// Default radii = pbrt-v4 PixelFilter defaults (filters.cpp Create).
 SR_INL float defaultFilterRadius(int filterType) {
     switch (filterType) {
-        case kPixelFilterTriangle: return 1.0f;
+        case kPixelFilterTriangle: return 2.0f;
         case kPixelFilterGaussian: return 1.5f;
         case kPixelFilterMitchell: return 2.0f;
         case kPixelFilterBox:
@@ -32,17 +32,19 @@ SR_INL float filterWeight1D(int filterType, float t, float radius) {
     if (x >= radius) return 0.0f;
     switch (filterType) {
         case kPixelFilterTriangle: {
+            // PBRT TriangleFilter is (r-|x|)(r-|y|); we store the unit tent
+            // (1-|x|/r). Scale cancels after weight normalization.
             return 1.0f - x / radius;
         }
         case kPixelFilterGaussian: {
-            // α=2 Gaussian truncated at radius (PBRT GaussianFilter).
+            // PBRT-v4 GaussianFilter: sigma=0.5 ≡ legacy α=2 (filters.cpp note).
             constexpr float alpha = 2.0f;
             const float expR = std::exp(-alpha * radius * radius);
             return std::max(0.0f, std::exp(-alpha * x * x) - expR);
         }
         case kPixelFilterMitchell: {
-            // Mitchell–Netravali B=C=1/3, support [-radius, radius] with
-            // parametric x mapped so |x|<=2 in the classic polynomial.
+            // Mitchell–Netravali B=C=1/3 (PBRT MitchellFilter), support [-radius,radius]
+            // with parametric x mapped so |x|<=2 in the classic polynomial.
             const float xx = x * (2.0f / radius);
             constexpr float B = 1.0f / 3.0f;
             constexpr float C = 1.0f / 3.0f;

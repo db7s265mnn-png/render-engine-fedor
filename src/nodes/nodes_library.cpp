@@ -869,8 +869,8 @@ public:
         addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.5, 0.0, 8.0, false)
                          .withGroup("Sampling")
                          .withTooltip("Filter support in pixels. Changing Pixel Filter fills the "
-                                      "recommended radius (Box 0.5, Triangle 1, Gaussian 1.5, "
-                                      "Mitchell 2). You can still override.\n"
+                                      "PBRT-v4 recommended radius (Box 0.5, Triangle 2, "
+                                      "Gaussian 1.5, Mitchell 2). You can still override.\n"
                                       "Larger = softer / more blur."));
 
         // --- Engine -------------------------------------------------------------------
