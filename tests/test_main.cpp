@@ -201,6 +201,46 @@ void testSampling() {
         check(std::fabs(acLag(32)) < 0.05, "pixel RNG ac@32 ~ 0");
         check(std::fabs(acLag(64)) < 0.05, "pixel RNG ac@64 ~ 0");
     }
+
+    // Optional xorshift32 Path Sampler: never emits 0; neighbor streams uncorrelated.
+    {
+        Rng r;
+        r.initXorshift32(2938653863u);
+        check(r.backend == kRngBackendXorshift32, "xorshift backend set");
+        bool sawZero = false;
+        for (int i = 0; i < 100000; ++i) {
+            if (r.nextUint() == 0u) {
+                sawZero = true;
+                break;
+            }
+        }
+        check(!sawZero, "xorshift32 never emits 0");
+
+        constexpr int W = 128, H = 64;
+        std::vector<float> field(size_t(W) * H);
+        double mean = 0.0;
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                Rng xr = makePixelRngXorshift32(x, y, 0, 0u);
+                const float u = xr.nextFloat();
+                field[size_t(y) * W + x] = u;
+                mean += double(u);
+                check(u >= 0.0f && u < 1.0f, "xorshift f01 in [0,1)");
+            }
+        }
+        mean /= double(W * H);
+        double num = 0.0, den = 0.0;
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x + 32 < W; ++x) {
+                const double a = double(field[size_t(y) * W + x]) - mean;
+                const double b = double(field[size_t(y) * W + x + 32]) - mean;
+                num += a * b;
+                den += a * a;
+            }
+        }
+        const double ac32 = den > 1e-12 ? num / den : 0.0;
+        check(std::fabs(ac32) < 0.08, "xorshift pixel RNG ac@32 ~ 0");
+    }
 }
 
 void testBsdf() {

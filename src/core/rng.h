@@ -6,15 +6,21 @@
 namespace sol {
 
 // Optional host-side QMC stream (Owen-scrambled Sobol). When set, nextFloat()
-// pulls dimension sampleDim, sampleDim+1, … instead of PCG. Device/CUDA keeps
-// sampleFn null and uses PCG only.
+// pulls dimension sampleDim, sampleDim+1, … instead of PCG/xorshift. Device/CUDA
+// keeps qmcFn null and uses the selected backend only.
 using RngQmcFn = float (*)(void* ctx, uint32_t dimension);
 
-// PCG32 - O'Neill 2014. Deterministic per pixel/sample which keeps CPU and GPU
-// renders reproducible for a given seed.
+enum RngBackend : uint8_t {
+    kRngBackendPcg = 0,         // PCG32 (default)
+    kRngBackendXorshift32 = 1,  // Marsaglia xorshift32 — optional Path Sampler
+};
+
+// PCG32 (O'Neill 2014) or optional xorshift32. Deterministic per pixel/sample.
 struct Rng {
     uint64_t state = 0x853c49e6748fea9bULL;
     uint64_t inc = 0xda3e39cb94b95bdbULL;
+    uint32_t xsState = 1u;  // xorshift32 — never 0 after seed()
+    uint8_t backend = kRngBackendPcg;
 
     // Host QMC (Sobol path dims). Null on GPU / when unused.
     void* qmcCtx = nullptr;
@@ -26,17 +32,30 @@ struct Rng {
     SR_HD Rng(uint64_t seq, uint64_t seed) { init(seq, seed); }
 
     SR_HD void init(uint64_t seq, uint64_t seed) {
+        backend = kRngBackendPcg;
         state = 0u;
         inc = (seq << 1u) | 1u;
-        nextUint();
+        nextUintPcg();
         state += 0x853c49e6748fea9bULL + seed;
-        nextUint();
+        nextUintPcg();
         qmcCtx = nullptr;
         qmcFn = nullptr;
         sampleDim = 4u;
+        xsState = 1u;
     }
 
-    SR_HD uint32_t nextUint() {
+    // Marsaglia xorshift32: 4 bytes, very fast, period 2^32-1, never emits 0
+    // if seeded non-zero. Optional Path Sampler alternative to PCG.
+    // Caller should pass an already-mixed non-zero seed (see makePixelRngXorshift32).
+    SR_HD void initXorshift32(uint32_t inSeed) {
+        backend = kRngBackendXorshift32;
+        qmcCtx = nullptr;
+        qmcFn = nullptr;
+        sampleDim = 4u;
+        xsState = inSeed ? inSeed : 1u;
+    }
+
+    SR_HD uint32_t nextUintPcg() {
         const uint64_t old = state;
         state = old * 6364136223846793005ULL + inc;
         const uint32_t xorshifted = static_cast<uint32_t>(((old >> 18u) ^ old) >> 27u);
@@ -44,12 +63,32 @@ struct Rng {
         return (xorshifted >> rot) | (xorshifted << ((~rot + 1u) & 31u));
     }
 
+    SR_HD uint32_t nextUintXorshift32() {
+        // state ^= state<<13; state ^= state>>17; state ^= state<<5;
+        uint32_t s = xsState;
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        xsState = s;
+        return s;
+    }
+
+    SR_HD uint32_t nextUint() {
+        if (backend == kRngBackendXorshift32) return nextUintXorshift32();
+        return nextUintPcg();
+    }
+
     SR_HD float nextFloat() {
 #if !defined(__CUDACC__)
         if (qmcFn) return qmcFn(qmcCtx, sampleDim++);
 #endif
-        // 24 bits of mantissa gives values in [0,1).
-        return static_cast<float>(nextUint() >> 8) * 0x1.0p-24f;
+        if (backend == kRngBackendXorshift32) {
+            // Full 32-bit → [0,1); clamp off 1.0 (matches reference f01).
+            const float u = float(nextUintXorshift32()) * 2.3283064e-10f;
+            return u < 1.0f - 1.192092896e-07f ? u : (1.0f - 1.192092896e-07f);
+        }
+        // PCG: 24 bits of mantissa → [0,1).
+        return static_cast<float>(nextUintPcg() >> 8) * 0x1.0p-24f;
     }
 
     SR_HD Vec2 next2D() {
@@ -116,6 +155,17 @@ SR_INL SR_HD Rng makePixelRng(int x, int y, int sampleIndex, uint32_t frameSeed,
     const uint64_t stream = hashPixelSample(x, y, si, frameSeed, salt);
     const uint64_t seed = hashPixelSample(x, y, si, frameSeed ^ 0xA511E9B3u, salt ^ 0xC2B2AE35u);
     return Rng(stream, seed);
+}
+
+// Same pixel keying as makePixelRng, but Marsaglia xorshift32 backend.
+SR_INL SR_HD Rng makePixelRngXorshift32(int x, int y, int sampleIndex, uint32_t frameSeed,
+                                         uint32_t salt = 0u) {
+    const uint32_t si = uint32_t(sampleIndex < 0 ? 0 : sampleIndex);
+    uint32_t s = uint32_t(hashPixelSample(x, y, si, frameSeed, salt ^ 0x51F15Fu));
+    s = hashUint(s ? s : 2938653863u);
+    Rng rng;
+    rng.initXorshift32(s ? s : 1u);
+    return rng;
 }
 
 }  // namespace sol

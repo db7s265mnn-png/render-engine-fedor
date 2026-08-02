@@ -319,8 +319,9 @@ public:
             const char* samplerName = "Sobol";
             if (settings.pixelSampler == kPixelSamplerBlueNoise) samplerName = "BlueNoise64";
             else if (settings.pixelSampler == kPixelSamplerWhite) samplerName = "White";
-            const char* pathName =
-                (settings.pathSampler == kPathSamplerOwenSobol) ? "PathOwenSobol" : "PathPCG";
+            const char* pathName = "PathPCG";
+            if (settings.pathSampler == kPathSamplerOwenSobol) pathName = "PathOwenSobol";
+            else if (settings.pathSampler == kPathSamplerXorshift32) pathName = "PathXorshift32";
             const char* engineName = "FilmTile";
             if (settings.samplingEngine == kSamplingEngineLegacy) engineName = "Legacy";
             else if (settings.samplingEngine == kSamplingEngineProgressive) engineName = "Progressive";
@@ -345,8 +346,21 @@ public:
 
         const int samplingEngine = std::clamp(settings.samplingEngine, 0, 2);
         const bool legacySeed = samplingEngine == kSamplingEngineLegacy;
+        const int pathSampler = std::clamp(settings.pathSampler, 0, 2);
+        const bool usePathSobol = !legacySeed && pathSampler == kPathSamplerOwenSobol;
 
         auto makePathRng = [&](int x, int y, uint32_t salt = 0u) -> Rng {
+            if (pathSampler == kPathSamplerXorshift32) {
+                if (legacySeed) {
+                    const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
+                    const uint32_t fs = frameSeed ^ (salt * 0x9e3779b9u);
+                    Rng rng;
+                    uint32_t s = hashUint(hashCombine(pixelIndex, fs));
+                    rng.initXorshift32(s ? s : 1u);
+                    return rng;
+                }
+                return makePixelRngXorshift32(x, y, sampleIndex, frameSeed, salt);
+            }
             if (legacySeed) {
                 // Pre-book seed: linear pixelIndex + weak hashCombine.
                 const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
@@ -356,9 +370,6 @@ public:
             }
             return makePixelRng(x, y, sampleIndex, frameSeed, salt);
         };
-
-        const int pathSampler = std::clamp(settings.pathSampler, 0, 1);
-        const bool usePathSobol = !legacySeed && pathSampler == kPathSamplerOwenSobol;
 
         auto evaluatePixelSample = [&](int x, int y, int threadId) -> Vec3 {
             EmbreeTracer tracer{topScene_};

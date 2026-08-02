@@ -397,8 +397,9 @@ enum PixelSampler : int {
 
 // Path bounce / NEE / BSDF RNG after camera dims.
 enum PathSampler : int {
-    kPathSamplerPcg = 0,        // classic white PCG — default; no screen-grid aliasing
-    kPathSamplerOwenSobol = 1,  // PBRT/Cycles-style Owen Sobol from dim 4+ (can quilt on caustics)
+    kPathSamplerPcg = 0,         // classic white PCG — default
+    kPathSamplerOwenSobol = 1,   // PBRT/Cycles-style Owen Sobol from dim 4+ (can quilt on caustics)
+    kPathSamplerXorshift32 = 2,  // Marsaglia xorshift32 — optional, 4-byte, never emits 0
 };
 
 // How the image is scheduled / seeded / written (Render Settings → Sampling Engine).

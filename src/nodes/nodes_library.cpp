@@ -843,13 +843,14 @@ public:
                                       "White: independent PCG — no structure, noisier AA.\n"
                                       "Active sampler is shown in the viewport spp overlay."));
         addParameter(Parameter::makeMenu("pathsampler", "Path Sampler",
-                                         {"PCG (white)", "Owen Sobol (PBRT/Cycles)"}, 0)
+                                         {"PCG (white)", "Owen Sobol (PBRT/Cycles)", "Xorshift32"}, 0)
                          .withGroup("Engine")
                          .withTooltip("Random stream for path bounces / NEE / BSDF (after camera).\n"
-                                      "PCG (default): white noise — avoids screen-space grid "
-                                      "aliasing on high-variance caustics / soft shadows.\n"
+                                      "PCG (default): white noise — solid general-purpose.\n"
                                       "Owen Sobol: Cycles/PBRT-like grain, but can print a visible "
-                                      "square lattice in caustic shadows / MNEE (tile_test)."));
+                                      "square lattice in caustic shadows / MNEE (tile_test).\n"
+                                      "Xorshift32: Marsaglia xorshift — very fast, 4 bytes, never "
+                                      "emits 0; optional alternative white stream."));
         addParameter(Parameter::makeMenu("samplingengine", "Sampling Engine",
                                          {"Legacy (pre-PBRT)", "FilmTile (PBRT)", "Progressive (no buckets)"},
                                          1)
@@ -1050,7 +1051,7 @@ public:
         settings.threads = intValue("threads", 0);
         settings.tileSize = std::clamp(intValue("tilesize", 32), 0, 256);
         settings.pixelSampler = std::clamp(intValue("pixelsampler", 0), 0, 2);
-        settings.pathSampler = std::clamp(intValue("pathsampler", 0), 0, 1);
+        settings.pathSampler = std::clamp(intValue("pathsampler", 0), 0, 2);
         settings.samplingEngine = std::clamp(intValue("samplingengine", 1), 0, 2);
         settings.aoDistance = float(floatValue("aodistance", 1.0));
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;

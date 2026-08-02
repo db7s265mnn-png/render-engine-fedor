@@ -1455,7 +1455,9 @@ void MainWindow::updateStatusBar() {
         const char* sampler = "Sobol";
         if (rs.pixelSampler == kPixelSamplerBlueNoise) sampler = "BN";
         else if (rs.pixelSampler == kPixelSamplerWhite) sampler = "White";
-        const char* path = (rs.pathSampler == kPathSamplerOwenSobol) ? "PathSobol" : "PathPCG";
+        const char* path = "PathPCG";
+        if (rs.pathSampler == kPathSamplerOwenSobol) path = "PathSobol";
+        else if (rs.pathSampler == kPathSamplerXorshift32) path = "PathXorshift";
         const char* engine = "FilmTile";
         if (rs.samplingEngine == kSamplingEngineLegacy) engine = "Legacy";
         else if (rs.samplingEngine == kSamplingEngineProgressive) engine = "Progressive";
