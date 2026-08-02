@@ -62,6 +62,8 @@ private slots:
     void onShowAbout();
     void onShowShortcuts();
     void onTimelineFrameChanged(int frame);
+    void onParameterAction(sol::Node* node, const QString& parameterName);
+    void maybeSaveStillFrame();
 
 private:
     void createActions();
@@ -92,6 +94,7 @@ private:
     void applyLensFromCameraNode(const Node* camera, CameraData& out) const;
     void writeViewToCameraNode(Node* camera);
     void selectDisplayNode();
+    void startStillFrameRender(Node* renderSettings);
 
     NodeGraph graph_;
     RenderSession session_;
@@ -122,6 +125,9 @@ private:
     std::atomic<bool> framePending_{false};
     bool cameraOverride_ = false;
     bool renderRequested_ = false;
+    // Image → Render: wait for a full spp pass, then write tonemapped EXR.
+    bool stillFramePending_ = false;
+    QString stillFramePath_;
     // Set by onTimelineFrameChanged; cookNow re-dices only timeDependent meshes.
     bool timelineFrameCook_ = false;
     // Empty = free persp; otherwise Scene Network camera node name (look-through).

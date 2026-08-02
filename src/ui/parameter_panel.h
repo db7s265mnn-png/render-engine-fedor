@@ -29,6 +29,8 @@ public:
 
 signals:
     void parameterEdited(sol::Node* node, const QString& parameterName);
+    // Button parameters (e.g. Render Settings → Render) — no value change.
+    void parameterAction(sol::Node* node, const QString& parameterName);
     void nodeRenamed(sol::Node* node);
     void materialXRenamed(sol::Node* hostMaterial, const QString& oldName, const QString& newName);
     void materialXInputEdited(sol::Node* hostMaterial, const QString& nodeName, const QString& inputName,

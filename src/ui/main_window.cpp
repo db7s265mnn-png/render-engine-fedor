@@ -4,6 +4,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDir>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -13,6 +14,7 @@
 #include <QMenuBar>
 #include <QIcon>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QPixmap>
 #include <QMouseEvent>
 #include <QSplitter>
@@ -277,7 +279,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // The render thread only flags that new samples exist; the UI timer picks
     // the image up so we never touch widgets from a worker thread.
     session_.setUpdateCallback([this] { framePending_.store(true, std::memory_order_relaxed); });
-    session_.setFinishedCallback([this] { framePending_.store(true, std::memory_order_relaxed); });
+    session_.setFinishedCallback([this] {
+        framePending_.store(true, std::memory_order_relaxed);
+        QMetaObject::invokeMethod(this, [this] { maybeSaveStillFrame(); }, Qt::QueuedConnection);
+    });
 }
 
 MainWindow::~MainWindow() { session_.stop(); }
@@ -656,6 +661,7 @@ void MainWindow::createDocks() {
                         parameterPanel_->setMaterialXSelection(mtlx);
                 }
             });
+    connect(parameterPanel_, &ParameterPanel::parameterAction, this, &MainWindow::onParameterAction);
     connect(parameterPanel_, &ParameterPanel::nodeRenamed, this, [this](Node*) { scheduleCook(); });
     connect(parameterPanel_, &ParameterPanel::materialXRenamed, this,
             [this](Node*, const QString&, const QString& newName) {
@@ -852,6 +858,83 @@ void MainWindow::onSaveImage() {
         return;
     }
     statusBar()->showMessage("Wrote " + path, 4000);
+}
+
+void MainWindow::onParameterAction(Node* node, const QString& parameterName) {
+    if (!node) return;
+    if (node->typeName() == QLatin1String("rendersettings") &&
+        parameterName == QLatin1String("render")) {
+        startStillFrameRender(node);
+    }
+}
+
+void MainWindow::startStillFrameRender(Node* renderSettings) {
+    if (!renderSettings) return;
+    QString path = renderSettings->stringValue("outputpath", "render.exr").trimmed();
+    if (path.isEmpty()) path = QStringLiteral("render.exr");
+    if (QFileInfo(path).suffix().isEmpty()) path += QStringLiteral(".exr");
+    if (QFileInfo(path).isRelative()) {
+        const QString base = graph_.filePath().isEmpty()
+                                 ? QDir::currentPath()
+                                 : QFileInfo(graph_.filePath()).absolutePath();
+        path = QDir(base).filePath(path);
+    }
+    stillFramePath_ = QFileInfo(path).absoluteFilePath();
+    stillFramePending_ = true;
+
+    // Same arming path as toolbar Start: cook current settings, then one full spp pass.
+    const bool fromPlaceholder = renderView_ && renderView_->isShowingPlaceholder();
+    setRenderArmed(true);
+    if (renderView_) {
+        renderView_->setNavigationEnabled(true);
+        if (fromPlaceholder) {
+            renderView_->beginPlaceholderFade(1000);
+        } else {
+            renderView_->showPlaceholder(false);
+        }
+    }
+    session_.releaseDeviceKeepDisplay();
+    tessCache_.clear();
+    tessCacheFingerprint_.clear();
+    scene_.reset();
+    renderRequested_ = true;
+    statusBar()->showMessage(QStringLiteral("Still frame: rendering → %1").arg(stillFramePath_));
+    cookNow();
+}
+
+void MainWindow::maybeSaveStillFrame() {
+    if (!stillFramePending_) return;
+    if (session_.isRendering()) return;
+
+    const RenderProgress progress = session_.progress();
+    if (progress.samplesDone < progress.samplesTarget || progress.samplesTarget <= 0) {
+        // Incomplete finish: keep waiting if Start is still armed (IPR restart mid-pass).
+        if (!renderArmed()) {
+            stillFramePending_ = false;
+            statusBar()->showMessage(QStringLiteral("Still frame cancelled"), 4000);
+        }
+        return;
+    }
+
+    stillFramePending_ = false;
+    const Image display = session_.displayImage();
+    if (display.empty()) {
+        appMessageBox(this, QStringLiteral("Still frame"),
+                      QStringLiteral("Render finished but the display buffer is empty."));
+        return;
+    }
+
+    // Ensure parent directory exists for relative/custom paths.
+    const QFileInfo info(stillFramePath_);
+    if (!info.absolutePath().isEmpty()) QDir().mkpath(info.absolutePath());
+
+    std::string error;
+    if (!saveImageExr(stillFramePath_.toStdString(), display, error)) {
+        appMessageBox(this, QStringLiteral("Still frame"), QString::fromStdString(error));
+        return;
+    }
+    statusBar()->showMessage(
+        QStringLiteral("Still frame written (tonemapped): %1").arg(stillFramePath_), 6000);
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,6 +1284,10 @@ void MainWindow::onStartRender() {
 void MainWindow::onStopRender() {
     setRenderArmed(false);
     renderRequested_ = false;
+    if (stillFramePending_) {
+        stillFramePending_ = false;
+        statusBar()->showMessage("Still frame cancelled", 4000);
+    }
     if (cookTimer_) cookTimer_->stop();
     session_.stop();
     if (renderView_) {

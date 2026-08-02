@@ -502,7 +502,11 @@ void ParameterPanel::rebuildLop() {
             QWidget* editor = createEditor(parameter);
             if (!editor) continue;
             if (!parameter.tooltip.isEmpty()) editor->setToolTip(parameter.tooltip);
-            form->addRow(parameter.label, editor);
+            // Buttons carry their own label text — avoid "Render: [Render]".
+            if (parameter.type == ParamType::Button)
+                form->addRow(QString(), editor);
+            else
+                form->addRow(parameter.label, editor);
         }
     }
 
@@ -1021,14 +1025,26 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             layout->addWidget(edit, 1);
             layout->addWidget(browse, 0);
             const QString filter = parameter.fileFilter;
+            const bool saveMode = parameter.fileSaveMode;
             connect(edit, &QLineEdit::editingFinished, this, [notify, edit] { notify(edit->text()); });
-            connect(browse, &QPushButton::clicked, this, [this, edit, filter, notify] {
-                const QString path = QFileDialog::getOpenFileName(this, "Choose file", edit->text(), filter);
+            connect(browse, &QPushButton::clicked, this, [this, edit, filter, notify, saveMode] {
+                const QString path =
+                    saveMode ? QFileDialog::getSaveFileName(this, "Save file", edit->text(), filter)
+                             : QFileDialog::getOpenFileName(this, "Choose file", edit->text(), filter);
                 if (path.isEmpty()) return;
                 edit->setText(path);
                 notify(path);
             });
             return container;
+        }
+        case ParamType::Button: {
+            auto* button = new QPushButton(parameter.label);
+            const QString paramName = parameter.name;
+            connect(button, &QPushButton::clicked, this, [this, paramName] {
+                if (!node_ || updating_ || materialXMode_) return;
+                emit parameterAction(node_, paramName);
+            });
+            return button;
         }
         case ParamType::Menu: {
             auto* combo = new NoWheelComboBox();

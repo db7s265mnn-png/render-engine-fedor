@@ -768,9 +768,111 @@ public:
 class RenderSettingsNode : public Node {
 public:
     explicit RenderSettingsNode(const QString& name) : Node("rendersettings", name) {
+        // Group order follows first appearance: Image → Sampling → Engine → …
+
+        // --- Image --------------------------------------------------------------------
         addParameter(Parameter::makeInt("resx", "Resolution X", 960, 16, 8192, false).withGroup("Image"));
         addParameter(Parameter::makeInt("resy", "Resolution Y", 540, 16, 8192, false).withGroup("Image"));
-        addParameter(Parameter::makeInt("samples", "Samples Per Pixel", 128, 1, 100000, false).withGroup("Image"));
+        addParameter(Parameter::makeFile("outputpath", "Output Path", "render.exr",
+                                         "OpenEXR (*.exr);;All Files (*)")
+                         .withGroup("Image")
+                         .withFileSaveMode(true)
+                         .withTooltip("Still-frame output path. Relative paths resolve next to the "
+                                      "scene file (or the current working directory if unsaved).\n"
+                                      "Default: render.exr. Existing files are overwritten."));
+        addParameter(Parameter::makeButton("render", "Render")
+                         .withGroup("Image")
+                         .withTooltip("One full pass from scratch with the current settings. "
+                                      "When all spp finish, writes a tonemapped EXR to Output Path."));
+        addParameter(Parameter::makeBool("enabletxcache", "Convert Textures to TX", true)
+                         .withGroup("Image")
+                         .withTooltip("Before rendering, convert source textures to .tx mipmapped "
+                                      "TIFF files using maketx or oiiotool. Cached in TX Cache "
+                                      "Directory; unchanged textures are skipped."));
+        addParameter(Parameter::makeString("txcachedir", "TX Cache Directory", "tx_cache")
+                         .withGroup("Image")
+                         .withTooltip("Directory for converted .tx files. Relative paths are "
+                                      "resolved from the current working directory. Empty uses "
+                                      "\"tx_cache\" next to the cwd."));
+
+        // --- Sampling -----------------------------------------------------------------
+        addParameter(Parameter::makeInt("samples", "Samples Per Pixel", 128, 1, 100000, false)
+                         .withGroup("Sampling"));
+        addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
+                                         {"Sobol (Owen)", "Blue Noise", "Xorshift", "GenPnt2D",
+                                          "Manual-Test"},
+                                         0)
+                         .withGroup("Sampling")
+                         .withTooltip(
+                             "Camera AA / DoF / shutter primary samples.\n"
+                             "Path bounces always use Owen-scrambled Sobol (PBRT4).\n"
+                             "Sobol: stratified per pixel — recommended.\n"
+                             "Blue Noise: CP dither from a 64×64 mask with per-tile phase.\n"
+                             "Xorshift: Marsaglia xorshift32 white jitter.\n"
+                             "GenPnt2D: plastic-number R2 (Roberts), n = sampleIndex + "
+                             "per-pixel CP phase; shutter uses golden 1D.\n"
+                             "Manual-Test: sample at pixel center, then add U(-1,1)×Mult "
+                             "per axis (clamped to the pixel). For grid diagnostics.\n"
+                             "Active sampler is shown in the viewport spp overlay."));
+        addParameter(Parameter::makeFloat("manualtestmult", "Manual-Test Mult", 0.0, 0.0, 2.0, false)
+                         .withGroup("Sampling")
+                         .withVisibleWhen("pixelsampler==4")
+                         .withTooltip("Manual-Test only. Pixel jitter = 0.5 + U(-1,1)×Mult on X and Y "
+                                      "(same Mult), then clamped to [0,1).\n"
+                                      "0 = exact pixel center. Raise to scatter samples inside "
+                                      "(and, if Mult>0.5, would leave the pixel — but we clamp)."));
+        // Hidden: marks menus that include Manual-Test (index 4). Older files used 4/5 for R2 modes.
+        addParameter(Parameter::makeBool("_pixel_sampler_manual_v1", "", true));
+        // Hidden: old menu was Legacy / FilmTile / Progressive (0/1/2).
+        addParameter(Parameter::makeBool("_sampling_type_v2", "", true));
+        addParameter(Parameter::makeMenu("samplingengine", "Sampling Type",
+                                         {"Buckets", "Progressive"}, 0)
+                         .withGroup("Sampling")
+                         .withTooltip("How the frame is scheduled.\n"
+                                      "Buckets: PBRT FilmTile — local bucket accum, then merge; "
+                                      "strong (x,y,spp) seed.\n"
+                                      "Progressive: no buckets — parallel scanlines, whole frame "
+                                      "densifies evenly."));
+        addParameter(Parameter::makeInt("tilesize", "Bucket Size (px)", 32, 0, 256, false)
+                         .withGroup("Sampling")
+                         .withVisibleWhen("samplingengine==0")
+                         .withTooltip("Bucket size in pixels for Sampling Type = Buckets.\n"
+                                      "0 = Auto (~8× threads tiles, side 8/16/32/64).\n"
+                                      "Ignored by Progressive."));
+        addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Sampling"));
+        addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
+                         .withGroup("Sampling")
+                         .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
+                                      "Higher = less light/reflection noise, slower."));
+        addParameter(Parameter::makeFloat("clampdirect", "Direct Clamp", 10.0, 0.0, 1000000.0, false)
+                         .withGroup("Sampling")
+                         .withTooltip("Caps eye-path sample contributions in linear pixel radiance "
+                                      "(Arnold Direct Clamp). Applies to PT/BDPT eye paths, NEE, "
+                                      "MNEE, and photon gather.\n"
+                                      "Default 10; ~100 is a soft look. 0 disables."));
+        addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
+                         .withGroup("Sampling")
+                         .withTooltip("Caps BDPT light-tracing splat contributions in linear pixel "
+                                      "radiance (Arnold Indirect Clamp). Raw LT deposits carry "
+                                      "camera PDF — they are scaled to radiance before clamping.\n"
+                                      "Affects BDPT / BDPT Spectral caustics from LT. 0 disables."));
+        addParameter(Parameter::makeMenu("pixelfilter", "Pixel Filter",
+                                         {"Box", "Triangle", "Gaussian", "Mitchell"}, 0)
+                         .withGroup("Sampling")
+                         .withTooltip("Film reconstruction filter — how each continuous sample is "
+                                      "weighted into neighbouring pixels (PBRT / Arnold).\n"
+                                      "Box (default): hard 1×1 pixels — sharp but makes 1spp noise "
+                                      "look blocky when zoomed.\n"
+                                      "Triangle / Gaussian / Mitchell: softer AA; softens the "
+                                      "visible pixel grid at low spp.\n"
+                                      "Does not change the Pixel Sampler (Sobol / GenPnt2D / …)."));
+        addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.0, 0.0, 8.0, false)
+                         .withGroup("Sampling")
+                         .withTooltip("Filter support in pixels. 0 = default for the chosen filter "
+                                      "(Box 0.5, Triangle 1, Gaussian 1.5, Mitchell 2).\n"
+                                      "Larger = softer / more blur."));
+
+        // --- Engine -------------------------------------------------------------------
         // OptiX is optional at compile time — label the menu so artists know when
         // this binary has no GPU backend (Windows CI historically shipped Embree-only).
         const QStringList backends =
@@ -817,67 +919,9 @@ public:
                                       "fixed spectral bin layers (S0..Sn)."));
         addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
-        addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
-                         .withGroup("Engine")
-                         .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
-                                      "Higher = less light/reflection noise, slower."));
-        addParameter(Parameter::makeFloat("clampdirect", "Direct Clamp", 10.0, 0.0, 1000000.0, false)
-                         .withGroup("Engine")
-                         .withTooltip("Caps eye-path sample contributions in linear pixel radiance "
-                                      "(Arnold Direct Clamp). Applies to PT/BDPT eye paths, NEE, "
-                                      "MNEE, and photon gather.\n"
-                                      "Default 10; ~100 is a soft look. 0 disables."));
-        addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
-                         .withGroup("Engine")
-                         .withTooltip("Caps BDPT light-tracing splat contributions in linear pixel "
-                                      "radiance (Arnold Indirect Clamp). Raw LT deposits carry "
-                                      "camera PDF — they are scaled to radiance before clamping.\n"
-                                      "Affects BDPT / BDPT Spectral caustics from LT. 0 disables."));
-        addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Engine"));
-        addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
-                                         {"Sobol (Owen)", "Blue Noise", "Xorshift", "GenPnt2D",
-                                          "Manual-Test"},
-                                         0)
-                         .withGroup("Engine")
-                         .withTooltip(
-                             "Camera AA / DoF / shutter primary samples.\n"
-                             "Path bounces always use Owen-scrambled Sobol (PBRT4).\n"
-                             "Sobol: stratified per pixel — recommended.\n"
-                             "Blue Noise: CP dither from a 64×64 mask with per-tile phase.\n"
-                             "Xorshift: Marsaglia xorshift32 white jitter.\n"
-                             "GenPnt2D: plastic-number R2 (Roberts), n = sampleIndex + "
-                             "per-pixel CP phase; shutter uses golden 1D.\n"
-                             "Manual-Test: sample at pixel center, then add U(-1,1)×Mult "
-                             "per axis (clamped to the pixel). For grid diagnostics.\n"
-                             "Active sampler is shown in the viewport spp overlay."));
-        addParameter(Parameter::makeFloat("manualtestmult", "Manual-Test Mult", 0.0, 0.0, 2.0, false)
-                         .withGroup("Engine")
-                         .withVisibleWhen("pixelsampler==4")
-                         .withTooltip("Manual-Test only. Pixel jitter = 0.5 + U(-1,1)×Mult on X and Y "
-                                      "(same Mult), then clamped to [0,1).\n"
-                                      "0 = exact pixel center. Raise to scatter samples inside "
-                                      "(and, if Mult>0.5, would leave the pixel — but we clamp)."));
-        // Hidden: marks menus that include Manual-Test (index 4). Older files used 4/5 for R2 modes.
-        addParameter(Parameter::makeBool("_pixel_sampler_manual_v1", "", true));
-        // Hidden: old menu was Legacy / FilmTile / Progressive (0/1/2).
-        addParameter(Parameter::makeBool("_sampling_type_v2", "", true));
-        addParameter(Parameter::makeMenu("samplingengine", "Sampling Type",
-                                         {"Buckets", "Progressive"}, 0)
-                         .withGroup("Engine")
-                         .withTooltip("How the frame is scheduled.\n"
-                                      "Buckets: PBRT FilmTile — local bucket accum, then merge; "
-                                      "strong (x,y,spp) seed.\n"
-                                      "Progressive: no buckets — parallel scanlines, whole frame "
-                                      "densifies evenly."));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
-        addParameter(Parameter::makeInt("tilesize", "Bucket Size (px)", 32, 0, 256, false)
-                         .withGroup("Engine")
-                         .withVisibleWhen("samplingengine==0")
-                         .withTooltip("Bucket size in pixels for Sampling Type = Buckets.\n"
-                                      "0 = Auto (~8× threads tiles, side 8/16/32/64).\n"
-                                      "Ignored by Progressive."));
         addParameter(Parameter::makeFloat("aodistance", "AO Distance", 1.0, 0.01, 100.0, false)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==3"));
@@ -1004,21 +1048,6 @@ public:
         addParameter(Parameter::makeMenu("tonemap", "Tone Map", {"None", "Reinhard", "ACES"}, 2).withGroup("Film"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -8.0, 8.0).withGroup("Film"));
         addParameter(Parameter::makeFloat("gamma", "Gamma", 2.2, 1.0, 4.0).withGroup("Film"));
-        addParameter(Parameter::makeMenu("pixelfilter", "Pixel Filter",
-                                         {"Box", "Triangle", "Gaussian", "Mitchell"}, 0)
-                         .withGroup("Film")
-                         .withTooltip("Film reconstruction filter — how each continuous sample is "
-                                      "weighted into neighbouring pixels (PBRT / Arnold).\n"
-                                      "Box (default): hard 1×1 pixels — sharp but makes 1spp noise "
-                                      "look blocky when zoomed.\n"
-                                      "Triangle / Gaussian / Mitchell: softer AA; softens the "
-                                      "visible pixel grid at low spp.\n"
-                                      "Does not change the Pixel Sampler (Sobol / GenPnt2D / …)."));
-        addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.0, 0.0, 8.0, false)
-                         .withGroup("Film")
-                         .withTooltip("Filter support in pixels. 0 = default for the chosen filter "
-                                      "(Box 0.5, Triangle 1, Gaussian 1.5, Mitchell 2).\n"
-                                      "Larger = softer / more blur."));
         addParameter(Parameter::makeBool("envvisible", "Environment Visible To Camera", true).withGroup("Film"));
 
         addParameter(Parameter::makeMenu("samplingdebug", "Sampling Debug",
@@ -1044,17 +1073,6 @@ public:
                          .withGroup("Diagnostic")
                          .withVisibleWhen("integrator==4&&filmfalsecolor==1||integrator==5&&filmfalsecolor==1")
                          .withTooltip("Which spectral bin to show when Spectral False Color is on."));
-
-        addParameter(Parameter::makeBool("enabletxcache", "Convert Textures to TX", true)
-                         .withGroup("Image")
-                         .withTooltip("Before rendering, convert source textures to .tx mipmapped "
-                                      "TIFF files using maketx or oiiotool. Cached in TX Cache "
-                                      "Directory; unchanged textures are skipped."));
-        addParameter(Parameter::makeString("txcachedir", "TX Cache Directory", "tx_cache")
-                         .withGroup("Image")
-                         .withTooltip("Directory for converted .tx files. Relative paths are "
-                                      "resolved from the current working directory. Empty uses "
-                                      "\"tx_cache\" next to the cwd."));
     }
 
     void cook(CookContext&, const std::vector<StagePtr>&, Stage& stage) override {

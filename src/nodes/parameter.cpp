@@ -111,6 +111,16 @@ Parameter Parameter::makeLabel(const QString& name, const QString& text) {
     return p;
 }
 
+Parameter Parameter::makeButton(const QString& name, const QString& label) {
+    Parameter p;
+    p.name = name;
+    p.label = label;
+    p.type = ParamType::Button;
+    p.value = QString();
+    p.defaultValue = QString();
+    return p;
+}
+
 Parameter& Parameter::withGroup(const QString& groupName) {
     group = groupName;
     return *this;
@@ -123,6 +133,11 @@ Parameter& Parameter::withTooltip(const QString& text) {
 
 Parameter& Parameter::withVisibleWhen(const QString& expression) {
     visibleWhen = expression;
+    return *this;
+}
+
+Parameter& Parameter::withFileSaveMode(bool enabled) {
+    fileSaveMode = enabled;
     return *this;
 }
 
@@ -207,6 +222,7 @@ QString paramTypeName(ParamType type) {
         case ParamType::FilePath: return "file";
         case ParamType::Menu: return "menu";
         case ParamType::Label: return "label";
+        case ParamType::Button: return "button";
     }
     return "float";
 }
@@ -220,6 +236,7 @@ ParamType paramTypeFromName(const QString& name) {
     if (name == "file") return ParamType::FilePath;
     if (name == "menu") return ParamType::Menu;
     if (name == "label") return ParamType::Label;
+    if (name == "button") return ParamType::Button;
     return ParamType::Float;
 }
 
@@ -240,7 +257,8 @@ QJsonObject Parameter::toJson() const {
         case ParamType::Menu: json["value"] = value.toInt(); break;
         case ParamType::String:
         case ParamType::FilePath:
-        case ParamType::Label: json["value"] = value.toString(); break;
+        case ParamType::Label:
+        case ParamType::Button: json["value"] = value.toString(); break;
         default: json["value"] = value.toDouble(); break;
     }
     return json;
@@ -261,7 +279,8 @@ void Parameter::fromJson(const QJsonObject& json) {
         case ParamType::Menu: value = jsonValue.toInt(); break;
         case ParamType::String:
         case ParamType::FilePath:
-        case ParamType::Label: value = jsonValue.toString(); break;
+        case ParamType::Label:
+        case ParamType::Button: value = jsonValue.toString(); break;
         default: value = jsonValue.toDouble(); break;
     }
 }

@@ -22,6 +22,7 @@ enum class ParamType {
     FilePath,
     Menu,
     Label,
+    Button,
 };
 
 class Parameter {
@@ -43,6 +44,7 @@ public:
     bool locked = false;
     QStringList menuItems;
     QString fileFilter;
+    bool fileSaveMode = false;  // FilePath: save dialog instead of open
 
     Parameter() = default;
 
@@ -58,10 +60,12 @@ public:
                               const QString& filter);
     static Parameter makeMenu(const QString& name, const QString& label, const QStringList& items, int index);
     static Parameter makeLabel(const QString& name, const QString& text);
+    static Parameter makeButton(const QString& name, const QString& label);
 
     Parameter& withGroup(const QString& groupName);
     Parameter& withTooltip(const QString& text);
     Parameter& withVisibleWhen(const QString& expression);
+    Parameter& withFileSaveMode(bool enabled = true);
 
     double toDouble() const { return value.toDouble(); }
     int toInt() const { return value.toInt(); }
