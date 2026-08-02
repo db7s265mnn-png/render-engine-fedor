@@ -93,13 +93,33 @@ SR_INL SR_HD float blueNoiseMask(int x, int y) {
 #endif
 }
 
-// Per-dimension screen-space CP offset. Tile is shifted so dimensions stay
-// decorrelated without destroying the blue-noise spectrum (Arnold TOG 2018).
+SR_INL SR_HD float unitFloatFromHash(uint32_t h) {
+    // Top 24 bits → [0,1). Same construction as Rng::nextFloat.
+    return float(h >> 8) * (1.0f / 16777216.0f);
+}
+
+// Per-dimension screen-space CP offset (Arnold / Georgiev & Fajardo).
+// Naive `mask[x&63,y&63]` prints an identical 64×64 wallpaper — especially at
+// spp0 where the lattice base is constant, so jitter ≡ tiled mask. Break that:
+//   1) per-64×64-tile phase (tiles are no longer copies of each other)
+//   2) small per-pixel lookup wobble (softens hard seam lines)
 SR_INL SR_HD float blueNoiseSample(int x, int y, int dimension) {
-    const uint32_t h = hashUint(uint32_t(dimension) * 0x9e3779b9u + 0x85ebca6bu);
-    const int ox = int(h & 63u);
-    const int oy = int((h >> 6) & 63u);
-    return blueNoiseMask(x + ox, y + oy);
+    const uint32_t hDim = hashUint(uint32_t(dimension) * 0x9e3779b9u + 0x85ebca6bu);
+    const int ox = int(hDim & 63u);
+    const int oy = int((hDim >> 6) & 63u);
+
+    const uint32_t hTile =
+        hashUint(uint32_t(x >> 6) * 0xA511E9B3u ^ uint32_t(y >> 6) * 0xC2B2AE35u ^
+                 (uint32_t(dimension) * 0x9E3779B9u + 0x7F4A7C15u));
+    const int tox = int(hTile & 63u);
+    const int toy = int((hTile >> 6) & 63u);
+
+    const uint32_t hPix =
+        hashUint(uint32_t(x) * 0x85EBCA6Bu ^ uint32_t(y) * 0xC2B2AE35u ^ hDim);
+    const int px = int(hPix & 7u);
+    const int py = int((hPix >> 3) & 7u);
+
+    return blueNoiseMask(x + ox + tox + px, y + oy + toy + py);
 }
 
 SR_INL SR_HD float blueNoiseOffset(float u, int x, int y, int dimension) {
@@ -108,15 +128,19 @@ SR_INL SR_HD float blueNoiseOffset(float u, int x, int y, int dimension) {
 }
 
 // Pixel / lens jitter. Rank-1 lattice + blue-noise CP rotation.
-// Sample 0 is also dithered (Arnold-style 1-spp look). Centering spp0 made
-// low-spp IPR look like plain white noise. Path-bounce RNG stays white —
-// BN mainly reshapes AA / DOF / primary-sample error, not indirect blotches.
+// spp0 uses a per-pixel phase (not a global 0.5) so the first sample is not a
+// pure tiled-mask wallpaper. Path-bounce RNG stays white.
 SR_INL SR_HD void blueNoisePixelJitter(int x, int y, int sampleIndex, float& jx, float& jy) {
     const float phiX = 0.7548776662466927f;
     const float phiY = 0.5698402909980532f;
-    // sampleIndex 0 → base 0.5; later samples walk a rank-1 lattice.
-    const float sx = (sampleIndex <= 0) ? 0.5f : (float(sampleIndex) * phiX);
-    const float sy = (sampleIndex <= 0) ? 0.5f : (float(sampleIndex) * phiY);
+    const float sx = (sampleIndex <= 0)
+                         ? unitFloatFromHash(hashUint(uint32_t(x) * 0xA511E9B3u ^
+                                                      uint32_t(y) * 0x9E3779B9u))
+                         : (float(sampleIndex) * phiX);
+    const float sy = (sampleIndex <= 0)
+                         ? unitFloatFromHash(hashUint(uint32_t(x) * 0xC2B2AE35u ^
+                                                      uint32_t(y) * 0x85EBCA6Bu ^ 0x9E3779B9u))
+                         : (float(sampleIndex) * phiY);
     jx = blueNoiseOffset(sx - floorf(sx), x, y, 0);
     jy = blueNoiseOffset(sy - floorf(sy), x, y, 1);
 }
@@ -124,8 +148,14 @@ SR_INL SR_HD void blueNoisePixelJitter(int x, int y, int sampleIndex, float& jx,
 SR_INL SR_HD void blueNoiseLensSample(int x, int y, int sampleIndex, float& u, float& v) {
     const float phiU = 0.41421356237f;
     const float phiV = 0.73205080757f;
-    const float su = (sampleIndex <= 0) ? 0.5f : (float(sampleIndex) * phiU);
-    const float sv = (sampleIndex <= 0) ? 0.5f : (float(sampleIndex) * phiV);
+    const float su = (sampleIndex <= 0)
+                         ? unitFloatFromHash(hashUint(uint32_t(x) * 0x7F4A7C15u ^
+                                                      uint32_t(y) * 0x94D049BBu))
+                         : (float(sampleIndex) * phiU);
+    const float sv = (sampleIndex <= 0)
+                         ? unitFloatFromHash(hashUint(uint32_t(x) * 0x94D049BBu ^
+                                                      uint32_t(y) * 0x7F4A7C15u ^ 0x85EBCA6Bu))
+                         : (float(sampleIndex) * phiV);
     u = blueNoiseOffset(su - floorf(su), x, y, 2);
     v = blueNoiseOffset(sv - floorf(sv), x, y, 3);
 }

@@ -38,6 +38,7 @@
 #include "render/motion_blur.h"
 #include "render/render_session.h"
 #include "render/scene_picker.h"
+#include "scene/types.h"
 #include "scene/scene.h"
 #include "scene/tessellate.h"
 #include "scene/displace.h"
@@ -1447,6 +1448,18 @@ void MainWindow::updateStatusBar() {
     const RenderProgress progress = session_.progress();
     QString overlay = QString("%1 / %2 spp").arg(progress.samplesDone).arg(progress.samplesTarget);
     if (progress.elapsedSeconds > 0.0) overlay += QString("   %1 s").arg(progress.elapsedSeconds, 0, 'f', 1);
+    // Always show which camera sampler / engine is live — catches "I swear I
+    // switched to White but still see BN tiles" mismatches.
+    if (scene_) {
+        const RenderSettingsData& rs = scene_->settings;
+        const char* sampler = "Sobol";
+        if (rs.pixelSampler == kPixelSamplerBlueNoise) sampler = "BN";
+        else if (rs.pixelSampler == kPixelSamplerWhite) sampler = "White";
+        const char* engine = "FilmTile";
+        if (rs.samplingEngine == kSamplingEngineLegacy) engine = "Legacy";
+        else if (rs.samplingEngine == kSamplingEngineProgressive) engine = "Progressive";
+        overlay += QString("   %1 · %2").arg(sampler, engine);
+    }
     renderView_->setStatusText(overlay);
 }
 

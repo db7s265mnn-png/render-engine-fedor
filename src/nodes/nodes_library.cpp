@@ -835,13 +835,14 @@ public:
                                       "Affects BDPT / BDPT Spectral caustics from LT. 0 disables."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Engine"));
         addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
-                                         {"Sobol (Owen)", "Blue Noise (64 tile)", "White (PCG)"}, 0)
+                                         {"Sobol (Owen)", "Blue Noise", "White (PCG)"}, 0)
                          .withGroup("Engine")
                          .withTooltip("Camera AA / DoF primary samples only (path RNG stays white).\n"
-                                      "Sobol: stratified per pixel — recommended; no screen-space period.\n"
-                                      "Blue Noise: Arnold-style 64×64 CP tile — nicer AA on smooth "
-                                      "surfaces, but can print a square quilt in caustic shadows.\n"
-                                      "White: independent PCG — no structure, noisier AA."));
+                                      "Sobol: stratified per pixel — recommended; no screen period.\n"
+                                      "Blue Noise: CP dither from a 64×64 mask with per-tile phase "
+                                      "(avoids identical wallpaper cells). Prefer Sobol for stills.\n"
+                                      "White: independent PCG — no structure, noisier AA.\n"
+                                      "Active sampler is shown in the viewport spp overlay."));
         addParameter(Parameter::makeMenu("samplingengine", "Sampling Engine",
                                          {"Legacy (pre-PBRT)", "FilmTile (PBRT)", "Progressive (no buckets)"},
                                          1)
