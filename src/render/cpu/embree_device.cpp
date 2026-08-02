@@ -9,6 +9,7 @@
 
 #include "core/log.h"
 #include "core/thread_pool.h"
+#include "render/blue_noise.h"
 #include "render/sobol.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
@@ -311,6 +312,12 @@ public:
                         (useGuiding ? " + OpenPGL guiding" : ""));
             else if (pathTracer)
                 logInfo("Caustics: off (dark shadows through glass; shadow_opacity fakes)");
+
+            const char* samplerName = "Sobol";
+            if (settings.pixelSampler == kPixelSamplerBlueNoise) samplerName = "BlueNoise64";
+            else if (settings.pixelSampler == kPixelSamplerWhite) samplerName = "White";
+            logInfo(std::string("Pixel Sampler: ") + samplerName +
+                    " (camera AA/DoF); bucket " + std::to_string(tileSize) + "px");
         }
 
         const int dispersionMode = settings.dispersionMode;
@@ -320,15 +327,23 @@ public:
             EmbreeTracer tracer{topScene_};
             const uint32_t pixelIndex = uint32_t(y) * uint32_t(width) + uint32_t(x);
             Rng rng(hashCombine(pixelIndex, frameSeed), hashUint(pixelIndex ^ (frameSeed * 2654435761u)));
-            // Camera AA/DoF: Owen-scrambled Sobol (per-pixel seeds). The previous
-            // Arnold-style 64×64 blue-noise CP tile made jx/jy strictly period-64
-            // in screen space — identical primary samples in every 64×64 block,
-            // which prints as a square quilt in high-variance caustic shadows.
-            // Path bounce RNG stays PCG white noise.
+            // Camera AA / DoF — selectable Pixel Sampler (path bounce RNG stays PCG).
             float jx = 0.5f, jy = 0.5f;
-            pixelSample(x, y, sampleIndex, jx, jy);
             float lensU = 0.5f, lensV = 0.5f;
-            lensSample(x, y, sampleIndex, lensU, lensV);
+            const int pixelSampler = settings.pixelSampler;
+            if (pixelSampler == kPixelSamplerBlueNoise) {
+                blueNoisePixelJitter(x, y, sampleIndex, jx, jy);
+                blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
+            } else if (pixelSampler == kPixelSamplerWhite) {
+                jx = rng.nextFloat();
+                jy = rng.nextFloat();
+                lensU = rng.nextFloat();
+                lensV = rng.nextFloat();
+            } else {
+                // Default: Owen-scrambled Sobol (no fixed screen-space period).
+                pixelSample(x, y, sampleIndex, jx, jy);
+                lensSample(x, y, sampleIndex, lensU, lensV);
+            }
 
             // Light-tracing splats assume the pinhole/thin-lens projection —
             // polynomial optics rays and camera motion blur bypass it.

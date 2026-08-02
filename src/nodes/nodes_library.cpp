@@ -834,10 +834,25 @@ public:
                                       "camera PDF — they are scaled to radiance before clamping.\n"
                                       "Affects BDPT / BDPT Spectral caustics from LT. 0 disables."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Engine"));
+        addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
+                                         {"Sobol (Owen)", "Blue Noise (64 tile)", "White (PCG)"}, 0)
+                         .withGroup("Engine")
+                         .withTooltip("Camera AA / DoF primary samples only (path RNG stays white).\n"
+                                      "Sobol: stratified per pixel — recommended; no screen-space period.\n"
+                                      "Blue Noise: Arnold-style 64×64 CP tile — nicer AA on smooth "
+                                      "surfaces, but can print a square quilt in caustic shadows.\n"
+                                      "White: independent PCG — no structure, noisier AA."));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
-        addParameter(Parameter::makeInt("tilesize", "Tile Size", 32, 8, 256).withGroup("Engine"));
+        addParameter(Parameter::makeInt("tilesize", "Bucket Size (px)", 32, 8, 256, false)
+                         .withGroup("Engine")
+                         .withTooltip("Render bucket / tile size in pixels (default 32).\n"
+                                      "Only affects how work is split across CPU threads and the "
+                                      "order of progressive IPR updates — not the sampling pattern.\n"
+                                      "The square quilt in caustic shadows comes from Pixel Sampler "
+                                      "(Blue Noise 64), not from this bucket size.\n"
+                                      "Try 16 / 32 / 64 / 128 to confirm buckets are unrelated."));
         addParameter(Parameter::makeFloat("aodistance", "AO Distance", 1.0, 0.01, 100.0, false)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==3"));
@@ -1001,7 +1016,8 @@ public:
         settings.clampIndirect = float(floatValue("clamp", 10.0));
         settings.seed = intValue("seed", 0);
         settings.threads = intValue("threads", 0);
-        settings.tileSize = intValue("tilesize", 32);
+        settings.tileSize = std::clamp(intValue("tilesize", 32), 8, 256);
+        settings.pixelSampler = std::clamp(intValue("pixelsampler", 0), 0, 2);
         settings.aoDistance = float(floatValue("aodistance", 1.0));
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;

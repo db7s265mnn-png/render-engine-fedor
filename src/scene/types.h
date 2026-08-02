@@ -388,6 +388,13 @@ enum CausticsEngine : int {
     kCausticsEnginePhoton = 2,
 };
 
+// Camera AA / DoF primary samples (path bounce RNG stays PCG white noise).
+enum PixelSampler : int {
+    kPixelSamplerSobol = 0,      // Owen-scrambled Sobol — default, no screen period
+    kPixelSamplerBlueNoise = 1,  // 64×64 BN CP tile (can quilt in caustic shadows)
+    kPixelSamplerWhite = 2,      // Independent PCG per pixel
+};
+
 // Chromatic dispersion sampling (material dispersion_abbe / lens CA).
 enum DispersionMode : int {
     // Current: one random hero RGB channel per sample; mask whole path to that channel.
@@ -434,7 +441,8 @@ struct RenderSettingsData {
 
     int backend = kBackendCpuEmbree;
     int envVisibleCamera = 1;
-    int tileSize = 32;
+    int tileSize = 32;             // render bucket size in pixels (threading / IPR order)
+    int pixelSampler = kPixelSamplerSobol;  // camera AA / DoF generator
     int threads = 0;               // 0 = hardware concurrency
 
     float aoDistance = 1.0f;

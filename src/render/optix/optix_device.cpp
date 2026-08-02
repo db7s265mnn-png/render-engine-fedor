@@ -370,6 +370,7 @@ public:
             launchParams.height = height;
             launchParams.sampleIndex = sampleIndex;
             launchParams.frameSeed = unsigned(scene_->settings.seed) * 9781u + unsigned(sampleIndex) * 6271u;
+            launchParams.pixelSampler = scene_->settings.pixelSampler;
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
 
             if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
