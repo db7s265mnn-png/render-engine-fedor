@@ -463,14 +463,6 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
 // BVH-accelerated light sampling (position-aware importance)
 // ---------------------------------------------------------------------------
 
-// Minimum squared distance from refP to a BVH node's AABB (0 when inside).
-SR_INL SR_HD float bvhNodeDist2(const LightBvhNode& node, Vec3 refP) {
-    const float dx = srMax(0.0f, srMax(node.bMin.x - refP.x, refP.x - node.bMax.x));
-    const float dy = srMax(0.0f, srMax(node.bMin.y - refP.y, refP.y - node.bMax.y));
-    const float dz = srMax(0.0f, srMax(node.bMin.z - refP.z, refP.z - node.bMax.z));
-    return dx * dx + dy * dy + dz * dz;
-}
-
 // Importance of a BVH node from refP. Uses distance to the AABB *center*
 // softened by the node's extent — not min-distance-to-box (that is zero under
 // the entire footprint and jumps at AABB faces → axis-aligned "bucket" noise
@@ -507,10 +499,10 @@ SR_INL SR_HD bool bvhContainsLight(const LightBvhNode* nodes, int nodeCount,
     return false;
 }
 
-// Position-aware light selection: sample a light index with importance
-// proportional to `power / max(dist² to AABB, ε)` using the prebuilt BVH.
+// Position-aware light selection via the prebuilt BVH (center+extent importance).
 // Infinite lights (dome/distant) are weighted by flux and kept outside the BVH.
-// Falls back to the flux-only overload when the BVH is unavailable.
+// Falls back to the flux-only overload when the BVH is unavailable (or skipped
+// for scenes with few finite lights).
 SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, float& pdf) {
     if (scene.lightCount <= 0) { pdf = 0.f; return -1; }
 
