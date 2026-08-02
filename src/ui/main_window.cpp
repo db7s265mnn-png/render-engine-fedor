@@ -1455,10 +1455,11 @@ void MainWindow::updateStatusBar() {
         const char* sampler = "Sobol";
         if (rs.pixelSampler == kPixelSamplerBlueNoise) sampler = "BN";
         else if (rs.pixelSampler == kPixelSamplerWhite) sampler = "White";
+        const char* path = (rs.pathSampler == kPathSamplerOwenSobol) ? "PathSobol" : "PathPCG";
         const char* engine = "FilmTile";
         if (rs.samplingEngine == kSamplingEngineLegacy) engine = "Legacy";
         else if (rs.samplingEngine == kSamplingEngineProgressive) engine = "Progressive";
-        overlay += QString("   %1 · %2").arg(sampler, engine);
+        overlay += QString("   %1 · %2 · %3").arg(sampler, path, engine);
     }
     renderView_->setStatusText(overlay);
 }

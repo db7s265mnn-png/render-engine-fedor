@@ -319,6 +319,8 @@ public:
             const char* samplerName = "Sobol";
             if (settings.pixelSampler == kPixelSamplerBlueNoise) samplerName = "BlueNoise64";
             else if (settings.pixelSampler == kPixelSamplerWhite) samplerName = "White";
+            const char* pathName =
+                (settings.pathSampler == kPathSamplerOwenSobol) ? "PathOwenSobol" : "PathPCG";
             const char* engineName = "FilmTile";
             if (settings.samplingEngine == kSamplingEngineLegacy) engineName = "Legacy";
             else if (settings.samplingEngine == kSamplingEngineProgressive) engineName = "Progressive";
@@ -329,7 +331,8 @@ public:
             } else {
                 engineDetail += " (no buckets, scanlines)";
             }
-            logInfo(std::string("Sampling Engine: ") + engineDetail + "; Pixel Sampler: " + samplerName);
+            logInfo(std::string("Sampling Engine: ") + engineDetail + "; Pixel Sampler: " + samplerName +
+                    "; " + pathName);
             if (settings.samplingDebug != kSamplingDebugOff) {
                 static const char* kDiagNames[] = {"Off", "PixelJitter", "PathRng", "Bucket", "PixelHash"};
                 const int d = std::clamp(settings.samplingDebug, 0, 4);
@@ -354,10 +357,13 @@ public:
             return makePixelRng(x, y, sampleIndex, frameSeed, salt);
         };
 
+        const int pathSampler = std::clamp(settings.pathSampler, 0, 1);
+        const bool usePathSobol = !legacySeed && pathSampler == kPathSamplerOwenSobol;
+
         auto evaluatePixelSample = [&](int x, int y, int threadId) -> Vec3 {
             EmbreeTracer tracer{topScene_};
             Rng rng = makePathRng(x, y);
-            // Camera AA / DoF — selectable Pixel Sampler (path bounce RNG stays PCG).
+            // Camera AA / DoF — selectable Pixel Sampler.
             float jx = 0.5f, jy = 0.5f;
             float lensU = 0.5f, lensV = 0.5f;
             const int pixelSampler = settings.pixelSampler;
@@ -374,6 +380,11 @@ public:
                 pixelSample(x, y, sampleIndex, jx, jy);
                 lensSample(x, y, sampleIndex, lensU, lensV);
             }
+
+            // Path dims: Owen Sobol (PBRT/Cycles) or keep PCG white.
+            // Must live for this sample — qmcCtx points here.
+            PathSobolStream pathSobol{};
+            if (usePathSobol) attachPathSobol(rng, pathSobol, x, y, sampleIndex);
 
             // Diagnostic: skip light transport and visualise sampler / seed fields.
             if (settings.samplingDebug != kSamplingDebugOff) {
@@ -402,7 +413,11 @@ public:
                     case kSamplingDebugPixelJitter:
                         return Vec3(jx, jy, 0.25f);
                     case kSamplingDebugPathRng: {
-                        const float u0 = makePathRng(x, y, 0xD1A60001u).nextFloat();
+                        Rng r = makePathRng(x, y, 0xD1A60001u);
+                        PathSobolStream dbgSobol{};
+                        if (usePathSobol)
+                            attachPathSobol(r, dbgSobol, x, y, sampleIndex, 0xD1A60001u);
+                        const float u0 = r.nextFloat();
                         return Vec3(u0, u0, u0);
                     }
                     default:
@@ -534,6 +549,9 @@ public:
                 // п.4: average independent R/G/B hero traces.
                 for (int ch = 0; ch < 3; ++ch) {
                     Rng rCh = makePathRng(x, y, uint32_t(ch + 1));
+                    PathSobolStream pathSobolCh{};
+                    if (usePathSobol)
+                        attachPathSobol(rCh, pathSobolCh, x, y, sampleIndex, uint32_t(ch + 1));
                     DispersionContext ctx = makeDispCtx(ch);
                     const float shutterTime = sampleShutter(rCh);
                     if (!generateRay(rCh, ch, origin, direction, lensTau, shutterTime)) continue;

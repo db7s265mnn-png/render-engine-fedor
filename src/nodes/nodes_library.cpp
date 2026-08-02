@@ -837,12 +837,18 @@ public:
         addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
                                          {"Sobol (Owen)", "Blue Noise", "White (PCG)"}, 0)
                          .withGroup("Engine")
-                         .withTooltip("Camera AA / DoF primary samples only (path RNG stays white).\n"
+                         .withTooltip("Camera AA / DoF primary samples only.\n"
                                       "Sobol: stratified per pixel — recommended; no screen period.\n"
-                                      "Blue Noise: CP dither from a 64×64 mask with per-tile phase "
-                                      "(avoids identical wallpaper cells). Prefer Sobol for stills.\n"
+                                      "Blue Noise: CP dither from a 64×64 mask with per-tile phase.\n"
                                       "White: independent PCG — no structure, noisier AA.\n"
                                       "Active sampler is shown in the viewport spp overlay."));
+        addParameter(Parameter::makeMenu("pathsampler", "Path Sampler",
+                                         {"PCG (white)", "Owen Sobol (PBRT/Cycles)"}, 1)
+                         .withGroup("Engine")
+                         .withTooltip("Random stream for path bounces / NEE / BSDF (after camera).\n"
+                                      "PCG: classic white noise — blotchier grain at low spp.\n"
+                                      "Owen Sobol: stratified like Cycles/PBRT — more uniform "
+                                      "grain (recommended). Per-pixel scramble; no screen tile."));
         addParameter(Parameter::makeMenu("samplingengine", "Sampling Engine",
                                          {"Legacy (pre-PBRT)", "FilmTile (PBRT)", "Progressive (no buckets)"},
                                          1)
@@ -1043,6 +1049,7 @@ public:
         settings.threads = intValue("threads", 0);
         settings.tileSize = std::clamp(intValue("tilesize", 32), 0, 256);
         settings.pixelSampler = std::clamp(intValue("pixelsampler", 0), 0, 2);
+        settings.pathSampler = std::clamp(intValue("pathsampler", 1), 0, 1);
         settings.samplingEngine = std::clamp(intValue("samplingengine", 1), 0, 2);
         settings.aoDistance = float(floatValue("aodistance", 1.0));
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
