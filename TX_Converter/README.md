@@ -14,4 +14,6 @@ Built with the main app (`TX_Converter` / `TX_Converter.exe`).
 4. **Advanced** — full colour-space list from the OCIO config.
 5. **Use OCIO from Environment** — read `OCIO` (default on).
 
-Requires `maketx` (or `oiiotool`) on `PATH` and a system OCIO config for colour converts.
+Requires `maketx` (or `oiiotool`). The Windows zip ships `maketx.exe` next to
+`TX_Converter.exe`. On other platforms, put them on `PATH`. OCIO config comes from
+the `OCIO` env var or the OCIO Config field (not bundled).

@@ -33,6 +33,7 @@ jobs:
       ALEMBIC_VERSION: "1.8.6"
       OPENEXR_VERSION: "v3.2.4"
       OCIO_VERSION: "v2.3.2"
+      OIIO_VERSION: "v2.5.19.0"
       DEPS_PREFIX: "C:/solstice-deps"
     steps:
       - uses: actions/checkout@v4
@@ -82,7 +83,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_PREFIX }}
-          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}-ocio${{ env.OCIO_VERSION }}-mtlx1.39.4
+          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}-ocio${{ env.OCIO_VERSION }}-oiio${{ env.OIIO_VERSION }}-mtlx1.39.4
 
       - name: Fetch Embree
         if: steps.deps-cache.outputs.cache-hit != 'true'
@@ -156,6 +157,27 @@ jobs:
             -DOCIO_INSTALL_EXT_PACKAGES=ALL
           cmake --build ocio-src/build --config Release --target install
 
+      # OpenImageIO tools (maketx) for TX Converter / auto-TX. Ships next to the exe.
+      - name: Build OpenImageIO
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch $env:OIIO_VERSION https://github.com/AcademySoftwareFoundation/OpenImageIO.git oiio-src
+          cmake -S oiio-src -B oiio-src/build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:DEPS_PREFIX" `
+            -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=ON `
+            -DUSE_PYTHON=OFF `
+            -DOIIO_BUILD_TESTS=OFF `
+            -DOIIO_BUILD_TOOLS=ON `
+            -DUSE_OPENCOLORIO=ON `
+            -DOpenImageIO_BUILD_MISSING_DEPS=all `
+            -DSTOP_ON_WARNING=OFF
+          cmake --build oiio-src/build --config Release --target install
+          if (-not (Test-Path "$env:DEPS_PREFIX/bin/maketx.exe")) {
+            throw "maketx.exe was not installed by OpenImageIO"
+          }
+
       - name: Configure (Clang + Ninja)
         shell: pwsh
         run: |
@@ -187,6 +209,21 @@ jobs:
           if (Test-Path "$env:DEPS_PREFIX/bin") {
             Get-ChildItem -Path "$env:DEPS_PREFIX/bin" -Filter "OpenColorIO*.dll" -ErrorAction SilentlyContinue |
               ForEach-Object { Copy-Item $_.FullName dist/ -Force }
+            # maketx + OpenImageIO runtime for TX Converter / auto-TX
+            if (Test-Path "$env:DEPS_PREFIX/bin/maketx.exe") {
+              Copy-Item "$env:DEPS_PREFIX/bin/maketx.exe" dist/ -Force
+            }
+            foreach ($pat in @(
+              "OpenImageIO*.dll",
+              "jpeg*.dll", "libjpeg*.dll", "turbojpeg*.dll",
+              "tiff*.dll", "libtiff*.dll",
+              "zlib*.dll", "libzlib*.dll", "zdll*.dll",
+              "libpng*.dll", "png*.dll",
+              "Imath*.dll", "OpenEXR*.dll", "IlmThread*.dll", "Half*.dll", "Iex*.dll"
+            )) {
+              Get-ChildItem -Path "$env:DEPS_PREFIX/bin" -Filter $pat -ErrorAction SilentlyContinue |
+                ForEach-Object { Copy-Item $_.FullName dist/ -Force }
+            }
           }
           # oneTBB / OpenPGL runtime (FetchContent build trees)
           Get-ChildItem -Path build -Recurse -Filter "tbb*.dll" -ErrorAction SilentlyContinue |
@@ -215,6 +252,11 @@ jobs:
             throw "OpenColorIO.dll missing from dist — Windows Display/View would be a no-op"
           }
           Write-Host "Packaged OCIO runtime: $($ocioDll.Name)"
+          if (-not (Test-Path "dist/maketx.exe")) {
+            throw "maketx.exe missing from dist — TX Converter would fail"
+          }
+          Write-Host "Packaged TX tool: maketx.exe"
+          & "dist/maketx.exe" --help | Select-Object -First 3
 
       - name: Render a frame with the packaged exe
         run: |

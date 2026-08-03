@@ -1,5 +1,6 @@
 #include "io/tx_convert.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -20,7 +21,29 @@
 namespace sol {
 namespace {
 
+QString toolFileName(const QString& name) {
+#ifdef Q_OS_WIN
+    if (!name.endsWith(QLatin1String(".exe"), Qt::CaseInsensitive))
+        return name + QStringLiteral(".exe");
+#endif
+    return name;
+}
+
 std::string findTool(const QString& name) {
+    const QString fileName = toolFileName(name);
+
+    // Prefer tools bundled next to Bob_Render / TX_Converter (Windows zip).
+    if (QCoreApplication::instance()) {
+        const QString appDir = QCoreApplication::applicationDirPath();
+        const QStringList candidates = {
+            appDir + QLatin1Char('/') + fileName,
+            appDir + QStringLiteral("/tools/") + fileName,
+        };
+        for (const QString& candidate : candidates) {
+            if (QFileInfo::exists(candidate)) return QFileInfo(candidate).absoluteFilePath().toStdString();
+        }
+    }
+
     const QString path = QStandardPaths::findExecutable(name);
     return path.isEmpty() ? std::string() : path.toStdString();
 }
@@ -45,7 +68,7 @@ void initTool() {
             logInfo("tx_convert: using oiiotool at " + g_toolPath);
             return;
         }
-        logWarning("tx_convert: neither maketx nor oiiotool found on PATH");
+        logWarning("tx_convert: neither maketx nor oiiotool found next to the app or on PATH");
     });
 }
 
@@ -210,7 +233,7 @@ TxConvertResult txConvertOne(const TxConvertRequest& req) {
     result.outputPath = req.outputPath;
     initTool();
     if (g_toolKind.empty()) {
-        result.error = "no maketx or oiiotool on PATH";
+        result.error = "no maketx or oiiotool found (expected next to the app, or on PATH)";
         return result;
     }
     if (req.sourcePath.empty() || req.outputPath.empty()) {
@@ -281,6 +304,8 @@ TxConvertResult txConvertOne(const TxConvertRequest& req) {
     QProcess proc;
     proc.setProgram(QString::fromStdString(g_toolPath));
     proc.setArguments(args);
+    // Load OpenImageIO / OCIO DLLs from the same folder as maketx (Windows zip layout).
+    proc.setWorkingDirectory(QFileInfo(QString::fromStdString(g_toolPath)).absolutePath());
     proc.start();
     if (!proc.waitForStarted(5000)) {
         result.error = g_toolKind + ": failed to start";
