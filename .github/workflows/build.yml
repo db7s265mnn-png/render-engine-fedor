@@ -33,7 +33,7 @@ jobs:
       ALEMBIC_VERSION: "1.8.6"
       OPENEXR_VERSION: "v3.2.4"
       OCIO_VERSION: "v2.3.2"
-      OIIO_VERSION: "v2.5.19.0"
+      OIIO_VERSION: "v3.0.21.0"
       DEPS_PREFIX: "C:/solstice-deps"
     steps:
       - uses: actions/checkout@v4
@@ -158,6 +158,7 @@ jobs:
           cmake --build ocio-src/build --config Release --target install
 
       # OpenImageIO tools (maketx) for TX Converter / auto-TX. Ships next to the exe.
+      # OIIO 3.x: no Boost; OpenImageIO_BUILD_MISSING_DEPS fetches jpeg/tiff/zlib/etc.
       - name: Build OpenImageIO
         if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
@@ -173,10 +174,14 @@ jobs:
             -DUSE_OPENCOLORIO=ON `
             -DOpenImageIO_BUILD_MISSING_DEPS=all `
             -DSTOP_ON_WARNING=OFF
-          cmake --build oiio-src/build --config Release --target install
+          if ($LASTEXITCODE -ne 0) { throw "OpenImageIO cmake configure failed" }
+          cmake --build oiio-src/build --config Release --target install --parallel
+          if ($LASTEXITCODE -ne 0) { throw "OpenImageIO build/install failed" }
           if (-not (Test-Path "$env:DEPS_PREFIX/bin/maketx.exe")) {
             throw "maketx.exe was not installed by OpenImageIO"
           }
+          Write-Host "Installed maketx: $env:DEPS_PREFIX/bin/maketx.exe"
+          Get-ChildItem "$env:DEPS_PREFIX/bin" -Filter "OpenImageIO*" | ForEach-Object { Write-Host $_.Name }
 
       - name: Configure (Clang + Ninja)
         shell: pwsh
