@@ -87,6 +87,7 @@ bool buildViewProcessor(const OCIO_NS::ConstConfigRcPtr& config, const std::stri
         const char* display;
         const char* view;
     };
+    // ACES 1.0.3 style first, then common aliases.
     const Pair srgbPairs[] = {
         {"ACES", "sRGB"},
         {"ACES", "sRGB (ACES)"},
@@ -143,19 +144,19 @@ void rebuildProcessors(int workingSpace) {
             : pickColorSpace(g_config, {"Utility - Linear - sRGB", "Linear Rec.709 (sRGB)", "linear",
                                         "scene-linear Rec 709/sRGB", "lin_srgb"});
     if (src.empty()) {
-        logWarning("OCIO: no suitable source colour space in config");
+        logWarning("OCIO: NOT FOUND suitable source colour space in config");
         return;
     }
 
     std::string usedSrgb, usedRec;
     if (buildViewProcessor(g_config, src, false, g_procSrgb, usedSrgb))
-        logInfo("OCIO view sRGB (ACES): " + src + " → " + usedSrgb);
+        logInfo("OCIO: FOUND view sRGB (ACES): " + src + " → " + usedSrgb);
     else
-        logWarning("OCIO: could not resolve Display/View for sRGB (ACES); available displays logged below");
+        logWarning("OCIO: NOT FOUND Display/View for sRGB (ACES)");
     if (buildViewProcessor(g_config, src, true, g_procRec709, usedRec))
-        logInfo("OCIO view rec709 (ACES): " + src + " → " + usedRec);
+        logInfo("OCIO: FOUND view rec709 (ACES): " + src + " → " + usedRec);
     else
-        logWarning("OCIO: could not resolve Display/View for rec709 (ACES)");
+        logWarning("OCIO: NOT FOUND Display/View for rec709 (ACES)");
 
     if (!g_procSrgb || !g_procRec709) {
         std::string displays;
@@ -189,11 +190,12 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
     OcioStatus st;
     st.libraryAvailable = ocioLibraryAvailable();
 #if !SOLSTICE_HAVE_OCIO
-    st.message = "OpenColorIO: not available in this build (compile with OpenColorIO)";
+    st.message = "OCIO: NOT FOUND — OpenColorIO library not linked in this build";
     return st;
 #else
     std::lock_guard<std::mutex> lock(g_mutex);
 
+    // Mutually exclusive: env checkbox OR Film path (not a fallback mix).
     std::string path;
     bool fromEnv = false;
     if (useEnv) {
@@ -203,8 +205,9 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
                 fromEnv = true;
             }
         }
+    } else if (!settingsPath.empty()) {
+        path = settingsPath;
     }
-    if (path.empty() && !settingsPath.empty()) path = settingsPath;
 
     // Reload if path changed or first call.
     const bool needLoad = !g_tried || path != g_loadedPath || fromEnv != g_fromEnv || !g_config;
@@ -219,16 +222,19 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
         g_procWorkingSpace = -1;
         g_preparedView = -1;
         if (path.empty()) {
-            st.message = "OpenColorIO: library OK, but no config (set OCIO or Film → OCIO Config)";
+            if (useEnv)
+                st.message = "OCIO: NOT FOUND — Use OCIO from Environment is on, but OCIO env is empty";
+            else
+                st.message = "OCIO: NOT FOUND — set Film → OCIO Config (or enable Use OCIO from Environment)";
             return st;
         }
         try {
             g_config = OCIO_NS::Config::CreateFromFile(path.c_str());
         } catch (const OCIO_NS::Exception& ex) {
-            st.message = std::string("OpenColorIO: library OK, config not loaded — ") + ex.what();
+            st.message = std::string("OCIO: NOT FOUND — failed to load config ") + path + " — " + ex.what();
             return st;
         } catch (...) {
-            st.message = "OpenColorIO: library OK, config not loaded — unknown error";
+            st.message = std::string("OCIO: NOT FOUND — failed to load config ") + path + " — unknown error";
             return st;
         }
     }
@@ -237,10 +243,12 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
     st.fromEnvironment = g_fromEnv;
     st.configPath = g_loadedPath;
     if (st.configLoaded) {
-        st.message = "OpenColorIO: found, config " + st.configPath +
-                     (st.fromEnvironment ? " [OCIO env]" : " [settings]");
+        st.message = "OCIO: FOUND — config " + st.configPath +
+                     (st.fromEnvironment ? " [OCIO env]" : " [Film path]");
+    } else if (useEnv) {
+        st.message = "OCIO: NOT FOUND — Use OCIO from Environment is on, but OCIO env is empty";
     } else {
-        st.message = "OpenColorIO: library OK, but no config (set OCIO or Film → OCIO Config)";
+        st.message = "OCIO: NOT FOUND — set Film → OCIO Config (or enable Use OCIO from Environment)";
     }
     return st;
 #endif
@@ -250,8 +258,6 @@ void ocioLogStatus(bool useEnv, const std::string& settingsPath) {
     const OcioStatus st = ocioEnsureConfig(useEnv, settingsPath);
     if (st.configLoaded)
         logInfo(st.message);
-    else if (st.libraryAvailable)
-        logWarning(st.message);
     else
         logWarning(st.message);
 }

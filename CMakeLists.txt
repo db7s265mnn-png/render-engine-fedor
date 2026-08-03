@@ -120,7 +120,8 @@ if(SOLSTICE_ENABLE_OPENEXR)
     endif()
 endif()
 
-# OpenColorIO — Nuke-style Display/View for the viewport (optional; Windows CI may omit).
+# OpenColorIO — Nuke-style Display/View for the viewport (optional).
+# Windows CI builds/links OpenColorIO.dll; config/LUTs stay on the user machine.
 set(SOLSTICE_HAVE_OCIO_01 0)
 set(SOLSTICE_OCIO_TARGET "")
 if(SOLSTICE_ENABLE_OCIO)
@@ -133,15 +134,27 @@ if(SOLSTICE_ENABLE_OCIO)
         # Debian/Ubuntu OpenColorIOConfig can leave include as "/include".
         get_target_property(_sol_ocio_incs OpenColorIO::OpenColorIO INTERFACE_INCLUDE_DIRECTORIES)
         set(_sol_ocio_inc_ok FALSE)
-        foreach(_d IN LISTS _sol_ocio_incs)
-            if(EXISTS "${_d}/OpenColorIO/OpenColorIO.h")
+        if(_sol_ocio_incs)
+            foreach(_d IN LISTS _sol_ocio_incs)
+                if(EXISTS "${_d}/OpenColorIO/OpenColorIO.h")
+                    set(_sol_ocio_inc_ok TRUE)
+                endif()
+            endforeach()
+        endif()
+        if(NOT _sol_ocio_inc_ok)
+            find_path(_sol_ocio_hdr_dir OpenColorIO/OpenColorIO.h)
+            if(_sol_ocio_hdr_dir)
+                set_property(TARGET OpenColorIO::OpenColorIO APPEND PROPERTY
+                             INTERFACE_INCLUDE_DIRECTORIES "${_sol_ocio_hdr_dir}")
+                set(_sol_ocio_inc_ok TRUE)
+            elseif(EXISTS "/usr/include/OpenColorIO/OpenColorIO.h")
+                set_property(TARGET OpenColorIO::OpenColorIO APPEND PROPERTY
+                             INTERFACE_INCLUDE_DIRECTORIES "/usr/include")
+                set(_sol_ocio_inc_ok TRUE)
+            elseif(WIN32)
+                # Trust the imported target from a CMAKE_PREFIX_PATH install.
                 set(_sol_ocio_inc_ok TRUE)
             endif()
-        endforeach()
-        if(NOT _sol_ocio_inc_ok AND EXISTS "/usr/include/OpenColorIO/OpenColorIO.h")
-            set_property(TARGET OpenColorIO::OpenColorIO APPEND PROPERTY
-                         INTERFACE_INCLUDE_DIRECTORIES "/usr/include")
-            set(_sol_ocio_inc_ok TRUE)
         endif()
         if(_sol_ocio_inc_ok)
             set(SOLSTICE_HAVE_OCIO_01 1)

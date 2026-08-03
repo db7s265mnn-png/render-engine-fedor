@@ -32,6 +32,7 @@ jobs:
       IMATH_VERSION: "v3.1.12"
       ALEMBIC_VERSION: "1.8.6"
       OPENEXR_VERSION: "v3.2.4"
+      OCIO_VERSION: "v2.3.2"
       DEPS_PREFIX: "C:/solstice-deps"
     steps:
       - uses: actions/checkout@v4
@@ -81,7 +82,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_PREFIX }}
-          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}-mtlx1.39.4
+          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}-ocio${{ env.OCIO_VERSION }}-mtlx1.39.4
 
       - name: Fetch Embree
         if: steps.deps-cache.outputs.cache-hit != 'true'
@@ -135,6 +136,26 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:DEPS_PREFIX/libraries" | Out-Null
           Copy-Item -Recurse materialx-src/libraries/* "$env:DEPS_PREFIX/libraries/"
 
+      # OpenColorIO shared DLL for Nuke-style Display/View. Config/LUTs stay on the
+      # user's machine (OCIO env or Film → OCIO Config) — not shipped in the zip.
+      - name: Build OpenColorIO
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch $env:OCIO_VERSION https://github.com/AcademySoftwareFoundation/OpenColorIO.git ocio-src
+          cmake -S ocio-src -B ocio-src/build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:DEPS_PREFIX" `
+            -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DBUILD_SHARED_LIBS=ON `
+            -DOCIO_BUILD_APPS=OFF `
+            -DOCIO_BUILD_TESTS=OFF `
+            -DOCIO_BUILD_GPU_TESTS=OFF `
+            -DOCIO_BUILD_PYTHON=OFF `
+            -DOCIO_BUILD_JAVA=OFF `
+            -DOCIO_BUILD_DOCS=OFF `
+            -DOCIO_INSTALL_EXT_PACKAGES=ALL
+          cmake --build ocio-src/build --config Release --target install
+
       - name: Configure (Clang + Ninja)
         shell: pwsh
         run: |
@@ -145,6 +166,7 @@ jobs:
             -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX;$env:DEPS_PREFIX/embree" `
             -DSOLSTICE_MATERIALX_LIBRARIES="$env:DEPS_PREFIX/libraries" `
             -DSOLSTICE_ENABLE_OPTIX=OFF `
+            -DSOLSTICE_ENABLE_OCIO=ON `
             -DSOLSTICE_MODERN_CPU=ON
 
       - name: Build
@@ -152,7 +174,7 @@ jobs:
 
       - name: Run the tests
         run: |
-          $env:PATH = "$env:DEPS_PREFIX/embree/bin;$env:PATH"
+          $env:PATH = "$env:DEPS_PREFIX/embree/bin;$env:DEPS_PREFIX/bin;$env:PATH"
           ./build/bin/solstice_tests.exe
 
       - name: Assemble the distribution
@@ -161,6 +183,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item build/bin/* dist/ -Recurse -Force
           Copy-Item "$env:DEPS_PREFIX/embree/bin/*.dll" dist/ -Force
+          # OpenColorIO runtime (config/LUTs are NOT packaged — use system OCIO / Film path)
+          if (Test-Path "$env:DEPS_PREFIX/bin") {
+            Get-ChildItem -Path "$env:DEPS_PREFIX/bin" -Filter "OpenColorIO*.dll" -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item $_.FullName dist/ -Force }
+          }
           # oneTBB / OpenPGL runtime (FetchContent build trees)
           Get-ChildItem -Path build -Recurse -Filter "tbb*.dll" -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName dist/ -Force }
@@ -183,6 +210,11 @@ jobs:
           "BUILD_ID=$(Get-Content build/solstice_build_id.txt -ErrorAction SilentlyContinue | Select-Object -First 1)" | Out-File -FilePath $env:GITHUB_ENV -Append
           "OUTPUT_NAME=$exeName" | Out-File -FilePath $env:GITHUB_ENV -Append
           Get-ChildItem dist
+          $ocioDll = Get-ChildItem -Path dist -Filter "OpenColorIO*.dll" -ErrorAction SilentlyContinue
+          if (-not $ocioDll) {
+            throw "OpenColorIO.dll missing from dist — Windows Display/View would be a no-op"
+          }
+          Write-Host "Packaged OCIO runtime: $($ocioDll.Name)"
 
       - name: Render a frame with the packaged exe
         run: |

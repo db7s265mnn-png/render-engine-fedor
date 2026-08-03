@@ -1061,13 +1061,16 @@ public:
         addParameter(Parameter::makeBool("_working_space_aces_v1", "", true));
         addParameter(Parameter::makeBool("ociousenv", "Use OCIO from Environment", true)
                          .withGroup("Film")
-                         .withTooltip("When on (default), read the OCIO config path from the "
-                                      "OCIO environment variable (Windows / system)."));
+                         .withTooltip("On: read config from the OCIO environment variable "
+                                      "(instead of the path below).\n"
+                                      "Off: use Film → OCIO Config path.\n"
+                                      "LUTs stay next to your config — not shipped with Bob Render."));
         addParameter(Parameter::makeFile("ocioconfig", "OCIO Config", "",
                                          "OCIO Config (*.ocio);;All Files (*)")
                          .withGroup("Film")
                          .withVisibleWhen("ociousenv==0")
-                         .withTooltip("Path to config.ocio when Use OCIO from Environment is off."));
+                         .withTooltip("Path to config.ocio when Use OCIO from Environment is off.\n"
+                                      "Example: C:/OCIO/aces_1.0.3/config.ocio"));
         addParameter(Parameter::makeBool("envvisible", "Environment Visible To Camera", true).withGroup("Film"));
 
         addParameter(Parameter::makeMenu("samplingdebug", "Sampling Debug",
