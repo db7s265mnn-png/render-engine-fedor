@@ -1,4 +1,4 @@
-// OpenColorIO helpers: config discovery, status logging, Nuke-style display views.
+// OpenColorIO helpers: config discovery, status logging, mplay-style display views.
 #pragma once
 
 #include <string>
@@ -22,13 +22,19 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath);
 // Log current OCIO status (library + config). Call at app start and Start/Render.
 void ocioLogStatus(bool useEnv, const std::string& settingsPath);
 
-// Apply Nuke-style viewer process to a linear working-space RGB pixel.
-// viewTransform: kViewSrgbAces / kViewRec709Aces / kViewRaw.
-// Returns false if Raw or OCIO unavailable (caller may leave linear / use fallback).
+// Classic (non-OCIO) monitor transform: Raw = linear clamp; else tone + transfer.
+// When workingSpace is ACEScg, converts to linear Rec.709/sRGB primaries first.
+Vec3 classicApplyView(Vec3 linearWorking, int workingSpace, int viewTransform);
+
+// Apply display view: Classic or OCIO based on colorManagement.
+// viewTransform: kViewSrgbAces / kViewRec709Aces / kViewRec2020 / kViewRaw.
+// Returns false if OCIO was requested but unavailable (out still filled via Classic fallback).
 bool ocioApplyView(Vec3 linearWorking, int workingSpace, int viewTransform, Vec3& outDisplay);
 
-// Prepare OCIO for many pixels (call once per resolve). Then use ocioApplyViewPrepared.
+// Prepare display for many pixels (call once per resolve). Then use ocioApplyViewPrepared.
+// colorManagement selects Classic vs OCIO path for the prepared state.
 bool ocioPrepareView(int workingSpace, int viewTransform);
+bool displayPrepareView(int workingSpace, int colorManagement, int viewTransform);
 Vec3 ocioApplyViewPrepared(Vec3 linearWorking);  // no lock; requires prepare
 
 // True when this build was linked with OpenColorIO.

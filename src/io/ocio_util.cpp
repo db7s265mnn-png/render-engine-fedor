@@ -25,10 +25,29 @@ bool g_tried = false;
 OCIO_NS::ConstConfigRcPtr g_config;
 OCIO_NS::ConstCPUProcessorRcPtr g_procSrgb;
 OCIO_NS::ConstCPUProcessorRcPtr g_procRec709;
+OCIO_NS::ConstCPUProcessorRcPtr g_procRec2020;
 OCIO_NS::ConstCPUProcessorRcPtr g_procActive;
 int g_procWorkingSpace = -1;
-int g_preparedView = -1;
+#endif
 
+int g_preparedView = -1;
+int g_preparedWorking = -1;
+bool g_preparedClassic = false;
+
+float encodeGamma24(float c) {
+    c = saturatef(c);
+    // BT.2020 / Rec.709-style gamma 2.4 with linear toe (approx).
+    constexpr float a = 1.09929682680944f;
+    constexpr float b = 0.018053968645747f;
+    if (c < b) return c * 4.5f;
+    return a * powf(c, 0.45f) - (a - 1.0f);
+}
+
+Vec3 encodeGamma24Vec(Vec3 c) {
+    return Vec3(encodeGamma24(c.x), encodeGamma24(c.y), encodeGamma24(c.z));
+}
+
+#if SOLSTICE_HAVE_OCIO
 std::string pickColorSpace(const OCIO_NS::ConstConfigRcPtr& config, const std::vector<std::string>& names) {
     for (const std::string& n : names) {
         try {
@@ -48,7 +67,6 @@ std::string pickColorSpace(const OCIO_NS::ConstConfigRcPtr& config, const std::v
 bool tryDisplayView(const OCIO_NS::ConstConfigRcPtr& config, const std::string& src,
                     const char* display, const char* view, OCIO_NS::ConstCPUProcessorRcPtr& out) {
     try {
-        // Validate display/view exist.
         bool displayOk = false;
         for (int i = 0; i < config->getNumDisplays(); ++i) {
             if (std::string(config->getDisplay(i)) == display) {
@@ -81,13 +99,14 @@ bool tryDisplayView(const OCIO_NS::ConstConfigRcPtr& config, const std::string& 
     }
 }
 
+enum class ViewKind { Srgb, Rec709, Rec2020 };
+
 bool buildViewProcessor(const OCIO_NS::ConstConfigRcPtr& config, const std::string& src,
-                        bool rec709, OCIO_NS::ConstCPUProcessorRcPtr& out, std::string& used) {
+                        ViewKind kind, OCIO_NS::ConstCPUProcessorRcPtr& out, std::string& used) {
     struct Pair {
         const char* display;
         const char* view;
     };
-    // ACES 1.0.3 style first, then common aliases.
     const Pair srgbPairs[] = {
         {"ACES", "sRGB"},
         {"ACES", "sRGB (ACES)"},
@@ -95,7 +114,7 @@ bool buildViewProcessor(const OCIO_NS::ConstConfigRcPtr& config, const std::stri
         {"sRGB (ACES)", "sRGB"},
         {"ACES", "Output - sRGB"},
     };
-    const Pair recPairs[] = {
+    const Pair rec709Pairs[] = {
         {"ACES", "Rec.709"},
         {"ACES", "rec709"},
         {"ACES", "Rec709"},
@@ -104,9 +123,28 @@ bool buildViewProcessor(const OCIO_NS::ConstConfigRcPtr& config, const std::stri
         {"rec709", "ACES"},
         {"ACES", "Output - Rec.709"},
     };
-    const Pair* pairs = rec709 ? recPairs : srgbPairs;
-    const int n = rec709 ? int(sizeof(recPairs) / sizeof(recPairs[0]))
-                         : int(sizeof(srgbPairs) / sizeof(srgbPairs[0]));
+    const Pair rec2020Pairs[] = {
+        {"ACES", "Rec.2020"},
+        {"ACES", "Rec2020"},
+        {"ACES", "rec2020"},
+        {"ACES", "Rec.2020 (ACES)"},
+        {"Rec.2020", "ACES"},
+        {"rec2020", "ACES"},
+        {"ACES", "Output - Rec.2020"},
+        {"ACES", "HDR Rec.2020"},
+        {"ACES", "Rec.2020 ST2084"},
+    };
+
+    const Pair* pairs = srgbPairs;
+    int n = int(sizeof(srgbPairs) / sizeof(srgbPairs[0]));
+    if (kind == ViewKind::Rec709) {
+        pairs = rec709Pairs;
+        n = int(sizeof(rec709Pairs) / sizeof(rec709Pairs[0]));
+    } else if (kind == ViewKind::Rec2020) {
+        pairs = rec2020Pairs;
+        n = int(sizeof(rec2020Pairs) / sizeof(rec2020Pairs[0]));
+    }
+
     for (int i = 0; i < n; ++i) {
         if (tryDisplayView(config, src, pairs[i].display, pairs[i].view, out)) {
             used = std::string(pairs[i].display) + " / " + pairs[i].view;
@@ -114,15 +152,21 @@ bool buildViewProcessor(const OCIO_NS::ConstConfigRcPtr& config, const std::stri
         }
     }
 
-    // Last resort: first display + its default / first view containing sRGB or 709.
     if (config->getNumDisplays() <= 0) return false;
     const char* display = config->getDisplay(0);
     const int nViews = config->getNumViews(display);
     for (int i = 0; i < nViews; ++i) {
         const char* view = config->getView(display, i);
         const std::string v = view ? view : "";
-        const bool match = rec709 ? (v.find("709") != std::string::npos || v.find("Rec") != std::string::npos)
-                                  : (v.find("sRGB") != std::string::npos || v.find("srgb") != std::string::npos);
+        bool match = false;
+        if (kind == ViewKind::Rec2020) {
+            match = v.find("2020") != std::string::npos;
+        } else if (kind == ViewKind::Rec709) {
+            match = v.find("709") != std::string::npos ||
+                    (v.find("Rec") != std::string::npos && v.find("2020") == std::string::npos);
+        } else {
+            match = v.find("sRGB") != std::string::npos || v.find("srgb") != std::string::npos;
+        }
         if (!match && i + 1 < nViews) continue;
         if (tryDisplayView(config, src, display, view, out)) {
             used = std::string(display) + " / " + v;
@@ -135,6 +179,7 @@ bool buildViewProcessor(const OCIO_NS::ConstConfigRcPtr& config, const std::stri
 void rebuildProcessors(int workingSpace) {
     g_procSrgb.reset();
     g_procRec709.reset();
+    g_procRec2020.reset();
     g_procWorkingSpace = workingSpace;
     if (!g_config) return;
 
@@ -148,17 +193,21 @@ void rebuildProcessors(int workingSpace) {
         return;
     }
 
-    std::string usedSrgb, usedRec;
-    if (buildViewProcessor(g_config, src, false, g_procSrgb, usedSrgb))
-        logInfo("OCIO: FOUND view sRGB (ACES): " + src + " → " + usedSrgb);
+    std::string usedSrgb, usedRec, used2020;
+    if (buildViewProcessor(g_config, src, ViewKind::Srgb, g_procSrgb, usedSrgb))
+        logInfo("OCIO: FOUND view sRGB: " + src + " → " + usedSrgb);
     else
-        logWarning("OCIO: NOT FOUND Display/View for sRGB (ACES)");
-    if (buildViewProcessor(g_config, src, true, g_procRec709, usedRec))
-        logInfo("OCIO: FOUND view rec709 (ACES): " + src + " → " + usedRec);
+        logWarning("OCIO: NOT FOUND Display/View for sRGB");
+    if (buildViewProcessor(g_config, src, ViewKind::Rec709, g_procRec709, usedRec))
+        logInfo("OCIO: FOUND view Rec.709: " + src + " → " + usedRec);
     else
-        logWarning("OCIO: NOT FOUND Display/View for rec709 (ACES)");
+        logWarning("OCIO: NOT FOUND Display/View for Rec.709");
+    if (buildViewProcessor(g_config, src, ViewKind::Rec2020, g_procRec2020, used2020))
+        logInfo("OCIO: FOUND view Rec.2020: " + src + " → " + used2020);
+    else
+        logWarning("OCIO: NOT FOUND Display/View for Rec.2020");
 
-    if (!g_procSrgb || !g_procRec709) {
+    if (!g_procSrgb || !g_procRec709 || !g_procRec2020) {
         std::string displays;
         for (int i = 0; i < g_config->getNumDisplays(); ++i) {
             const char* d = g_config->getDisplay(i);
@@ -173,6 +222,12 @@ void rebuildProcessors(int workingSpace) {
         }
         logInfo("OCIO displays/views: " + (displays.empty() ? std::string("(none)") : displays));
     }
+}
+
+OCIO_NS::ConstCPUProcessorRcPtr processorForView(int viewTransform) {
+    if (viewTransform == kViewRec709Aces) return g_procRec709;
+    if (viewTransform == kViewRec2020) return g_procRec2020;
+    return g_procSrgb;
 }
 #endif
 
@@ -195,7 +250,6 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
 #else
     std::lock_guard<std::mutex> lock(g_mutex);
 
-    // Mutually exclusive: env checkbox OR Film path (not a fallback mix).
     std::string path;
     bool fromEnv = false;
     if (useEnv) {
@@ -209,7 +263,6 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
         path = settingsPath;
     }
 
-    // Reload if path changed or first call.
     const bool needLoad = !g_tried || path != g_loadedPath || fromEnv != g_fromEnv || !g_config;
     if (needLoad) {
         g_tried = true;
@@ -218,6 +271,7 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
         g_config.reset();
         g_procSrgb.reset();
         g_procRec709.reset();
+        g_procRec2020.reset();
         g_procActive.reset();
         g_procWorkingSpace = -1;
         g_preparedView = -1;
@@ -262,6 +316,20 @@ void ocioLogStatus(bool useEnv, const std::string& settingsPath) {
         logWarning(st.message);
 }
 
+Vec3 classicApplyView(Vec3 linearWorking, int workingSpace, int viewTransform) {
+    if (viewTransform == kViewRaw) {
+        return Vec3(saturatef(linearWorking.x), saturatef(linearWorking.y),
+                    saturatef(linearWorking.z));
+    }
+    Vec3 c = linearWorking;
+    if (workingSpace == kWorkingSpaceAcesCg) c = acescgToLinearSrgb(c);
+    // Soft HDR compress then transfer (old Classic sRGB path).
+    c = reinhard(c);
+    if (viewTransform == kViewRec2020) return encodeGamma24Vec(c);
+    // sRGB and Rec.709 share a close OETF; use the sRGB curve for Classic.
+    return linearToSrgbVec(c);
+}
+
 bool ocioApplyView(Vec3 linearWorking, int workingSpace, int viewTransform, Vec3& outDisplay) {
     if (viewTransform == kViewRaw) {
         outDisplay = Vec3(saturatef(linearWorking.x), saturatef(linearWorking.y),
@@ -269,7 +337,7 @@ bool ocioApplyView(Vec3 linearWorking, int workingSpace, int viewTransform, Vec3
         return true;
     }
     if (!ocioPrepareView(workingSpace, viewTransform)) {
-        outDisplay = linearWorking;
+        outDisplay = classicApplyView(linearWorking, workingSpace, viewTransform);
         return false;
     }
     outDisplay = ocioApplyViewPrepared(linearWorking);
@@ -277,12 +345,14 @@ bool ocioApplyView(Vec3 linearWorking, int workingSpace, int viewTransform, Vec3
 }
 
 bool ocioPrepareView(int workingSpace, int viewTransform) {
+    g_preparedClassic = false;
+    g_preparedWorking = workingSpace;
     if (viewTransform == kViewRaw) {
 #if SOLSTICE_HAVE_OCIO
         std::lock_guard<std::mutex> lock(g_mutex);
         g_procActive.reset();
-        g_preparedView = kViewRaw;
 #endif
+        g_preparedView = kViewRaw;
         return true;
     }
 #if !SOLSTICE_HAVE_OCIO
@@ -292,19 +362,55 @@ bool ocioPrepareView(int workingSpace, int viewTransform) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_config) return false;
     if (g_procWorkingSpace != workingSpace) rebuildProcessors(workingSpace);
-    g_procActive = (viewTransform == kViewRec709Aces) ? g_procRec709 : g_procSrgb;
+    g_procActive = processorForView(viewTransform);
     g_preparedView = viewTransform;
     return g_procActive != nullptr;
 #endif
 }
 
+bool displayPrepareView(int workingSpace, int colorManagement, int viewTransform) {
+    if (colorManagement == kColorClassic || viewTransform == kViewRaw) {
+#if SOLSTICE_HAVE_OCIO
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_procActive.reset();
+#endif
+        g_preparedClassic = (viewTransform != kViewRaw) && (colorManagement == kColorClassic);
+        // Raw always uses linear clamp via prepared path (classic or OCIO).
+        if (viewTransform == kViewRaw) {
+            g_preparedClassic = false;
+            g_preparedView = kViewRaw;
+            g_preparedWorking = workingSpace;
+            return true;
+        }
+        g_preparedView = viewTransform;
+        g_preparedWorking = workingSpace;
+        return true;
+    }
+    const bool ok = ocioPrepareView(workingSpace, viewTransform);
+    if (!ok) {
+        // Fall back to Classic transfer so the viewport still looks reasonable.
+        g_preparedClassic = true;
+        g_preparedView = viewTransform;
+        g_preparedWorking = workingSpace;
+        return true;
+    }
+    g_preparedClassic = false;
+    return true;
+}
+
 Vec3 ocioApplyViewPrepared(Vec3 linearWorking) {
-#if !SOLSTICE_HAVE_OCIO
-    return Vec3(saturatef(linearWorking.x), saturatef(linearWorking.y), saturatef(linearWorking.z));
-#else
-    if (g_preparedView == kViewRaw || !g_procActive) {
+    if (g_preparedView == kViewRaw) {
         return Vec3(saturatef(linearWorking.x), saturatef(linearWorking.y),
                     saturatef(linearWorking.z));
+    }
+    if (g_preparedClassic) {
+        return classicApplyView(linearWorking, g_preparedWorking, g_preparedView);
+    }
+#if !SOLSTICE_HAVE_OCIO
+    return classicApplyView(linearWorking, g_preparedWorking, g_preparedView);
+#else
+    if (!g_procActive) {
+        return classicApplyView(linearWorking, g_preparedWorking, g_preparedView);
     }
     float rgb[3] = {linearWorking.x, linearWorking.y, linearWorking.z};
     g_procActive->applyRGB(rgb);

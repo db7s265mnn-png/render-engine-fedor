@@ -9,6 +9,8 @@
 #include <atomic>
 #include <vector>
 
+#include "scene/types.h"
+
 class QLabel;
 class QComboBox;
 class QPushButton;
@@ -19,11 +21,6 @@ class QSlider;
 namespace sol {
 
 class TimelineScrubber;
-
-enum class ViewerDisplayMode : int {
-    ClassicSrgb = 0,
-    OcioSrgbAces = 1,
-};
 
 struct ViewerGrade {
     float brightness = 0.0f;  // -1..1 add after contrast
@@ -40,8 +37,8 @@ public:
     void clear();
     void setPlaceholder(const QString& text);
     void setLinearImage(const float* rgb, int width, int height, quint64 contentId);
-    void setDisplayMode(ViewerDisplayMode mode, bool ocioUseEnv, const QString& ocioConfigPath,
-                        int workingSpace);
+    void setDisplayParams(int colorManagement, int viewTransform, bool ocioUseEnv,
+                          const QString& ocioConfigPath, int workingSpace);
     void setGrade(const ViewerGrade& grade);
     void fitToView();
     void resetView();
@@ -70,7 +67,8 @@ private:
     int height_ = 0;
     quint64 contentId_ = 0;
 
-    ViewerDisplayMode displayMode_ = ViewerDisplayMode::ClassicSrgb;
+    int colorManagement_ = kColorOcio;
+    int viewTransform_ = kViewSrgbAces;
     bool ocioUseEnv_ = true;
     QString ocioConfigPath_;
     int workingSpace_ = 1;
@@ -78,7 +76,8 @@ private:
 
     QImage displayCache_;
     quint64 displayCacheId_ = 0;
-    ViewerDisplayMode displayCacheMode_ = ViewerDisplayMode::ClassicSrgb;
+    int displayCacheColorMgmt_ = -1;
+    int displayCacheView_ = -1;
     int displayCacheWorking_ = -1;
     QString displayCacheOcioPath_;
     bool displayCacheOcioEnv_ = true;
@@ -111,8 +110,10 @@ public:
     static QString guessConvertedTxPath(const QString& sourcePath, const QString& outputFolder);
 
     void setOcioConfig(bool useEnv, const QString& configPath);
-    void setDisplayMode(ViewerDisplayMode mode);
-    ViewerDisplayMode displayMode() const { return displayMode_; }
+    void setColorManagement(int mode);
+    void setViewTransform(int view);
+    int colorManagement() const { return colorManagement_; }
+    int viewTransform() const { return viewTransform_; }
 
     QString currentPath() const;
     int frameCount() const { return frames_.size(); }
@@ -178,7 +179,8 @@ private:
     FloatPreviewCanvas* canvas_ = nullptr;
     QLabel* infoLabel_ = nullptr;
     QLabel* zoomLabel_ = nullptr;
-    QComboBox* displayCombo_ = nullptr;
+    QComboBox* colorMgmtCombo_ = nullptr;
+    QComboBox* viewCombo_ = nullptr;
     QComboBox* contentCombo_ = nullptr;
     QPushButton* fitBtn_ = nullptr;
     QPushButton* gradeResetBtn_ = nullptr;
@@ -205,7 +207,8 @@ private:
     int rangeEnd_ = 1;
     bool updatingTimeline_ = false;
 
-    ViewerDisplayMode displayMode_ = ViewerDisplayMode::ClassicSrgb;
+    int colorManagement_ = kColorOcio;
+    int viewTransform_ = kViewSrgbAces;
     bool ocioUseEnv_ = true;
     QString ocioConfigPath_;
     int ocioWorkingSpace_ = 1;

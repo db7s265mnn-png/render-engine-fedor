@@ -194,6 +194,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         framePending_.store(true, std::memory_order_relaxed);
         onRenderTick();
     });
+    connect(renderView_, &RenderView::colorManagementChanged, this, [this](int) {
+        framePending_.store(true, std::memory_order_relaxed);
+        onRenderTick();
+    });
     connect(renderView_, &RenderView::lookThroughCameraChosen, this, [this](const QString& name) {
         lookThroughCamera(name);
     });
@@ -1398,7 +1402,10 @@ void MainWindow::onRenderTick() {
     if (!pending && !fade) return;
     if (!renderView_) return;
     if (renderArmed() || fade) {
-        if (scene_) scene_->settings.viewTransform = renderView_->viewTransform();
+        if (scene_) {
+            scene_->settings.viewTransform = renderView_->viewTransform();
+            scene_->settings.colorManagement = renderView_->colorManagement();
+        }
         renderView_->setImage(toQImage(session_.displayImage()));
         updateStatusBar();
     }

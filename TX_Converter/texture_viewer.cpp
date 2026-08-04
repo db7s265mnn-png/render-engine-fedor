@@ -125,32 +125,23 @@ void extractLinearFromFloatImage(const Image& image, std::vector<float>& outRgb,
     downscaleLinearRgb(src, srcW, srcH, outRgb, outW, outH);
 }
 
-Vec3 classicDisplayRgb(Vec3 linear) {
-    linear.x = linear.x / (1.0f + std::max(0.0f, linear.x));
-    linear.y = linear.y / (1.0f + std::max(0.0f, linear.y));
-    linear.z = linear.z / (1.0f + std::max(0.0f, linear.z));
-    return linearToSrgbVec(linear);
-}
-
-QImage bakeDisplayImage(const float* linearRgb, int w, int h, ViewerDisplayMode mode, bool ocioUseEnv,
-                        const QString& ocioConfigPath, int workingSpace, const ViewerGrade& grade) {
+QImage bakeDisplayImage(const float* linearRgb, int w, int h, int colorManagement, int viewTransform,
+                        bool ocioUseEnv, const QString& ocioConfigPath, int workingSpace,
+                        const ViewerGrade& grade) {
     QImage out(w, h, QImage::Format_RGB888);
     if (!linearRgb || w <= 0 || h <= 0) return out;
 
-    bool ocioOk = false;
-    if (mode == ViewerDisplayMode::OcioSrgbAces) {
+    if (colorManagement == kColorOcio) {
         ocioEnsureConfig(ocioUseEnv, ocioConfigPath.toStdString());
-        ocioOk = ocioPrepareView(workingSpace, kViewSrgbAces);
     }
+    displayPrepareView(workingSpace, colorManagement, viewTransform);
 
     for (int y = 0; y < h; ++y) {
         uchar* line = out.scanLine(y);
         const float* row = linearRgb + size_t(y) * size_t(w) * 3;
         for (int x = 0; x < w; ++x) {
             Vec3 linear(row[x * 3 + 0], row[x * 3 + 1], row[x * 3 + 2]);
-            Vec3 display =
-                (mode == ViewerDisplayMode::OcioSrgbAces && ocioOk) ? ocioApplyViewPrepared(linear)
-                                                                    : classicDisplayRgb(linear);
+            Vec3 display = ocioApplyViewPrepared(linear);
             display = applyGrade(display, grade);
             uchar* px = line + size_t(x) * 3;
             px[0] = static_cast<uchar>(clampf(display.x, 0.0f, 1.0f) * 255.0f + 0.5f);
@@ -206,9 +197,10 @@ void FloatPreviewCanvas::setLinearImage(const float* rgb, int width, int height,
     }
 }
 
-void FloatPreviewCanvas::setDisplayMode(ViewerDisplayMode mode, bool ocioUseEnv,
-                                        const QString& ocioConfigPath, int workingSpace) {
-    displayMode_ = mode;
+void FloatPreviewCanvas::setDisplayParams(int colorManagement, int viewTransform, bool ocioUseEnv,
+                                          const QString& ocioConfigPath, int workingSpace) {
+    colorManagement_ = colorManagement;
+    viewTransform_ = viewTransform;
     ocioUseEnv_ = ocioUseEnv;
     ocioConfigPath_ = ocioConfigPath;
     workingSpace_ = workingSpace;
@@ -230,15 +222,17 @@ void FloatPreviewCanvas::invalidateDisplayCache() {
 void FloatPreviewCanvas::ensureDisplayCache() {
     if (!linearRgb_ || width_ <= 0 || height_ <= 0) return;
     if (!displayCache_.isNull() && displayCacheId_ == contentId_ &&
-        displayCacheMode_ == displayMode_ && displayCacheWorking_ == workingSpace_ &&
-        displayCacheOcioEnv_ == ocioUseEnv_ && displayCacheOcioPath_ == ocioConfigPath_ &&
-        gradeEquals(displayCacheGrade_, grade_)) {
+        displayCacheColorMgmt_ == colorManagement_ && displayCacheView_ == viewTransform_ &&
+        displayCacheWorking_ == workingSpace_ && displayCacheOcioEnv_ == ocioUseEnv_ &&
+        displayCacheOcioPath_ == ocioConfigPath_ && gradeEquals(displayCacheGrade_, grade_)) {
         return;
     }
-    displayCache_ = bakeDisplayImage(linearRgb_, width_, height_, displayMode_, ocioUseEnv_,
-                                     ocioConfigPath_, workingSpace_, grade_);
+    displayCache_ =
+        bakeDisplayImage(linearRgb_, width_, height_, colorManagement_, viewTransform_, ocioUseEnv_,
+                         ocioConfigPath_, workingSpace_, grade_);
     displayCacheId_ = contentId_;
-    displayCacheMode_ = displayMode_;
+    displayCacheColorMgmt_ = colorManagement_;
+    displayCacheView_ = viewTransform_;
     displayCacheWorking_ = workingSpace_;
     displayCacheOcioEnv_ = ocioUseEnv_;
     displayCacheOcioPath_ = ocioConfigPath_;
@@ -516,11 +510,23 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     modeRow->setContentsMargins(0, 0, 0, 0);
     modeRow->setSpacing(6);
     modeRow->addWidget(new QLabel(QStringLiteral("Display")));
-    displayCombo_ = new QComboBox();
-    displayCombo_->addItem(QStringLiteral("Classic sRGB"), int(ViewerDisplayMode::ClassicSrgb));
-    displayCombo_->addItem(QStringLiteral("OCIO sRGB (ACES)"), int(ViewerDisplayMode::OcioSrgbAces));
-    displayCombo_->setMinimumWidth(150);
-    modeRow->addWidget(displayCombo_);
+    colorMgmtCombo_ = new QComboBox();
+    colorMgmtCombo_->addItem(QStringLiteral("Classic"), kColorClassic);
+    colorMgmtCombo_->addItem(QStringLiteral("OCIO"), kColorOcio);
+    colorMgmtCombo_->setCurrentIndex(1);
+    colorMgmtCombo_->setMinimumWidth(90);
+    colorMgmtCombo_->setToolTip(
+        QStringLiteral("Classic: gamma / linear (no OCIO).\nOCIO: OpenColorIO Display/View."));
+    modeRow->addWidget(colorMgmtCombo_);
+    viewCombo_ = new QComboBox();
+    viewCombo_->addItem(QStringLiteral("sRGB"), kViewSrgbAces);
+    viewCombo_->addItem(QStringLiteral("Rec.709"), kViewRec709Aces);
+    viewCombo_->addItem(QStringLiteral("Rec.2020"), kViewRec2020);
+    viewCombo_->addItem(QStringLiteral("Raw"), kViewRaw);
+    viewCombo_->setCurrentIndex(0);
+    viewCombo_->setMinimumWidth(100);
+    viewCombo_->setToolTip(QStringLiteral("Monitor view transform."));
+    modeRow->addWidget(viewCombo_);
     modeRow->addWidget(new QLabel(QStringLiteral("View")));
     contentCombo_ = new QComboBox();
     contentCombo_->addItem(QStringLiteral("Source Images"), int(ViewerContentKind::SourceImages));
@@ -603,8 +609,11 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     connect(canvas_, &FloatPreviewCanvas::zoomChanged, this, [this](double z) {
         zoomLabel_->setText(QStringLiteral("%1%").arg(int(std::lround(z * 100.0))));
     });
-    connect(displayCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-        setDisplayMode(ViewerDisplayMode(displayCombo_->currentData().toInt()));
+    connect(colorMgmtCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        setColorManagement(colorMgmtCombo_->currentData().toInt());
+    });
+    connect(viewCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        setViewTransform(viewCombo_->currentData().toInt());
     });
     connect(contentCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         contentKind_ = ViewerContentKind(contentCombo_->currentData().toInt());
@@ -658,7 +667,8 @@ void TextureViewerWidget::resetGrade() {
 void TextureViewerWidget::setOcioConfig(bool useEnv, const QString& configPath) {
     ocioUseEnv_ = useEnv;
     ocioConfigPath_ = configPath.trimmed();
-    canvas_->setDisplayMode(displayMode_, ocioUseEnv_, ocioConfigPath_, ocioWorkingSpace_);
+    canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
+                              ocioWorkingSpace_);
 }
 
 void TextureViewerWidget::setPipelinePaths(const QString& sourcePath, const QString& outputFolder) {
@@ -734,20 +744,38 @@ void TextureViewerWidget::refreshFromPipeline() {
     setSourcePath(path);
 }
 
-void TextureViewerWidget::setDisplayMode(ViewerDisplayMode mode) {
-    displayMode_ = mode;
-    {
-        const QSignalBlocker block(displayCombo_);
-        const int idx = displayCombo_->findData(int(mode));
-        if (idx >= 0) displayCombo_->setCurrentIndex(idx);
+void TextureViewerWidget::setColorManagement(int mode) {
+    mode = (mode == kColorClassic) ? kColorClassic : kColorOcio;
+    colorManagement_ = mode;
+    if (colorMgmtCombo_) {
+        const QSignalBlocker block(colorMgmtCombo_);
+        const int idx = colorMgmtCombo_->findData(mode);
+        if (idx >= 0) colorMgmtCombo_->setCurrentIndex(idx);
     }
-    if (mode == ViewerDisplayMode::OcioSrgbAces) {
+    if (mode == kColorOcio) {
         const OcioStatus st = ocioEnsureConfig(ocioUseEnv_, ocioConfigPath_.toStdString());
         if (!st.configLoaded) {
             emit statusMessage(QStringLiteral("Viewer: %1").arg(QString::fromStdString(st.message)));
         }
     }
-    canvas_->setDisplayMode(displayMode_, ocioUseEnv_, ocioConfigPath_, ocioWorkingSpace_);
+    canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
+                              ocioWorkingSpace_);
+    updateInfoBar();
+}
+
+void TextureViewerWidget::setViewTransform(int view) {
+    if (view != kViewSrgbAces && view != kViewRec709Aces && view != kViewRec2020 &&
+        view != kViewRaw) {
+        view = kViewSrgbAces;
+    }
+    viewTransform_ = view;
+    if (viewCombo_) {
+        const QSignalBlocker block(viewCombo_);
+        const int idx = viewCombo_->findData(view);
+        if (idx >= 0) viewCombo_->setCurrentIndex(idx);
+    }
+    canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
+                              ocioWorkingSpace_);
     updateInfoBar();
 }
 
@@ -806,7 +834,8 @@ void TextureViewerWidget::setSourcePath(const QString& pathIn) {
 
     ocioWorkingSpace_ = prefersAcesCgWorkingSpace(paths.first()) ? kWorkingSpaceAcesCg
                                                                  : kWorkingSpaceSrgbLinear;
-    canvas_->setDisplayMode(displayMode_, ocioUseEnv_, ocioConfigPath_, ocioWorkingSpace_);
+    canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
+                              ocioWorkingSpace_);
     canvas_->setGrade(grade_);
 
     rangeStart_ = 1;
@@ -967,9 +996,13 @@ void TextureViewerWidget::updateInfoBar() {
         return;
     }
     const FrameSlot& slot = frames_[frameIndex_];
-    const QString modeBit = (displayMode_ == ViewerDisplayMode::OcioSrgbAces)
+    const QString modeBit = (colorManagement_ == kColorOcio)
                                 ? QStringLiteral("OCIO")
-                                : QStringLiteral("sRGB");
+                                : QStringLiteral("Classic");
+    QString viewBit = QStringLiteral("sRGB");
+    if (viewTransform_ == kViewRec709Aces) viewBit = QStringLiteral("Rec.709");
+    else if (viewTransform_ == kViewRec2020) viewBit = QStringLiteral("Rec.2020");
+    else if (viewTransform_ == kViewRaw) viewBit = QStringLiteral("Raw");
     if (!slot.error.isEmpty()) {
         infoLabel_->setText(slot.error);
         return;
@@ -981,12 +1014,13 @@ void TextureViewerWidget::updateInfoBar() {
                                 .arg(frames_.size()));
         return;
     }
-    infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  %5  ·  float  ·  %6/%7")
+    infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  %5/%6  ·  float  ·  %7/%8")
                             .arg(QFileInfo(slot.path).fileName())
                             .arg(slot.sourceWidth)
                             .arg(slot.sourceHeight)
                             .arg(formatBytes(slot.fileBytes))
                             .arg(modeBit)
+                            .arg(viewBit)
                             .arg(loadedCount_)
                             .arg(frames_.size()));
 }

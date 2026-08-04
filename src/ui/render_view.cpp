@@ -366,23 +366,41 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     localSpaceButton_->setChecked(true);
 
     stripLayout->addSpacing(8);
-    viewTransformCombo_ = new QComboBox(toolStrip_);
-    viewTransformCombo_->addItem(QStringLiteral("sRGB (ACES)"), 0);
-    viewTransformCombo_->addItem(QStringLiteral("rec709 (ACES)"), 1);
-    viewTransformCombo_->addItem(QStringLiteral("Raw"), 2);
-    viewTransformCombo_->setCurrentIndex(0);
-    viewTransformCombo_->setToolTip(
-        QStringLiteral("Nuke-style OCIO viewer process. "
-                       "Working space is set in Render Settings → Film."));
-    viewTransformCombo_->setStyleSheet(
+    auto comboStyle = QStringLiteral(
         "QComboBox {"
-        "  min-height: 24px; max-width: 160px;"
+        "  min-height: 24px;"
         "  font-size: 10px; font-weight: 600;"
         "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
         "  padding: 0 6px;"
         "}"
         "QComboBox:hover { background: #474c54; }"
         "QComboBox::drop-down { border: none; width: 16px; }");
+
+    colorManagementCombo_ = new QComboBox(toolStrip_);
+    colorManagementCombo_->addItem(QStringLiteral("Classic"), 0);
+    colorManagementCombo_->addItem(QStringLiteral("OCIO"), 1);
+    colorManagementCombo_->setCurrentIndex(1);
+    colorManagementCombo_->setToolTip(
+        QStringLiteral("Classic: gamma / linear (no OCIO).\n"
+                       "OCIO: OpenColorIO Display/View from the config."));
+    colorManagementCombo_->setStyleSheet(comboStyle + QStringLiteral(" QComboBox { max-width: 90px; }"));
+    stripLayout->addWidget(colorManagementCombo_);
+    connect(colorManagementCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int index) {
+                if (index < 0) return;
+                setColorManagement(colorManagementCombo_->itemData(index).toInt());
+            });
+
+    viewTransformCombo_ = new QComboBox(toolStrip_);
+    viewTransformCombo_->addItem(QStringLiteral("sRGB"), 0);
+    viewTransformCombo_->addItem(QStringLiteral("Rec.709"), 1);
+    viewTransformCombo_->addItem(QStringLiteral("Rec.2020"), 3);
+    viewTransformCombo_->addItem(QStringLiteral("Raw"), 2);
+    viewTransformCombo_->setCurrentIndex(0);
+    viewTransformCombo_->setToolTip(
+        QStringLiteral("Monitor view transform.\n"
+                       "Working space is set in Render Settings → Film."));
+    viewTransformCombo_->setStyleSheet(comboStyle + QStringLiteral(" QComboBox { max-width: 110px; }"));
     stripLayout->addWidget(viewTransformCombo_);
     connect(viewTransformCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int index) {
@@ -549,7 +567,7 @@ void RenderView::setTransformSpace(TransformSpace space) {
 }
 
 void RenderView::setViewTransform(int view) {
-    view = std::clamp(view, 0, 2);
+    if (view != 0 && view != 1 && view != 2 && view != 3) view = 0;
     if (viewTransform_ == view) return;
     viewTransform_ = view;
     if (viewTransformCombo_) {
@@ -558,6 +576,19 @@ void RenderView::setViewTransform(int view) {
         if (idx >= 0) viewTransformCombo_->setCurrentIndex(idx);
     }
     emit viewTransformChanged(viewTransform_);
+    update();
+}
+
+void RenderView::setColorManagement(int mode) {
+    mode = std::clamp(mode, 0, 1);
+    if (colorManagement_ == mode) return;
+    colorManagement_ = mode;
+    if (colorManagementCombo_) {
+        const QSignalBlocker block(colorManagementCombo_);
+        const int idx = colorManagementCombo_->findData(mode);
+        if (idx >= 0) colorManagementCombo_->setCurrentIndex(idx);
+    }
+    emit colorManagementChanged(colorManagement_);
     update();
 }
 

@@ -73,6 +73,8 @@ public:
     void setTransformSpace(TransformSpace space);
     int viewTransform() const { return viewTransform_; }
     void setViewTransform(int view);
+    int colorManagement() const { return colorManagement_; }
+    void setColorManagement(int mode);
     void setTransformTarget(Node* node);
     Node* transformTarget() const { return transformTarget_; }
     bool isGizmoDragging() const { return mode_ == 4; }
@@ -113,6 +115,7 @@ signals:
     void transformToolChanged(sol::TransformTool tool);
     void transformSpaceChanged(sol::TransformSpace space);
     void viewTransformChanged(int view);
+    void colorManagementChanged(int mode);
     // Viewport object pick: empty string clears selection.
     void objectSelected(const QString& sourceNode);
     // Focus-distance pick for DOF (metres along the view ray to the hit).
@@ -208,8 +211,10 @@ private:
     QToolButton* scaleButton_ = nullptr;
     QToolButton* localSpaceButton_ = nullptr;
     QToolButton* worldSpaceButton_ = nullptr;
+    QComboBox* colorManagementCombo_ = nullptr;
     QComboBox* viewTransformCombo_ = nullptr;
-    int viewTransform_ = 0;  // kViewSrgbAces
+    int colorManagement_ = 1;  // kColorOcio
+    int viewTransform_ = 0;    // kViewSrgbAces
     QStringList cameraMenuNames_;
     QString activeCameraName_;
 

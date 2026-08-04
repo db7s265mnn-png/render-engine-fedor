@@ -429,11 +429,18 @@ enum WorkingColorSpace : int {
     kWorkingSpaceAcesCg = 1,
 };
 
-// Viewport / display view transform (chrome strip next to Local/World). Nuke-style.
+// mplay-style colour management: Classic = gamma/linear; OCIO = config Display/View.
+enum ColorManagementMode : int {
+    kColorClassic = 0,
+    kColorOcio = 1,  // default
+};
+
+// Monitor view transform (chrome strip). Labels: sRGB / Rec.709 / Rec.2020 / Raw.
 enum ViewTransform : int {
-    kViewSrgbAces = 0,     // sRGB (ACES) — default OCIO Display/View
-    kViewRec709Aces = 1,   // rec709 (ACES)
-    kViewRaw = 2,          // no display transform
+    kViewSrgbAces = 0,     // sRGB (enum name kept for compatibility)
+    kViewRec709Aces = 1,   // Rec.709
+    kViewRaw = 2,          // no display transform (linear clamp)
+    kViewRec2020 = 3,      // Rec.2020
 };
 
 // Framebuffer resolve / viewport quantize / EXR save bit depth (accum stays float).
@@ -485,6 +492,8 @@ struct RenderSettingsData {
     float clampIndirect = 10.0f;
     // Working colour space (Film). Display view is separate (viewport chrome).
     int workingSpace = kWorkingSpaceAcesCg;
+    // Classic vs OCIO (updated live from the render view chrome). Default OCIO.
+    int colorManagement = kColorOcio;
     // Viewport view transform (updated live from the render view chrome).
     int viewTransform = kViewSrgbAces;
     // Resolve / save bit depth: 8, 16, or 32 (accumulation remains float).

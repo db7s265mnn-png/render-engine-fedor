@@ -84,11 +84,10 @@ Image Framebuffer::resolveLinear() const {
 
 Vec3 applyDisplayView(Vec3 linearWorking, const RenderSettingsData& settings) {
     Vec3 display = linearWorking;
-    if (!ocioApplyView(linearWorking, settings.workingSpace, settings.viewTransform, display)) {
-        if (settings.viewTransform != kViewRaw) {
-            display = Vec3(saturatef(linearWorking.x), saturatef(linearWorking.y),
-                           saturatef(linearWorking.z));
-        }
+    if (settings.colorManagement == kColorClassic) {
+        display = classicApplyView(linearWorking, settings.workingSpace, settings.viewTransform);
+    } else if (!ocioApplyView(linearWorking, settings.workingSpace, settings.viewTransform, display)) {
+        // OCIO unavailable — classicApplyView already used inside ocioApplyView fallback.
     }
     return quantizeRgb(display, settings.bitDepth);
 }
@@ -106,8 +105,8 @@ Image Framebuffer::resolveDisplay(const RenderSettingsData& settings) const {
     const Vec3 charcoal(0.07f, 0.07f, 0.08f);
     const double invPaths = invSplatPaths();
 
-    // Prepare OCIO once per frame (Nuke-style Display/View).
-    ocioPrepareView(settings.workingSpace, settings.viewTransform);
+    // Prepare Classic or OCIO once per frame (mplay-style Display/View).
+    displayPrepareView(settings.workingSpace, settings.colorManagement, settings.viewTransform);
 
     for (int y = 0; y < height_; ++y) {
         for (int x = 0; x < width_; ++x) {
