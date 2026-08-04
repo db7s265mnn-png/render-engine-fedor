@@ -1,14 +1,19 @@
 // Texture preview for TX Converter: LDR/HDR/TX + UDIM timeline (lazy per-tile load).
 #pragma once
 
+#include <QHash>
+#include <QImage>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
+
+#include <atomic>
 
 class QLabel;
 class QSlider;
 class QPushButton;
 class QScrollArea;
+class QTimer;
 
 namespace sol {
 
@@ -38,10 +43,21 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
+    struct PreviewResult {
+        QImage image;
+        int sourceWidth = 0;
+        int sourceHeight = 0;
+        qint64 fileBytes = 0;
+        QString error;
+    };
+
     void rebuildTimeline();
     void showCurrentFrame(bool forceReload);
-    QImage loadPreviewImage(const QString& path, QString& error) const;
+    void applyPreview(const QString& path, int frameIndex, quint64 generation, const PreviewResult& result);
     void updateImageLabel();
+    void touchCache(const QString& path, const PreviewResult& result);
+
+    static PreviewResult loadPreviewImage(const QString& path);
 
     QScrollArea* scroll_ = nullptr;
     QLabel* imageLabel_ = nullptr;
@@ -50,12 +66,21 @@ private:
     QPushButton* prevBtn_ = nullptr;
     QPushButton* nextBtn_ = nullptr;
     QLabel* frameLabel_ = nullptr;
+    QTimer* resizeDebounce_ = nullptr;
 
-    QStringList paths_;       // concrete files in timeline order
-    QList<int> udims_;        // parallel UDIM ids (0 if non-UDIM)
+    QStringList paths_;  // concrete files in timeline order
+    QList<int> udims_;   // parallel UDIM ids (0 if non-UDIM)
     int frameIndex_ = 0;
-    QImage fullImage_;        // current frame pixels (display-encoded)
+
+    QImage previewImage_;  // current frame, already capped for preview
+    int sourceWidth_ = 0;
+    int sourceHeight_ = 0;
+    qint64 fileBytes_ = 0;
     QString loadedPath_;
+
+    QHash<QString, PreviewResult> cache_;
+    QStringList cacheOrder_;
+    std::atomic<quint64> loadGeneration_{0};
 };
 
 }  // namespace sol
