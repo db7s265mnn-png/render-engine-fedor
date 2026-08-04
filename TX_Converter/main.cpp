@@ -74,6 +74,7 @@ public:
                 }
                 if (!path.isEmpty()) {
                     edit->setText(path);
+                    syncFormatUi();
                     syncPipeline();
                 }
             });
@@ -83,12 +84,16 @@ public:
         form_->addRow(QStringLiteral("Source"), makeBrowseRow(&sourceEdit_, false));
         sourceEdit_->setPlaceholderText(QStringLiteral("texture.png or tile_<UDIM>.exr / .tx"));
         form_->addRow(QStringLiteral("Output Folder"), makeBrowseRow(&outputEdit_, true));
-        outputEdit_->setText(QStringLiteral("tx_cache"));
+        outputEdit_->setPlaceholderText(QStringLiteral("Choose an output folder…"));
+        outputEdit_->clear();
 
         formatCombo_ = new QComboBox();
+        formatCombo_->addItem(QStringLiteral("Original"), int(sol::TxOutputFormat::Original));
+        formatCombo_->addItem(QStringLiteral("EXR"), int(sol::TxOutputFormat::Exr));
         formatCombo_->addItem(QStringLiteral("TX"), int(sol::TxOutputFormat::Tx));
         formatCombo_->addItem(QStringLiteral("PNG"), int(sol::TxOutputFormat::Png));
         formatCombo_->addItem(QStringLiteral("JPG"), int(sol::TxOutputFormat::Jpg));
+        formatCombo_->setCurrentIndex(formatCombo_->findData(int(sol::TxOutputFormat::Tx)));
         form_->addRow(QStringLiteral("Format"), formatCombo_);
 
         bitDepthCombo_ = new QComboBox();
@@ -103,12 +108,6 @@ public:
         form_->addRow(QStringLiteral("Resolution"), resolutionCombo_);
 
         channelsCombo_ = new QComboBox();
-        channelsCombo_->addItem(QStringLiteral("RGBA"), int(sol::TxChannelMode::RGBA));
-        channelsCombo_->addItem(QStringLiteral("RGB"), int(sol::TxChannelMode::RGB));
-        channelsCombo_->addItem(QStringLiteral("R"), int(sol::TxChannelMode::R));
-        channelsCombo_->addItem(QStringLiteral("G"), int(sol::TxChannelMode::G));
-        channelsCombo_->addItem(QStringLiteral("B"), int(sol::TxChannelMode::B));
-        channelsCombo_->addItem(QStringLiteral("A"), int(sol::TxChannelMode::A));
         form_->addRow(QStringLiteral("Channels"), channelsCombo_);
 
         colorSpaceCombo_ = new QComboBox();
@@ -163,9 +162,9 @@ public:
         leftLay->addWidget(formBox);
 
         auto* hint = new QLabel(
-            QStringLiteral("TX output is ACEScg. PNG/JPG keep source colour (resize/bit/channels only). "
-                           "UDIM/$F timeline uses numbers from filenames. "
-                           "Viewer: channels + Classic/OCIO view. Wheel = zoom, drag = pan."));
+            QStringLiteral("TX → ACEScg. EXR/PNG/JPG/Original keep source colour "
+                           "(resize / bit / channels only). "
+                           "Output folder must be chosen. F = fit, drag = pan."));
         hint->setWordWrap(true);
         hint->setStyleSheet(QStringLiteral("color: #969aa0;"));
         leftLay->addWidget(hint);
@@ -174,7 +173,10 @@ public:
         convertBtn->setMinimumHeight(32);
         leftLay->addWidget(convertBtn);
         connect(convertBtn, &QPushButton::clicked, this, &TxConverterWindow::onConvert);
-        connect(sourceEdit_, &QLineEdit::editingFinished, this, [this] { syncPipeline(); });
+        connect(sourceEdit_, &QLineEdit::editingFinished, this, [this] {
+            syncFormatUi();
+            syncPipeline();
+        });
         connect(outputEdit_, &QLineEdit::editingFinished, this, [this] { syncPipeline(); });
 
         leftLay->addStretch(1);
@@ -206,25 +208,33 @@ public:
     }
 
 private:
-    sol::TxOutputFormat currentFormat() const {
+    sol::TxOutputFormat selectedFormat() const {
         return sol::TxOutputFormat(formatCombo_->currentData().toInt());
     }
 
+    sol::TxOutputFormat effectiveFormat() const {
+        return sol::txResolveFormat(selectedFormat(), sourceEdit_->text().trimmed().toStdString());
+    }
+
     void syncFormatUi() {
-        const auto fmt = currentFormat();
-        const bool isTx = fmt == sol::TxOutputFormat::Tx;
-        const bool isJpg = fmt == sol::TxOutputFormat::Jpg;
+        const auto eff = effectiveFormat();
+        const bool isTx = eff == sol::TxOutputFormat::Tx;
+        const bool isJpg = eff == sol::TxOutputFormat::Jpg;
+        const bool isExr = eff == sol::TxOutputFormat::Exr;
+        const bool isPng = eff == sol::TxOutputFormat::Png;
 
         if (colorSpaceCombo_) colorSpaceCombo_->setVisible(isTx);
         if (colorSpaceLabel_) colorSpaceLabel_->setVisible(isTx);
         if (advancedCheck_) advancedCheck_->setVisible(isTx);
         if (useEnvCheck_) useEnvCheck_->setVisible(isTx);
         if (ocioEdit_) {
-            // parent row widget
             if (QWidget* w = ocioEdit_->parentWidget()) w->setVisible(isTx);
         }
         if (ocioLabel_) ocioLabel_->setVisible(isTx);
 
+        // Bit depth
+        const int prevBit = bitDepthCombo_->currentData().isValid() ? bitDepthCombo_->currentData().toInt()
+                                                                    : 0;
         bitDepthCombo_->blockSignals(true);
         bitDepthCombo_->clear();
         if (isJpg) {
@@ -234,17 +244,51 @@ private:
         } else {
             if (QWidget* field = form_->labelForField(bitDepthCombo_)) field->setVisible(true);
             bitDepthCombo_->setVisible(true);
-            bitDepthCombo_->addItem(QStringLiteral("8"), 8);
-            bitDepthCombo_->addItem(QStringLiteral("16"), 16);
-            if (isTx) bitDepthCombo_->addItem(QStringLiteral("32"), 32);
-            const int prefer = isTx ? 16 : 8;
+            if (isExr) {
+                bitDepthCombo_->addItem(QStringLiteral("16"), 16);
+                bitDepthCombo_->addItem(QStringLiteral("32"), 32);
+            } else if (isPng) {
+                bitDepthCombo_->addItem(QStringLiteral("8"), 8);
+                bitDepthCombo_->addItem(QStringLiteral("16"), 16);
+            } else {  // TX
+                bitDepthCombo_->addItem(QStringLiteral("8"), 8);
+                bitDepthCombo_->addItem(QStringLiteral("16"), 16);
+                bitDepthCombo_->addItem(QStringLiteral("32"), 32);
+            }
+            int prefer = isExr || isTx ? 16 : 8;
+            if (bitDepthCombo_->findData(prevBit) >= 0) prefer = prevBit;
             const int idx = bitDepthCombo_->findData(prefer);
             bitDepthCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
         }
         bitDepthCombo_->blockSignals(false);
 
+        // Channels — JPG has no alpha.
+        const int prevCh = channelsCombo_->currentData().isValid() ? channelsCombo_->currentData().toInt()
+                                                                   : int(sol::TxChannelMode::RGBA);
+        channelsCombo_->blockSignals(true);
+        channelsCombo_->clear();
+        if (isJpg) {
+            channelsCombo_->addItem(QStringLiteral("RGB"), int(sol::TxChannelMode::RGB));
+            channelsCombo_->addItem(QStringLiteral("R"), int(sol::TxChannelMode::R));
+            channelsCombo_->addItem(QStringLiteral("G"), int(sol::TxChannelMode::G));
+            channelsCombo_->addItem(QStringLiteral("B"), int(sol::TxChannelMode::B));
+        } else {
+            channelsCombo_->addItem(QStringLiteral("RGBA"), int(sol::TxChannelMode::RGBA));
+            channelsCombo_->addItem(QStringLiteral("RGB"), int(sol::TxChannelMode::RGB));
+            channelsCombo_->addItem(QStringLiteral("R"), int(sol::TxChannelMode::R));
+            channelsCombo_->addItem(QStringLiteral("G"), int(sol::TxChannelMode::G));
+            channelsCombo_->addItem(QStringLiteral("B"), int(sol::TxChannelMode::B));
+            channelsCombo_->addItem(QStringLiteral("A"), int(sol::TxChannelMode::A));
+        }
+        int chIdx = channelsCombo_->findData(prevCh);
+        if (chIdx < 0) chIdx = 0;
+        channelsCombo_->setCurrentIndex(chIdx);
+        channelsCombo_->blockSignals(false);
+
         if (viewer_) {
-            viewer_->setOutputExtension(QString::fromStdString(sol::txOutputExtension(fmt)));
+            const std::string src = sourceEdit_->text().trimmed().toStdString();
+            viewer_->setOutputExtension(QString::fromStdString(
+                sol::txOutputExtension(selectedFormat(), src)));
         }
     }
 
@@ -275,28 +319,38 @@ private:
     void syncPipeline() {
         if (!viewer_) return;
         syncViewerOcio();
-        viewer_->setOutputExtension(QString::fromStdString(sol::txOutputExtension(currentFormat())));
+        const std::string src = sourceEdit_->text().trimmed().toStdString();
+        viewer_->setOutputExtension(
+            QString::fromStdString(sol::txOutputExtension(selectedFormat(), src)));
         viewer_->setPipelinePaths(sourceEdit_->text().trimmed(), outputEdit_->text().trimmed());
     }
 
     void onConvert() {
         const QString src = sourceEdit_->text().trimmed();
         const QString outDir = outputEdit_->text().trimmed();
-        if (src.isEmpty() || outDir.isEmpty()) {
+        if (src.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("TX Converter"),
-                                 QStringLiteral("Choose a source texture and an output folder."));
+                                 QStringLiteral("Choose a source texture."));
+            return;
+        }
+        if (outDir.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("TX Converter"),
+                                 QStringLiteral("Choose an output folder before converting."));
             return;
         }
 
+        const auto selected = selectedFormat();
+        const auto effective = sol::txResolveFormat(selected, src.toStdString());
+
         sol::TxConvertOptions opt;
-        opt.format = currentFormat();
+        opt.format = selected;  // Original kept; resolved inside convert
         opt.bitDepth = bitDepthCombo_->isVisible() ? bitDepthCombo_->currentData().toInt() : 8;
         opt.longSide = resolutionCombo_->currentData().toInt();
         opt.channels = sol::TxChannelMode(channelsCombo_->currentData().toInt());
         opt.frameStart = viewer_ ? viewer_->rangeStart() : 1;
         opt.frameEnd = viewer_ ? viewer_->rangeEnd() : 1;
         opt.updateOnly = true;
-        if (opt.format == sol::TxOutputFormat::Tx) {
+        if (effective == sol::TxOutputFormat::Tx) {
             opt.inputColorSpace = colorSpaceCombo_->currentText().toStdString();
             opt.ocioConfigPath = sol::txResolveOcioConfig(useEnvCheck_->isChecked(),
                                                           ocioEdit_->text().trimmed().toStdString());

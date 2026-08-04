@@ -11,6 +11,7 @@
 #include <QIcon>
 #include <QImageReader>
 #include <QIntValidator>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMetaObject>
@@ -321,8 +322,11 @@ void FloatPreviewCanvas::clampPan() {
     }
     const double w = double(width_) * zoom_;
     const double h = double(height_) * zoom_;
-    const double maxX = std::max(0.0, (w - double(this->width())) * 0.5 + 32.0);
-    const double maxY = std::max(0.0, (h - double(this->height())) * 0.5 + 32.0);
+    // Allow panning even when the image fits (no zoom) — keep ~½ viewport of slack.
+    const double slackX = double(this->width()) * 0.5;
+    const double slackY = double(this->height()) * 0.5;
+    const double maxX = std::max(slackX, (w - double(this->width())) * 0.5 + 32.0);
+    const double maxY = std::max(slackY, (h - double(this->height())) * 0.5 + 32.0);
     pan_.setX(std::clamp(pan_.x(), -maxX, maxX));
     pan_.setY(std::clamp(pan_.y(), -maxY, maxY));
 }
@@ -423,6 +427,15 @@ void FloatPreviewCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
         return;
     }
     QWidget::mouseDoubleClickEvent(event);
+}
+
+void FloatPreviewCanvas::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_F && !event->modifiers()) {
+        fitToView();
+        event->accept();
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }
 
 // ---------------------------------------------------------------------------
@@ -685,7 +698,7 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     modeRow->addStretch(1);
     root->addLayout(modeRow);
 
-    // Grade row: click the label ("Bright" / "Contrast" / "Gamma") to reset just that param.
+    // Grade row: click the label ("Brightness" / "Contrast" / "Gamma") to reset just that param.
     auto* gradeRow = new QHBoxLayout();
     gradeRow->setContentsMargins(0, 0, 0, 0);
     gradeRow->setSpacing(4);
@@ -701,9 +714,9 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
         gradeRow->addWidget(*slider, 1);
         gradeRow->addWidget(*spin);
     };
-    addGrade(&brightnessLabelBtn_, QStringLiteral("Bright"), &brightnessSpin_, &brightnessSlider_,
+    addGrade(&brightnessLabelBtn_, QStringLiteral("Brightness"), &brightnessSpin_, &brightnessSlider_,
              -5.0, 5.0, 0.05, 0.0,
-             QStringLiteral("Brightness in stops, applied in linear (click \"Bright\" to reset to 0)"));
+             QStringLiteral("Brightness in stops, applied in linear (click \"Brightness\" to reset to 0)"));
     addGrade(&contrastLabelBtn_, QStringLiteral("Contrast"), &contrastSpin_, &contrastSlider_, 0.0, 3.0,
              0.05, 1.0, QStringLiteral("Contrast about the 0.18 linear pivot (click \"Contrast\" to reset to 1)"));
     addGrade(&gammaLabelBtn_, QStringLiteral("Gamma"), &gammaSpin_, &gammaSlider_, 0.20, 3.0, 0.05, 1.0,
@@ -711,6 +724,7 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     root->addLayout(gradeRow);
 
     canvas_ = new FloatPreviewCanvas(this);
+    setFocusProxy(canvas_);
     root->addWidget(canvas_, 1);
 
     // Solstice-style scrub row: [start] [scrubber] [end] — no transport/play buttons.

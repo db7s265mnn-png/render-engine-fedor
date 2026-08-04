@@ -19,6 +19,7 @@ class QLineEdit;
 class QDoubleSpinBox;
 class QSlider;
 class QButtonGroup;
+class QKeyEvent;
 
 namespace sol {
 
@@ -67,6 +68,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
 
 private:
     void invalidateDisplayCache();

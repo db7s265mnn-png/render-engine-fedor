@@ -144,8 +144,10 @@ bool queryImageSize(const QString& path, int& outW, int& outH, std::string& erro
 QString oiioDepthArg(int bitDepth, TxOutputFormat format) {
     if (format == TxOutputFormat::Jpg) return QStringLiteral("uint8");
     if (bitDepth <= 0) {
-        // Leave source depth — omit -d at call site when possible; float is safe intermediate.
         return QStringLiteral("float");
+    }
+    if (format == TxOutputFormat::Exr) {
+        return (bitDepth <= 16) ? QStringLiteral("half") : QStringLiteral("float");
     }
     if (bitDepth <= 8) return QStringLiteral("uint8");
     if (bitDepth <= 16) {
@@ -170,7 +172,6 @@ bool needsOiiotoolPreprocess(const TxConvertRequest& req) {
     if (req.format != TxOutputFormat::Tx) return true;
     if (req.longSide > 0) return true;
     if (req.channels != TxChannelMode::RGBA) return true;
-    // Explicit bit depth for TX (0 = leave source / maketx default).
     if (req.bitDepth == 8 || req.bitDepth == 16 || req.bitDepth == 32) return true;
     return false;
 }
@@ -360,10 +361,56 @@ int txExtractFrameNumber(const std::string& path) {
     return m.captured(1).toInt();
 }
 
-std::string txOutputExtension(TxOutputFormat format) {
+TxOutputFormat txFormatFromPath(const std::string& pathOrExt) {
+    QString ext = QString::fromStdString(pathOrExt).trimmed().toLower();
+    if (ext.contains(QLatin1Char('/')) || ext.contains(QLatin1Char('\\')) ||
+        ext.contains(QLatin1Char('.'))) {
+        ext = QFileInfo(QString::fromStdString(pathOrExt)).suffix().toLower();
+    }
+    // Patterns like tile_<UDIM>.exr → suffix still works via QFileInfo.
+    if (ext.isEmpty()) {
+        const QString p = QString::fromStdString(pathOrExt).toLower();
+        if (p.contains(QLatin1String(".exr"))) ext = QStringLiteral("exr");
+        else if (p.contains(QLatin1String(".png"))) ext = QStringLiteral("png");
+        else if (p.contains(QLatin1String(".jpg")) || p.contains(QLatin1String(".jpeg")))
+            ext = QStringLiteral("jpg");
+        else if (p.contains(QLatin1String(".tx"))) ext = QStringLiteral("tx");
+        else if (p.contains(QLatin1String(".tif"))) ext = QStringLiteral("tif");
+        else if (p.contains(QLatin1String(".hdr"))) ext = QStringLiteral("hdr");
+    }
+    if (ext == QLatin1String("tx")) return TxOutputFormat::Tx;
+    if (ext == QLatin1String("png")) return TxOutputFormat::Png;
+    if (ext == QLatin1String("jpg") || ext == QLatin1String("jpeg")) return TxOutputFormat::Jpg;
+    if (ext == QLatin1String("exr") || ext == QLatin1String("hdr") || ext == QLatin1String("rgbe") ||
+        ext == QLatin1String("tif") || ext == QLatin1String("tiff"))
+        return TxOutputFormat::Exr;
+    // Unknown / empty source while Original is selected → treat as EXR for UI defaults.
+    return TxOutputFormat::Exr;
+}
+
+TxOutputFormat txResolveFormat(TxOutputFormat selected, const std::string& sourcePath) {
+    if (selected == TxOutputFormat::Original) return txFormatFromPath(sourcePath);
+    return selected;
+}
+
+std::string txOutputExtension(TxOutputFormat format, const std::string& sourcePath) {
+    if (format == TxOutputFormat::Original) {
+        QString ext = QFileInfo(QString::fromStdString(sourcePath)).suffix().toLower();
+        if (ext == QLatin1String("jpeg")) ext = QStringLiteral("jpg");
+        if (ext.isEmpty()) {
+            // UDIM / $F pattern: peel trailing .ext before tokens if needed.
+            const QString p = QString::fromStdString(sourcePath);
+            const QRegularExpression re(QStringLiteral(R"(\.([A-Za-z0-9]+)$)"));
+            const auto m = re.match(p);
+            if (m.hasMatch()) ext = m.captured(1).toLower();
+        }
+        if (ext.isEmpty()) return "exr";
+        return ext.toStdString();
+    }
     switch (format) {
         case TxOutputFormat::Png: return "png";
         case TxOutputFormat::Jpg: return "jpg";
+        case TxOutputFormat::Exr: return "exr";
         case TxOutputFormat::Tx:
         default: return "tx";
     }
@@ -407,7 +454,10 @@ std::string txAllocateOutputPath(const std::string& sourcePath, const std::strin
                                  TxOutputFormat format) {
     const QFileInfo src(QString::fromStdString(sourcePath));
     const QString baseName = src.completeBaseName();
-    const QString ext = QString::fromStdString(txOutputExtension(format));
+    const TxOutputFormat resolved = txResolveFormat(format, sourcePath);
+    const QString ext = QString::fromStdString(
+        format == TxOutputFormat::Original ? txOutputExtension(TxOutputFormat::Original, sourcePath)
+                                           : txOutputExtension(resolved));
     QString dir = QString::fromStdString(outputDir);
     if (dir.isEmpty()) dir = QStringLiteral("tx_cache");
     const QFileInfo dirInfo(dir);
@@ -430,8 +480,12 @@ std::string txAllocateOutputPath(const std::string& sourcePath, const std::strin
     return candidate(9999).toStdString();
 }
 
-TxConvertResult txConvertOne(const TxConvertRequest& req) {
+TxConvertResult txConvertOne(const TxConvertRequest& reqIn) {
     TxConvertResult result;
+    TxConvertRequest req = reqIn;
+    // Original is resolved to a concrete format before writing.
+    if (req.format == TxOutputFormat::Original)
+        req.format = txResolveFormat(TxOutputFormat::Original, req.sourcePath);
     result.outputPath = req.outputPath;
     initTools();
     if (g_maketxPath.empty() && g_oiiotoolPath.empty()) {
@@ -472,8 +526,9 @@ TxConvertResult txConvertOne(const TxConvertRequest& req) {
     const QString dstQ = QString::fromStdString(req.outputPath);
     std::string error;
 
-    if (req.format == TxOutputFormat::Png || req.format == TxOutputFormat::Jpg) {
-        // PNG/JPG: no colour-space convert — resize / bit / channels only.
+    if (req.format == TxOutputFormat::Png || req.format == TxOutputFormat::Jpg ||
+        req.format == TxOutputFormat::Exr) {
+        // No colour-space convert — resize / bit / channels only.
         if (!oiiotoolRewrite(srcQ, dstQ, req, /*applyColorConvert=*/false, error)) {
             result.error = error;
             return result;
@@ -492,7 +547,6 @@ TxConvertResult txConvertOne(const TxConvertRequest& req) {
         }
         const QString tempPath = tmp.filePath(QStringLiteral("pre.exr"));
         TxConvertRequest pre = req;
-        // Intermediate stays float-friendly; colour convert happens in maketx.
         if (!oiiotoolRewrite(srcQ, tempPath, pre, /*applyColorConvert=*/false, error)) {
             result.error = error;
             return result;

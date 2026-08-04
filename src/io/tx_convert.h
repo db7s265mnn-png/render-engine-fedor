@@ -11,6 +11,8 @@ enum class TxOutputFormat : int {
     Tx = 0,
     Png = 1,
     Jpg = 2,
+    Exr = 3,
+    Original = 4,  // same extension as source; rules follow resolved format
 };
 
 enum class TxChannelMode : int {
@@ -50,7 +52,14 @@ std::vector<std::string> txExpandFrameSources(const std::string& sourcePathOrPat
 // File-name frame / UDIM number (trailing digits before extension), or 0.
 int txExtractFrameNumber(const std::string& path);
 
-std::string txOutputExtension(TxOutputFormat format);
+// Map a path/extension to a concrete output format (Original never returned).
+TxOutputFormat txFormatFromPath(const std::string& pathOrExt);
+
+// Resolve Original → format from sourcePath; otherwise return `selected`.
+TxOutputFormat txResolveFormat(TxOutputFormat selected, const std::string& sourcePath);
+
+// Extension for the format. For Original, uses sourcePath suffix (fallback "exr").
+std::string txOutputExtension(TxOutputFormat format, const std::string& sourcePath = {});
 
 // Pick an output path in `outputDir` named like the source basename + extension.
 // If that name is taken by a different source, use name_copy_1.ext, …
