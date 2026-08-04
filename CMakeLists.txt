@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(Solstice VERSION 0.9.0 LANGUAGES CXX)
 
-set(SOLSTICE_APP_DISPLAY_NAME "Bob_Render" CACHE STRING "User-visible application name")
+set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
+set(SOLSTICE_TX_CONVERTER_NAME "Grendizer_TX_Converter" CACHE STRING "User-visible TX Converter name")
 
 # Build identity: PROJECT_VERSION + short git SHA so exe / Help can be traced.
 set(SOLSTICE_GIT_SHA "unknown")
@@ -28,7 +29,7 @@ string(TIMESTAMP SOLSTICE_BUILD_DATE "%Y%m%d" UTC)
 set(SOLSTICE_BUILD_ID "${PROJECT_VERSION}-${SOLSTICE_GIT_SHA}${SOLSTICE_GIT_DIRTY}")
 # Human-readable string for Help → About / window title.
 set(SOLSTICE_VERSION_FULL "${PROJECT_VERSION} (${SOLSTICE_GIT_SHA}${SOLSTICE_GIT_DIRTY}, ${SOLSTICE_BUILD_DATE})")
-# Exe / artifact basename, e.g. Bob_Render-0.9.0-dc870a4
+# Exe / artifact basename, e.g. Grendizer_Render-0.9.0-dc870a4
 set(SOLSTICE_OUTPUT_NAME "${SOLSTICE_APP_DISPLAY_NAME}-${SOLSTICE_BUILD_ID}")
 message(STATUS "Build id: ${SOLSTICE_BUILD_ID}")
 
@@ -616,7 +617,7 @@ if(SOLSTICE_BUILD_APP)
     set(CMAKE_AUTORCC ON)
     set(SOLSTICE_APP_ICON_SOURCES resources/icons.qrc)
     if(WIN32)
-        # Embed multi-size .ico so Explorer / taskbar / shortcuts use the Bob icon.
+        # Embed multi-size .ico so Explorer / taskbar / shortcuts use the app icon.
         list(APPEND SOLSTICE_APP_ICON_SOURCES resources/app_icon.rc)
     endif()
     qt_add_executable(Solstice WIN32 MACOSX_BUNDLE
@@ -627,12 +628,16 @@ if(SOLSTICE_BUILD_APP)
     set_target_properties(Solstice PROPERTIES
         OUTPUT_NAME "${SOLSTICE_OUTPUT_NAME}"
         MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.sonya.render")
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.grendizer.render")
     # Write build id next to the binary so packaging / CI can discover the exe name.
     file(WRITE "${CMAKE_BINARY_DIR}/solstice_build_id.txt" "${SOLSTICE_BUILD_ID}\n")
     file(WRITE "${CMAKE_BINARY_DIR}/solstice_output_name.txt" "${SOLSTICE_OUTPUT_NAME}\n")
 
     # Standalone TX Converter (same maketx/OCIO core as auto-TX) + texture viewer.
+    set(TX_CONVERTER_ICON_SOURCES resources/icons.qrc)
+    if(WIN32)
+        list(APPEND TX_CONVERTER_ICON_SOURCES resources/app_icon.rc)
+    endif()
     qt_add_executable(TX_Converter WIN32 MACOSX_BUNDLE
         TX_Converter/main.cpp
         TX_Converter/texture_viewer.cpp
@@ -641,10 +646,16 @@ if(SOLSTICE_BUILD_APP)
         src/ui/timeline_bar.cpp
         src/ui/timeline_bar.h
         src/ui/texture_file_dialog.cpp
-        src/ui/texture_file_dialog.h)
+        src/ui/texture_file_dialog.h
+        ${TX_CONVERTER_ICON_SOURCES})
     target_include_directories(TX_Converter PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
     target_link_libraries(TX_Converter PRIVATE solstice_lib Qt6::Widgets)
-    set_target_properties(TX_Converter PROPERTIES OUTPUT_NAME "TX_Converter")
+    set_target_properties(TX_Converter PROPERTIES
+        OUTPUT_NAME "${SOLSTICE_TX_CONVERTER_NAME}"
+        MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_TX_CONVERTER_NAME}"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.grendizer.txconverter")
+    target_compile_definitions(TX_Converter PRIVATE
+        SOLSTICE_TX_CONVERTER_NAME="${SOLSTICE_TX_CONVERTER_NAME}")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -678,7 +689,7 @@ if(WIN32 AND SOLSTICE_BUILD_APP)
     find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS "${SOLSTICE_QT_BIN_DIR}" ${Qt6_DIR}/../../../bin)
     if(WINDEPLOYQT_EXECUTABLE)
         add_custom_target(deploy
-            COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to ${SOLSTICE_OUTPUT_NAME} + TX_Converter"
+            COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to ${SOLSTICE_OUTPUT_NAME} + ${SOLSTICE_TX_CONVERTER_NAME}"
             COMMAND ${WINDEPLOYQT_EXECUTABLE} --release --no-translations --no-system-d3d-compiler
                     --compiler-runtime $<TARGET_FILE:Solstice>
             COMMAND ${WINDEPLOYQT_EXECUTABLE} --release --no-translations --no-system-d3d-compiler

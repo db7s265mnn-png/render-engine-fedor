@@ -1,11 +1,11 @@
-# TX Converter
+# TX Converter (Grendizer_TX_Converter)
 
-Standalone Qt tool that shares Bob Render’s `maketx` / OCIO TX core (`src/io/tx_convert.*`),
+Standalone Qt tool that shares Grendizer_Render’s `maketx` / OCIO TX core (`src/io/tx_convert.*`),
 plus a texture viewer (LDR / HDR / `.tx`, UDIM timeline).
 
 ## Build
 
-Built with the main app (`TX_Converter` / `TX_Converter.exe`).
+Built with the main app (`Grendizer_TX_Converter` / `Grendizer_TX_Converter.exe`).
 
 ## Usage
 
@@ -22,5 +22,5 @@ Built with the main app (`TX_Converter` / `TX_Converter.exe`).
     Timeline uses filename numbers. **Brightness** = exposure stops (click label to reset).
     Drag to pan (even without zoom), **F** or Fit to frame.
 
-Requires `maketx` and/or `oiiotool`. The Windows zip ships them next to `TX_Converter.exe`.
+Requires `maketx` and/or `oiiotool`. The Windows zip ships them next to `Grendizer_TX_Converter.exe`.
 OCIO config comes from the `OCIO` env var or the OCIO Config field (not bundled).

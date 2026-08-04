@@ -8,12 +8,14 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QImageReader>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSplitter>
+#include <QSize>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -30,7 +32,14 @@ namespace {
 class TxConverterWindow : public QWidget {
 public:
     TxConverterWindow() {
-        setWindowTitle(QStringLiteral("TX Converter"));
+#ifndef SOLSTICE_TX_CONVERTER_NAME
+#define SOLSTICE_TX_CONVERTER_NAME "Grendizer_TX_Converter"
+#endif
+        setWindowTitle(QStringLiteral(SOLSTICE_TX_CONVERTER_NAME));
+        QIcon appIcon(QStringLiteral(":/icons/app_icon.png"));
+        appIcon.addFile(QStringLiteral(":/icons/app_icon_32.png"), QSize(32, 32));
+        appIcon.addFile(QStringLiteral(":/icons/app_icon_64.png"), QSize(64, 64));
+        setWindowIcon(appIcon);
         resize(1280, 780);
 
         auto* root = new QVBoxLayout(this);

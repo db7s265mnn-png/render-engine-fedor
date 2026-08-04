@@ -24,7 +24,7 @@
 | `src/render` | scene | BSDF, light sampling, the integrator, the framebuffer, both backends and the render session |
 | `src/nodes` | render, io, Qt Core | parameters, nodes, the stage, the graph and the built in node library |
 | `src/ui` | nodes, Qt Widgets | the desktop application |
-| `src/app` | nodes | default networks, `.bobsc` documents, headless rendering |
+| `src/app` | nodes | default networks, `.scene` documents, headless rendering |
 
 `src/core` and `src/scene/types.h` are written so that `nvcc` can compile them: every function
 is marked with `SR_HD` (`__host__ __device__` under CUDA) and no STL container ever crosses

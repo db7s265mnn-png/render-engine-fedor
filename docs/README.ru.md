@@ -104,13 +104,13 @@ Device-программы компилируются в PTX через `nvcc` и
 
 ```bash
 # отрендерить существующую сеть
-Solstice --headless scene.bobsc -o beauty.exr -s 512
+Solstice --headless scene.scene -o beauty.exr -s 512
 
 # собрать сеть из Alembic и HDRI и сразу посчитать кадр
 Solstice --headless -a cache.abc -e studio.hdr -o render.png -s 256 --width 1920 --height 1080
 
 # только сохранить сеть в файл сцены
-Solstice --headless -a cache.abc -e studio.hdr --no-render --save-scene shot.bobsc
+Solstice --headless -a cache.abc -e studio.hdr --no-render --save-scene shot.scene
 ```
 
 Формат вывода определяется расширением: `.png` тонмапится настройками плёнки, `.exr` и `.hdr`
@@ -121,14 +121,14 @@ Solstice --headless -a cache.abc -e studio.hdr --no-render --save-scene shot.bob
 ```bash
 ./build/bin/sol_make_test_abc examples/kit.abc      # тестовый Alembic-архив
 python3 tools/make_test_hdri.py examples/sky.hdr    # синтетическое HDRI-небо
-./build/bin/Solstice examples/alembic_hdri.bobsc
+./build/bin/Solstice examples/alembic_hdri.scene
 ```
 
 | Сцена | Что показывает |
 | --- | --- |
-| `studio_sphere.bobsc` | студийная сборка по умолчанию: пол, сфера, dome, солнце и rect-свет |
-| `alembic_hdri.bobsc` | импорт Alembic под HDRI-небом и солнцем |
-| `glass_sphere.bobsc` | тот же импорт, но сфере назначено гладкое стекло |
+| `studio_sphere.scene` | студийная сборка по умолчанию: пол, сфера, dome, солнце и rect-свет |
+| `alembic_hdri.scene` | импорт Alembic под HDRI-небом и солнцем |
+| `glass_sphere.scene` | тот же импорт, но сфере назначено гладкое стекло |
 
 ![Стекло](images/render_glass.png)
 

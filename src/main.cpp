@@ -1,4 +1,4 @@
-// Bob_Render - node based path tracer with Embree and OptiX backends.
+// Grendizer_Render - node based path tracer with Embree and OptiX backends.
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -50,7 +50,7 @@ void configureParser(QCommandLineParser& parser) {
         "with the Embree CPU backend or the OptiX GPU backend.");
     parser.addHelpOption();
     parser.addVersionOption();
-    parser.addPositionalArgument("scene", "Scene file to open (.bobsc)", "[scene]");
+    parser.addPositionalArgument("scene", "Scene file to open (.scene)", "[scene]");
     parser.addOptions({
         {{"r", "headless", "render"}, "Render without opening the user interface."},
         {{"o", "output"}, "Output image (.png, .exr or .hdr).", "path", "render.png"},
@@ -61,7 +61,7 @@ void configureParser(QCommandLineParser& parser) {
         {{"j", "threads"}, "CPU thread count (0 = all cores).", "count"},
         {{"a", "abc"}, "Alembic file to import when no scene file is given.", "path"},
         {{"e", "hdri"}, "HDRI used by the generated dome light.", "path"},
-        {"save-scene", "Write the resulting node network to a .bobsc file.", "path"},
+        {"save-scene", "Write the resulting node network to a .scene file.", "path"},
         {"no-render", "Skip rendering, useful together with --save-scene."},
         {"verbose", "Verbose logging."},
     });

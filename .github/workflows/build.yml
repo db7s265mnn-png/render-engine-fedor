@@ -275,7 +275,7 @@ jobs:
             Copy-Item build/solstice_output_name.txt dist/
           }
           $exeName = (Get-Content build/solstice_output_name.txt -ErrorAction SilentlyContinue | Select-Object -First 1).Trim()
-          if (-not $exeName) { $exeName = "Bob_Render" }
+          if (-not $exeName) { $exeName = "Grendizer_Render" }
           "BUILD_ID=$(Get-Content build/solstice_build_id.txt -ErrorAction SilentlyContinue | Select-Object -First 1)" | Out-File -FilePath $env:GITHUB_ENV -Append
           "OUTPUT_NAME=$exeName" | Out-File -FilePath $env:GITHUB_ENV -Append
           Get-ChildItem dist
@@ -292,8 +292,8 @@ jobs:
 
       - name: Render a frame with the packaged exe
         run: |
-          $exe = Get-ChildItem -Path dist -Filter "Bob_Render-*.exe" | Select-Object -First 1
-          if (-not $exe) { $exe = Get-Item "dist/Bob_Render.exe" -ErrorAction Stop }
+          $exe = Get-ChildItem -Path dist -Filter "Grendizer_Render-*.exe" | Select-Object -First 1
+          if (-not $exe) { $exe = Get-Item "dist/Grendizer_Render.exe" -ErrorAction Stop }
           Write-Host "Smoke-testing $($exe.FullName)"
           Start-Process -FilePath $exe.FullName `
             -ArgumentList '--headless','-o','windows-smoke.png','-s','16','--width','480','--height','270' `
@@ -303,7 +303,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Bob-Render-windows-x64-${{ env.BUILD_ID }}
+          name: Grendizer-Render-windows-x64-${{ env.BUILD_ID }}
           path: dist/
 
       - uses: actions/upload-artifact@v4

@@ -1068,7 +1068,7 @@ public:
                          .withTooltip("On: read config from the OCIO environment variable "
                                       "(instead of the path below).\n"
                                       "Off: use Film → OCIO Config path.\n"
-                                      "LUTs stay next to your config — not shipped with Bob Render."));
+                                      "LUTs stay next to your config — not shipped with Grendizer_Render."));
         addParameter(Parameter::makeFile("ocioconfig", "OCIO Config", "",
                                          "OCIO Config (*.ocio);;All Files (*)")
                          .withGroup("Film")
