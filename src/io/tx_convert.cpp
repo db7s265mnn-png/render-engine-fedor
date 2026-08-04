@@ -189,7 +189,8 @@ bool oiiotoolRewrite(const QString& src, const QString& dst, const TxConvertRequ
 
     QStringList args;
     args << src;
-    args << QStringLiteral("--autocc") << QStringLiteral("off");
+    // Boolean toggle — do NOT pass "off" as an argument (oiiotool treats it as a filename).
+    args << QStringLiteral("--noautocc");
 
     if (req.channels != TxChannelMode::RGBA) {
         args << QStringLiteral("--ch") << oiioChannelArg(req.channels);
@@ -237,7 +238,7 @@ bool maketxWrite(const QString& src, const QString& dst, const TxConvertRequest&
             return false;
         }
         QStringList args;
-        args << src << QStringLiteral("--autocc") << QStringLiteral("off");
+        args << src << QStringLiteral("--noautocc");
         if (!txSkipColorConvert(req.inputColorSpace)) {
             if (!req.ocioConfigPath.empty())
                 args << QStringLiteral("--colorconfig") << QString::fromStdString(req.ocioConfigPath);
