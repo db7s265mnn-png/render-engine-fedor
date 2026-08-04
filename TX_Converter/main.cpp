@@ -109,6 +109,7 @@ public:
         formatCombo_ = new QComboBox();
         formatCombo_->addItem(QStringLiteral("Original"), int(sol::TxOutputFormat::Original));
         formatCombo_->addItem(QStringLiteral("EXR"), int(sol::TxOutputFormat::Exr));
+        formatCombo_->addItem(QStringLiteral("TIFF"), int(sol::TxOutputFormat::Tiff));
         formatCombo_->addItem(QStringLiteral("TX"), int(sol::TxOutputFormat::Tx));
         formatCombo_->addItem(QStringLiteral("PNG"), int(sol::TxOutputFormat::Png));
         formatCombo_->addItem(QStringLiteral("JPG"), int(sol::TxOutputFormat::Jpg));
@@ -185,9 +186,10 @@ public:
         leftLay->addWidget(formBox);
 
         auto* hint = new QLabel(
-            QStringLiteral("TX → ACEScg. EXR/PNG/JPG/Original keep source colour "
+            QStringLiteral("TX → ACEScg. EXR/TIFF/PNG/JPG/Original keep source colour "
                            "(resize / bit / channels only). "
-                           "Output folder must be chosen. F = fit, drag = pan."));
+                           "R/G/B/A write 1 channel; RGB = 3; RGBA = 4. "
+                           "Output folder must be chosen. F = fit, 1/2 = Source/Output."));
         hint->setWordWrap(true);
         hint->setStyleSheet(QStringLiteral("color: #969aa0;"));
         leftLay->addWidget(hint);
@@ -343,6 +345,7 @@ private:
         const bool isTx = eff == sol::TxOutputFormat::Tx;
         const bool isJpg = eff == sol::TxOutputFormat::Jpg;
         const bool isExr = eff == sol::TxOutputFormat::Exr;
+        const bool isTiff = eff == sol::TxOutputFormat::Tiff;
         const bool isPng = eff == sol::TxOutputFormat::Png;
 
         if (colorSpaceCombo_) colorSpaceCombo_->setVisible(isTx);
@@ -366,7 +369,7 @@ private:
         } else {
             if (QWidget* field = form_->labelForField(bitDepthCombo_)) field->setVisible(true);
             bitDepthCombo_->setVisible(true);
-            if (isExr) {
+            if (isExr || isTiff) {
                 bitDepthCombo_->addItem(QStringLiteral("16"), 16);
                 bitDepthCombo_->addItem(QStringLiteral("32"), 32);
             } else if (isPng) {
@@ -377,7 +380,7 @@ private:
                 bitDepthCombo_->addItem(QStringLiteral("16"), 16);
                 bitDepthCombo_->addItem(QStringLiteral("32"), 32);
             }
-            int prefer = isExr || isTx ? 16 : 8;
+            int prefer = isExr || isTiff || isTx ? 16 : 8;
             if (bitDepthCombo_->findData(prevBit) >= 0) prefer = prevBit;
             const int idx = bitDepthCombo_->findData(prefer);
             bitDepthCombo_->setCurrentIndex(idx >= 0 ? idx : 0);

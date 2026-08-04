@@ -5,6 +5,7 @@
 #include <QButtonGroup>
 #include <QColor>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileInfo>
@@ -21,12 +22,14 @@
 #include <QPaintEvent>
 #include <QPixmap>
 #include <QPointer>
+#include <QProcess>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QShortcut>
 #include <QSpinBox>
+#include <QTemporaryDir>
 #include <QThreadPool>
 #include <QTimer>
 #include <QToolButton>
@@ -579,8 +582,40 @@ TextureViewerWidget::LoadPayload TextureViewerWidget::decodeFrame(const QString&
     std::string err;
     if (!loadImage(path.toStdString(), image, err, /*srgbColor=*/false)) {
         if (!loadImage(path.toStdString(), image, err, true)) {
-            payload.error = QString::fromStdString(err.empty() ? "load failed" : err);
-            return payload;
+            // Tiled/half .tx sometimes needs oiiotool when libtiff path fails.
+            const QString ext = info.suffix().toLower();
+            if (ext == QLatin1String("tx") || ext == QLatin1String("tif") ||
+                ext == QLatin1String("tiff")) {
+                QTemporaryDir tmp;
+                if (tmp.isValid()) {
+                    const QString exrPath = tmp.filePath(QStringLiteral("preview.exr"));
+                    QProcess proc;
+                    const QString tool = QDir(QCoreApplication::applicationDirPath())
+                                            .filePath(QStringLiteral("oiiotool"));
+#ifdef Q_OS_WIN
+                    const QString toolExe = tool + QStringLiteral(".exe");
+#else
+                    const QString toolExe = tool;
+#endif
+                    proc.setProgram(QFileInfo::exists(toolExe) ? toolExe : QStringLiteral("oiiotool"));
+                    proc.setArguments({path, QStringLiteral("--noautocc"), QStringLiteral("-o"), exrPath});
+                    proc.setWorkingDirectory(QFileInfo(proc.program()).absolutePath());
+                    proc.start();
+                    if (proc.waitForFinished(120000) && proc.exitCode() == 0 &&
+                        loadImage(exrPath.toStdString(), image, err, false) && !image.empty()) {
+                        // ok — fall through
+                    } else {
+                        payload.error = QString::fromStdString(err.empty() ? "load failed" : err);
+                        return payload;
+                    }
+                } else {
+                    payload.error = QString::fromStdString(err.empty() ? "load failed" : err);
+                    return payload;
+                }
+            } else {
+                payload.error = QString::fromStdString(err.empty() ? "load failed" : err);
+                return payload;
+            }
         }
     }
     if (image.empty()) {

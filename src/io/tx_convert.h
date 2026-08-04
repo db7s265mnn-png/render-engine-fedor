@@ -16,6 +16,7 @@ enum class TxOutputFormat : int {
     Jpg = 2,
     Exr = 3,
     Original = 4,  // same extension as source; rules follow resolved format
+    Tiff = 5,      // .tif / .tiff — settings like EXR (16/32-bit)
 };
 
 enum class TxChannelMode : int {

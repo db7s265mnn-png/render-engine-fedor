@@ -358,11 +358,43 @@ bool loadLdr(const std::string& path, Image& out, std::string& error, bool srgbC
 
 #if SOLSTICE_HAVE_TIFF
 
+// IEEE half (16-bit float) → float32.
+float halfBitsToFloat(uint16_t h) {
+    const uint32_t sign = (uint32_t(h) >> 15) & 1u;
+    uint32_t exp = (uint32_t(h) >> 10) & 0x1fu;
+    uint32_t mant = uint32_t(h) & 0x3ffu;
+    uint32_t fbits = 0;
+    if (exp == 0) {
+        if (mant == 0) {
+            fbits = sign << 31;
+        } else {
+            exp = 127 - 15 + 1;
+            while ((mant & 0x400u) == 0) {
+                mant <<= 1;
+                --exp;
+            }
+            mant &= 0x3ffu;
+            fbits = (sign << 31) | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 31) {
+        fbits = (sign << 31) | 0x7f800000u | (mant << 13);
+    } else {
+        fbits = (sign << 31) | ((exp + (127 - 15)) << 23) | (mant << 13);
+    }
+    float out = 0.0f;
+    std::memcpy(&out, &fbits, sizeof(out));
+    return out;
+}
+
 float decodeTiffChannel(const void* row, int x, int sample, uint16_t samples, uint16_t bits,
                         uint16_t sampleFormat, bool linearize) {
     if (bits == 32 && sampleFormat == SAMPLEFORMAT_IEEEFP) {
         const float* f = static_cast<const float*>(row);
         return f[size_t(x) * samples + sample];
+    }
+    if (bits == 16 && sampleFormat == SAMPLEFORMAT_IEEEFP) {
+        const uint16_t* u = static_cast<const uint16_t*>(row);
+        return halfBitsToFloat(u[size_t(x) * samples + sample]);
     }
     if (bits == 16 && sampleFormat == SAMPLEFORMAT_UINT) {
         const uint16_t* u = static_cast<const uint16_t*>(row);
@@ -377,10 +409,38 @@ float decodeTiffChannel(const void* row, int x, int sample, uint16_t samples, ui
     return 0.0f;
 }
 
+void writeDecodedPixel(std::vector<float>& rgba, uint32_t w, uint32_t imgX, uint32_t imgY,
+                       int colInRow, uint16_t samples, uint16_t bits, uint16_t sampleFormat,
+                       uint16_t photometric, bool linearize, const void* rowBase) {
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
+    if (photometric == PHOTOMETRIC_MINISBLACK || samples == 1) {
+        r = g = b =
+            decodeTiffChannel(rowBase, colInRow, 0, samples, bits, sampleFormat, linearize);
+        if (samples > 1)
+            a = decodeTiffChannel(rowBase, colInRow, 1, samples, bits, sampleFormat, false);
+    } else {
+        r = decodeTiffChannel(rowBase, colInRow, 0, samples, bits, sampleFormat, linearize);
+        g = samples > 1
+                ? decodeTiffChannel(rowBase, colInRow, 1, samples, bits, sampleFormat, linearize)
+                : r;
+        b = samples > 2
+                ? decodeTiffChannel(rowBase, colInRow, 2, samples, bits, sampleFormat, linearize)
+                : r;
+        if (samples > 3)
+            a = decodeTiffChannel(rowBase, colInRow, 3, samples, bits, sampleFormat, false);
+    }
+    const size_t idx = (size_t(imgY) * size_t(w) + size_t(imgX)) * 4;
+    rgba[idx + 0] = r;
+    rgba[idx + 1] = g;
+    rgba[idx + 2] = b;
+    rgba[idx + 3] = a;
+}
+
 bool readTiffDirectoryLevel(TIFF* tif, std::vector<float>& rgba, int& width, int& height, std::string& error,
                             bool srgbColor) {
     uint32_t w = 0, h = 0;
     uint16_t samples = 1, bits = 8, sampleFormat = SAMPLEFORMAT_UINT, photometric = PHOTOMETRIC_RGB;
+    uint16_t planar = PLANARCONFIG_CONTIG;
     if (!TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w) || !TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h) || w == 0 ||
         h == 0) {
         error = "TIFF directory missing width/height";
@@ -390,18 +450,69 @@ bool readTiffDirectoryLevel(TIFF* tif, std::vector<float>& rgba, int& width, int
     TIFFGetFieldDefaulted(tif, TIFFTAG_BITSPERSAMPLE, &bits);
     TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLEFORMAT, &sampleFormat);
     TIFFGetFieldDefaulted(tif, TIFFTAG_PHOTOMETRIC, &photometric);
+    TIFFGetFieldDefaulted(tif, TIFFTAG_PLANARCONFIG, &planar);
 
     const bool supportedBits =
         (bits == 8) || (bits == 16 && sampleFormat == SAMPLEFORMAT_UINT) ||
+        (bits == 16 && sampleFormat == SAMPLEFORMAT_IEEEFP) ||
         (bits == 32 && sampleFormat == SAMPLEFORMAT_IEEEFP);
-    if (!supportedBits || samples < 1 || samples > 4) {
-        error = "unsupported TIFF sample format";
+    if (!supportedBits || samples < 1) {
+        error = "unsupported TIFF sample format (need 8/16u/16f/32f, ≥1 sample)";
+        return false;
+    }
+    // maketx / OIIO .tx may carry extra AOVs — keep the first 4 for preview.
+    if (samples > 4) samples = 4;
+    if (planar != PLANARCONFIG_CONTIG) {
+        error = "planar (separate) TIFF/TX not supported in viewer";
         return false;
     }
 
-    // 8/16-bit colour textures are usually sRGB; float .tx from maketx is linear.
-    // Data maps (normals/bump) pass srgbColor=false so 8/16-bit stay as-authored.
-    const bool linearize = srgbColor && !(bits == 32 && sampleFormat == SAMPLEFORMAT_IEEEFP);
+    // 8/16-bit colour textures are usually sRGB; float/half .tx from maketx is linear.
+    const bool isFloatBits =
+        (bits == 32 && sampleFormat == SAMPLEFORMAT_IEEEFP) ||
+        (bits == 16 && sampleFormat == SAMPLEFORMAT_IEEEFP);
+    const bool linearize = srgbColor && !isFloatBits;
+
+    rgba.assign(size_t(w) * size_t(h) * 4, 0.0f);
+    width = int(w);
+    height = int(h);
+
+    if (TIFFIsTiled(tif)) {
+        // maketx / OIIO write tiled TX — scanlines fail on these files.
+        uint32_t tileW = 0, tileH = 0;
+        TIFFGetFieldDefaulted(tif, TIFFTAG_TILEWIDTH, &tileW);
+        TIFFGetFieldDefaulted(tif, TIFFTAG_TILELENGTH, &tileH);
+        if (tileW == 0 || tileH == 0) {
+            error = "tiled TIFF missing tile size";
+            return false;
+        }
+        const tsize_t tileBytes = TIFFTileSize(tif);
+        if (tileBytes <= 0) {
+            error = "invalid TIFF tile size";
+            return false;
+        }
+        std::vector<uint8_t> tile(static_cast<size_t>(tileBytes), 0);
+        const size_t bytesPerSample = size_t(bits) / 8;
+        const size_t bytesPerPixel = bytesPerSample * size_t(samples);
+        for (uint32_t y0 = 0; y0 < h; y0 += tileH) {
+            for (uint32_t x0 = 0; x0 < w; x0 += tileW) {
+                if (TIFFReadTile(tif, tile.data(), x0, y0, 0, 0) < 0) {
+                    error = "TIFFReadTile failed";
+                    return false;
+                }
+                const uint32_t th = std::min(tileH, h - y0);
+                const uint32_t tw = std::min(tileW, w - x0);
+                for (uint32_t ty = 0; ty < th; ++ty) {
+                    const uint8_t* row = tile.data() + size_t(ty) * size_t(tileW) * bytesPerPixel;
+                    for (uint32_t tx = 0; tx < tw; ++tx) {
+                        writeDecodedPixel(rgba, w, x0 + tx, y0 + ty, int(tx), samples, bits,
+                                          sampleFormat, photometric, linearize, row);
+                    }
+                }
+            }
+        }
+        return true;
+    }
 
     const tsize_t stride = TIFFScanlineSize(tif);
     if (stride <= 0) {
@@ -409,37 +520,14 @@ bool readTiffDirectoryLevel(TIFF* tif, std::vector<float>& rgba, int& width, int
         return false;
     }
     std::vector<uint8_t> scanline(static_cast<size_t>(stride), 0);
-    rgba.assign(size_t(w) * size_t(h) * 4, 0.0f);
-    width = int(w);
-    height = int(h);
-
     for (uint32_t y = 0; y < h; ++y) {
         if (TIFFReadScanline(tif, scanline.data(), y, 0) < 0) {
             error = "TIFFReadScanline failed";
             return false;
         }
         for (uint32_t x = 0; x < w; ++x) {
-            float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
-            if (photometric == PHOTOMETRIC_MINISBLACK || samples == 1) {
-                r = g = b = decodeTiffChannel(scanline.data(), int(x), 0, samples, bits, sampleFormat, linearize);
-                if (samples > 1)
-                    a = decodeTiffChannel(scanline.data(), int(x), 1, samples, bits, sampleFormat, false);
-            } else {
-                r = decodeTiffChannel(scanline.data(), int(x), 0, samples, bits, sampleFormat, linearize);
-                g = samples > 1
-                        ? decodeTiffChannel(scanline.data(), int(x), 1, samples, bits, sampleFormat, linearize)
-                        : r;
-                b = samples > 2
-                        ? decodeTiffChannel(scanline.data(), int(x), 2, samples, bits, sampleFormat, linearize)
-                        : r;
-                if (samples > 3)
-                    a = decodeTiffChannel(scanline.data(), int(x), 3, samples, bits, sampleFormat, false);
-            }
-            const size_t idx = (size_t(y) * size_t(w) + size_t(x)) * 4;
-            rgba[idx + 0] = r;
-            rgba[idx + 1] = g;
-            rgba[idx + 2] = b;
-            rgba[idx + 3] = a;
+            writeDecodedPixel(rgba, w, x, y, int(x), samples, bits, sampleFormat, photometric,
+                              linearize, scanline.data());
         }
     }
     return true;

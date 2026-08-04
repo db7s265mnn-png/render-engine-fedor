@@ -264,11 +264,13 @@ jobs:
                 ForEach-Object { Copy-Item $_.FullName dist/ -Force }
             }
           }
-          # oneTBB / OpenPGL runtime (FetchContent build trees)
+          # oneTBB / OpenPGL / FetchContent libtiff runtime
           Get-ChildItem -Path build -Recurse -Filter "tbb*.dll" -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName dist/ -Force }
           Get-ChildItem -Path build -Recurse -Filter "tbbmalloc*.dll" -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName dist/ -Force }
+          Get-ChildItem -Path build -Recurse -Filter "tiff*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName dist/ -Force; Write-Host "Copied $($_.Name)" }
           if (Test-Path "$env:DEPS_PREFIX/libraries") {
             New-Item -ItemType Directory -Force -Path dist/materialx | Out-Null
             Copy-Item -Recurse "$env:DEPS_PREFIX/libraries" dist/materialx/libraries

@@ -153,7 +153,7 @@ QString oiioDepthArg(int bitDepth, TxOutputFormat format) {
     if (bitDepth <= 0) {
         return QStringLiteral("float");
     }
-    if (format == TxOutputFormat::Exr) {
+    if (format == TxOutputFormat::Exr || format == TxOutputFormat::Tiff) {
         return (bitDepth <= 16) ? QStringLiteral("half") : QStringLiteral("float");
     }
     if (bitDepth <= 8) return QStringLiteral("uint8");
@@ -161,6 +161,11 @@ QString oiioDepthArg(int bitDepth, TxOutputFormat format) {
         return (format == TxOutputFormat::Png) ? QStringLiteral("uint16") : QStringLiteral("half");
     }
     return QStringLiteral("float");
+}
+
+bool isSingleChannelMode(TxChannelMode mode) {
+    return mode == TxChannelMode::R || mode == TxChannelMode::G || mode == TxChannelMode::B ||
+           mode == TxChannelMode::A;
 }
 
 QString oiioChannelArg(TxChannelMode mode) {
@@ -195,8 +200,12 @@ bool oiiotoolRewrite(const QString& src, const QString& dst, const TxConvertRequ
     // Boolean toggle — do NOT pass "off" as an argument (oiiotool treats it as a filename).
     args << QStringLiteral("--noautocc");
 
-    if (req.channels != TxChannelMode::RGBA) {
-        args << QStringLiteral("--ch") << oiioChannelArg(req.channels);
+    // Always select channels explicitly so outputs are truly 1/3/4-channel
+    // (R alone must not become RRR RGB).
+    args << QStringLiteral("--ch") << oiioChannelArg(req.channels);
+    if (isSingleChannelMode(req.channels) && req.format == TxOutputFormat::Jpg) {
+        // JPEG greyscale expects a single Y-like channel, not named R.
+        args << QStringLiteral("--chnames") << QStringLiteral("Y");
     }
 
     if (req.longSide > 0) {
@@ -389,8 +398,9 @@ TxOutputFormat txFormatFromPath(const std::string& pathOrExt) {
     if (ext == QLatin1String("tx")) return TxOutputFormat::Tx;
     if (ext == QLatin1String("png")) return TxOutputFormat::Png;
     if (ext == QLatin1String("jpg") || ext == QLatin1String("jpeg")) return TxOutputFormat::Jpg;
+    if (ext == QLatin1String("tif") || ext == QLatin1String("tiff")) return TxOutputFormat::Tiff;
     if (ext == QLatin1String("exr") || ext == QLatin1String("hdr") || ext == QLatin1String("rgbe") ||
-        ext == QLatin1String("tif") || ext == QLatin1String("tiff"))
+        ext == QLatin1String("pic"))
         return TxOutputFormat::Exr;
     // Unknown / empty source while Original is selected → treat as EXR for UI defaults.
     return TxOutputFormat::Exr;
@@ -419,6 +429,7 @@ std::string txOutputExtension(TxOutputFormat format, const std::string& sourcePa
         case TxOutputFormat::Png: return "png";
         case TxOutputFormat::Jpg: return "jpg";
         case TxOutputFormat::Exr: return "exr";
+        case TxOutputFormat::Tiff: return "tif";
         case TxOutputFormat::Tx:
         default: return "tx";
     }
@@ -535,7 +546,7 @@ TxConvertResult txConvertOne(const TxConvertRequest& reqIn) {
     std::string error;
 
     if (req.format == TxOutputFormat::Png || req.format == TxOutputFormat::Jpg ||
-        req.format == TxOutputFormat::Exr) {
+        req.format == TxOutputFormat::Exr || req.format == TxOutputFormat::Tiff) {
         // No colour-space convert — resize / bit / channels only.
         if (!oiiotoolRewrite(srcQ, dstQ, req, /*applyColorConvert=*/false, error)) {
             result.error = error;
