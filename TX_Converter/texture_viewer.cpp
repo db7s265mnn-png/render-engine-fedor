@@ -25,6 +25,7 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QThreadPool>
+#include <QTimer>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -87,15 +88,86 @@ bool gradeEquals(const ViewerGrade& a, const ViewerGrade& b) {
 // All done in scene-linear before any display / view transform, so HDR values above
 // 1.0 are boosted rather than clamped-then-brightened (which would just wash to grey).
 Vec3 applyGrade(Vec3 c, const ViewerGrade& grade) {
-    c = c * std::exp2(grade.brightness);
-    const float pivot = kGradePivot;
-    c = (c - Vec3(pivot)) * grade.contrast + Vec3(pivot);
-    const float g = std::max(0.01f, grade.gamma);
-    const float invG = 1.0f / g;
-    c.x = std::pow(std::max(0.0f, c.x), invG);
-    c.y = std::pow(std::max(0.0f, c.y), invG);
-    c.z = std::pow(std::max(0.0f, c.z), invG);
+    if (grade.brightness != 0.0f) c = c * std::exp2(grade.brightness);
+    if (grade.contrast != 1.0f) {
+        const float pivot = kGradePivot;
+        c = (c - Vec3(pivot)) * grade.contrast + Vec3(pivot);
+    }
+    if (grade.gamma != 1.0f) {
+        const float invG = 1.0f / std::max(0.01f, grade.gamma);
+        c.x = std::pow(std::max(0.0f, c.x), invG);
+        c.y = std::pow(std::max(0.0f, c.y), invG);
+        c.z = std::pow(std::max(0.0f, c.z), invG);
+    }
     return c;
+}
+
+bool gradeIsIdentity(const ViewerGrade& grade) {
+    return grade.brightness == 0.0f && grade.contrast == 1.0f && grade.gamma == 1.0f;
+}
+
+// Channel extract into packed RGB (no grade / view). Done once per image+channel.
+void buildBaseLinear(const float* linearRgba, int w, int h, ViewerChannelMode channelMode,
+                     std::vector<float>& outRgb) {
+    outRgb.resize(size_t(w) * size_t(h) * 3);
+    if (!linearRgba || w <= 0 || h <= 0) return;
+
+    for (int y = 0; y < h; ++y) {
+        const float* row = linearRgba + size_t(y) * size_t(w) * 4;
+        float* dst = outRgb.data() + size_t(y) * size_t(w) * 3;
+        for (int x = 0; x < w; ++x) {
+            const float* px = row + size_t(x) * 4;
+            float r = px[0], g = px[1], b = px[2];
+            if (channelMode != ViewerChannelMode::RGBA) {
+                float v = px[0];
+                switch (channelMode) {
+                    case ViewerChannelMode::R: v = px[0]; break;
+                    case ViewerChannelMode::G: v = px[1]; break;
+                    case ViewerChannelMode::B: v = px[2]; break;
+                    case ViewerChannelMode::A: v = px[3]; break;
+                    default: break;
+                }
+                r = g = b = v;
+            }
+            dst[x * 3 + 0] = r;
+            dst[x * 3 + 1] = g;
+            dst[x * 3 + 2] = b;
+        }
+    }
+}
+
+// Bake from pre-extracted linear RGB (3 floats/px). pixelStep>1 = interactive preview.
+QImage bakeDisplayFromBase(const float* baseRgb, int w, int h, int colorManagement, int viewTransform,
+                           bool ocioUseEnv, const QString& ocioConfigPath, int workingSpace,
+                           const ViewerGrade& grade, int pixelStep) {
+    pixelStep = std::max(1, pixelStep);
+    const int outW = std::max(1, (w + pixelStep - 1) / pixelStep);
+    const int outH = std::max(1, (h + pixelStep - 1) / pixelStep);
+    QImage out(outW, outH, QImage::Format_RGB888);
+    if (!baseRgb || w <= 0 || h <= 0) return out;
+
+    if (colorManagement == kColorOcio) {
+        ocioEnsureConfig(ocioUseEnv, ocioConfigPath.toStdString());
+    }
+    displayPrepareView(workingSpace, colorManagement, viewTransform);
+    const bool skipGrade = gradeIsIdentity(grade);
+
+    for (int oy = 0; oy < outH; ++oy) {
+        const int y = std::min(h - 1, oy * pixelStep);
+        uchar* line = out.scanLine(oy);
+        const float* row = baseRgb + size_t(y) * size_t(w) * 3;
+        for (int ox = 0; ox < outW; ++ox) {
+            const int x = std::min(w - 1, ox * pixelStep);
+            Vec3 linear(row[x * 3 + 0], row[x * 3 + 1], row[x * 3 + 2]);
+            if (!skipGrade) linear = applyGrade(linear, grade);
+            const Vec3 display = ocioApplyViewPrepared(linear);
+            uchar* dst = line + size_t(ox) * 3;
+            dst[0] = static_cast<uchar>(clampf(display.x, 0.0f, 1.0f) * 255.0f + 0.5f);
+            dst[1] = static_cast<uchar>(clampf(display.y, 0.0f, 1.0f) * 255.0f + 0.5f);
+            dst[2] = static_cast<uchar>(clampf(display.z, 0.0f, 1.0f) * 255.0f + 0.5f);
+        }
+    }
+    return out;
 }
 
 // src/out are tightly packed RGBA float (4 components per pixel); alpha survives the resize.
@@ -147,51 +219,6 @@ void extractLinearFromFloatImage(const Image& image, std::vector<float>& outRgba
     downscaleLinearRgba(src, srcW, srcH, outRgba, outW, outH);
 }
 
-QImage bakeDisplayImage(const float* linearRgba, int w, int h, ViewerChannelMode channelMode,
-                        int colorManagement, int viewTransform, bool ocioUseEnv,
-                        const QString& ocioConfigPath, int workingSpace, const ViewerGrade& grade) {
-    QImage out(w, h, QImage::Format_RGB888);
-    if (!linearRgba || w <= 0 || h <= 0) return out;
-
-    if (colorManagement == kColorOcio) {
-        ocioEnsureConfig(ocioUseEnv, ocioConfigPath.toStdString());
-    }
-    displayPrepareView(workingSpace, colorManagement, viewTransform);
-
-    for (int y = 0; y < h; ++y) {
-        uchar* line = out.scanLine(y);
-        const float* row = linearRgba + size_t(y) * size_t(w) * 4;
-        for (int x = 0; x < w; ++x) {
-            const float* px = row + size_t(x) * 4;
-
-            Vec3 linear;
-            if (channelMode == ViewerChannelMode::RGBA) {
-                linear = Vec3(px[0], px[1], px[2]);
-            } else {
-                float v = px[0];
-                switch (channelMode) {
-                    case ViewerChannelMode::R: v = px[0]; break;
-                    case ViewerChannelMode::G: v = px[1]; break;
-                    case ViewerChannelMode::B: v = px[2]; break;
-                    case ViewerChannelMode::A: v = px[3]; break;
-                    default: break;
-                }
-                linear = Vec3(v, v, v);
-            }
-
-            // Grade in linear (scene-referred), then hand off to the OCIO/Classic view transform.
-            linear = applyGrade(linear, grade);
-            Vec3 display = ocioApplyViewPrepared(linear);
-
-            uchar* dst = line + size_t(x) * 3;
-            dst[0] = static_cast<uchar>(clampf(display.x, 0.0f, 1.0f) * 255.0f + 0.5f);
-            dst[1] = static_cast<uchar>(clampf(display.y, 0.0f, 1.0f) * 255.0f + 0.5f);
-            dst[2] = static_cast<uchar>(clampf(display.z, 0.0f, 1.0f) * 255.0f + 0.5f);
-        }
-    }
-    return out;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -210,7 +237,7 @@ void FloatPreviewCanvas::clear() {
     linearRgba_ = nullptr;
     width_ = height_ = 0;
     contentId_ = 0;
-    invalidateDisplayCache();
+    invalidateBaseLinear();
     placeholder_ = QStringLiteral("No texture");
     update();
 }
@@ -219,7 +246,7 @@ void FloatPreviewCanvas::setPlaceholder(const QString& text) {
     linearRgba_ = nullptr;
     width_ = height_ = 0;
     contentId_ = 0;
-    invalidateDisplayCache();
+    invalidateBaseLinear();
     placeholder_ = text;
     update();
 }
@@ -229,7 +256,7 @@ void FloatPreviewCanvas::setLinearImage(const float* rgba, int width, int height
     width_ = width;
     height_ = height;
     contentId_ = contentId;
-    invalidateDisplayCache();
+    invalidateBaseLinear();
     if (fitted_) fitToView();
     else {
         clampPan();
@@ -251,32 +278,65 @@ void FloatPreviewCanvas::setDisplayParams(int colorManagement, int viewTransform
 void FloatPreviewCanvas::setChannelMode(ViewerChannelMode mode) {
     if (channelMode_ == mode) return;
     channelMode_ = mode;
-    invalidateDisplayCache();
+    invalidateBaseLinear();
     update();
 }
 
-void FloatPreviewCanvas::setGrade(const ViewerGrade& grade) {
+void FloatPreviewCanvas::setGrade(const ViewerGrade& grade, bool interactive) {
+    const bool sameGrade = gradeEquals(grade_, grade);
     grade_ = grade;
-    invalidateDisplayCache();
+    gradeInteractive_ = interactive;
+    // Keep the last display frame while scrubbing (avoid blank flash); ensureDisplayCache
+    // rebuilds when grade / step no longer match the cache keys.
+    if (!sameGrade || (!interactive && displayCacheStep_ > 1)) {
+        // Mark dirty without wiping the QImage so paint can still show the previous frame.
+        displayCacheId_ = 0;
+    }
     update();
 }
 
 void FloatPreviewCanvas::invalidateDisplayCache() {
     displayCache_ = {};
     displayCacheId_ = 0;
+    displayCacheStep_ = 0;
+}
+
+void FloatPreviewCanvas::invalidateBaseLinear() {
+    baseLinearRgb_.clear();
+    baseLinearId_ = 0;
+    baseLinearChannel_ = -1;
+    invalidateDisplayCache();
+}
+
+void FloatPreviewCanvas::ensureBaseLinear() {
+    if (!linearRgba_ || width_ <= 0 || height_ <= 0) return;
+    if (!baseLinearRgb_.empty() && baseLinearId_ == contentId_ &&
+        baseLinearChannel_ == int(channelMode_)) {
+        return;
+    }
+    buildBaseLinear(linearRgba_, width_, height_, channelMode_, baseLinearRgb_);
+    baseLinearId_ = contentId_;
+    baseLinearChannel_ = int(channelMode_);
 }
 
 void FloatPreviewCanvas::ensureDisplayCache() {
     if (!linearRgba_ || width_ <= 0 || height_ <= 0) return;
+
+    const int wantStep = gradeInteractive_ ? 3 : 1;
+    // Reuse cache when params match and resolution is at least as good as requested.
     if (!displayCache_.isNull() && displayCacheId_ == contentId_ &&
         displayCacheColorMgmt_ == colorManagement_ && displayCacheView_ == viewTransform_ &&
         displayCacheChannel_ == int(channelMode_) && displayCacheWorking_ == workingSpace_ &&
         displayCacheOcioEnv_ == ocioUseEnv_ && displayCacheOcioPath_ == ocioConfigPath_ &&
-        gradeEquals(displayCacheGrade_, grade_)) {
+        gradeEquals(displayCacheGrade_, grade_) && displayCacheStep_ > 0 &&
+        displayCacheStep_ <= wantStep) {
         return;
     }
-    displayCache_ = bakeDisplayImage(linearRgba_, width_, height_, channelMode_, colorManagement_,
-                                     viewTransform_, ocioUseEnv_, ocioConfigPath_, workingSpace_, grade_);
+
+    ensureBaseLinear();
+    displayCache_ = bakeDisplayFromBase(baseLinearRgb_.data(), width_, height_, colorManagement_,
+                                        viewTransform_, ocioUseEnv_, ocioConfigPath_, workingSpace_,
+                                        grade_, wantStep);
     displayCacheId_ = contentId_;
     displayCacheColorMgmt_ = colorManagement_;
     displayCacheView_ = viewTransform_;
@@ -285,6 +345,7 @@ void FloatPreviewCanvas::ensureDisplayCache() {
     displayCacheOcioEnv_ = ocioUseEnv_;
     displayCacheOcioPath_ = ocioConfigPath_;
     displayCacheGrade_ = grade_;
+    displayCacheStep_ = wantStep;
 }
 
 void FloatPreviewCanvas::fitToView() {
@@ -774,19 +835,30 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     connect(channelGroup_, &QButtonGroup::idClicked, this,
             [this](int id) { setChannelMode(ViewerChannelMode(id)); });
 
+    gradeTimer_ = new QTimer(this);
+    gradeTimer_->setSingleShot(true);
+    connect(gradeTimer_, &QTimer::timeout, this, [this] { applyGradeFromUi(gradeScrubbing_); });
+
     auto wireGrade = [this](QDoubleSpinBox* spin, QSlider* slider, double minV, double maxV) {
         const double span = std::max(1e-9, maxV - minV);
         connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
                 [this, slider, minV, span](double v) {
                     QSignalBlocker b(slider);
                     slider->setValue(int(std::lround(std::clamp((v - minV) / span, 0.0, 1.0) * 1000.0)));
-                    applyGradeFromUi();
+                    // Spin edits (typing / label reset): full bake. While scrubbing, spin is blocked.
+                    scheduleGradeApply(false);
                 });
+        connect(slider, &QSlider::sliderPressed, this, [this] { gradeScrubbing_ = true; });
+        connect(slider, &QSlider::sliderReleased, this, [this] {
+            gradeScrubbing_ = false;
+            if (gradeTimer_) gradeTimer_->stop();
+            applyGradeFromUi(false);
+        });
         connect(slider, &QSlider::valueChanged, this, [this, spin, minV, span](int pos) {
             const double v = minV + span * (double(pos) / 1000.0);
             QSignalBlocker b(spin);
             spin->setValue(v);
-            applyGradeFromUi();
+            scheduleGradeApply(true);
         });
     };
     wireGrade(brightnessSpin_, brightnessSlider_, -5.0, 5.0);
@@ -801,11 +873,21 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     rebuildTimeline();
 }
 
-void TextureViewerWidget::applyGradeFromUi() {
+void TextureViewerWidget::scheduleGradeApply(bool interactive) {
+    if (interactive) gradeScrubbing_ = true;
+    if (!gradeTimer_) {
+        applyGradeFromUi(interactive);
+        return;
+    }
+    // Coalesce slider ticks to ~60 Hz interactive previews.
+    gradeTimer_->start(interactive ? 16 : 0);
+}
+
+void TextureViewerWidget::applyGradeFromUi(bool interactive) {
     grade_.brightness = float(brightnessSpin_->value());
     grade_.contrast = float(contrastSpin_->value());
     grade_.gamma = float(gammaSpin_->value());
-    canvas_->setGrade(grade_);
+    canvas_->setGrade(grade_, interactive);
 }
 
 void TextureViewerWidget::setChannelMode(ViewerChannelMode mode) {

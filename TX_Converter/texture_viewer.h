@@ -20,6 +20,7 @@ class QDoubleSpinBox;
 class QSlider;
 class QButtonGroup;
 class QKeyEvent;
+class QTimer;
 
 namespace sol {
 
@@ -52,7 +53,8 @@ public:
     void setDisplayParams(int colorManagement, int viewTransform, bool ocioUseEnv,
                           const QString& ocioConfigPath, int workingSpace);
     void setChannelMode(ViewerChannelMode mode);
-    void setGrade(const ViewerGrade& grade);
+    // interactive=true: cheaper preview bake while scrubbing grade sliders.
+    void setGrade(const ViewerGrade& grade, bool interactive = false);
     void fitToView();
     void resetView();
     double zoom() const { return zoom_; }
@@ -72,6 +74,8 @@ protected:
 
 private:
     void invalidateDisplayCache();
+    void invalidateBaseLinear();
+    void ensureBaseLinear();
     void ensureDisplayCache();
     QRectF imageRect() const;
     void clampPan();
@@ -88,6 +92,12 @@ private:
     QString ocioConfigPath_;
     int workingSpace_ = 1;
     ViewerGrade grade_;
+    bool gradeInteractive_ = false;
+
+    // Channel-extracted linear RGB (no grade / view). Rebuilt on image/channel change.
+    std::vector<float> baseLinearRgb_;
+    quint64 baseLinearId_ = 0;
+    int baseLinearChannel_ = -1;
 
     QImage displayCache_;
     quint64 displayCacheId_ = 0;
@@ -95,6 +105,7 @@ private:
     int displayCacheView_ = -1;
     int displayCacheChannel_ = -1;
     int displayCacheWorking_ = -1;
+    int displayCacheStep_ = 0;
     QString displayCacheOcioPath_;
     bool displayCacheOcioEnv_ = true;
     ViewerGrade displayCacheGrade_;
@@ -182,7 +193,8 @@ private:
     void startPreloadAll();
     void onFrameLoaded(quint64 generation, LoadPayload payload);
     void pushFrameToCanvas();
-    void applyGradeFromUi();
+    void applyGradeFromUi(bool interactive = false);
+    void scheduleGradeApply(bool interactive);
     void setChannelMode(ViewerChannelMode mode);
     void onStartEdited();
     void onEndEdited();
@@ -220,6 +232,8 @@ private:
     QSlider* brightnessSlider_ = nullptr;
     QSlider* contrastSlider_ = nullptr;
     QSlider* gammaSlider_ = nullptr;
+    QTimer* gradeTimer_ = nullptr;
+    bool gradeScrubbing_ = false;
 
     QLineEdit* startEdit_ = nullptr;
     QLineEdit* endEdit_ = nullptr;
