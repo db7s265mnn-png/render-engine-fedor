@@ -93,7 +93,6 @@ public:
 
         bitDepthCombo_ = new QComboBox();
         form_->addRow(QStringLiteral("Bit Depth"), bitDepthCombo_);
-        bitDepthRow_ = form_->itemAt(form_->rowCount() - 1, QFormLayout::LabelRole)->widget();
 
         resolutionCombo_ = new QComboBox();
         resolutionCombo_->addItem(QStringLiteral("Original"), 0);
@@ -337,7 +336,6 @@ private:
     QCheckBox* useEnvCheck_ = nullptr;
     QWidget* colorSpaceLabel_ = nullptr;
     QWidget* ocioLabel_ = nullptr;
-    QWidget* bitDepthRow_ = nullptr;
     QLabel* status_ = nullptr;
     sol::TextureViewerWidget* viewer_ = nullptr;
 };

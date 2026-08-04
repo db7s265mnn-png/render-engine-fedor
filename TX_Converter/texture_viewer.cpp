@@ -616,32 +616,43 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     modeRow->addWidget(new QLabel(QStringLiteral("View")));
     contentCombo_ = new QComboBox();
     contentCombo_->addItem(QStringLiteral("Source Images"), int(ViewerContentKind::SourceImages));
-    contentCombo_->addItem(QStringLiteral("Converted TX"), int(ViewerContentKind::ConvertedTx));
-    contentCombo_->setMinimumWidth(130);
+    contentCombo_->addItem(QStringLiteral("Converted"), int(ViewerContentKind::ConvertedTx));
+    contentCombo_->setMinimumWidth(120);
     contentCombo_->setToolTip(QStringLiteral("Preview the source images or the converted output."));
     modeRow->addWidget(contentCombo_);
 
     channelGroup_ = new QButtonGroup(this);
     channelGroup_->setExclusive(true);
-    auto addChannelButton = [&](ViewerChannelMode mode, const QString& text, const QString& tip,
-                                const QColor& fill, bool checker = false) {
+    auto addChannelButton = [&](ViewerChannelMode mode, const QString& tip, const QColor& fill,
+                                bool checker = false, bool rgbaIcon = false) {
         QToolButton* btn = makeChannelButton(tip, fill, checker);
-        btn->setText(text);
+        if (rgbaIcon) {
+            QPixmap pix(14, 14);
+            pix.fill(Qt::transparent);
+            QPainter pp(&pix);
+            pp.fillRect(0, 0, 7, 7, QColor(220, 70, 70));
+            pp.fillRect(7, 0, 7, 7, QColor(70, 120, 220));
+            pp.fillRect(0, 7, 7, 7, QColor(70, 190, 90));
+            pp.fillRect(7, 7, 7, 7, QColor(180, 180, 180));
+            pp.end();
+            btn->setIcon(QIcon(pix));
+            btn->setIconSize(QSize(14, 14));
+        }
         channelGroup_->addButton(btn, int(mode));
         modeRow->addWidget(btn);
         return btn;
     };
     QToolButton* rgbaBtn =
-        addChannelButton(ViewerChannelMode::RGBA, QStringLiteral("RGBA"),
-                         QStringLiteral("Show all channels in colour"), QColor(210, 213, 218));
-    addChannelButton(ViewerChannelMode::R, QStringLiteral("R"),
-                     QStringLiteral("Isolate red channel (grey)"), QColor(224, 96, 96));
-    addChannelButton(ViewerChannelMode::G, QStringLiteral("G"),
-                     QStringLiteral("Isolate green channel (grey)"), QColor(104, 200, 110));
-    addChannelButton(ViewerChannelMode::B, QStringLiteral("B"),
-                     QStringLiteral("Isolate blue channel (grey)"), QColor(102, 146, 232));
-    addChannelButton(ViewerChannelMode::A, QStringLiteral("A"),
-                     QStringLiteral("Isolate alpha channel (grey)"), QColor(160, 160, 160), true);
+        addChannelButton(ViewerChannelMode::RGBA, QStringLiteral("Show all channels in colour"),
+                         QColor(58, 61, 66), false, true);
+    addChannelButton(ViewerChannelMode::R, QStringLiteral("Isolate red channel (grey)"),
+                     QColor(224, 96, 96));
+    addChannelButton(ViewerChannelMode::G, QStringLiteral("Isolate green channel (grey)"),
+                     QColor(104, 200, 110));
+    addChannelButton(ViewerChannelMode::B, QStringLiteral("Isolate blue channel (grey)"),
+                     QColor(102, 146, 232));
+    addChannelButton(ViewerChannelMode::A, QStringLiteral("Isolate alpha channel (grey)"),
+                     QColor(160, 160, 160), true);
     rgbaBtn->setChecked(true);
 
     modeRow->addWidget(new QLabel(QStringLiteral("Display")));
