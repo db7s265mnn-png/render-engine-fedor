@@ -26,7 +26,9 @@ namespace {
 
 QString resolvePath(const CookContext& context, const QString& path) {
     if (path.isEmpty()) return path;
-    const QString expanded = expandStringExpression(path, context.frame);
+    QString expanded = path.contains(QStringLiteral("$F"))
+                           ? resolveFramePathExisting(path, context.frame)
+                           : expandStringExpression(path, context.frame);
     QFileInfo info(expanded);
     if (info.isAbsolute() || context.sceneDirectory.isEmpty()) return expanded;
     return QDir(context.sceneDirectory).absoluteFilePath(expanded);

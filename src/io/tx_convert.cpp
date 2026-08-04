@@ -16,6 +16,7 @@
 #include <mutex>
 #include <string>
 
+#include "core/expr_eval.h"
 #include "core/log.h"
 
 namespace sol {
@@ -202,18 +203,12 @@ std::vector<std::string> txExpandFrameSources(const std::string& sourcePathOrPat
                                               int frameEnd) {
     const QString path = QString::fromStdString(sourcePathOrPattern);
     std::vector<std::string> out;
-    if (!path.contains(QLatin1Char('$'))) return out;
+    if (!path.contains(QStringLiteral("$F"))) return out;
     if (frameEnd < frameStart) std::swap(frameStart, frameEnd);
     frameStart = std::max(1, frameStart);
     frameEnd = std::max(frameStart, frameEnd);
     for (int f = frameStart; f <= frameEnd; ++f) {
-        QString concrete = path;
-        for (int width = 8; width >= 2; --width) {
-            const QString token = QStringLiteral("$F%1").arg(width);
-            const QString repl = QStringLiteral("%1").arg(f, width, 10, QChar('0'));
-            concrete.replace(token, repl);
-        }
-        concrete.replace(QStringLiteral("$F"), QString::number(f));
+        const QString concrete = resolveFramePathExisting(path, f);
         if (QFileInfo::exists(concrete)) out.push_back(concrete.toStdString());
     }
     return out;

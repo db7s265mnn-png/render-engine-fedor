@@ -1,5 +1,7 @@
 #include "core/expr_eval.h"
 
+#include <QFileInfo>
+#include <QStringList>
 #include <cmath>
 #include <string>
 
@@ -140,14 +142,25 @@ int exprFrame() { return g_exprFrame; }
 
 QString expandFrameTokens(const QString& text, int frame) {
     QString out = text;
-    // Longest first so $F4 wins over $F.
-    for (int width = 8; width >= 2; --width) {
-        const QString token = QStringLiteral("$F%1").arg(width);
-        const QString repl = QStringLiteral("%1").arg(frame, width, 10, QChar('0'));
-        out.replace(token, repl);
-    }
     out.replace(QStringLiteral("$F"), QString::number(frame));
     return out;
+}
+
+QString resolveFramePathExisting(const QString& text, int frame) {
+    if (!text.contains(QStringLiteral("$F"))) return text;
+    // Prefer unpadded, then common paddings so foo.$F.exr finds foo.0001.exr.
+    QStringList candidates;
+    candidates << expandFrameTokens(text, frame);
+    for (int width = 2; width <= 8; ++width) {
+        const QString padded = QStringLiteral("%1").arg(frame, width, 10, QChar('0'));
+        QString c = text;
+        c.replace(QStringLiteral("$F"), padded);
+        if (!candidates.contains(c)) candidates << c;
+    }
+    for (const QString& c : candidates) {
+        if (QFileInfo::exists(c)) return c;
+    }
+    return candidates.first();
 }
 
 bool looksLikeExpression(const QString& text) {

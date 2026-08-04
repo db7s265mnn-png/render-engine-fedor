@@ -24,7 +24,8 @@ bool txSkipColorConvert(const std::string& inputColorSpace);
 // Non-UDIM paths return a single-element list if the file exists (or the path as-is).
 std::vector<std::string> txExpandUdimSources(const std::string& sourcePathOrPattern);
 
-// Expand $F / $F2..$F8 in a pattern across [frameStart, frameEnd] (inclusive).
+// Expand $F in a pattern across [frameStart, frameEnd] (inclusive).
+// Tries unpadded and zero-padded variants so foo.$F.exr finds foo.0001.exr.
 // Returns existing concrete files. If pattern has no $F token, returns empty.
 std::vector<std::string> txExpandFrameSources(const std::string& sourcePathOrPattern, int frameStart,
                                               int frameEnd);

@@ -18,19 +18,12 @@ namespace sol {
 
 enum class SequenceTokenKind {
     None = 0,
-    Udim,   // <UDIM>
-    F,      // $F
-    F2,
-    F3,
-    F4,
-    F5,
-    F6,
-    F7,
-    F8,
+    Udim,  // <UDIM>
+    F,     // $F
 };
 
 struct TextureFileDialogResult {
-    QString path;                 // concrete file or pattern with <UDIM> / $F#
+    QString path;  // concrete file or pattern with <UDIM> / $F
     bool sequence = false;
     SequenceTokenKind token = SequenceTokenKind::None;
 };
@@ -41,38 +34,36 @@ public:
     explicit TextureFileDialog(QWidget* parent = nullptr);
 
     void setStartPath(const QString& path);
-    void setNameFilters(const QStringList& filters);  // e.g. {"*.png", "*.exr", ...}
+    void setNameFilters(const QStringList& filters);
     void setWindowTitleText(const QString& title);
 
     TextureFileDialogResult resultData() const { return result_; }
 
-    // Static helper used by call sites.
     static TextureFileDialogResult getOpenTexture(QWidget* parent, const QString& title,
-                                                  const QString& startPath,
-                                                  const QString& filter);
+                                                  const QString& startPath, const QString& filter);
 
 private slots:
     void onDirectorySelected(const QModelIndex& index);
     void onFileActivated(const QModelIndex& index);
     void onSequenceToggled(bool on);
     void onTokenChanged(int);
-    void onPathEdited();
     void acceptSelection();
     void refreshFileList();
 
 private:
     struct SeqGroup {
-        QString displayName;   // foo.<UDIM>.png or foo.$F4.exr
-        QString patternPath;   // full path with token
-        QStringList members;   // concrete files
+        QString displayName;
+        QString patternPath;
+        QStringList members;
         SequenceTokenKind kind = SequenceTokenKind::None;
-        int padWidth = 0;
     };
 
     void populateFiles();
+    void rememberDirectory(const QString& dirPath);
+    QString rememberedDirectory() const;
     QVector<SeqGroup> detectSequences(const QStringList& files) const;
     SequenceTokenKind currentTokenKind() const;
-    QString tokenString(SequenceTokenKind kind, int padWidth) const;
+    static QString tokenString(SequenceTokenKind kind);
 
     QFileSystemModel* dirModel_ = nullptr;
     QTreeView* dirView_ = nullptr;
