@@ -198,6 +198,27 @@ std::vector<std::string> txExpandUdimSources(const std::string& sourcePathOrPatt
     return out;
 }
 
+std::vector<std::string> txExpandFrameSources(const std::string& sourcePathOrPattern, int frameStart,
+                                              int frameEnd) {
+    const QString path = QString::fromStdString(sourcePathOrPattern);
+    std::vector<std::string> out;
+    if (!path.contains(QLatin1Char('$'))) return out;
+    if (frameEnd < frameStart) std::swap(frameStart, frameEnd);
+    frameStart = std::max(1, frameStart);
+    frameEnd = std::max(frameStart, frameEnd);
+    for (int f = frameStart; f <= frameEnd; ++f) {
+        QString concrete = path;
+        for (int width = 8; width >= 2; --width) {
+            const QString token = QStringLiteral("$F%1").arg(width);
+            const QString repl = QStringLiteral("%1").arg(f, width, 10, QChar('0'));
+            concrete.replace(token, repl);
+        }
+        concrete.replace(QStringLiteral("$F"), QString::number(f));
+        if (QFileInfo::exists(concrete)) out.push_back(concrete.toStdString());
+    }
+    return out;
+}
+
 std::string txAllocateOutputPath(const std::string& sourcePath, const std::string& outputDir) {
     const QFileInfo src(QString::fromStdString(sourcePath));
     const QString baseName = src.completeBaseName();  // strip extension; keep UDIM digits in name
@@ -329,9 +350,16 @@ TxConvertResult txConvertOne(const TxConvertRequest& req) {
 
 bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string& outputDir,
                       const std::string& inputColorSpace, const std::string& ocioConfigPath,
-                      std::vector<TxConvertResult>& results, std::string& error) {
+                      std::vector<TxConvertResult>& results, std::string& error, int frameStart,
+                      int frameEnd) {
     results.clear();
-    const std::vector<std::string> sources = txExpandUdimSources(sourcePathOrPattern);
+    const QString pathQ = QString::fromStdString(sourcePathOrPattern);
+    std::vector<std::string> sources;
+    if (pathQ.contains(QLatin1Char('$'))) {
+        sources = txExpandFrameSources(sourcePathOrPattern, frameStart, frameEnd);
+    } else {
+        sources = txExpandUdimSources(sourcePathOrPattern);
+    }
     if (sources.empty()) {
         error = "no source files found for: " + sourcePathOrPattern;
         return false;

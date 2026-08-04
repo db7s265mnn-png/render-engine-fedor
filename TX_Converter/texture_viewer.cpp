@@ -1,5 +1,6 @@
 #include "texture_viewer.h"
 
+#include <QAbstractSpinBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFileInfo>
@@ -16,6 +17,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QSignalBlocker>
+#include <QSlider>
 #include <QThreadPool>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -24,6 +26,7 @@
 #include <cmath>
 #include <string>
 
+#include "core/expr_eval.h"
 #include "core/image.h"
 #include "core/math.h"
 #include "io/image_io.h"
@@ -480,7 +483,7 @@ QDoubleSpinBox* TextureViewerWidget::makeGradeSpin(double minV, double maxV, dou
     spin->setSingleStep(step);
     spin->setDecimals(2);
     spin->setValue(value);
-    spin->setFixedWidth(72);
+    spin->setFixedWidth(64);
     spin->setToolTip(tip);
     spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
     spin->setStyleSheet(QStringLiteral(
@@ -493,6 +496,13 @@ QDoubleSpinBox* TextureViewerWidget::makeGradeSpin(double minV, double maxV, dou
         "}"
         "QDoubleSpinBox:focus { border: 1px solid #50aaff; }"));
     return spin;
+}
+
+QSlider* makeGradeSlider(QWidget* parent, int steps = 1000) {
+    auto* slider = new QSlider(Qt::Horizontal, parent);
+    slider->setRange(0, steps);
+    slider->setFixedWidth(110);
+    return slider;
 }
 
 TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
@@ -522,28 +532,30 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
 
     auto* gradeRow = new QHBoxLayout();
     gradeRow->setContentsMargins(0, 0, 0, 0);
-    gradeRow->setSpacing(6);
+    gradeRow->setSpacing(4);
     const QString gradeStyle = QStringLiteral("color: #9aa0a6;");
-    auto* bLab = new QLabel(QStringLiteral("Bright"));
-    bLab->setStyleSheet(gradeStyle);
-    gradeRow->addWidget(bLab);
-    brightnessSpin_ = makeGradeSpin(-1.0, 1.0, 0.05, 0.0, QStringLiteral("Brightness (−1 … +1)"));
-    gradeRow->addWidget(brightnessSpin_);
-    auto* cLab = new QLabel(QStringLiteral("Contrast"));
-    cLab->setStyleSheet(gradeStyle);
-    gradeRow->addWidget(cLab);
-    contrastSpin_ = makeGradeSpin(0.0, 3.0, 0.05, 1.0, QStringLiteral("Contrast (1 = neutral)"));
-    gradeRow->addWidget(contrastSpin_);
-    auto* gLab = new QLabel(QStringLiteral("Gamma"));
-    gLab->setStyleSheet(gradeStyle);
-    gradeRow->addWidget(gLab);
-    gammaSpin_ = makeGradeSpin(0.20, 3.0, 0.05, 1.0, QStringLiteral("Display gamma (1 = neutral)"));
-    gradeRow->addWidget(gammaSpin_);
+    auto addGrade = [&](const QString& name, QDoubleSpinBox** spin, QSlider** slider, double minV,
+                        double maxV, double step, double value, const QString& tip) {
+        auto* lab = new QLabel(name);
+        lab->setStyleSheet(gradeStyle);
+        gradeRow->addWidget(lab);
+        *spin = makeGradeSpin(minV, maxV, step, value, tip);
+        *slider = makeGradeSlider(this);
+        const double t = (value - minV) / std::max(1e-9, maxV - minV);
+        (*slider)->setValue(int(std::lround(std::clamp(t, 0.0, 1.0) * 1000.0)));
+        gradeRow->addWidget(*slider, 1);
+        gradeRow->addWidget(*spin);
+    };
+    addGrade(QStringLiteral("Bright"), &brightnessSpin_, &brightnessSlider_, -1.0, 1.0, 0.05, 0.0,
+             QStringLiteral("Brightness (−1 … +1)"));
+    addGrade(QStringLiteral("Contrast"), &contrastSpin_, &contrastSlider_, 0.0, 3.0, 0.05, 1.0,
+             QStringLiteral("Contrast (1 = neutral)"));
+    addGrade(QStringLiteral("Gamma"), &gammaSpin_, &gammaSlider_, 0.20, 3.0, 0.05, 1.0,
+             QStringLiteral("Display gamma (1 = neutral)"));
     gradeResetBtn_ = new QPushButton(QStringLiteral("Reset"));
     gradeResetBtn_->setFixedWidth(52);
     gradeResetBtn_->setToolTip(QStringLiteral("Reset brightness / contrast / gamma"));
     gradeRow->addWidget(gradeResetBtn_);
-    gradeRow->addStretch(1);
     root->addLayout(gradeRow);
 
     canvas_ = new FloatPreviewCanvas(this);
@@ -586,10 +598,24 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     connect(displayCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         setDisplayMode(ViewerDisplayMode(displayCombo_->currentData().toInt()));
     });
-    auto gradeChanged = [this](double) { applyGradeFromUi(); };
-    connect(brightnessSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, gradeChanged);
-    connect(contrastSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, gradeChanged);
-    connect(gammaSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, gradeChanged);
+    auto wireGrade = [this](QDoubleSpinBox* spin, QSlider* slider, double minV, double maxV) {
+        const double span = std::max(1e-9, maxV - minV);
+        connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+                [this, slider, minV, span](double v) {
+                    QSignalBlocker b(slider);
+                    slider->setValue(int(std::lround(std::clamp((v - minV) / span, 0.0, 1.0) * 1000.0)));
+                    applyGradeFromUi();
+                });
+        connect(slider, &QSlider::valueChanged, this, [this, spin, minV, span](int pos) {
+            const double v = minV + span * (double(pos) / 1000.0);
+            QSignalBlocker b(spin);
+            spin->setValue(v);
+            applyGradeFromUi();
+        });
+    };
+    wireGrade(brightnessSpin_, brightnessSlider_, -1.0, 1.0);
+    wireGrade(contrastSpin_, contrastSlider_, 0.0, 3.0);
+    wireGrade(gammaSpin_, gammaSlider_, 0.20, 3.0);
 
     rebuildTimeline();
 }
@@ -605,9 +631,15 @@ void TextureViewerWidget::resetGrade() {
     const QSignalBlocker b0(brightnessSpin_);
     const QSignalBlocker b1(contrastSpin_);
     const QSignalBlocker b2(gammaSpin_);
+    const QSignalBlocker s0(brightnessSlider_);
+    const QSignalBlocker s1(contrastSlider_);
+    const QSignalBlocker s2(gammaSlider_);
     brightnessSpin_->setValue(0.0);
     contrastSpin_->setValue(1.0);
     gammaSpin_->setValue(1.0);
+    brightnessSlider_->setValue(500);
+    contrastSlider_->setValue(int(std::lround((1.0 / 3.0) * 1000.0)));
+    gammaSlider_->setValue(int(std::lround(((1.0 - 0.2) / (3.0 - 0.2)) * 1000.0)));
     applyGradeFromUi();
 }
 
@@ -748,6 +780,7 @@ QString TextureViewerWidget::currentPath() const {
 void TextureViewerWidget::setTimelineFrame(int frame) {
     // Scrubber is 1-based within [rangeStart_, rangeEnd_].
     const int index = std::clamp(frame, rangeStart_, rangeEnd_) - 1;
+    setExprFrame(frame);
     setFrame(index);
 }
 

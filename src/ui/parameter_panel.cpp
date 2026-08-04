@@ -31,12 +31,19 @@
 #include <functional>
 
 #include "nodes/node_registry.h"
+#include "core/expr_eval.h"
 #include "render/pixel_filter.h"
 #include "ui/numeric_editors.h"
+#include "ui/texture_file_dialog.h"
 #include "ui/theme.h"
 
 namespace sol {
 namespace {
+
+void applyExpressionFieldStyle(QWidget* widget, bool isExpression) {
+    if (!widget) return;
+    widget->setStyleSheet(isExpression ? expressionFieldStyleSheet() : normalFieldStyleSheet());
+}
 
 constexpr const char* kPrimPathMime = "application/x-fedor-prim-path";
 
@@ -117,9 +124,9 @@ NoWheelDoubleSpinBox* makeDoubleSpin(double value, double minimum, double maximu
     return spin;
 }
 
-// Line-edit + soft slider: type freely (caret anywhere); slider only authors within [lo,hi].
-QWidget* makeFreeFloatSliderRow(double value, double sliderMin, double sliderMax,
-                                const std::function<void(double)>& onCommit) {
+// Line-edit + soft slider. Edit accepts Houdini-style expressions ($F, math).
+QWidget* makeFreeFloatSliderRow(double value, const QString& expression, double sliderMin,
+                                double sliderMax, const std::function<void(const QString&)>& onCommitText) {
     auto* container = new QWidget();
     auto* layout = new QHBoxLayout(container);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -127,7 +134,11 @@ QWidget* makeFreeFloatSliderRow(double value, double sliderMin, double sliderMax
 
     auto* edit = new FreeFloatLineEdit(value);
     edit->setMinimumWidth(64);
-    edit->setMaximumWidth(96);
+    edit->setMaximumWidth(120);
+    if (!expression.isEmpty()) {
+        edit->setText(expression);
+        applyExpressionFieldStyle(edit, true);
+    }
     layout->addWidget(edit, 0);
 
     auto* slider = new NoWheelSlider(Qt::Horizontal);
@@ -142,23 +153,49 @@ QWidget* makeFreeFloatSliderRow(double value, double sliderMin, double sliderMax
         slider->setValue(int(std::lround(std::clamp((v - sliderMin) / span, 0.0, 1.0) * 1000.0)));
     };
 
-    QObject::connect(edit, &QLineEdit::editingFinished, container, [edit, onCommit, syncSlider] {
-        bool ok = false;
-        const double v = edit->value(&ok);
-        if (!ok) {
-            edit->setValue(0.0, true);
+    QObject::connect(edit, &QLineEdit::editingFinished, container, [edit, onCommitText, syncSlider] {
+        const QString text = edit->text().trimmed();
+        applyExpressionFieldStyle(edit, looksLikeExpression(text));
+        if (looksLikeExpression(text)) {
+            double v = 0.0;
+            if (evalExpression(text, exprFrame(), v)) syncSlider(v);
+            onCommitText(text);
             return;
         }
-        edit->setValue(v, true);  // normalize formatting after commit
-        syncSlider(v);
-        onCommit(v);
-    });
-    QObject::connect(slider, &QSlider::valueChanged, container, [edit, sliderMin, span, onCommit](int pos) {
-        const double v = sliderMin + span * (double(pos) / 1000.0);
+        bool ok = false;
+        const double v = QLocale::c().toDouble(text, &ok);
+        if (!ok) {
+            edit->setValue(0.0, true);
+            onCommitText(QStringLiteral("0"));
+            return;
+        }
         edit->setValue(v, true);
-        onCommit(v);
+        syncSlider(v);
+        onCommitText(QString::number(v, 'g', 9));
     });
+    QObject::connect(slider, &QSlider::valueChanged, container,
+                     [edit, sliderMin, span, onCommitText](int pos) {
+                         const double v = sliderMin + span * (double(pos) / 1000.0);
+                         edit->setValue(v, true);
+                         applyExpressionFieldStyle(edit, false);
+                         onCommitText(QString::number(v, 'g', 9));
+                     });
     return container;
+}
+
+// Back-compat wrapper used by older call sites expecting double callback.
+QWidget* makeFreeFloatSliderRow(double value, double sliderMin, double sliderMax,
+                                const std::function<void(double)>& onCommit) {
+    return makeFreeFloatSliderRow(value, QString(), sliderMin, sliderMax,
+                                  [onCommit](const QString& text) {
+                                      bool ok = false;
+                                      double v = 0.0;
+                                      if (looksLikeExpression(text))
+                                          evalExpression(text, exprFrame(), v);
+                                      else
+                                          v = QLocale::c().toDouble(text, &ok);
+                                      onCommit(v);
+                                  });
 }
 
 QString prettyMaterialXLabel(const QString& name) {
@@ -683,13 +720,18 @@ void ParameterPanel::rebuildMaterialX() {
             browse->setFixedWidth(28);
             connect(edit, &QLineEdit::editingFinished, this, [edit, commit] { commit(edit->text()); });
             connect(browse, &QPushButton::clicked, this, [this, edit, commit] {
-                const QString path = QFileDialog::getOpenFileName(
-                    this, "Choose file", edit->text(),
-                    "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tx *.tif *.tiff *.bmp *.webp);;All Files (*)");
-                if (path.isEmpty()) return;
-                edit->setText(path);
-                commit(path);
+                const auto picked = TextureFileDialog::getOpenTexture(
+                    this, QStringLiteral("Choose file"), edit->text(),
+                    QStringLiteral(
+                        "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tx *.tif *.tiff *.bmp *.webp);;All Files (*)"));
+                if (picked.path.isEmpty()) return;
+                edit->setText(picked.path);
+                applyExpressionFieldStyle(edit, looksLikeExpression(picked.path) ||
+                                                    picked.path.contains(QLatin1Char('$')));
+                commit(picked.path);
             });
+            applyExpressionFieldStyle(edit, looksLikeExpression(edit->text()) ||
+                                                edit->text().contains(QLatin1Char('$')));
             rowLayout->addWidget(edit, 1);
             rowLayout->addWidget(browse);
             form->addRow(label, row);
@@ -858,13 +900,48 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
         }
         if (affectsVisibility) QTimer::singleShot(0, this, [this] { refresh(); });
     };
+    auto notifyText = [this, node, name](const QString& text) {
+        if (updating_ || !node) return;
+        Parameter* p = node->findParameter(name);
+        if (!p) return;
+        if (p->type == ParamType::Float || p->type == ParamType::Int || p->type == ParamType::String ||
+            p->type == ParamType::FilePath) {
+            if (looksLikeExpression(text) ||
+                ((p->type == ParamType::String || p->type == ParamType::FilePath) &&
+                 text.contains(QLatin1Char('$')))) {
+                node->setParameterExpression(name, text);
+            } else if (p->type == ParamType::Float) {
+                bool ok = false;
+                const double v = QLocale::c().toDouble(text, &ok);
+                node->setParameterValue(name, ok ? v : 0.0);
+            } else if (p->type == ParamType::Int) {
+                bool ok = false;
+                const double v = QLocale::c().toDouble(text, &ok);
+                node->setParameterValue(name, ok ? int(std::lround(v)) : 0);
+            } else {
+                node->setParameterValue(name, text);
+            }
+        } else {
+            node->setParameterValue(name, text);
+        }
+        emit parameterEdited(node, name);
+        bool affectsVisibility = false;
+        for (const Parameter& pp : node->parameters()) {
+            if (!pp.visibleWhen.isEmpty() && pp.visibleWhen.contains(name)) {
+                affectsVisibility = true;
+                break;
+            }
+        }
+        if (affectsVisibility) QTimer::singleShot(0, this, [this] { refresh(); });
+    };
 
     switch (parameter.type) {
         case ParamType::Float: {
             const double lo = parameter.minValue;
             const double hi = parameter.maxValue;
-            QWidget* slider = makeFreeFloatSliderRow(parameter.toDouble(), lo, hi,
-                                                    [notify](double value) { notify(value); });
+            const double shown = parameter.hasExpression() ? parameter.evaluatedNumber()
+                                                           : parameter.toDouble();
+            QWidget* slider = makeFreeFloatSliderRow(shown, parameter.expression, lo, hi, notifyText);
             // Camera DOF: Focus Pick next to Focus Distance.
             if (name == QLatin1String("focusdistance") && node_ && node_->typeName() == QLatin1String("camera")) {
                 auto* row = new QWidget();
@@ -956,9 +1033,9 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
         case ParamType::Int: {
             const int lo = int(parameter.minValue);
             const int hi = int(parameter.maxValue);
-            auto* spin = makeIntSpin(parameter.toInt(), lo, hi);
-            return makeSpinSliderRow(spin, double(parameter.toInt()), double(lo), double(hi),
-                                     [notify](double value) { notify(int(std::lround(value))); });
+            const double shown = parameter.hasExpression() ? parameter.evaluatedNumber()
+                                                           : double(parameter.toInt());
+            return makeFreeFloatSliderRow(shown, parameter.expression, double(lo), double(hi), notifyText);
         }
         case ParamType::Bool: {
             auto* check = new QCheckBox();
@@ -1029,23 +1106,38 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             return container;
         }
         case ParamType::String: {
-            auto* edit = new PathLineEdit(parameter.toString());
+            auto* edit = new PathLineEdit(parameter.hasExpression() ? parameter.expression
+                                                                    : parameter.toString());
             edit->setAcceptDrops(true);
+            applyExpressionFieldStyle(edit, parameter.hasExpression() ||
+                                                looksLikeExpression(edit->text()) ||
+                                                edit->text().contains(QLatin1Char('$')));
             if (parameter.name == "pattern") {
                 edit->setPlaceholderText("e.g. /geo/sphere1 — Ctrl+V or drop from Scene Graph");
                 if (parameter.tooltip.isEmpty())
                     edit->setToolTip("Prim path or glob. Copy a prim with Ctrl+C in the Scene Graph, "
                                      "or drag its name into this field.");
             }
-            edit->onCommitted = [notify](const QString& text) { notify(text); };
-            connect(edit, &QLineEdit::editingFinished, this, [notify, edit] { notify(edit->text()); });
+            edit->onCommitted = [notifyText, edit](const QString& text) {
+                applyExpressionFieldStyle(edit, looksLikeExpression(text) || text.contains(QLatin1Char('$')));
+                notifyText(text);
+            };
+            connect(edit, &QLineEdit::editingFinished, this, [notifyText, edit] {
+                applyExpressionFieldStyle(edit, looksLikeExpression(edit->text()) ||
+                                                    edit->text().contains(QLatin1Char('$')));
+                notifyText(edit->text());
+            });
             return edit;
         }
         case ParamType::FilePath: {
             auto* container = new QWidget();
             auto* layout = new QHBoxLayout(container);
             layout->setContentsMargins(0, 0, 0, 0);
-            auto* edit = new QLineEdit(parameter.toString());
+            auto* edit = new QLineEdit(parameter.hasExpression() ? parameter.expression
+                                                                 : parameter.toString());
+            applyExpressionFieldStyle(edit, parameter.hasExpression() ||
+                                                looksLikeExpression(edit->text()) ||
+                                                edit->text().contains(QLatin1Char('$')));
             auto* browse = new QPushButton("...");
             browse->setFixedWidth(30);
             layout->addWidget(edit, 1);
@@ -1053,20 +1145,34 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             const QString filter = parameter.fileFilter;
             const bool saveMode = parameter.fileSaveMode;
             const bool dirMode = parameter.fileDirectoryMode;
-            connect(edit, &QLineEdit::editingFinished, this, [notify, edit] { notify(edit->text()); });
-            connect(browse, &QPushButton::clicked, this, [this, edit, filter, notify, saveMode, dirMode] {
-                QString path;
-                if (dirMode) {
-                    path = QFileDialog::getExistingDirectory(this, "Choose folder", edit->text());
-                } else if (saveMode) {
-                    path = QFileDialog::getSaveFileName(this, "Save file", edit->text(), filter);
-                } else {
-                    path = QFileDialog::getOpenFileName(this, "Choose file", edit->text(), filter);
-                }
-                if (path.isEmpty()) return;
-                edit->setText(path);
-                notify(path);
+            connect(edit, &QLineEdit::editingFinished, this, [notifyText, edit] {
+                applyExpressionFieldStyle(edit, looksLikeExpression(edit->text()) ||
+                                                    edit->text().contains(QLatin1Char('$')));
+                notifyText(edit->text());
             });
+            connect(browse, &QPushButton::clicked, this,
+                    [this, edit, filter, notifyText, saveMode, dirMode] {
+                        QString path;
+                        if (dirMode) {
+                            path = QFileDialog::getExistingDirectory(this, "Choose folder", edit->text());
+                        } else if (saveMode) {
+                            path = QFileDialog::getSaveFileName(this, "Save file", edit->text(), filter);
+                        } else {
+                            const auto picked = TextureFileDialog::getOpenTexture(
+                                this, QStringLiteral("Choose file"), edit->text(),
+                                filter.isEmpty()
+                                    ? QStringLiteral(
+                                          "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tx *.tif *.tiff "
+                                          "*.bmp *.webp);;All Files (*)")
+                                    : filter);
+                            path = picked.path;
+                        }
+                        if (path.isEmpty()) return;
+                        edit->setText(path);
+                        applyExpressionFieldStyle(edit, looksLikeExpression(path) ||
+                                                            path.contains(QLatin1Char('$')));
+                        notifyText(path);
+                    });
             return container;
         }
         case ParamType::Button: {

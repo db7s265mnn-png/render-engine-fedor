@@ -9,6 +9,7 @@
 #include <cstring>
 #include <map>
 
+#include "core/expr_eval.h"
 #include "core/log.h"
 #include "core/units.h"
 #include "io/alembic_loader.h"
@@ -25,9 +26,10 @@ namespace {
 
 QString resolvePath(const CookContext& context, const QString& path) {
     if (path.isEmpty()) return path;
-    QFileInfo info(path);
-    if (info.isAbsolute() || context.sceneDirectory.isEmpty()) return path;
-    return QDir(context.sceneDirectory).absoluteFilePath(path);
+    const QString expanded = expandStringExpression(path, context.frame);
+    QFileInfo info(expanded);
+    if (info.isAbsolute() || context.sceneDirectory.isEmpty()) return expanded;
+    return QDir(context.sceneDirectory).absoluteFilePath(expanded);
 }
 
 QString primPathFor(const Node& node, const QString& group, const QString& explicitName) {

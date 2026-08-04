@@ -41,6 +41,7 @@
 #include <limits>
 
 #include "io/image_io.h"
+#include "ui/texture_file_dialog.h"
 #include "io/materialx_graph.h"
 #include "render/metal_spectra.h"
 #include "nodes/node.h"
@@ -1899,12 +1900,17 @@ void MaterialNetworkGraphView::chooseTexture(const QString& nodeName) {
     }
 
     const QString filter = "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tx *.tif *.tiff *.bmp *.webp);;All Files (*)";
-    const QString path =
-        QFileDialog::getOpenFileName(this, "Choose texture for " + nodeName, node->inputs[fileInput].value, filter);
-    if (path.isEmpty()) return;
+    const auto picked = TextureFileDialog::getOpenTexture(
+        this, "Choose texture for " + nodeName, node->inputs[fileInput].value, filter);
+    if (picked.path.isEmpty()) return;
 
-    // MaterialX authoring: store unresolved <UDIM> + geominfo udimset (not one concrete tile).
-    node->inputs[fileInput].value = applyUdimFilename(path);
+    // UDIM sequence → keep unresolved <UDIM> + geominfo udimset.
+    // $F sequence → store the token path as authored.
+    if (picked.token == SequenceTokenKind::Udim || picked.path.contains(QLatin1String("<UDIM>"))) {
+        node->inputs[fileInput].value = applyUdimFilename(picked.path);
+    } else {
+        node->inputs[fileInput].value = picked.path;
+    }
     node->inputs[fileInput].nodename.clear();
     writeModel(true);
     rebuild();

@@ -70,6 +70,8 @@ public:
     // notify=false updates the value / dirty flag without emitting parameterChanged
     // (used while dragging viewport gizmos so cook/IPR wait for mouse release).
     void setParameterValue(const QString& name, const QVariant& value, bool notify = true);
+    // Set a Houdini-style expression; clears when expr is empty / plain literal.
+    void setParameterExpression(const QString& name, const QString& expr, bool notify = true);
     void notifyParameterChanged(const QString& name);
 
     double floatValue(const QString& name, double fallback = 0.0) const;

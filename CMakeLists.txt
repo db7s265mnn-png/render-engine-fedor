@@ -438,6 +438,7 @@ configure_file(${CMAKE_SOURCE_DIR}/cmake/solstice_config.h.in
 set(SOLSTICE_LIB_SOURCES
     src/core/image.cpp
     src/core/log.cpp
+    src/core/expr_eval.cpp
     src/scene/scene.cpp
     src/scene/displace.cpp
     src/scene/tessellate.cpp
@@ -476,6 +477,7 @@ set(SOLSTICE_LIB_HEADERS
     src/core/rng.h
     src/core/image.h
     src/core/log.h
+    src/core/expr_eval.h
     src/core/thread_pool.h
     src/scene/types.h
     src/scene/scene.h
@@ -590,6 +592,7 @@ set(SOLSTICE_APP_SOURCES
     src/ui/log_panel.cpp
     src/ui/theme.cpp
     src/ui/timeline_bar.cpp
+    src/ui/texture_file_dialog.cpp
 )
 
 set(SOLSTICE_APP_HEADERS
@@ -606,6 +609,7 @@ set(SOLSTICE_APP_HEADERS
     src/ui/log_panel.h
     src/ui/theme.h
     src/ui/timeline_bar.h
+    src/ui/texture_file_dialog.h
 )
 
 if(SOLSTICE_BUILD_APP)
@@ -635,7 +639,9 @@ if(SOLSTICE_BUILD_APP)
         TX_Converter/texture_viewer.h
         src/ui/theme.cpp
         src/ui/timeline_bar.cpp
-        src/ui/timeline_bar.h)
+        src/ui/timeline_bar.h
+        src/ui/texture_file_dialog.cpp
+        src/ui/texture_file_dialog.h)
     target_include_directories(TX_Converter PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
     target_link_libraries(TX_Converter PRIVATE solstice_lib Qt6::Widgets)
     set_target_properties(TX_Converter PROPERTIES OUTPUT_NAME "TX_Converter")

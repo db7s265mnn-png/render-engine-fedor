@@ -38,6 +38,9 @@ public:
     ParamType type = ParamType::Float;
     QVariant value;
     QVariant defaultValue;
+    // Houdini-style expression (math + $F/$F#). When non-empty, value is the last
+    // evaluated cache and floatValue/intValue re-evaluate from expression.
+    QString expression;
     double minValue = 0.0;
     double maxValue = 1.0;
     bool hasRange = false;
@@ -75,6 +78,11 @@ public:
     QString toString() const { return value.toString(); }
     Vec3 toVec3() const;
     void setVec3(Vec3 v);
+
+    bool hasExpression() const { return !expression.trimmed().isEmpty(); }
+    // Evaluate expression (or return literal). Uses sol::exprFrame() when frame < 0.
+    double evaluatedNumber(int frame = -1) const;
+    QString evaluatedString(int frame = -1) const;
 
     QJsonObject toJson() const;
     void fromJson(const QJsonObject& json);

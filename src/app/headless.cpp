@@ -7,6 +7,7 @@
 
 #include "app/default_scene.h"
 #include "app/document.h"
+#include "core/expr_eval.h"
 #include "core/log.h"
 #include "io/image_io.h"
 #include "io/ocio_util.h"
@@ -50,6 +51,7 @@ int runHeadless(const HeadlessOptions& options) {
     CookContext context;
     if (!options.scenePath.isEmpty())
         context.sceneDirectory = QFileInfo(options.scenePath).absolutePath();
+    setExprFrame(context.frame);
 
     RenderSettingsData txArm{};
     bool txArmed = false;

@@ -24,6 +24,11 @@ bool txSkipColorConvert(const std::string& inputColorSpace);
 // Non-UDIM paths return a single-element list if the file exists (or the path as-is).
 std::vector<std::string> txExpandUdimSources(const std::string& sourcePathOrPattern);
 
+// Expand $F / $F2..$F8 in a pattern across [frameStart, frameEnd] (inclusive).
+// Returns existing concrete files. If pattern has no $F token, returns empty.
+std::vector<std::string> txExpandFrameSources(const std::string& sourcePathOrPattern, int frameStart,
+                                              int frameEnd);
+
 // Pick an output .tx path in `outputDir` named like the source basename.
 // If that name is taken by a different source, use name_copy_1.tx, name_copy_2.tx, …
 // `sourcePath` is recorded in a sibling `.txsrc` sidecar so re-runs stay stable.
@@ -46,10 +51,12 @@ struct TxConvertResult {
 // Convert one texture to tiled mipmapped .tx (ACEScg when colorconvert applies).
 TxConvertResult txConvertOne(const TxConvertRequest& req);
 
-// Convert source (possibly UDIM pattern) into `outputDir`. Names from sources.
+// Convert source (possibly UDIM / $F pattern) into `outputDir`. Names from sources.
+// frameStart/frameEnd used when the path contains $F / $F#.
 // Returns false if any tile failed (partial successes still written).
 bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string& outputDir,
                       const std::string& inputColorSpace, const std::string& ocioConfigPath,
-                      std::vector<TxConvertResult>& results, std::string& error);
+                      std::vector<TxConvertResult>& results, std::string& error,
+                      int frameStart = 1, int frameEnd = 1);
 
 }  // namespace sol

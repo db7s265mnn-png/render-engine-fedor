@@ -14,6 +14,7 @@ class QComboBox;
 class QPushButton;
 class QLineEdit;
 class QDoubleSpinBox;
+class QSlider;
 
 namespace sol {
 
@@ -104,6 +105,8 @@ public:
     QString currentPath() const;
     int frameCount() const { return frames_.size(); }
     int currentFrame() const { return frameIndex_; }
+    int rangeStart() const { return rangeStart_; }
+    int rangeEnd() const { return rangeEnd_; }
 
 public slots:
     void setFrame(int index);       // 0-based tile index
@@ -167,6 +170,9 @@ private:
     QDoubleSpinBox* brightnessSpin_ = nullptr;
     QDoubleSpinBox* contrastSpin_ = nullptr;
     QDoubleSpinBox* gammaSpin_ = nullptr;
+    QSlider* brightnessSlider_ = nullptr;
+    QSlider* contrastSlider_ = nullptr;
+    QSlider* gammaSlider_ = nullptr;
 
     QLineEdit* startEdit_ = nullptr;
     QLineEdit* endEdit_ = nullptr;

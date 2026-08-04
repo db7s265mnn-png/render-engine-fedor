@@ -33,6 +33,7 @@
 
 #include "app/default_scene.h"
 #include "app/document.h"
+#include "core/expr_eval.h"
 #include "core/log.h"
 #include "core/math.h"
 #include "io/image_io.h"
@@ -995,6 +996,7 @@ void MainWindow::cookNow() {
         context.fps = timelineBar_->fps();
         context.time = timelineBar_->timeSeconds();
     }
+    setExprFrame(context.frame);
 
     const bool timelineInteractive = timelineBar_ && timelineBar_->isInteractive();
 

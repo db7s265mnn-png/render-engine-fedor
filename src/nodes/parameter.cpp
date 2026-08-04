@@ -1,8 +1,10 @@
 #include "nodes/parameter.h"
 
+#include "core/expr_eval.h"
 #include "nodes/node.h"
 
 #include <QJsonArray>
+#include <cmath>
 
 namespace sol {
 
@@ -154,8 +156,8 @@ double paramNumericValue(const Node& node, const QString& name) {
     switch (p->type) {
         case ParamType::Bool: return p->toBool() ? 1.0 : 0.0;
         case ParamType::Int:
-        case ParamType::Menu: return double(p->toInt());
-        case ParamType::Float: return p->toDouble();
+        case ParamType::Menu: return p->evaluatedNumber();
+        case ParamType::Float: return p->evaluatedNumber();
         default: return p->value.toDouble();
     }
 }
@@ -216,6 +218,21 @@ Vec3 Parameter::toVec3() const {
 
 void Parameter::setVec3(Vec3 v) { value = vecToVariant(v); }
 
+double Parameter::evaluatedNumber(int frame) const {
+    const int f = frame >= 0 ? frame : exprFrame();
+    if (hasExpression()) {
+        double out = 0.0;
+        if (evalExpression(expression, f, out)) return out;
+    }
+    return value.toDouble();
+}
+
+QString Parameter::evaluatedString(int frame) const {
+    const int f = frame >= 0 ? frame : exprFrame();
+    const QString src = hasExpression() ? expression : value.toString();
+    return expandStringExpression(src, f);
+}
+
 QString paramTypeName(ParamType type) {
     switch (type) {
         case ParamType::Float: return "float";
@@ -249,6 +266,7 @@ QJsonObject Parameter::toJson() const {
     QJsonObject json;
     json["name"] = name;
     json["type"] = paramTypeName(type);
+    if (hasExpression()) json["expr"] = expression;
     switch (type) {
         case ParamType::Vec3:
         case ParamType::Color: {
@@ -270,6 +288,7 @@ QJsonObject Parameter::toJson() const {
 }
 
 void Parameter::fromJson(const QJsonObject& json) {
+    expression = json.value(QStringLiteral("expr")).toString();
     const QJsonValue jsonValue = json.value("value");
     switch (type) {
         case ParamType::Vec3:
@@ -287,6 +306,16 @@ void Parameter::fromJson(const QJsonObject& json) {
         case ParamType::Label:
         case ParamType::Button: value = jsonValue.toString(); break;
         default: value = jsonValue.toDouble(); break;
+    }
+    // Legacy: float/int saved as string expression in value.
+    if (expression.isEmpty() && (type == ParamType::Float || type == ParamType::Int) &&
+        jsonValue.isString()) {
+        const QString s = jsonValue.toString();
+        if (looksLikeExpression(s)) {
+            expression = s;
+            double out = 0.0;
+            if (evalExpression(s, exprFrame(), out)) value = (type == ParamType::Int) ? int(std::lround(out)) : out;
+        }
     }
 }
 

@@ -18,9 +18,11 @@
 #include <QWidget>
 
 #include "core/log.h"
+#include "core/expr_eval.h"
 #include "io/image_io.h"
 #include "io/tx_convert.h"
 #include "texture_viewer.h"
+#include "ui/texture_file_dialog.h"
 #include "ui/theme.h"
 
 namespace {
@@ -65,10 +67,11 @@ public:
                     path = QFileDialog::getExistingDirectory(this, QStringLiteral("Choose folder"),
                                                             edit->text());
                 } else {
-                    path = QFileDialog::getOpenFileName(
+                    const auto picked = sol::TextureFileDialog::getOpenTexture(
                         this, QStringLiteral("Choose texture"), edit->text(),
                         QStringLiteral(
                             "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.tx);;All (*)"));
+                    path = picked.path;
                 }
                 if (!path.isEmpty()) {
                     edit->setText(path);
@@ -154,13 +157,13 @@ public:
         viewBtnRow->addWidget(previewOutBtn);
         leftLay->addLayout(viewBtnRow);
         connect(openViewBtn, &QPushButton::clicked, this, [this] {
-            const QString path = QFileDialog::getOpenFileName(
+            const auto picked = sol::TextureFileDialog::getOpenTexture(
                 this, QStringLiteral("Preview texture"), sourceEdit_->text(),
                 QStringLiteral(
                     "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.tx);;All (*)"));
-            if (!path.isEmpty()) {
+            if (!picked.path.isEmpty()) {
                 syncViewerOcio();
-                viewer_->setSourcePath(path);
+                viewer_->setSourcePath(picked.path);
             }
         });
         connect(previewOutBtn, &QPushButton::clicked, this, [this] { previewOutputTx(); });
@@ -278,7 +281,8 @@ private:
         QApplication::processEvents();
         const bool ok = sol::txConvertPattern(src.toStdString(), outDir.toStdString(),
                                               colorSpaceCombo_->currentText().toStdString(), ocio,
-                                              results, error);
+                                              results, error, viewer_ ? viewer_->rangeStart() : 1,
+                                              viewer_ ? viewer_->rangeEnd() : 1);
         int success = 0;
         for (const auto& r : results)
             if (r.ok) ++success;

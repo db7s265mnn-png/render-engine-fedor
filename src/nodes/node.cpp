@@ -1,7 +1,9 @@
 #include "nodes/node.h"
 
 #include <algorithm>
+#include <cmath>
 
+#include "core/expr_eval.h"
 #include "core/log.h"
 #include "core/units.h"
 
@@ -65,8 +67,47 @@ void Node::addParameter(Parameter parameter) {
 void Node::setParameterValue(const QString& name, const QVariant& value, bool notify) {
     Parameter* parameter = findParameter(name);
     if (!parameter) return;
-    if (parameter->value == value) return;
+    if (parameter->value == value && parameter->expression.isEmpty()) return;
     parameter->value = value;
+    parameter->expression.clear();
+    dirty_ = true;
+    if (notify) emit parameterChanged(this, name);
+}
+
+void Node::setParameterExpression(const QString& name, const QString& expr, bool notify) {
+    Parameter* parameter = findParameter(name);
+    if (!parameter) return;
+    const QString trimmed = expr.trimmed();
+    if (trimmed.isEmpty() || !looksLikeExpression(trimmed)) {
+        // Treat as literal assignment when possible.
+        if (parameter->type == ParamType::Float || parameter->type == ParamType::Int) {
+            bool ok = false;
+            const double v = trimmed.toDouble(&ok);
+            if (ok) {
+                setParameterValue(name,
+                                  parameter->type == ParamType::Int ? QVariant(int(std::lround(v)))
+                                                                    : QVariant(v),
+                                  notify);
+                return;
+            }
+        }
+        if (parameter->type == ParamType::String || parameter->type == ParamType::FilePath) {
+            setParameterValue(name, trimmed, notify);
+            return;
+        }
+    }
+    if (parameter->expression == trimmed) return;
+    parameter->expression = trimmed;
+    // Cache evaluated numeric value.
+    if (parameter->type == ParamType::Float || parameter->type == ParamType::Int) {
+        double out = 0.0;
+        if (evalExpression(trimmed, exprFrame(), out)) {
+            parameter->value =
+                parameter->type == ParamType::Int ? QVariant(int(std::lround(out))) : QVariant(out);
+        }
+    } else if (parameter->type == ParamType::String || parameter->type == ParamType::FilePath) {
+        parameter->value = trimmed;  // store expression text as value too for display
+    }
     dirty_ = true;
     if (notify) emit parameterChanged(this, name);
 }
@@ -78,12 +119,14 @@ void Node::notifyParameterChanged(const QString& name) {
 
 double Node::floatValue(const QString& name, double fallback) const {
     const Parameter* parameter = findParameter(name);
-    return parameter ? parameter->toDouble() : fallback;
+    if (!parameter) return fallback;
+    return parameter->evaluatedNumber();
 }
 
 int Node::intValue(const QString& name, int fallback) const {
     const Parameter* parameter = findParameter(name);
-    return parameter ? parameter->toInt() : fallback;
+    if (!parameter) return fallback;
+    return int(std::lround(parameter->evaluatedNumber()));
 }
 
 bool Node::boolValue(const QString& name, bool fallback) const {
@@ -93,7 +136,10 @@ bool Node::boolValue(const QString& name, bool fallback) const {
 
 QString Node::stringValue(const QString& name, const QString& fallback) const {
     const Parameter* parameter = findParameter(name);
-    return parameter ? parameter->toString() : fallback;
+    if (!parameter) return fallback;
+    if (parameter->type == ParamType::FilePath || parameter->type == ParamType::String)
+        return parameter->evaluatedString();
+    return parameter->toString();
 }
 
 Vec3 Node::vec3Value(const QString& name, Vec3 fallback) const {
