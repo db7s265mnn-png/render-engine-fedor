@@ -57,10 +57,14 @@ void initTools() {
         if (g_maketxPath.empty()) g_maketxPath = findTool(QStringLiteral("maketx-2.5"));
         if (g_maketxPath.empty()) g_maketxPath = findTool(QStringLiteral("maketx-2.4"));
         g_oiiotoolPath = findTool(QStringLiteral("oiiotool"));
+        if (g_oiiotoolPath.empty()) g_oiiotoolPath = findTool(QStringLiteral("oiiotool-2.5"));
+        if (g_oiiotoolPath.empty()) g_oiiotoolPath = findTool(QStringLiteral("oiiotool-2.4"));
         if (!g_maketxPath.empty()) logInfo("tx_convert: maketx at " + g_maketxPath);
         if (!g_oiiotoolPath.empty()) logInfo("tx_convert: oiiotool at " + g_oiiotoolPath);
         if (g_maketxPath.empty() && g_oiiotoolPath.empty())
             logWarning("tx_convert: neither maketx nor oiiotool found next to the app or on PATH");
+        else if (g_oiiotoolPath.empty())
+            logWarning("tx_convert: oiiotool not found — PNG/JPG and TX reformat unavailable");
     });
 }
 

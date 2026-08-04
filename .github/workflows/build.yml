@@ -157,7 +157,7 @@ jobs:
             -DOCIO_INSTALL_EXT_PACKAGES=ALL
           cmake --build ocio-src/build --config Release --target install
 
-      # OpenImageIO tools (maketx) for TX Converter / auto-TX. Ships next to the exe.
+      # OpenImageIO tools (maketx + oiiotool) for TX Converter / auto-TX. Ships next to the exe.
       # OIIO 3.x: no Boost; OpenImageIO_BUILD_MISSING_DEPS fetches jpeg/tiff/zlib/etc.
       - name: Build OpenImageIO
         if: steps.deps-cache.outputs.cache-hit != 'true'
@@ -180,7 +180,11 @@ jobs:
           if (-not (Test-Path "$env:DEPS_PREFIX/bin/maketx.exe")) {
             throw "maketx.exe was not installed by OpenImageIO"
           }
+          if (-not (Test-Path "$env:DEPS_PREFIX/bin/oiiotool.exe")) {
+            throw "oiiotool.exe was not installed by OpenImageIO (needed for PNG/JPG and TX reformat)"
+          }
           Write-Host "Installed maketx: $env:DEPS_PREFIX/bin/maketx.exe"
+          Write-Host "Installed oiiotool: $env:DEPS_PREFIX/bin/oiiotool.exe"
           Get-ChildItem "$env:DEPS_PREFIX/bin" -Filter "OpenImageIO*" | ForEach-Object { Write-Host $_.Name }
 
       - name: Configure (Clang + Ninja)
@@ -241,9 +245,12 @@ jobs:
           if (Test-Path "$env:DEPS_PREFIX/bin") {
             Get-ChildItem -Path "$env:DEPS_PREFIX/bin" -Filter "OpenColorIO*.dll" -ErrorAction SilentlyContinue |
               ForEach-Object { Copy-Item $_.FullName dist/ -Force }
-            # maketx + OpenImageIO runtime for TX Converter / auto-TX
-            if (Test-Path "$env:DEPS_PREFIX/bin/maketx.exe") {
-              Copy-Item "$env:DEPS_PREFIX/bin/maketx.exe" dist/ -Force
+            # maketx + oiiotool + OpenImageIO runtime for TX Converter / auto-TX
+            foreach ($tool in @("maketx.exe", "oiiotool.exe")) {
+              if (Test-Path "$env:DEPS_PREFIX/bin/$tool") {
+                Copy-Item "$env:DEPS_PREFIX/bin/$tool" dist/ -Force
+                Write-Host "Copied $tool"
+              }
             }
             foreach ($pat in @(
               "OpenImageIO*.dll",
@@ -287,8 +294,12 @@ jobs:
           if (-not (Test-Path "dist/maketx.exe")) {
             throw "maketx.exe missing from dist — TX Converter would fail"
           }
-          Write-Host "Packaged TX tool: maketx.exe"
+          if (-not (Test-Path "dist/oiiotool.exe")) {
+            throw "oiiotool.exe missing from dist — PNG/JPG and TX reformat would fail"
+          }
+          Write-Host "Packaged TX tools: maketx.exe, oiiotool.exe"
           & "dist/maketx.exe" --help | Select-Object -First 3
+          & "dist/oiiotool.exe" --help | Select-Object -First 3
 
       - name: Render a frame with the packaged exe
         run: |
