@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QImageReader>
 #include <QStringList>
 
 #include "app/headless.h"
@@ -102,6 +103,8 @@ int main(int argc, char** argv) {
     }
 
     QApplication application(argc, argv);
+    // Qt 6 default QImageReader allocation limit is 256 MB; 8K RGBA ≈ 268 MB.
+    QImageReader::setAllocationLimit(0);
     QCoreApplication::setApplicationName(SOLSTICE_APP_NAME);
     QCoreApplication::setOrganizationName("Bob");
     QCoreApplication::setApplicationVersion(SOLSTICE_VERSION_FULL);
