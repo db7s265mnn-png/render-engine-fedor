@@ -210,42 +210,29 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item build/bin/* dist/ -Recurse -Force
           Copy-Item "$env:DEPS_PREFIX/embree/bin/*.dll" dist/ -Force
-          # Ensure Qt image format plugins (esp. qpng) are present — windeployqt
-          # sometimes omits PNG even though the viewer needs it.
+          # Ensure Qt image format plugins are present (windeployqt may omit some).
+          # Note: official Qt 6.7 often builds PNG into Qt6Gui (no qpng.dll) — still copy
+          # whatever is in plugins/imageformats for jpeg/gif/webp/etc.
           $qtRoot = $env:QT_ROOT_DIR
-          if (-not $qtRoot) { $qtRoot = $env:Qt6_DIR }
+          if (-not $qtRoot -and $env:Qt6_DIR) {
+            # Qt6_DIR is typically <prefix>/lib/cmake/Qt6
+            $qtRoot = (Resolve-Path "$env:Qt6_DIR/../../..").Path
+          }
           $imgSrc = $null
           foreach ($cand in @(
             "$qtRoot/plugins/imageformats",
-            "$qtRoot/../plugins/imageformats",
-            "$env:IQTA_TOOLS/Qt/6.7.2/msvc2019_64/plugins/imageformats"
+            "$env:QT_ROOT_DIR/plugins/imageformats"
           )) {
             if ($cand -and (Test-Path $cand)) { $imgSrc = $cand; break }
           }
           if ($imgSrc) {
             New-Item -ItemType Directory -Force -Path dist/imageformats | Out-Null
-            Copy-Item "$imgSrc/*.dll" dist/imageformats/ -Force
+            Get-ChildItem "$imgSrc" -Filter "q*.dll" | Where-Object { $_.Name -notmatch 'd\.dll$' } |
+              ForEach-Object { Copy-Item $_.FullName dist/imageformats/ -Force; Write-Host "  $($_.Name)" }
             Write-Host "Copied Qt imageformats from $imgSrc"
-            Get-ChildItem dist/imageformats | ForEach-Object { Write-Host "  $($_.Name)" }
           } else {
-            Write-Host "WARNING: Qt imageformats folder not found (PNG may fail)"
+            Write-Host "WARNING: Qt imageformats folder not found"
           }
-          if (-not (Test-Path "dist/imageformats/qpng.dll")) {
-            # Last resort: search under the Qt install tree.
-            $found = Get-ChildItem -Path "$env:Qt6_DIR/../../.." -Recurse -Filter "qpng.dll" -ErrorAction SilentlyContinue |
-              Select-Object -First 1
-            if ($found) {
-              New-Item -ItemType Directory -Force -Path dist/imageformats | Out-Null
-              Copy-Item $found.FullName dist/imageformats/ -Force
-              Write-Host "Copied qpng.dll from $($found.FullName)"
-            }
-          }
-          if (-not (Test-Path "dist/imageformats/qpng.dll")) {
-            Write-Host "WARNING: qpng.dll still missing — PNG preview will fail"
-          } else {
-            Write-Host "OK: qpng.dll present for PNG preview"
-          }
-          # Make sure Qt finds imageformats/ next to the exe (windeployqt layout).
           if (-not (Test-Path "dist/qt.conf")) {
             Set-Content -Path "dist/qt.conf" -Value "[Paths]`r`nPrefix=.`r`nPlugins=.`r`n"
             Write-Host "Wrote dist/qt.conf"

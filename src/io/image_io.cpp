@@ -321,6 +321,9 @@ bool loadLdr(const std::string& path, Image& out, std::string& error, bool srgbC
     // Prefer UTF-8 path (Windows paths from UI are UTF-8 via Qt).
     const QString qpath = QString::fromUtf8(path.data(), int(path.size()));
     QImageReader reader(qpath);
+    // Qt 6 default allocation limit is 256 MB — 8K RGBA8888 is ~268 MB and would
+    // fail with "unsupported or unreadable". Allow large textures (UDIM 4K/8K).
+    reader.setAllocationLimit(0);
     QImage qimage = reader.read();
     if (qimage.isNull()) {
         // Fallback: QImage::load (some builds resolve format plugins differently).

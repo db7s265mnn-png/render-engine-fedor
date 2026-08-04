@@ -8,6 +8,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QImageReader>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -294,6 +295,8 @@ private:
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    // Qt 6 default image allocation limit is 256 MB; 8K UDIM tiles exceed it.
+    QImageReader::setAllocationLimit(0);
     sol::applyDarkTheme(app);
     TxConverterWindow window;
     window.show();
