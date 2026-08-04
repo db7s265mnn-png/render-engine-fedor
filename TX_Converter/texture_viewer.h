@@ -7,6 +7,7 @@
 #include <QWidget>
 
 #include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include "scene/types.h"
@@ -18,6 +19,7 @@ class QToolButton;
 class QLineEdit;
 class QDoubleSpinBox;
 class QSlider;
+class QSpinBox;
 class QButtonGroup;
 class QKeyEvent;
 class QTimer;
@@ -142,11 +144,18 @@ public:
     int colorManagement() const { return colorManagement_; }
     int viewTransform() const { return viewTransform_; }
 
+    // Viewer RAM budget for decoded float previews (default 32 GiB).
+    void setMemoryBudgetBytes(qint64 bytes);
+    qint64 memoryBudgetBytes() const { return memoryBudgetBytes_; }
+    qint64 bufferBytesUsed() const;
+    void clearTextureBuffers();
+    void reloadConvertedBuffer();
+
     QString currentPath() const;
-    int frameCount() const { return frames_.size(); }
+    int frameCount() const;
     int currentFrame() const { return frameIndex_; }
-    int rangeStart() const { return rangeStart_; }
-    int rangeEnd() const { return rangeEnd_; }
+    int rangeStart() const;
+    int rangeEnd() const;
 
 public slots:
     void setFrame(int index);          // 0-based tile index
@@ -170,6 +179,42 @@ private:
         std::vector<float> linearRgba;  // RGBA float
         QString error;
         bool ready = false;
+
+        qint64 previewBytes() const {
+            return qint64(linearRgba.size()) * qint64(sizeof(float));
+        }
+        void unloadPixels() {
+            linearRgba.clear();
+            linearRgba.shrink_to_fit();
+            ready = false;
+        }
+    };
+
+    struct SequenceCache {
+        QString pathKey;
+        QVector<FrameSlot> frames;
+        int loadedCount = 0;
+        quint64 generation = 0;
+        int rangeStart = 1;
+        int rangeEnd = 1;
+
+        qint64 bytesUsed() const {
+            qint64 n = 0;
+            for (const FrameSlot& f : frames) n += f.previewBytes();
+            return n;
+        }
+        void clearPixels() {
+            for (FrameSlot& f : frames) f.unloadPixels();
+            loadedCount = 0;
+        }
+        void reset() {
+            frames.clear();
+            loadedCount = 0;
+            ++generation;
+            pathKey.clear();
+            rangeStart = 1;
+            rangeEnd = 1;
+        }
     };
 
     struct LoadPayload {
@@ -184,15 +229,27 @@ private:
         QString error;
     };
 
-    void setSourcePath(const QString& path);
-    void clearView();
-    void refreshFromPipeline();
+    SequenceCache& cacheFor(ViewerContentKind kind);
+    const SequenceCache& cacheFor(ViewerContentKind kind) const;
+    SequenceCache& activeCache();
+    const SequenceCache& activeCache() const;
+    SequenceCache& inactiveCache();
+
+    void rememberSharedFrame();
+    void restoreSharedFrame();
+    void bindActiveCacheToUi();
+    void loadSequenceInto(SequenceCache& cache, const QString& path);
+    void ensureActiveSequence();
+    void clearActiveView();
+    void refreshFromPipeline(bool forceReload = false);
     void rebuildTimeline();
     void updateInfoBar();
+    void updateBufferStatus();
     void showCurrentFrame();
-    void startPreloadAll();
-    void onFrameLoaded(quint64 generation, LoadPayload payload);
+    void startPreload(SequenceCache& cache);
+    void onFrameLoaded(ViewerContentKind kind, quint64 generation, LoadPayload payload);
     void pushFrameToCanvas();
+    void enforceMemoryBudget(SequenceCache* preferKeep);
     void applyGradeFromUi(bool interactive = false);
     void scheduleGradeApply(bool interactive);
     void setChannelMode(ViewerChannelMode mode);
@@ -211,11 +268,14 @@ private:
     FloatPreviewCanvas* canvas_ = nullptr;
     QLabel* infoLabel_ = nullptr;
     QLabel* zoomLabel_ = nullptr;
+    QLabel* bufferLabel_ = nullptr;
     QComboBox* contentCombo_ = nullptr;
     QComboBox* colorMgmtCombo_ = nullptr;
     QComboBox* viewCombo_ = nullptr;
     QButtonGroup* channelGroup_ = nullptr;
     QPushButton* fitBtn_ = nullptr;
+    QPushButton* clearBufBtn_ = nullptr;
+    QSpinBox* memoryGbSpin_ = nullptr;
 
     QString pipelineSource_;
     QString pipelineOutputFolder_;
@@ -239,12 +299,12 @@ private:
     QLineEdit* endEdit_ = nullptr;
     TimelineScrubber* scrubber_ = nullptr;
 
-    QVector<FrameSlot> frames_;
+    SequenceCache sourceCache_;
+    SequenceCache convertedCache_;
     int frameIndex_ = 0;
-    int loadedCount_ = 0;
-    int rangeStart_ = 1;
-    int rangeEnd_ = 1;
+    int sharedFrameNumber_ = 1;
     bool updatingTimeline_ = false;
+    qint64 memoryBudgetBytes_ = 32LL * 1024 * 1024 * 1024;
 
     int colorManagement_ = kColorOcio;
     int viewTransform_ = kViewSrgbAces;
@@ -252,8 +312,6 @@ private:
     QString ocioConfigPath_;
     int ocioWorkingSpace_ = 1;
     ViewerGrade grade_;
-
-    std::atomic<quint64> loadGeneration_{0};
 };
 
 }  // namespace sol

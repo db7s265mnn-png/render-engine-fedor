@@ -12,10 +12,13 @@
 #include <QTextStream>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "core/expr_eval.h"
 #include "core/log.h"
@@ -592,31 +595,72 @@ bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string&
     }
 
     const int total = int(sources.size());
+    results.assign(size_t(total), TxConvertResult{});
     if (progress) progress(0, total, {});
 
-    bool allOk = true;
-    for (int i = 0; i < total; ++i) {
-        const std::string& src = sources[size_t(i)];
-        TxConvertRequest req;
-        req.sourcePath = src;
-        req.outputPath = txAllocateOutputPath(src, outputDir, options.format);
-        req.inputColorSpace = options.inputColorSpace;
-        req.ocioConfigPath = options.ocioConfigPath;
-        req.updateOnly = options.updateOnly;
-        req.format = options.format;
-        req.bitDepth = options.bitDepth;
-        req.longSide = options.longSide;
-        req.channels = options.channels;
-        TxConvertResult r = txConvertOne(req);
-        results.push_back(r);
-        if (!r.ok) {
-            allOk = false;
-            if (error.empty()) error = r.error;
-            logWarning("tx_convert: " + r.error);
-        }
-        if (progress) progress(i + 1, total, src);
+    // Estimate peak RAM per concurrent job (preprocess + maketx scratch). Conservative.
+    std::int64_t perJob = 512LL * 1024 * 1024;
+    if (options.longSide > 0) {
+        const std::int64_t edge = std::max<std::int64_t>(1, options.longSide);
+        perJob = std::max(perJob, edge * edge * 16);  // RGBA float-ish working set
+    } else {
+        perJob = std::max(perJob, std::int64_t(1536) * 1024 * 1024);  // ~1.5 GiB for large EXRs
     }
-    return allOk;
+    const std::int64_t budget =
+        options.memoryBudgetBytes > 0 ? options.memoryBudgetBytes : (32LL * 1024 * 1024 * 1024);
+    int maxParallel = options.maxParallelJobs;
+    if (maxParallel <= 0) maxParallel = int(std::max<std::int64_t>(1, budget / perJob));
+    const int hw = std::max(1, int(std::thread::hardware_concurrency()));
+    maxParallel = std::clamp(maxParallel, 1, std::min(hw, total));
+
+    std::atomic<int> nextIdx{0};
+    std::atomic<int> completed{0};
+    std::mutex progressMu;
+    std::mutex errorMu;
+    std::atomic<bool> allOk{true};
+
+    auto worker = [&]() {
+        while (true) {
+            const int i = nextIdx.fetch_add(1);
+            if (i >= total) return;
+
+            const std::string& src = sources[size_t(i)];
+            TxConvertRequest req;
+            req.sourcePath = src;
+            req.outputPath = txAllocateOutputPath(src, outputDir, options.format);
+            req.inputColorSpace = options.inputColorSpace;
+            req.ocioConfigPath = options.ocioConfigPath;
+            req.updateOnly = options.updateOnly;
+            req.format = options.format;
+            req.bitDepth = options.bitDepth;
+            req.longSide = options.longSide;
+            req.channels = options.channels;
+
+            TxConvertResult r = txConvertOne(req);
+            results[size_t(i)] = r;
+            if (!r.ok) {
+                allOk.store(false);
+                std::lock_guard<std::mutex> lock(errorMu);
+                if (error.empty()) error = r.error;
+                logWarning("tx_convert: " + r.error);
+            }
+            const int done = completed.fetch_add(1) + 1;
+            if (progress) {
+                std::lock_guard<std::mutex> lock(progressMu);
+                progress(done, total, src);
+            }
+        }
+    };
+
+    if (maxParallel <= 1) {
+        worker();
+    } else {
+        std::vector<std::thread> threads;
+        threads.reserve(size_t(maxParallel));
+        for (int t = 0; t < maxParallel; ++t) threads.emplace_back(worker);
+        for (auto& th : threads) th.join();
+    }
+    return allOk.load();
 }
 
 bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string& outputDir,

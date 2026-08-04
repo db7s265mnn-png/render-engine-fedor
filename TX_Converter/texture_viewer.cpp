@@ -24,6 +24,7 @@
 #include <QResizeEvent>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QSpinBox>
 #include <QThreadPool>
 #include <QTimer>
 #include <QToolButton>
@@ -756,6 +757,25 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     zoomLabel_->setMinimumWidth(44);
     zoomLabel_->setStyleSheet(QStringLiteral("color: #9aa0a6;"));
     modeRow->addWidget(zoomLabel_);
+
+    modeRow->addWidget(new QLabel(QStringLiteral("RAM")));
+    memoryGbSpin_ = new QSpinBox();
+    memoryGbSpin_->setRange(1, 512);
+    memoryGbSpin_->setValue(32);
+    memoryGbSpin_->setSuffix(QStringLiteral(" GB"));
+    memoryGbSpin_->setToolTip(
+        QStringLiteral("Viewer texture buffer budget (decoded float previews).\n"
+                       "Also used as the convert parallel memory budget."));
+    memoryGbSpin_->setFixedWidth(90);
+    modeRow->addWidget(memoryGbSpin_);
+    clearBufBtn_ = new QPushButton(QStringLiteral("Clear"));
+    clearBufBtn_->setFixedWidth(52);
+    clearBufBtn_->setToolTip(QStringLiteral("Unload Source and Converted textures from memory."));
+    modeRow->addWidget(clearBufBtn_);
+    bufferLabel_ = new QLabel(QStringLiteral("buf 0 B"));
+    bufferLabel_->setMinimumWidth(70);
+    bufferLabel_->setStyleSheet(QStringLiteral("color: #9aa0a6;"));
+    modeRow->addWidget(bufferLabel_);
     modeRow->addStretch(1);
     root->addLayout(modeRow);
 
@@ -829,11 +849,17 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
         setViewTransform(viewCombo_->currentData().toInt());
     });
     connect(contentCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        rememberSharedFrame();
         contentKind_ = ViewerContentKind(contentCombo_->currentData().toInt());
-        refreshFromPipeline();
+        refreshFromPipeline(false);
     });
     connect(channelGroup_, &QButtonGroup::idClicked, this,
             [this](int id) { setChannelMode(ViewerChannelMode(id)); });
+    connect(clearBufBtn_, &QPushButton::clicked, this, [this] { clearTextureBuffers(); });
+    connect(memoryGbSpin_, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int gb) {
+        setMemoryBudgetBytes(qint64(gb) * 1024LL * 1024LL * 1024LL);
+    });
+    setMemoryBudgetBytes(qint64(memoryGbSpin_->value()) * 1024LL * 1024LL * 1024LL);
 
     gradeTimer_ = new QTimer(this);
     gradeTimer_->setSingleShot(true);
@@ -903,10 +929,147 @@ void TextureViewerWidget::setOcioConfig(bool useEnv, const QString& configPath) 
                               ocioWorkingSpace_);
 }
 
+TextureViewerWidget::SequenceCache& TextureViewerWidget::cacheFor(ViewerContentKind kind) {
+    return kind == ViewerContentKind::SourceImages ? sourceCache_ : convertedCache_;
+}
+
+const TextureViewerWidget::SequenceCache& TextureViewerWidget::cacheFor(ViewerContentKind kind) const {
+    return kind == ViewerContentKind::SourceImages ? sourceCache_ : convertedCache_;
+}
+
+TextureViewerWidget::SequenceCache& TextureViewerWidget::activeCache() {
+    return cacheFor(contentKind_);
+}
+
+const TextureViewerWidget::SequenceCache& TextureViewerWidget::activeCache() const {
+    return cacheFor(contentKind_);
+}
+
+TextureViewerWidget::SequenceCache& TextureViewerWidget::inactiveCache() {
+    return cacheFor(contentKind_ == ViewerContentKind::SourceImages
+                        ? ViewerContentKind::ConvertedTx
+                        : ViewerContentKind::SourceImages);
+}
+
+void TextureViewerWidget::rememberSharedFrame() {
+    const SequenceCache& cache = activeCache();
+    if (!cache.frames.isEmpty() && frameIndex_ >= 0 && frameIndex_ < cache.frames.size()) {
+        sharedFrameNumber_ = cache.frames[frameIndex_].frameNumber;
+    }
+}
+
+void TextureViewerWidget::restoreSharedFrame() {
+    const SequenceCache& cache = activeCache();
+    if (cache.frames.isEmpty()) {
+        frameIndex_ = 0;
+        return;
+    }
+    frameIndex_ = indexForFrameNumber(sharedFrameNumber_);
+    setFrame(frameIndex_);
+}
+
+qint64 TextureViewerWidget::bufferBytesUsed() const {
+    return sourceCache_.bytesUsed() + convertedCache_.bytesUsed();
+}
+
+void TextureViewerWidget::setMemoryBudgetBytes(qint64 bytes) {
+    memoryBudgetBytes_ = std::max<qint64>(qint64(256) * 1024 * 1024, bytes);
+    if (memoryGbSpin_) {
+        const int gb = int(std::clamp<qint64>(memoryBudgetBytes_ / (1024LL * 1024LL * 1024LL), 1, 512));
+        const QSignalBlocker b(memoryGbSpin_);
+        memoryGbSpin_->setValue(gb);
+    }
+    enforceMemoryBudget(&activeCache());
+    updateBufferStatus();
+}
+
+void TextureViewerWidget::clearTextureBuffers() {
+    rememberSharedFrame();
+    sourceCache_.clearPixels();
+    convertedCache_.clearPixels();
+    // Keep path keys / frame lists so we can reload without resetting timeline.
+    sourceCache_.loadedCount = 0;
+    convertedCache_.loadedCount = 0;
+    ++sourceCache_.generation;
+    ++convertedCache_.generation;
+    canvas_->clear();
+    canvas_->setPlaceholder(QStringLiteral("Buffer cleared — reload on demand"));
+    updateInfoBar();
+    updateBufferStatus();
+    emit statusMessage(QStringLiteral("Viewer: texture buffers cleared"));
+    // Kick reload for the active view only.
+    if (!activeCache().pathKey.isEmpty() && !activeCache().frames.isEmpty()) {
+        startPreload(activeCache());
+    }
+}
+
+void TextureViewerWidget::reloadConvertedBuffer() {
+    rememberSharedFrame();
+    convertedCache_.reset();
+    if (contentKind_ == ViewerContentKind::ConvertedTx) refreshFromPipeline(true);
+}
+
+void TextureViewerWidget::updateBufferStatus() {
+    if (!bufferLabel_) return;
+    bufferLabel_->setText(QStringLiteral("buf %1").arg(formatBytes(bufferBytesUsed())));
+    bufferLabel_->setToolTip(
+        QStringLiteral("Source %1 · Converted %2 · Budget %3")
+            .arg(formatBytes(sourceCache_.bytesUsed()), formatBytes(convertedCache_.bytesUsed()),
+                 formatBytes(memoryBudgetBytes_)));
+}
+
+void TextureViewerWidget::enforceMemoryBudget(SequenceCache* preferKeep) {
+    if (bufferBytesUsed() <= memoryBudgetBytes_) return;
+
+    auto unloadUntilOk = [&](SequenceCache& cache, int keepIndex) {
+        for (int pass = 0; pass < cache.frames.size(); ++pass) {
+            if (bufferBytesUsed() <= memoryBudgetBytes_) return;
+            int best = -1;
+            int bestDist = -1;
+            for (int i = 0; i < cache.frames.size(); ++i) {
+                if (i == keepIndex) continue;
+                if (!cache.frames[i].ready || cache.frames[i].linearRgba.empty()) continue;
+                const int dist = std::abs(i - std::max(0, keepIndex));
+                if (dist > bestDist) {
+                    bestDist = dist;
+                    best = i;
+                }
+            }
+            if (best < 0) return;
+            cache.frames[best].unloadPixels();
+            cache.loadedCount = std::max(0, cache.loadedCount - 1);
+        }
+    };
+
+    // Free the inactive cache first (only while over budget).
+    SequenceCache* other =
+        (preferKeep == &sourceCache_) ? &convertedCache_
+        : (preferKeep == &convertedCache_) ? &sourceCache_
+                                           : &convertedCache_;
+    if (other != preferKeep) {
+        other->clearPixels();
+        other->loadedCount = 0;
+    }
+    if (bufferBytesUsed() > memoryBudgetBytes_ && preferKeep) {
+        const int keep = (preferKeep == &activeCache()) ? frameIndex_ : -1;
+        unloadUntilOk(*preferKeep, keep);
+    }
+}
+
 void TextureViewerWidget::setPipelinePaths(const QString& sourcePath, const QString& outputFolder) {
-    pipelineSource_ = sourcePath.trimmed();
-    pipelineOutputFolder_ = outputFolder.trimmed();
-    refreshFromPipeline();
+    const QString src = sourcePath.trimmed();
+    const QString out = outputFolder.trimmed();
+    const bool sourceChanged = src != pipelineSource_;
+    const bool outChanged = out != pipelineOutputFolder_;
+    pipelineSource_ = src;
+    pipelineOutputFolder_ = out;
+    if (sourceChanged) {
+        sourceCache_.reset();
+    }
+    if (sourceChanged || outChanged) {
+        convertedCache_.reset();
+    }
+    refreshFromPipeline(false);
 }
 
 void TextureViewerWidget::setOutputExtension(const QString& ext) {
@@ -914,17 +1077,19 @@ void TextureViewerWidget::setOutputExtension(const QString& ext) {
     const QString next = trimmed.isEmpty() ? QStringLiteral("tx") : trimmed;
     if (outputExt_ == next) return;
     outputExt_ = next;
-    if (contentKind_ == ViewerContentKind::ConvertedTx) refreshFromPipeline();
+    convertedCache_.reset();
+    if (contentKind_ == ViewerContentKind::ConvertedTx) refreshFromPipeline(true);
 }
 
 void TextureViewerWidget::setContentKind(ViewerContentKind kind) {
+    rememberSharedFrame();
     contentKind_ = kind;
     if (contentCombo_) {
         const QSignalBlocker block(contentCombo_);
         const int idx = contentCombo_->findData(int(kind));
         if (idx >= 0) contentCombo_->setCurrentIndex(idx);
     }
-    refreshFromPipeline();
+    refreshFromPipeline(false);
 }
 
 QString TextureViewerWidget::guessConvertedOutputPath(const QString& sourcePath,
@@ -959,19 +1124,14 @@ QString TextureViewerWidget::guessConvertedOutputPath(const QString& sourcePath,
     return QDir(outDir).filePath(name);
 }
 
-void TextureViewerWidget::clearView() {
-    frames_.clear();
-    frameIndex_ = 0;
-    loadedCount_ = 0;
-    ++loadGeneration_;
+void TextureViewerWidget::clearActiveView() {
     canvas_->clear();
-    rangeStart_ = 1;
-    rangeEnd_ = 1;
     rebuildTimeline();
     infoLabel_->setText(QStringLiteral("No texture"));
+    updateBufferStatus();
 }
 
-void TextureViewerWidget::refreshFromPipeline() {
+void TextureViewerWidget::refreshFromPipeline(bool forceReload) {
     QString path;
     if (contentKind_ == ViewerContentKind::SourceImages) {
         path = pipelineSource_;
@@ -979,10 +1139,93 @@ void TextureViewerWidget::refreshFromPipeline() {
         path = guessConvertedOutputPath(pipelineSource_, pipelineOutputFolder_, outputExt_);
     }
     if (path.isEmpty()) {
-        clearView();
+        activeCache().reset();
+        clearActiveView();
         return;
     }
-    setSourcePath(path);
+
+    SequenceCache& cache = activeCache();
+    if (!forceReload && cache.pathKey == path && !cache.frames.isEmpty()) {
+        bindActiveCacheToUi();
+        restoreSharedFrame();
+        showCurrentFrame();
+        updateBufferStatus();
+        return;
+    }
+
+    loadSequenceInto(cache, path);
+}
+
+void TextureViewerWidget::bindActiveCacheToUi() {
+    SequenceCache& cache = activeCache();
+    if (cache.frames.isEmpty()) return;
+    ocioWorkingSpace_ = prefersAcesCgWorkingSpace(cache.frames.first().path) ? kWorkingSpaceAcesCg
+                                                                             : kWorkingSpaceSrgbLinear;
+    canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
+                              ocioWorkingSpace_);
+    canvas_->setChannelMode(channelMode_);
+    canvas_->setGrade(grade_);
+    rebuildTimeline();
+}
+
+void TextureViewerWidget::loadSequenceInto(SequenceCache& cache, const QString& pathIn) {
+    rememberSharedFrame();
+    cache.reset();
+    canvas_->clear();
+
+    const QString path = pathIn.trimmed();
+    if (path.isEmpty()) {
+        clearActiveView();
+        return;
+    }
+
+    QStringList paths;
+    QString pattern;
+    std::vector<int> tiles;
+    if (resolveUdimPattern(path, QString(), pattern, tiles) && !tiles.empty()) {
+        for (int udim : tiles) {
+            const QString tile = expandUdimToken(pattern, udim);
+            if (!QFileInfo::exists(tile)) continue;
+            paths.push_back(tile);
+        }
+    }
+
+    if (paths.isEmpty() && path.contains(QStringLiteral("$F"))) {
+        const int scanEnd = std::max(10000, cache.rangeEnd);
+        const auto expanded = txExpandFrameSources(path.toStdString(), 1, scanEnd);
+        for (const std::string& p : expanded) paths.push_back(QString::fromStdString(p));
+    }
+
+    if (paths.isEmpty()) {
+        if (!QFileInfo::exists(path)) {
+            clearActiveView();
+            return;
+        }
+        paths.push_back(path);
+    }
+
+    cache.pathKey = path;
+    cache.frames.resize(paths.size());
+    for (int i = 0; i < paths.size(); ++i) {
+        cache.frames[i].path = paths[i];
+        cache.frames[i].frameNumber = txExtractFrameNumber(paths[i].toStdString());
+    }
+
+    int minFrame = cache.frames.first().frameNumber;
+    int maxFrame = cache.frames.first().frameNumber;
+    for (const FrameSlot& f : cache.frames) {
+        minFrame = std::min(minFrame, f.frameNumber);
+        maxFrame = std::max(maxFrame, f.frameNumber);
+    }
+    cache.rangeStart = minFrame;
+    cache.rangeEnd = maxFrame;
+
+    bindActiveCacheToUi();
+    canvas_->setPlaceholder(QStringLiteral("Loading sequence…"));
+    emit statusMessage(QStringLiteral("Viewer: loading %1 tile(s)…").arg(cache.frames.size()));
+    restoreSharedFrame();
+    startPreload(cache);
+    updateBufferStatus();
 }
 
 void TextureViewerWidget::setColorManagement(int mode) {
@@ -1020,104 +1263,37 @@ void TextureViewerWidget::setViewTransform(int view) {
     updateInfoBar();
 }
 
-void TextureViewerWidget::setSourcePath(const QString& pathIn) {
-    frames_.clear();
-    frameIndex_ = 0;
-    loadedCount_ = 0;
-    ++loadGeneration_;
-    canvas_->clear();
-
-    const QString path = pathIn.trimmed();
-    if (path.isEmpty()) {
-        rangeStart_ = 1;
-        rangeEnd_ = 1;
-        rebuildTimeline();
-        infoLabel_->setText(QStringLiteral("No texture"));
-        return;
-    }
-
-    QStringList paths;
-    QString pattern;
-    std::vector<int> tiles;
-    if (resolveUdimPattern(path, QString(), pattern, tiles) && !tiles.empty()) {
-        for (int udim : tiles) {
-            const QString tile = expandUdimToken(pattern, udim);
-            if (!QFileInfo::exists(tile)) continue;
-            paths.push_back(tile);
-        }
-    }
-
-    if (paths.isEmpty() && path.contains(QStringLiteral("$F"))) {
-        const int scanEnd = std::max(10000, rangeEnd_);
-        const auto expanded = txExpandFrameSources(path.toStdString(), 1, scanEnd);
-        for (const std::string& p : expanded) paths.push_back(QString::fromStdString(p));
-    }
-
-    if (paths.isEmpty()) {
-        if (!QFileInfo::exists(path)) {
-            // Missing source / .tx → default placeholder, not an error banner.
-            rangeStart_ = 1;
-            rangeEnd_ = 1;
-            rebuildTimeline();
-            infoLabel_->setText(QStringLiteral("No texture"));
-            return;
-        }
-        paths.push_back(path);
-    }
-
-    frames_.resize(paths.size());
-    for (int i = 0; i < paths.size(); ++i) {
-        frames_[i].path = paths[i];
-        frames_[i].frameNumber = txExtractFrameNumber(paths[i].toStdString());
-    }
-
-    ocioWorkingSpace_ = prefersAcesCgWorkingSpace(paths.first()) ? kWorkingSpaceAcesCg
-                                                                 : kWorkingSpaceSrgbLinear;
-    canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
-                              ocioWorkingSpace_);
-    canvas_->setChannelMode(channelMode_);
-    canvas_->setGrade(grade_);
-
-    int minFrame = frames_.first().frameNumber;
-    int maxFrame = frames_.first().frameNumber;
-    for (const FrameSlot& f : frames_) {
-        minFrame = std::min(minFrame, f.frameNumber);
-        maxFrame = std::max(maxFrame, f.frameNumber);
-    }
-    rangeStart_ = minFrame;
-    rangeEnd_ = maxFrame;
-    rebuildTimeline();
-    canvas_->setPlaceholder(QStringLiteral("Loading sequence…"));
-    emit statusMessage(QStringLiteral("Viewer: loading %1 tile(s)…").arg(frames_.size()));
-    startPreloadAll();
-}
-
-void TextureViewerWidget::startPreloadAll() {
-    const quint64 generation = loadGeneration_.load();
+void TextureViewerWidget::startPreload(SequenceCache& cache) {
+    const ViewerContentKind kind =
+        (&cache == &sourceCache_) ? ViewerContentKind::SourceImages : ViewerContentKind::ConvertedTx;
+    const quint64 generation = cache.generation;
     QPointer<TextureViewerWidget> self(this);
-    for (int i = 0; i < frames_.size(); ++i) {
-        const QString path = frames_[i].path;
-        QThreadPool::globalInstance()->start([self, path, i, generation]() {
+    for (int i = 0; i < cache.frames.size(); ++i) {
+        if (cache.frames[i].ready && !cache.frames[i].linearRgba.empty()) continue;
+        const QString path = cache.frames[i].path;
+        QThreadPool::globalInstance()->start([self, path, i, generation, kind]() {
             LoadPayload payload = decodeFrame(path, i);
             if (!self) return;
             QMetaObject::invokeMethod(
                 self,
-                [self, generation, payload = std::move(payload)]() mutable {
+                [self, kind, generation, payload = std::move(payload)]() mutable {
                     if (!self) return;
-                    self->onFrameLoaded(generation, std::move(payload));
+                    self->onFrameLoaded(kind, generation, std::move(payload));
                 },
                 Qt::QueuedConnection);
         });
     }
 }
 
-void TextureViewerWidget::onFrameLoaded(quint64 generation, LoadPayload payload) {
-    if (generation != loadGeneration_.load()) return;
-    if (payload.index < 0 || payload.index >= frames_.size()) return;
-    if (frames_[payload.index].path != payload.path) return;
+void TextureViewerWidget::onFrameLoaded(ViewerContentKind kind, quint64 generation,
+                                        LoadPayload payload) {
+    SequenceCache& cache = cacheFor(kind);
+    if (generation != cache.generation) return;
+    if (payload.index < 0 || payload.index >= cache.frames.size()) return;
+    if (cache.frames[payload.index].path != payload.path) return;
 
-    FrameSlot& slot = frames_[payload.index];
-    if (!slot.ready) ++loadedCount_;
+    FrameSlot& slot = cache.frames[payload.index];
+    const bool wasReady = slot.ready && !slot.linearRgba.empty();
 
     slot.sourceWidth = payload.sourceWidth;
     slot.sourceHeight = payload.sourceHeight;
@@ -1127,29 +1303,45 @@ void TextureViewerWidget::onFrameLoaded(quint64 generation, LoadPayload payload)
     slot.linearRgba = std::move(payload.linearRgba);
     slot.error = payload.error;
     slot.ready = payload.error.isEmpty() && !slot.linearRgba.empty();
+    if (slot.ready && !wasReady) ++cache.loadedCount;
 
-    if (payload.index == frameIndex_) showCurrentFrame();
+    enforceMemoryBudget(&cache);
 
-    if (loadedCount_ >= frames_.size()) {
-        emit statusMessage(QStringLiteral("Viewer: sequence ready (%1 tile(s))").arg(frames_.size()));
-    } else {
-        emit statusMessage(
-            QStringLiteral("Viewer: loaded %1/%2…").arg(loadedCount_).arg(frames_.size()));
+    if (kind == contentKind_ && payload.index == frameIndex_) showCurrentFrame();
+
+    if (kind == contentKind_) {
+        if (cache.loadedCount >= cache.frames.size()) {
+            emit statusMessage(
+                QStringLiteral("Viewer: sequence ready (%1 tile(s))").arg(cache.frames.size()));
+        } else {
+            emit statusMessage(QStringLiteral("Viewer: loaded %1/%2…")
+                                   .arg(cache.loadedCount)
+                                   .arg(cache.frames.size()));
+        }
+        updateInfoBar();
     }
-    updateInfoBar();
+    updateBufferStatus();
 }
 
 QString TextureViewerWidget::currentPath() const {
-    if (frameIndex_ < 0 || frameIndex_ >= frames_.size()) return {};
-    return frames_[frameIndex_].path;
+    const SequenceCache& cache = activeCache();
+    if (frameIndex_ < 0 || frameIndex_ >= cache.frames.size()) return {};
+    return cache.frames[frameIndex_].path;
 }
 
+int TextureViewerWidget::frameCount() const { return activeCache().frames.size(); }
+
+int TextureViewerWidget::rangeStart() const { return activeCache().rangeStart; }
+
+int TextureViewerWidget::rangeEnd() const { return activeCache().rangeEnd; }
+
 int TextureViewerWidget::indexForFrameNumber(int frame) const {
-    if (frames_.isEmpty()) return 0;
+    const SequenceCache& cache = activeCache();
+    if (cache.frames.isEmpty()) return 0;
     int bestIdx = 0;
-    int bestDist = std::abs(frames_[0].frameNumber - frame);
-    for (int i = 1; i < frames_.size(); ++i) {
-        const int d = std::abs(frames_[i].frameNumber - frame);
+    int bestDist = std::abs(cache.frames[0].frameNumber - frame);
+    for (int i = 1; i < cache.frames.size(); ++i) {
+        const int d = std::abs(cache.frames[i].frameNumber - frame);
         if (d < bestDist) {
             bestDist = d;
             bestIdx = i;
@@ -1159,38 +1351,45 @@ int TextureViewerWidget::indexForFrameNumber(int frame) const {
 }
 
 int TextureViewerWidget::frameNumberAt(int index) const {
-    if (index < 0 || index >= frames_.size()) return rangeStart_;
-    return frames_[index].frameNumber;
+    const SequenceCache& cache = activeCache();
+    if (index < 0 || index >= cache.frames.size()) return cache.rangeStart;
+    return cache.frames[index].frameNumber;
 }
 
 void TextureViewerWidget::setTimelineFrame(int frame) {
-    // Scrubber shows absolute UDIM / $F numbers; snap to the nearest existing frame.
-    if (frames_.isEmpty()) return;
+    if (activeCache().frames.isEmpty()) return;
+    sharedFrameNumber_ = frame;
     setFrame(indexForFrameNumber(frame));
 }
 
 void TextureViewerWidget::setFrame(int index) {
-    if (frames_.isEmpty()) return;
-    index = std::clamp(index, 0, int(frames_.size()) - 1);
-    // Keep scrub inside the editable start/end window (also expressed as frame numbers).
-    int lo = indexForFrameNumber(rangeStart_);
-    int hi = indexForFrameNumber(rangeEnd_);
+    SequenceCache& cache = activeCache();
+    if (cache.frames.isEmpty()) return;
+    index = std::clamp(index, 0, int(cache.frames.size()) - 1);
+    int lo = indexForFrameNumber(cache.rangeStart);
+    int hi = indexForFrameNumber(cache.rangeEnd);
     if (lo > hi) std::swap(lo, hi);
     index = std::clamp(index, lo, hi);
     frameIndex_ = index;
-    setExprFrame(frameNumberAt(frameIndex_));
+    sharedFrameNumber_ = frameNumberAt(frameIndex_);
+    setExprFrame(sharedFrameNumber_);
     if (!updatingTimeline_) {
         updatingTimeline_ = true;
-        scrubber_->setFrame(frameNumberAt(frameIndex_));
+        scrubber_->setFrame(sharedFrameNumber_);
         updatingTimeline_ = false;
+    }
+    // Reload if this tile was evicted from the buffer.
+    if (!cache.frames[frameIndex_].ready && cache.frames[frameIndex_].error.isEmpty()) {
+        startPreload(cache);
     }
     showCurrentFrame();
 }
 
 void TextureViewerWidget::nextFrame() {
-    if (frames_.size() <= 1) return;
-    int lo = indexForFrameNumber(rangeStart_);
-    int hi = indexForFrameNumber(rangeEnd_);
+    const SequenceCache& cache = activeCache();
+    if (cache.frames.size() <= 1) return;
+    int lo = indexForFrameNumber(cache.rangeStart);
+    int hi = indexForFrameNumber(cache.rangeEnd);
     if (lo > hi) std::swap(lo, hi);
     const int next = frameIndex_ + 1;
     if (next > hi) setFrame(lo);
@@ -1198,9 +1397,10 @@ void TextureViewerWidget::nextFrame() {
 }
 
 void TextureViewerWidget::prevFrame() {
-    if (frames_.size() <= 1) return;
-    int lo = indexForFrameNumber(rangeStart_);
-    int hi = indexForFrameNumber(rangeEnd_);
+    const SequenceCache& cache = activeCache();
+    if (cache.frames.size() <= 1) return;
+    int lo = indexForFrameNumber(cache.rangeStart);
+    int hi = indexForFrameNumber(cache.rangeEnd);
     if (lo > hi) std::swap(lo, hi);
     const int prev = frameIndex_ - 1;
     if (prev < lo) setFrame(hi);
@@ -1211,82 +1411,86 @@ void TextureViewerWidget::fitView() { canvas_->fitToView(); }
 
 void TextureViewerWidget::onStartEdited() {
     if (updatingTimeline_ || !startEdit_) return;
+    SequenceCache& cache = activeCache();
     bool ok = false;
     int value = startEdit_->text().trimmed().toInt(&ok);
     if (!ok) {
         updatingTimeline_ = true;
-        startEdit_->setText(QString::number(rangeStart_));
+        startEdit_->setText(QString::number(cache.rangeStart));
         updatingTimeline_ = false;
         return;
     }
-    if (!frames_.isEmpty()) {
-        int lo = frames_.first().frameNumber;
-        int hi = frames_.first().frameNumber;
-        for (const FrameSlot& f : frames_) {
+    if (!cache.frames.isEmpty()) {
+        int lo = cache.frames.first().frameNumber;
+        int hi = cache.frames.first().frameNumber;
+        for (const FrameSlot& f : cache.frames) {
             lo = std::min(lo, f.frameNumber);
             hi = std::max(hi, f.frameNumber);
         }
         value = std::clamp(value, lo, hi);
     }
-    rangeStart_ = value;
-    if (rangeEnd_ < rangeStart_) rangeEnd_ = rangeStart_;
+    cache.rangeStart = value;
+    if (cache.rangeEnd < cache.rangeStart) cache.rangeEnd = cache.rangeStart;
     rebuildTimeline();
     setFrame(frameIndex_);
 }
 
 void TextureViewerWidget::onEndEdited() {
     if (updatingTimeline_ || !endEdit_) return;
+    SequenceCache& cache = activeCache();
     bool ok = false;
     int value = endEdit_->text().trimmed().toInt(&ok);
     if (!ok) {
         updatingTimeline_ = true;
-        endEdit_->setText(QString::number(rangeEnd_));
+        endEdit_->setText(QString::number(cache.rangeEnd));
         updatingTimeline_ = false;
         return;
     }
-    if (!frames_.isEmpty()) {
-        int lo = frames_.first().frameNumber;
-        int hi = frames_.first().frameNumber;
-        for (const FrameSlot& f : frames_) {
+    if (!cache.frames.isEmpty()) {
+        int lo = cache.frames.first().frameNumber;
+        int hi = cache.frames.first().frameNumber;
+        for (const FrameSlot& f : cache.frames) {
             lo = std::min(lo, f.frameNumber);
             hi = std::max(hi, f.frameNumber);
         }
         value = std::clamp(value, lo, hi);
     }
-    rangeEnd_ = value;
-    if (rangeEnd_ < rangeStart_) rangeStart_ = rangeEnd_;
+    cache.rangeEnd = value;
+    if (cache.rangeEnd < cache.rangeStart) cache.rangeStart = cache.rangeEnd;
     rebuildTimeline();
     setFrame(frameIndex_);
 }
 
 void TextureViewerWidget::rebuildTimeline() {
+    SequenceCache& cache = activeCache();
     int lo = 1;
     int hi = 1;
-    if (!frames_.isEmpty()) {
-        lo = hi = frames_.first().frameNumber;
-        for (const FrameSlot& f : frames_) {
+    if (!cache.frames.isEmpty()) {
+        lo = hi = cache.frames.first().frameNumber;
+        for (const FrameSlot& f : cache.frames) {
             lo = std::min(lo, f.frameNumber);
             hi = std::max(hi, f.frameNumber);
         }
     }
-    rangeStart_ = std::clamp(rangeStart_, lo, hi);
-    rangeEnd_ = std::clamp(rangeEnd_, lo, hi);
-    if (rangeEnd_ < rangeStart_) rangeEnd_ = rangeStart_;
+    cache.rangeStart = std::clamp(cache.rangeStart, lo, hi);
+    cache.rangeEnd = std::clamp(cache.rangeEnd, lo, hi);
+    if (cache.rangeEnd < cache.rangeStart) cache.rangeEnd = cache.rangeStart;
 
     updatingTimeline_ = true;
-    if (startEdit_) startEdit_->setText(QString::number(rangeStart_));
-    if (endEdit_) endEdit_->setText(QString::number(rangeEnd_));
-    scrubber_->setRange(rangeStart_, rangeEnd_);
-    scrubber_->setFrame(std::clamp(frameNumberAt(frameIndex_), rangeStart_, rangeEnd_));
+    if (startEdit_) startEdit_->setText(QString::number(cache.rangeStart));
+    if (endEdit_) endEdit_->setText(QString::number(cache.rangeEnd));
+    scrubber_->setRange(cache.rangeStart, cache.rangeEnd);
+    scrubber_->setFrame(std::clamp(sharedFrameNumber_, cache.rangeStart, cache.rangeEnd));
     updatingTimeline_ = false;
 }
 
 void TextureViewerWidget::updateInfoBar() {
-    if (frames_.isEmpty() || frameIndex_ < 0 || frameIndex_ >= frames_.size()) {
+    const SequenceCache& cache = activeCache();
+    if (cache.frames.isEmpty() || frameIndex_ < 0 || frameIndex_ >= cache.frames.size()) {
         infoLabel_->setText(QStringLiteral("No texture"));
         return;
     }
-    const FrameSlot& slot = frames_[frameIndex_];
+    const FrameSlot& slot = cache.frames[frameIndex_];
     const QString modeBit = (colorManagement_ == kColorOcio)
                                 ? QStringLiteral("OCIO")
                                 : QStringLiteral("Classic");
@@ -1302,8 +1506,8 @@ void TextureViewerWidget::updateInfoBar() {
     if (!slot.ready) {
         infoLabel_->setText(QStringLiteral("Loading %1… (%2/%3)")
                                 .arg(QFileInfo(slot.path).fileName())
-                                .arg(loadedCount_)
-                                .arg(frames_.size()));
+                                .arg(cache.loadedCount)
+                                .arg(cache.frames.size()));
         return;
     }
     infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  %5/%6  ·  %7  ·  float  ·  %8/%9")
@@ -1314,16 +1518,17 @@ void TextureViewerWidget::updateInfoBar() {
                             .arg(modeBit)
                             .arg(viewBit)
                             .arg(channelBit)
-                            .arg(loadedCount_)
-                            .arg(frames_.size()));
+                            .arg(cache.loadedCount)
+                            .arg(cache.frames.size()));
 }
 
 void TextureViewerWidget::pushFrameToCanvas() {
-    if (frames_.isEmpty() || frameIndex_ < 0 || frameIndex_ >= frames_.size()) {
+    const SequenceCache& cache = activeCache();
+    if (cache.frames.isEmpty() || frameIndex_ < 0 || frameIndex_ >= cache.frames.size()) {
         canvas_->clear();
         return;
     }
-    const FrameSlot& slot = frames_[frameIndex_];
+    const FrameSlot& slot = cache.frames[frameIndex_];
     if (!slot.error.isEmpty()) {
         canvas_->setPlaceholder(slot.error);
         return;
@@ -1332,14 +1537,16 @@ void TextureViewerWidget::pushFrameToCanvas() {
         canvas_->setPlaceholder(QStringLiteral("Loading…"));
         return;
     }
-    const quint64 id = (quint64(loadGeneration_.load()) << 32) ^ quint64(frameIndex_ + 1) ^
-                       (quint64(slot.previewW) << 16) ^ quint64(slot.previewH);
+    const quint64 id = (quint64(cache.generation) << 32) ^ quint64(frameIndex_ + 1) ^
+                       (quint64(slot.previewW) << 16) ^ quint64(slot.previewH) ^
+                       (quint64(contentKind_) << 48);
     canvas_->setLinearImage(slot.linearRgba.data(), slot.previewW, slot.previewH, id);
 }
 
 void TextureViewerWidget::showCurrentFrame() {
-    if (frames_.isEmpty()) return;
-    frameIndex_ = std::clamp(frameIndex_, 0, int(frames_.size()) - 1);
+    const SequenceCache& cache = activeCache();
+    if (cache.frames.isEmpty()) return;
+    frameIndex_ = std::clamp(frameIndex_, 0, int(cache.frames.size()) - 1);
     pushFrameToCanvas();
     updateInfoBar();
 }

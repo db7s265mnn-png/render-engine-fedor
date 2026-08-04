@@ -3,6 +3,8 @@
 #pragma once
 
 #include <functional>
+#include <atomic>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -90,6 +92,10 @@ struct TxConvertOptions {
     int frameStart = 1;
     int frameEnd = 1;
     bool updateOnly = true;
+    // Parallel convert: 0 = auto from memoryBudgetBytes. Caps concurrent maketx/oiiotool jobs.
+    int maxParallelJobs = 0;
+    // Soft memory budget for concurrency estimate (default 32 GiB).
+    std::int64_t memoryBudgetBytes = 32LL * 1024 * 1024 * 1024;
 };
 
 struct TxConvertResult {
@@ -98,8 +104,14 @@ struct TxConvertResult {
     std::string error;
 };
 
-// Progress: completed / total (after each file). Optional.
+// Progress: completed / total (after each file). May be called from worker threads — keep thread-safe.
 using TxConvertProgressFn = std::function<void(int completed, int total, const std::string& sourcePath)>;
+
+// Shared atomics for UI polling during parallel convert (optional).
+struct TxConvertProgressState {
+    std::atomic<int> completed{0};
+    std::atomic<int> total{0};
+};
 
 // Convert one texture (TX via maketx; PNG/JPG via oiiotool; TX reformat = oiiotool then maketx).
 TxConvertResult txConvertOne(const TxConvertRequest& req);

@@ -22,7 +22,11 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <future>
+#include <memory>
 
 #include "core/log.h"
 #include "core/expr_eval.h"
@@ -468,41 +472,64 @@ private:
         opt.frameStart = viewer_ ? viewer_->rangeStart() : 1;
         opt.frameEnd = viewer_ ? viewer_->rangeEnd() : 1;
         opt.updateOnly = true;
+        opt.memoryBudgetBytes =
+            viewer_ ? viewer_->memoryBudgetBytes() : (32LL * 1024 * 1024 * 1024);
         if (effective == sol::TxOutputFormat::Tx) {
             opt.inputColorSpace = colorSpaceCombo_->currentText().toStdString();
             opt.ocioConfigPath = sol::txResolveOcioConfig(useEnvCheck_->isChecked(),
                                                           ocioEdit_->text().trimmed().toStdString());
         }
 
-        std::vector<sol::TxConvertResult> results;
-        std::string error;
+        auto results = std::make_shared<std::vector<sol::TxConvertResult>>();
+        auto error = std::make_shared<std::string>();
+        auto progressState = std::make_shared<sol::TxConvertProgressState>();
+        auto okFlag = std::make_shared<std::atomic<bool>>(false);
+
         status_->setText(QStringLiteral("Converting…"));
         if (convertBtn_) convertBtn_->setEnabled(false);
         setConvertProgress(0, 1, {});
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
-        const bool ok = sol::txConvertPattern(
-            src.toStdString(), outDir.toStdString(), opt, results, error,
-            [this](int completed, int total, const std::string& path) {
-                setConvertProgress(completed, total, QString::fromStdString(path));
-            });
+        auto future = std::async(std::launch::async, [=]() {
+            sol::TxConvertProgressFn progress = [progressState](int completed, int total,
+                                                                const std::string& /*path*/) {
+                progressState->total.store(total);
+                progressState->completed.store(completed);
+            };
+            const bool ok =
+                sol::txConvertPattern(src.toStdString(), outDir.toStdString(), opt, *results,
+                                      *error, progress);
+            okFlag->store(ok);
+            return ok;
+        });
+
+        while (future.wait_for(std::chrono::milliseconds(33)) != std::future_status::ready) {
+            const int tot = progressState->total.load();
+            const int done = progressState->completed.load();
+            setConvertProgress(done, std::max(1, tot), {});
+        }
+        future.get();
+        const bool ok = okFlag->load();
 
         hideConvertProgress();
         if (convertBtn_) convertBtn_->setEnabled(true);
         refreshOcioStatus();
 
         int success = 0;
-        for (const auto& r : results)
+        for (const auto& r : *results)
             if (r.ok) ++success;
         if (ok) {
             status_->setText(QStringLiteral("Done — %1 file(s) → %2").arg(success).arg(outDir));
-            viewer_->setContentKind(sol::TextureViewerWidget::ViewerContentKind::ConvertedTx);
+            if (viewer_) {
+                viewer_->reloadConvertedBuffer();
+                viewer_->setContentKind(sol::TextureViewerWidget::ViewerContentKind::ConvertedTx);
+            }
         } else {
             status_->setText(QStringLiteral("Finished with errors (%1 ok): %2")
                                  .arg(success)
-                                 .arg(QString::fromStdString(error)));
+                                 .arg(QString::fromStdString(*error)));
             QMessageBox::warning(this, QStringLiteral("TX Converter"),
-                                 QString::fromStdString(error.empty() ? "conversion failed" : error));
+                                 QString::fromStdString(error->empty() ? "conversion failed" : *error));
         }
     }
 
