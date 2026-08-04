@@ -1,7 +1,7 @@
-// Texture preview for TX Converter: UDIM timeline, full-sequence preload, OCIO/sRGB display.
+// Texture preview for TX Converter: right-side float canvas, tick timeline, OCIO/sRGB.
 #pragma once
 
-#include <QImage>
+#include <QPointF>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -13,8 +13,6 @@
 class QLabel;
 class QComboBox;
 class QPushButton;
-class QScrollArea;
-class QTimer;
 
 namespace sol {
 
@@ -23,7 +21,7 @@ enum class ViewerDisplayMode : int {
     OcioSrgbAces = 1,
 };
 
-// Horizontal timeline with a tick per frame (UDIM tile / sequence index).
+// Horizontal timeline with a tick per frame — no UDIM/frame text.
 class FrameTimelineWidget : public QWidget {
     Q_OBJECT
 public:
@@ -31,7 +29,6 @@ public:
 
     void setFrameCount(int count);
     void setCurrentFrame(int index);
-    void setTickLabels(const QStringList& labels);  // optional per-frame labels (e.g. UDIM)
     int currentFrame() const { return current_; }
     int frameCount() const { return count_; }
 
@@ -42,7 +39,6 @@ protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
-    void resizeEvent(QResizeEvent* event) override;
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
 
@@ -52,7 +48,64 @@ private:
 
     int count_ = 0;
     int current_ = 0;
-    QStringList labels_;
+};
+
+// Paints linear float RGB with a live display transform; supports zoom + drag.
+class FloatPreviewCanvas : public QWidget {
+    Q_OBJECT
+public:
+    explicit FloatPreviewCanvas(QWidget* parent = nullptr);
+
+    void clear();
+    void setPlaceholder(const QString& text);
+    void setLinearImage(const float* rgb, int width, int height, quint64 contentId);
+    void setDisplayMode(ViewerDisplayMode mode, bool ocioUseEnv, const QString& ocioConfigPath,
+                        int workingSpace);
+    void fitToView();
+    void resetView();
+    double zoom() const { return zoom_; }
+
+signals:
+    void zoomChanged(double zoom);
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+
+private:
+    void invalidateDisplayCache();
+    void ensureDisplayCache();
+    QRectF imageRect() const;
+    void clampPan();
+
+    const float* linearRgb_ = nullptr;
+    int width_ = 0;
+    int height_ = 0;
+    quint64 contentId_ = 0;
+
+    ViewerDisplayMode displayMode_ = ViewerDisplayMode::ClassicSrgb;
+    bool ocioUseEnv_ = true;
+    QString ocioConfigPath_;
+    int workingSpace_ = 1;
+
+    QImage displayCache_;
+    quint64 displayCacheId_ = 0;
+    ViewerDisplayMode displayCacheMode_ = ViewerDisplayMode::ClassicSrgb;
+    int displayCacheWorking_ = -1;
+    QString displayCacheOcioPath_;
+    bool displayCacheOcioEnv_ = true;
+
+    double zoom_ = 1.0;
+    QPointF pan_{0.0, 0.0};  // pan in widget pixels
+    bool fitted_ = true;
+    bool dragging_ = false;
+    QPoint lastMouse_;
+    QString placeholder_ = QStringLiteral("No texture");
 };
 
 class TextureViewerWidget : public QWidget {
@@ -60,12 +113,8 @@ class TextureViewerWidget : public QWidget {
 public:
     explicit TextureViewerWidget(QWidget* parent = nullptr);
 
-    // Load a single file or a UDIM sequence; preloads every tile in the background.
     void setSourcePath(const QString& path);
-
-    // OCIO config used when display mode is OCIO (env and/or explicit path).
     void setOcioConfig(bool useEnv, const QString& configPath);
-
     void setDisplayMode(ViewerDisplayMode mode);
     ViewerDisplayMode displayMode() const { return displayMode_; }
 
@@ -82,9 +131,6 @@ public slots:
 signals:
     void statusMessage(const QString& text);
 
-protected:
-    void resizeEvent(QResizeEvent* event) override;
-
 private:
     struct FrameSlot {
         QString path;
@@ -94,9 +140,7 @@ private:
         qint64 fileBytes = 0;
         int previewW = 0;
         int previewH = 0;
-        // Linear RGB preview (previewW*previewH*3), downscaled.
-        std::vector<float> linearRgb;
-        QImage display;  // baked for current display mode
+        std::vector<float> linearRgb;  // linear RGB, source of truth for display
         QString error;
         bool ready = false;
     };
@@ -115,25 +159,21 @@ private:
 
     void rebuildTimeline();
     void updateInfoBar();
-    void updateImageLabel();
     void showCurrentFrame();
     void startPreloadAll();
     void onFrameLoaded(quint64 generation, LoadPayload payload);
-    void bakeDisplay(FrameSlot& slot) const;
-    void rebakeAllDisplays();
-    void refreshDisplayModeUi();
+    void pushFrameToCanvas();
 
     static LoadPayload decodeFrame(const QString& path, int index);
 
-    QScrollArea* scroll_ = nullptr;
-    QLabel* imageLabel_ = nullptr;
+    FloatPreviewCanvas* canvas_ = nullptr;
     QLabel* infoLabel_ = nullptr;
+    QLabel* zoomLabel_ = nullptr;
     QComboBox* displayCombo_ = nullptr;
     FrameTimelineWidget* timeline_ = nullptr;
     QPushButton* prevBtn_ = nullptr;
     QPushButton* nextBtn_ = nullptr;
-    QLabel* frameLabel_ = nullptr;
-    QTimer* resizeDebounce_ = nullptr;
+    QPushButton* fitBtn_ = nullptr;
 
     QVector<FrameSlot> frames_;
     int frameIndex_ = 0;
@@ -142,7 +182,7 @@ private:
     ViewerDisplayMode displayMode_ = ViewerDisplayMode::ClassicSrgb;
     bool ocioUseEnv_ = true;
     QString ocioConfigPath_;
-    int ocioWorkingSpace_ = 1;  // default ACEScg; updated from file type when loading
+    int ocioWorkingSpace_ = 1;
 
     std::atomic<quint64> loadGeneration_{0};
 };

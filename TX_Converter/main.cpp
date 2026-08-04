@@ -29,19 +29,22 @@ class TxConverterWindow : public QWidget {
 public:
     TxConverterWindow() {
         setWindowTitle(QStringLiteral("TX Converter"));
-        resize(980, 720);
+        resize(1280, 780);
 
         auto* root = new QVBoxLayout(this);
-        root->setContentsMargins(10, 10, 10, 10);
-        root->setSpacing(8);
+        root->setContentsMargins(8, 8, 8, 8);
+        root->setSpacing(6);
 
-        auto* splitter = new QSplitter(Qt::Vertical, this);
+        auto* splitter = new QSplitter(Qt::Horizontal, this);
         splitter->setChildrenCollapsible(false);
 
-        // ---- Convert panel ----
-        auto* convertPanel = new QWidget();
-        auto* convertLay = new QVBoxLayout(convertPanel);
-        convertLay->setContentsMargins(0, 0, 0, 0);
+        // ---- Left: Convert + open buttons ----
+        auto* leftPanel = new QWidget();
+        leftPanel->setMinimumWidth(320);
+        leftPanel->setMaximumWidth(520);
+        auto* leftLay = new QVBoxLayout(leftPanel);
+        leftLay->setContentsMargins(0, 0, 4, 0);
+        leftLay->setSpacing(8);
 
         auto* formBox = new QGroupBox(QStringLiteral("Convert"));
         auto* form = new QFormLayout(formBox);
@@ -120,15 +123,15 @@ public:
         connect(ocioEdit_, &QLineEdit::editingFinished, this, [this] { syncViewerOcio(); });
         syncOcioEnabled();
 
-        convertLay->addWidget(formBox);
+        leftLay->addWidget(formBox);
 
         auto* hint = new QLabel(
             QStringLiteral("Output is always ACEScg (Arnold-style). "
                            "UDIM: put <UDIM> in the source path to convert the whole sequence. "
-                           "Viewer preloads the full tile sequence; timeline ticks = tiles."));
+                           "Viewer keeps float buffers; wheel = zoom, drag = pan."));
         hint->setWordWrap(true);
         hint->setStyleSheet(QStringLiteral("color: #969aa0;"));
-        convertLay->addWidget(hint);
+        leftLay->addWidget(hint);
 
         auto* btnRow = new QHBoxLayout();
         auto* previewBtn = new QPushButton(QStringLiteral("Preview Source"));
@@ -137,28 +140,19 @@ public:
         previewBtn->setMinimumHeight(32);
         btnRow->addWidget(previewBtn);
         btnRow->addWidget(convertBtn, 1);
-        convertLay->addLayout(btnRow);
+        leftLay->addLayout(btnRow);
         connect(previewBtn, &QPushButton::clicked, this, [this] { previewSource(); });
         connect(convertBtn, &QPushButton::clicked, this, &TxConverterWindow::onConvert);
         connect(sourceEdit_, &QLineEdit::editingFinished, this, [this] {
             if (!sourceEdit_->text().trimmed().isEmpty()) previewSource();
         });
 
-        splitter->addWidget(convertPanel);
-
-        // ---- Viewer panel ----
-        auto* viewBox = new QGroupBox(QStringLiteral("Texture Viewer"));
-        auto* viewLay = new QVBoxLayout(viewBox);
-        viewer_ = new sol::TextureViewerWidget(viewBox);
-        viewLay->addWidget(viewer_);
-
         auto* viewBtnRow = new QHBoxLayout();
         auto* openViewBtn = new QPushButton(QStringLiteral("Open in Viewer…"));
         auto* previewOutBtn = new QPushButton(QStringLiteral("Preview Output Folder .tx"));
         viewBtnRow->addWidget(openViewBtn);
         viewBtnRow->addWidget(previewOutBtn);
-        viewBtnRow->addStretch(1);
-        viewLay->addLayout(viewBtnRow);
+        leftLay->addLayout(viewBtnRow);
         connect(openViewBtn, &QPushButton::clicked, this, [this] {
             const QString path = QFileDialog::getOpenFileName(
                 this, QStringLiteral("Preview texture"), sourceEdit_->text(),
@@ -170,15 +164,26 @@ public:
             }
         });
         connect(previewOutBtn, &QPushButton::clicked, this, [this] { previewOutputTx(); });
+
+        leftLay->addStretch(1);
+        splitter->addWidget(leftPanel);
+
+        // ---- Right: Texture viewer + timeline ----
+        auto* viewBox = new QGroupBox(QStringLiteral("Texture Viewer"));
+        auto* viewLay = new QVBoxLayout(viewBox);
+        viewLay->setContentsMargins(6, 8, 6, 6);
+        viewLay->setSpacing(4);
+        viewer_ = new sol::TextureViewerWidget(viewBox);
+        viewLay->addWidget(viewer_);
         connect(viewer_, &sol::TextureViewerWidget::statusMessage, this, [this](const QString& msg) {
             status_->setText(msg);
         });
         syncViewerOcio();
-
         splitter->addWidget(viewBox);
+
         splitter->setStretchFactor(0, 0);
         splitter->setStretchFactor(1, 1);
-        splitter->setSizes({280, 440});
+        splitter->setSizes({380, 900});
 
         root->addWidget(splitter, 1);
 
@@ -230,12 +235,8 @@ private:
                                      QStringLiteral("Set Source and Output Folder first."));
             return;
         }
-        // Prefer converted .tx named like the source basename (or UDIM pattern → .tx).
-        QString pattern = src;
-        // If source is an image, guess .tx next to output dir with same stem pattern.
         QFileInfo info(src);
         QString name = info.fileName();
-        // Replace extension with .tx for single file; keep <UDIM> for sequences.
         if (sol::pathHasUdimToken(name)) {
             const int dot = name.lastIndexOf(QLatin1Char('.'));
             if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
@@ -245,7 +246,6 @@ private:
             const int dot = name.lastIndexOf(QLatin1Char('.'));
             if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
         } else {
-            // Concrete UDIM tile or single file → resolve pattern then .tx
             QString udimPattern;
             std::vector<int> tiles;
             if (sol::resolveUdimPattern(src, QString(), udimPattern, tiles)) {
