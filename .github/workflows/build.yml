@@ -210,6 +210,46 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item build/bin/* dist/ -Recurse -Force
           Copy-Item "$env:DEPS_PREFIX/embree/bin/*.dll" dist/ -Force
+          # Ensure Qt image format plugins (esp. qpng) are present — windeployqt
+          # sometimes omits PNG even though the viewer needs it.
+          $qtRoot = $env:QT_ROOT_DIR
+          if (-not $qtRoot) { $qtRoot = $env:Qt6_DIR }
+          $imgSrc = $null
+          foreach ($cand in @(
+            "$qtRoot/plugins/imageformats",
+            "$qtRoot/../plugins/imageformats",
+            "$env:IQTA_TOOLS/Qt/6.7.2/msvc2019_64/plugins/imageformats"
+          )) {
+            if ($cand -and (Test-Path $cand)) { $imgSrc = $cand; break }
+          }
+          if ($imgSrc) {
+            New-Item -ItemType Directory -Force -Path dist/imageformats | Out-Null
+            Copy-Item "$imgSrc/*.dll" dist/imageformats/ -Force
+            Write-Host "Copied Qt imageformats from $imgSrc"
+            Get-ChildItem dist/imageformats | ForEach-Object { Write-Host "  $($_.Name)" }
+          } else {
+            Write-Host "WARNING: Qt imageformats folder not found (PNG may fail)"
+          }
+          if (-not (Test-Path "dist/imageformats/qpng.dll")) {
+            # Last resort: search under the Qt install tree.
+            $found = Get-ChildItem -Path "$env:Qt6_DIR/../../.." -Recurse -Filter "qpng.dll" -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($found) {
+              New-Item -ItemType Directory -Force -Path dist/imageformats | Out-Null
+              Copy-Item $found.FullName dist/imageformats/ -Force
+              Write-Host "Copied qpng.dll from $($found.FullName)"
+            }
+          }
+          if (-not (Test-Path "dist/imageformats/qpng.dll")) {
+            Write-Host "WARNING: qpng.dll still missing — PNG preview will fail"
+          } else {
+            Write-Host "OK: qpng.dll present for PNG preview"
+          }
+          # Make sure Qt finds imageformats/ next to the exe (windeployqt layout).
+          if (-not (Test-Path "dist/qt.conf")) {
+            Set-Content -Path "dist/qt.conf" -Value "[Paths]`r`nPrefix=.`r`nPlugins=.`r`n"
+            Write-Host "Wrote dist/qt.conf"
+          }
           # OpenColorIO runtime (config/LUTs are NOT packaged — use system OCIO / Film path)
           if (Test-Path "$env:DEPS_PREFIX/bin") {
             Get-ChildItem -Path "$env:DEPS_PREFIX/bin" -Filter "OpenColorIO*.dll" -ErrorAction SilentlyContinue |

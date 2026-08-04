@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImage>
+#include <QImageReader>
 #include <QRegularExpression>
 #include <QString>
 
@@ -317,10 +318,23 @@ bool writeExrSpectral(const std::string& path, const Image& image, int width, in
 #endif
 
 bool loadLdr(const std::string& path, Image& out, std::string& error, bool srgbColor) {
-    QImage qimage;
-    if (!qimage.load(QString::fromStdString(path))) {
-        error = "unsupported or unreadable image: " + path;
-        return false;
+    // Prefer UTF-8 path (Windows paths from UI are UTF-8 via Qt).
+    const QString qpath = QString::fromUtf8(path.data(), int(path.size()));
+    QImageReader reader(qpath);
+    QImage qimage = reader.read();
+    if (qimage.isNull()) {
+        // Fallback: QImage::load (some builds resolve format plugins differently).
+        if (!qimage.load(qpath)) {
+            QString formats;
+            for (const QByteArray& f : QImageReader::supportedImageFormats()) {
+                if (!formats.isEmpty()) formats += ',';
+                formats += QString::fromLatin1(f);
+            }
+            error = "unsupported or unreadable image: " + path + " (" +
+                    reader.errorString().toStdString() + "); Qt image formats: [" +
+                    formats.toStdString() + "]";
+            return false;
+        }
     }
     qimage = qimage.convertToFormat(QImage::Format_RGBA8888);
     out.resize(qimage.width(), qimage.height());

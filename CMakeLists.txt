@@ -670,10 +670,12 @@ if(WIN32 AND SOLSTICE_BUILD_APP)
     find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS "${SOLSTICE_QT_BIN_DIR}" ${Qt6_DIR}/../../../bin)
     if(WINDEPLOYQT_EXECUTABLE)
         add_custom_target(deploy
-            COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to ${SOLSTICE_OUTPUT_NAME}"
+            COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to ${SOLSTICE_OUTPUT_NAME} + TX_Converter"
             COMMAND ${WINDEPLOYQT_EXECUTABLE} --release --no-translations --no-system-d3d-compiler
                     --compiler-runtime $<TARGET_FILE:Solstice>
-            DEPENDS Solstice)
+            COMMAND ${WINDEPLOYQT_EXECUTABLE} --release --no-translations --no-system-d3d-compiler
+                    $<TARGET_FILE:TX_Converter>
+            DEPENDS Solstice TX_Converter)
     endif()
 endif()
 
