@@ -14,21 +14,31 @@
 class QLabel;
 class QComboBox;
 class QPushButton;
+class QToolButton;
 class QLineEdit;
 class QDoubleSpinBox;
 class QSlider;
+class QButtonGroup;
 
 namespace sol {
 
 class TimelineScrubber;
 
-struct ViewerGrade {
-    float brightness = 0.0f;  // -1..1 add after contrast
-    float contrast = 1.0f;    // pivot 0.5
-    float gamma = 1.0f;       // display gamma (>0)
+enum class ViewerChannelMode : int {
+    RGBA = 0,
+    R = 1,
+    G = 2,
+    B = 3,
+    A = 4,
 };
 
-// Paints linear float RGB with a live display transform; supports zoom + drag.
+struct ViewerGrade {
+    float brightness = 0.0f;  // exposure stops (× 2^b), Houdini/mplay-style
+    float contrast = 1.0f;    // pivot 0.18 linear
+    float gamma = 1.0f;       // linear gamma before view transform
+};
+
+// Paints linear float RGBA with a live display transform; supports zoom + drag.
 class FloatPreviewCanvas : public QWidget {
     Q_OBJECT
 public:
@@ -36,9 +46,11 @@ public:
 
     void clear();
     void setPlaceholder(const QString& text);
-    void setLinearImage(const float* rgb, int width, int height, quint64 contentId);
+    // rgba = tightly packed RGBA float (4 components per pixel).
+    void setLinearImage(const float* rgba, int width, int height, quint64 contentId);
     void setDisplayParams(int colorManagement, int viewTransform, bool ocioUseEnv,
                           const QString& ocioConfigPath, int workingSpace);
+    void setChannelMode(ViewerChannelMode mode);
     void setGrade(const ViewerGrade& grade);
     void fitToView();
     void resetView();
@@ -62,13 +74,14 @@ private:
     QRectF imageRect() const;
     void clampPan();
 
-    const float* linearRgb_ = nullptr;
+    const float* linearRgba_ = nullptr;
     int width_ = 0;
     int height_ = 0;
     quint64 contentId_ = 0;
 
     int colorManagement_ = kColorOcio;
     int viewTransform_ = kViewSrgbAces;
+    ViewerChannelMode channelMode_ = ViewerChannelMode::RGBA;
     bool ocioUseEnv_ = true;
     QString ocioConfigPath_;
     int workingSpace_ = 1;
@@ -78,6 +91,7 @@ private:
     quint64 displayCacheId_ = 0;
     int displayCacheColorMgmt_ = -1;
     int displayCacheView_ = -1;
+    int displayCacheChannel_ = -1;
     int displayCacheWorking_ = -1;
     QString displayCacheOcioPath_;
     bool displayCacheOcioEnv_ = true;
@@ -101,13 +115,13 @@ public:
 
     explicit TextureViewerWidget(QWidget* parent = nullptr);
 
-    // Source path + output folder from the converter panel. Auto-refreshes the view.
     void setPipelinePaths(const QString& sourcePath, const QString& outputFolder);
+    void setOutputExtension(const QString& ext);  // tx / png / jpg
     void setContentKind(ViewerContentKind kind);
     ViewerContentKind contentKind() const { return contentKind_; }
 
-    // Same basename as Source under Output Folder (handles UDIM / $F / single file).
-    static QString guessConvertedTxPath(const QString& sourcePath, const QString& outputFolder);
+    static QString guessConvertedOutputPath(const QString& sourcePath, const QString& outputFolder,
+                                            const QString& ext);
 
     void setOcioConfig(bool useEnv, const QString& configPath);
     void setColorManagement(int mode);
@@ -122,8 +136,8 @@ public:
     int rangeEnd() const { return rangeEnd_; }
 
 public slots:
-    void setFrame(int index);       // 0-based tile index
-    void setTimelineFrame(int frame);  // 1-based scrubber frame
+    void setFrame(int index);          // 0-based tile index
+    void setTimelineFrame(int frame);  // absolute frame / UDIM number
     void nextFrame();
     void prevFrame();
     void fitView();
@@ -134,13 +148,13 @@ signals:
 private:
     struct FrameSlot {
         QString path;
-        int udim = 0;
+        int frameNumber = 0;  // UDIM / $F number from filename
         int sourceWidth = 0;
         int sourceHeight = 0;
         qint64 fileBytes = 0;
         int previewW = 0;
         int previewH = 0;
-        std::vector<float> linearRgb;
+        std::vector<float> linearRgba;  // RGBA float
         QString error;
         bool ready = false;
     };
@@ -153,7 +167,7 @@ private:
         qint64 fileBytes = 0;
         int previewW = 0;
         int previewH = 0;
-        std::vector<float> linearRgb;
+        std::vector<float> linearRgba;
         QString error;
     };
 
@@ -167,28 +181,37 @@ private:
     void onFrameLoaded(quint64 generation, LoadPayload payload);
     void pushFrameToCanvas();
     void applyGradeFromUi();
-    void resetGrade();
+    void setChannelMode(ViewerChannelMode mode);
     void onStartEdited();
     void onEndEdited();
+    int indexForFrameNumber(int frame) const;
+    int frameNumberAt(int index) const;
     QLineEdit* makeRangeEdit(const QString& tip);
+    QPushButton* makeGradeLabel(const QString& text, const QString& tip);
     QDoubleSpinBox* makeGradeSpin(double minV, double maxV, double step, double value,
                                   const QString& tip);
+    QToolButton* makeChannelButton(const QString& tip, const QColor& fill, bool checker = false);
 
     static LoadPayload decodeFrame(const QString& path, int index);
 
     FloatPreviewCanvas* canvas_ = nullptr;
     QLabel* infoLabel_ = nullptr;
     QLabel* zoomLabel_ = nullptr;
+    QComboBox* contentCombo_ = nullptr;
     QComboBox* colorMgmtCombo_ = nullptr;
     QComboBox* viewCombo_ = nullptr;
-    QComboBox* contentCombo_ = nullptr;
+    QButtonGroup* channelGroup_ = nullptr;
     QPushButton* fitBtn_ = nullptr;
-    QPushButton* gradeResetBtn_ = nullptr;
 
     QString pipelineSource_;
     QString pipelineOutputFolder_;
+    QString outputExt_ = QStringLiteral("tx");
     ViewerContentKind contentKind_ = ViewerContentKind::SourceImages;
+    ViewerChannelMode channelMode_ = ViewerChannelMode::RGBA;
 
+    QPushButton* brightnessLabelBtn_ = nullptr;
+    QPushButton* contrastLabelBtn_ = nullptr;
+    QPushButton* gammaLabelBtn_ = nullptr;
     QDoubleSpinBox* brightnessSpin_ = nullptr;
     QDoubleSpinBox* contrastSpin_ = nullptr;
     QDoubleSpinBox* gammaSpin_ = nullptr;

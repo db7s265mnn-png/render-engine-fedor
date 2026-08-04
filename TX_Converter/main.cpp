@@ -40,7 +40,6 @@ public:
         auto* splitter = new QSplitter(Qt::Horizontal, this);
         splitter->setChildrenCollapsible(false);
 
-        // ---- Left: Convert controls ----
         auto* leftPanel = new QWidget();
         leftPanel->setMinimumWidth(320);
         leftPanel->setMaximumWidth(520);
@@ -49,7 +48,7 @@ public:
         leftLay->setSpacing(8);
 
         auto* formBox = new QGroupBox(QStringLiteral("Convert"));
-        auto* form = new QFormLayout(formBox);
+        form_ = new QFormLayout(formBox);
 
         auto makeBrowseRow = [&](QLineEdit** editOut, bool directory) {
             auto* row = new QWidget();
@@ -81,24 +80,52 @@ public:
             return row;
         };
 
-        form->addRow(QStringLiteral("Source"), makeBrowseRow(&sourceEdit_, false));
+        form_->addRow(QStringLiteral("Source"), makeBrowseRow(&sourceEdit_, false));
         sourceEdit_->setPlaceholderText(QStringLiteral("texture.png or tile_<UDIM>.exr / .tx"));
-        form->addRow(QStringLiteral("Output Folder"), makeBrowseRow(&outputEdit_, true));
+        form_->addRow(QStringLiteral("Output Folder"), makeBrowseRow(&outputEdit_, true));
         outputEdit_->setText(QStringLiteral("tx_cache"));
+
+        formatCombo_ = new QComboBox();
+        formatCombo_->addItem(QStringLiteral("TX"), int(sol::TxOutputFormat::Tx));
+        formatCombo_->addItem(QStringLiteral("PNG"), int(sol::TxOutputFormat::Png));
+        formatCombo_->addItem(QStringLiteral("JPG"), int(sol::TxOutputFormat::Jpg));
+        form_->addRow(QStringLiteral("Format"), formatCombo_);
+
+        bitDepthCombo_ = new QComboBox();
+        form_->addRow(QStringLiteral("Bit Depth"), bitDepthCombo_);
+        bitDepthRow_ = form_->itemAt(form_->rowCount() - 1, QFormLayout::LabelRole)->widget();
+
+        resolutionCombo_ = new QComboBox();
+        resolutionCombo_->addItem(QStringLiteral("Original"), 0);
+        for (int s : {256, 512, 1024, 2048, 4096, 8192})
+            resolutionCombo_->addItem(QString::number(s), s);
+        resolutionCombo_->setToolTip(
+            QStringLiteral("Long side in pixels (aspect preserved). Original = no resize."));
+        form_->addRow(QStringLiteral("Resolution"), resolutionCombo_);
+
+        channelsCombo_ = new QComboBox();
+        channelsCombo_->addItem(QStringLiteral("RGBA"), int(sol::TxChannelMode::RGBA));
+        channelsCombo_->addItem(QStringLiteral("RGB"), int(sol::TxChannelMode::RGB));
+        channelsCombo_->addItem(QStringLiteral("R"), int(sol::TxChannelMode::R));
+        channelsCombo_->addItem(QStringLiteral("G"), int(sol::TxChannelMode::G));
+        channelsCombo_->addItem(QStringLiteral("B"), int(sol::TxChannelMode::B));
+        channelsCombo_->addItem(QStringLiteral("A"), int(sol::TxChannelMode::A));
+        form_->addRow(QStringLiteral("Channels"), channelsCombo_);
 
         colorSpaceCombo_ = new QComboBox();
         colorSpaceCombo_->setEditable(true);
         refreshColorSpaces(false);
-        form->addRow(QStringLiteral("Color Space"), colorSpaceCombo_);
+        form_->addRow(QStringLiteral("Color Space"), colorSpaceCombo_);
+        colorSpaceLabel_ = form_->labelForField(colorSpaceCombo_);
 
         advancedCheck_ = new QCheckBox(QStringLiteral("Advanced (full OCIO list)"));
-        form->addRow(QString(), advancedCheck_);
+        form_->addRow(QString(), advancedCheck_);
         connect(advancedCheck_, &QCheckBox::toggled, this, [this](bool on) { refreshColorSpaces(on); });
 
         useEnvCheck_ = new QCheckBox(QStringLiteral("Use OCIO from Environment"));
         useEnvCheck_->setChecked(true);
         useEnvCheck_->setToolTip(QStringLiteral("Read config path from the OCIO environment variable."));
-        form->addRow(QString(), useEnvCheck_);
+        form_->addRow(QString(), useEnvCheck_);
 
         ocioEdit_ = new QLineEdit();
         auto* ocioRow = new QWidget();
@@ -108,7 +135,8 @@ public:
         ocioBrowse->setFixedWidth(32);
         ocioLay->addWidget(ocioEdit_, 1);
         ocioLay->addWidget(ocioBrowse);
-        form->addRow(QStringLiteral("OCIO Config"), ocioRow);
+        form_->addRow(QStringLiteral("OCIO Config"), ocioRow);
+        ocioLabel_ = form_->labelForField(ocioRow);
         connect(ocioBrowse, &QPushButton::clicked, this, [this] {
             const QString path = QFileDialog::getOpenFileName(
                 this, QStringLiteral("OCIO config"), ocioEdit_->text(),
@@ -126,13 +154,19 @@ public:
         connect(ocioEdit_, &QLineEdit::editingFinished, this, [this] { syncViewerOcio(); });
         syncOcioEnabled();
 
+        connect(formatCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [this](int) {
+                    syncFormatUi();
+                    syncPipeline();
+                });
+        syncFormatUi();
+
         leftLay->addWidget(formBox);
 
         auto* hint = new QLabel(
-            QStringLiteral("Output is always ACEScg (Arnold-style). "
-                           "UDIM: put <UDIM> in the source path to convert the whole sequence. "
-                           "Viewer: switch Source Images / Converted TX. "
-                           "Wheel = zoom, drag = pan."));
+            QStringLiteral("TX output is ACEScg. PNG/JPG keep source colour (resize/bit/channels only). "
+                           "UDIM/$F timeline uses numbers from filenames. "
+                           "Viewer: channels + Classic/OCIO view. Wheel = zoom, drag = pan."));
         hint->setWordWrap(true);
         hint->setStyleSheet(QStringLiteral("color: #969aa0;"));
         leftLay->addWidget(hint);
@@ -147,7 +181,6 @@ public:
         leftLay->addStretch(1);
         splitter->addWidget(leftPanel);
 
-        // ---- Right: Texture viewer + timeline ----
         auto* viewBox = new QGroupBox(QStringLiteral("Texture Viewer"));
         auto* viewLay = new QVBoxLayout(viewBox);
         viewLay->setContentsMargins(6, 8, 6, 6);
@@ -174,6 +207,48 @@ public:
     }
 
 private:
+    sol::TxOutputFormat currentFormat() const {
+        return sol::TxOutputFormat(formatCombo_->currentData().toInt());
+    }
+
+    void syncFormatUi() {
+        const auto fmt = currentFormat();
+        const bool isTx = fmt == sol::TxOutputFormat::Tx;
+        const bool isJpg = fmt == sol::TxOutputFormat::Jpg;
+
+        if (colorSpaceCombo_) colorSpaceCombo_->setVisible(isTx);
+        if (colorSpaceLabel_) colorSpaceLabel_->setVisible(isTx);
+        if (advancedCheck_) advancedCheck_->setVisible(isTx);
+        if (useEnvCheck_) useEnvCheck_->setVisible(isTx);
+        if (ocioEdit_) {
+            // parent row widget
+            if (QWidget* w = ocioEdit_->parentWidget()) w->setVisible(isTx);
+        }
+        if (ocioLabel_) ocioLabel_->setVisible(isTx);
+
+        bitDepthCombo_->blockSignals(true);
+        bitDepthCombo_->clear();
+        if (isJpg) {
+            bitDepthCombo_->addItem(QStringLiteral("8"), 8);
+            if (QWidget* field = form_->labelForField(bitDepthCombo_)) field->setVisible(false);
+            bitDepthCombo_->setVisible(false);
+        } else {
+            if (QWidget* field = form_->labelForField(bitDepthCombo_)) field->setVisible(true);
+            bitDepthCombo_->setVisible(true);
+            bitDepthCombo_->addItem(QStringLiteral("8"), 8);
+            bitDepthCombo_->addItem(QStringLiteral("16"), 16);
+            if (isTx) bitDepthCombo_->addItem(QStringLiteral("32"), 32);
+            const int prefer = isTx ? 16 : 8;
+            const int idx = bitDepthCombo_->findData(prefer);
+            bitDepthCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
+        }
+        bitDepthCombo_->blockSignals(false);
+
+        if (viewer_) {
+            viewer_->setOutputExtension(QString::fromStdString(sol::txOutputExtension(fmt)));
+        }
+    }
+
     void refreshColorSpaces(bool advanced) {
         const QString current = colorSpaceCombo_->currentText();
         colorSpaceCombo_->clear();
@@ -201,6 +276,7 @@ private:
     void syncPipeline() {
         if (!viewer_) return;
         syncViewerOcio();
+        viewer_->setOutputExtension(QString::fromStdString(sol::txOutputExtension(currentFormat())));
         viewer_->setPipelinePaths(sourceEdit_->text().trimmed(), outputEdit_->text().trimmed());
     }
 
@@ -212,22 +288,32 @@ private:
                                  QStringLiteral("Choose a source texture and an output folder."));
             return;
         }
-        const std::string ocio = sol::txResolveOcioConfig(useEnvCheck_->isChecked(),
+
+        sol::TxConvertOptions opt;
+        opt.format = currentFormat();
+        opt.bitDepth = bitDepthCombo_->isVisible() ? bitDepthCombo_->currentData().toInt() : 8;
+        opt.longSide = resolutionCombo_->currentData().toInt();
+        opt.channels = sol::TxChannelMode(channelsCombo_->currentData().toInt());
+        opt.frameStart = viewer_ ? viewer_->rangeStart() : 1;
+        opt.frameEnd = viewer_ ? viewer_->rangeEnd() : 1;
+        opt.updateOnly = true;
+        if (opt.format == sol::TxOutputFormat::Tx) {
+            opt.inputColorSpace = colorSpaceCombo_->currentText().toStdString();
+            opt.ocioConfigPath = sol::txResolveOcioConfig(useEnvCheck_->isChecked(),
                                                           ocioEdit_->text().trimmed().toStdString());
+        }
+
         std::vector<sol::TxConvertResult> results;
         std::string error;
         status_->setText(QStringLiteral("Converting…"));
         QApplication::processEvents();
-        const bool ok = sol::txConvertPattern(src.toStdString(), outDir.toStdString(),
-                                              colorSpaceCombo_->currentText().toStdString(), ocio,
-                                              results, error, viewer_ ? viewer_->rangeStart() : 1,
-                                              viewer_ ? viewer_->rangeEnd() : 1);
+        const bool ok = sol::txConvertPattern(src.toStdString(), outDir.toStdString(), opt, results,
+                                              error);
         int success = 0;
         for (const auto& r : results)
             if (r.ok) ++success;
         if (ok) {
             status_->setText(QStringLiteral("Done — %1 file(s) → %2").arg(success).arg(outDir));
-            // Show converted .tx immediately.
             viewer_->setContentKind(sol::TextureViewerWidget::ViewerContentKind::ConvertedTx);
         } else {
             status_->setText(QStringLiteral("Finished with errors (%1 ok): %2")
@@ -238,12 +324,20 @@ private:
         }
     }
 
+    QFormLayout* form_ = nullptr;
     QLineEdit* sourceEdit_ = nullptr;
     QLineEdit* outputEdit_ = nullptr;
     QLineEdit* ocioEdit_ = nullptr;
+    QComboBox* formatCombo_ = nullptr;
+    QComboBox* bitDepthCombo_ = nullptr;
+    QComboBox* resolutionCombo_ = nullptr;
+    QComboBox* channelsCombo_ = nullptr;
     QComboBox* colorSpaceCombo_ = nullptr;
     QCheckBox* advancedCheck_ = nullptr;
     QCheckBox* useEnvCheck_ = nullptr;
+    QWidget* colorSpaceLabel_ = nullptr;
+    QWidget* ocioLabel_ = nullptr;
+    QWidget* bitDepthRow_ = nullptr;
     QLabel* status_ = nullptr;
     sol::TextureViewerWidget* viewer_ = nullptr;
 };
@@ -252,7 +346,6 @@ private:
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
-    // Qt 6 default image allocation limit is 256 MB; 8K UDIM tiles exceed it.
     QImageReader::setAllocationLimit(0);
     sol::applyDarkTheme(app);
     TxConverterWindow window;

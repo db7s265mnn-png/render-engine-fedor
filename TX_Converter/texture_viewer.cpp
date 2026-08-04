@@ -1,11 +1,14 @@
 #include "texture_viewer.h"
 
 #include <QAbstractSpinBox>
+#include <QButtonGroup>
+#include <QColor>
 #include <QComboBox>
 #include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileInfo>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QImageReader>
 #include <QIntValidator>
 #include <QLabel>
@@ -14,12 +17,14 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
+#include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QThreadPool>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -40,8 +45,9 @@ namespace sol {
 namespace {
 
 constexpr int kMaxPreviewEdge = 2048;
-constexpr int kFrameBoxWidth = 40;
+constexpr int kFrameBoxWidth = 44;
 constexpr int kFrameBoxHeight = 16;
+constexpr float kGradePivot = 0.18f;
 
 bool isFloatPreviewPath(const QString& path) {
     const QString ext = QFileInfo(path).suffix().toLower();
@@ -61,15 +67,28 @@ QString formatBytes(qint64 bytes) {
     return QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
 }
 
+QString channelModeLabel(ViewerChannelMode mode) {
+    switch (mode) {
+        case ViewerChannelMode::R: return QStringLiteral("R");
+        case ViewerChannelMode::G: return QStringLiteral("G");
+        case ViewerChannelMode::B: return QStringLiteral("B");
+        case ViewerChannelMode::A: return QStringLiteral("A");
+        case ViewerChannelMode::RGBA:
+        default: return QStringLiteral("RGBA");
+    }
+}
+
 bool gradeEquals(const ViewerGrade& a, const ViewerGrade& b) {
     return a.brightness == b.brightness && a.contrast == b.contrast && a.gamma == b.gamma;
 }
 
+// Houdini/mplay-style grade: exposure (stops) -> contrast about the 0.18 pivot -> gamma.
+// All done in scene-linear before any display / view transform, so HDR values above
+// 1.0 are boosted rather than clamped-then-brightened (which would just wash to grey).
 Vec3 applyGrade(Vec3 c, const ViewerGrade& grade) {
-    // Contrast around mid-grey, then brightness offset, then gamma.
-    c.x = (c.x - 0.5f) * grade.contrast + 0.5f + grade.brightness;
-    c.y = (c.y - 0.5f) * grade.contrast + 0.5f + grade.brightness;
-    c.z = (c.z - 0.5f) * grade.contrast + 0.5f + grade.brightness;
+    c = c * std::exp2(grade.brightness);
+    const float pivot = kGradePivot;
+    c = (c - Vec3(pivot)) * grade.contrast + Vec3(pivot);
     const float g = std::max(0.01f, grade.gamma);
     const float invG = 1.0f / g;
     c.x = std::pow(std::max(0.0f, c.x), invG);
@@ -78,8 +97,9 @@ Vec3 applyGrade(Vec3 c, const ViewerGrade& grade) {
     return c;
 }
 
-void downscaleLinearRgb(const float* src, int srcW, int srcH, std::vector<float>& outRgb, int& outW,
-                        int& outH) {
+// src/out are tightly packed RGBA float (4 components per pixel); alpha survives the resize.
+void downscaleLinearRgba(const float* src, int srcW, int srcH, std::vector<float>& outRgba, int& outW,
+                         int& outH) {
     int stepX = 1;
     int stepY = 1;
     outW = srcW;
@@ -91,22 +111,23 @@ void downscaleLinearRgb(const float* src, int srcW, int srcH, std::vector<float>
         outW = std::max(1, srcW / stepX);
         outH = std::max(1, srcH / stepY);
     }
-    outRgb.resize(size_t(outW) * size_t(outH) * 3);
+    outRgba.resize(size_t(outW) * size_t(outH) * 4);
     for (int y = 0; y < outH; ++y) {
         const int sy = std::min(srcH - 1, y * stepY);
         const float* row = src + size_t(sy) * size_t(srcW) * 4;
-        float* dst = outRgb.data() + size_t(y) * size_t(outW) * 3;
+        float* dst = outRgba.data() + size_t(y) * size_t(outW) * 4;
         for (int x = 0; x < outW; ++x) {
             const int sx = std::min(srcW - 1, x * stepX);
             const float* px = row + size_t(sx) * 4;
-            dst[x * 3 + 0] = px[0];
-            dst[x * 3 + 1] = px[1];
-            dst[x * 3 + 2] = px[2];
+            dst[x * 4 + 0] = px[0];
+            dst[x * 4 + 1] = px[1];
+            dst[x * 4 + 2] = px[2];
+            dst[x * 4 + 3] = px[3];
         }
     }
 }
 
-void extractLinearFromFloatImage(const Image& image, std::vector<float>& outRgb, int& outW, int& outH) {
+void extractLinearFromFloatImage(const Image& image, std::vector<float>& outRgba, int& outW, int& outH) {
     int srcW = image.width();
     int srcH = image.height();
     const float* src = image.data();
@@ -122,14 +143,14 @@ void extractLinearFromFloatImage(const Image& image, std::vector<float>& outRgb,
             }
         }
     }
-    downscaleLinearRgb(src, srcW, srcH, outRgb, outW, outH);
+    downscaleLinearRgba(src, srcW, srcH, outRgba, outW, outH);
 }
 
-QImage bakeDisplayImage(const float* linearRgb, int w, int h, int colorManagement, int viewTransform,
-                        bool ocioUseEnv, const QString& ocioConfigPath, int workingSpace,
-                        const ViewerGrade& grade) {
+QImage bakeDisplayImage(const float* linearRgba, int w, int h, ViewerChannelMode channelMode,
+                        int colorManagement, int viewTransform, bool ocioUseEnv,
+                        const QString& ocioConfigPath, int workingSpace, const ViewerGrade& grade) {
     QImage out(w, h, QImage::Format_RGB888);
-    if (!linearRgb || w <= 0 || h <= 0) return out;
+    if (!linearRgba || w <= 0 || h <= 0) return out;
 
     if (colorManagement == kColorOcio) {
         ocioEnsureConfig(ocioUseEnv, ocioConfigPath.toStdString());
@@ -138,15 +159,33 @@ QImage bakeDisplayImage(const float* linearRgb, int w, int h, int colorManagemen
 
     for (int y = 0; y < h; ++y) {
         uchar* line = out.scanLine(y);
-        const float* row = linearRgb + size_t(y) * size_t(w) * 3;
+        const float* row = linearRgba + size_t(y) * size_t(w) * 4;
         for (int x = 0; x < w; ++x) {
-            Vec3 linear(row[x * 3 + 0], row[x * 3 + 1], row[x * 3 + 2]);
+            const float* px = row + size_t(x) * 4;
+
+            Vec3 linear;
+            if (channelMode == ViewerChannelMode::RGBA) {
+                linear = Vec3(px[0], px[1], px[2]);
+            } else {
+                float v = px[0];
+                switch (channelMode) {
+                    case ViewerChannelMode::R: v = px[0]; break;
+                    case ViewerChannelMode::G: v = px[1]; break;
+                    case ViewerChannelMode::B: v = px[2]; break;
+                    case ViewerChannelMode::A: v = px[3]; break;
+                    default: break;
+                }
+                linear = Vec3(v, v, v);
+            }
+
+            // Grade in linear (scene-referred), then hand off to the OCIO/Classic view transform.
+            linear = applyGrade(linear, grade);
             Vec3 display = ocioApplyViewPrepared(linear);
-            display = applyGrade(display, grade);
-            uchar* px = line + size_t(x) * 3;
-            px[0] = static_cast<uchar>(clampf(display.x, 0.0f, 1.0f) * 255.0f + 0.5f);
-            px[1] = static_cast<uchar>(clampf(display.y, 0.0f, 1.0f) * 255.0f + 0.5f);
-            px[2] = static_cast<uchar>(clampf(display.z, 0.0f, 1.0f) * 255.0f + 0.5f);
+
+            uchar* dst = line + size_t(x) * 3;
+            dst[0] = static_cast<uchar>(clampf(display.x, 0.0f, 1.0f) * 255.0f + 0.5f);
+            dst[1] = static_cast<uchar>(clampf(display.y, 0.0f, 1.0f) * 255.0f + 0.5f);
+            dst[2] = static_cast<uchar>(clampf(display.z, 0.0f, 1.0f) * 255.0f + 0.5f);
         }
     }
     return out;
@@ -167,7 +206,7 @@ FloatPreviewCanvas::FloatPreviewCanvas(QWidget* parent) : QWidget(parent) {
 }
 
 void FloatPreviewCanvas::clear() {
-    linearRgb_ = nullptr;
+    linearRgba_ = nullptr;
     width_ = height_ = 0;
     contentId_ = 0;
     invalidateDisplayCache();
@@ -176,7 +215,7 @@ void FloatPreviewCanvas::clear() {
 }
 
 void FloatPreviewCanvas::setPlaceholder(const QString& text) {
-    linearRgb_ = nullptr;
+    linearRgba_ = nullptr;
     width_ = height_ = 0;
     contentId_ = 0;
     invalidateDisplayCache();
@@ -184,8 +223,8 @@ void FloatPreviewCanvas::setPlaceholder(const QString& text) {
     update();
 }
 
-void FloatPreviewCanvas::setLinearImage(const float* rgb, int width, int height, quint64 contentId) {
-    linearRgb_ = rgb;
+void FloatPreviewCanvas::setLinearImage(const float* rgba, int width, int height, quint64 contentId) {
+    linearRgba_ = rgba;
     width_ = width;
     height_ = height;
     contentId_ = contentId;
@@ -208,6 +247,13 @@ void FloatPreviewCanvas::setDisplayParams(int colorManagement, int viewTransform
     update();
 }
 
+void FloatPreviewCanvas::setChannelMode(ViewerChannelMode mode) {
+    if (channelMode_ == mode) return;
+    channelMode_ = mode;
+    invalidateDisplayCache();
+    update();
+}
+
 void FloatPreviewCanvas::setGrade(const ViewerGrade& grade) {
     grade_ = grade;
     invalidateDisplayCache();
@@ -220,19 +266,20 @@ void FloatPreviewCanvas::invalidateDisplayCache() {
 }
 
 void FloatPreviewCanvas::ensureDisplayCache() {
-    if (!linearRgb_ || width_ <= 0 || height_ <= 0) return;
+    if (!linearRgba_ || width_ <= 0 || height_ <= 0) return;
     if (!displayCache_.isNull() && displayCacheId_ == contentId_ &&
         displayCacheColorMgmt_ == colorManagement_ && displayCacheView_ == viewTransform_ &&
-        displayCacheWorking_ == workingSpace_ && displayCacheOcioEnv_ == ocioUseEnv_ &&
-        displayCacheOcioPath_ == ocioConfigPath_ && gradeEquals(displayCacheGrade_, grade_)) {
+        displayCacheChannel_ == int(channelMode_) && displayCacheWorking_ == workingSpace_ &&
+        displayCacheOcioEnv_ == ocioUseEnv_ && displayCacheOcioPath_ == ocioConfigPath_ &&
+        gradeEquals(displayCacheGrade_, grade_)) {
         return;
     }
-    displayCache_ =
-        bakeDisplayImage(linearRgb_, width_, height_, colorManagement_, viewTransform_, ocioUseEnv_,
-                         ocioConfigPath_, workingSpace_, grade_);
+    displayCache_ = bakeDisplayImage(linearRgba_, width_, height_, channelMode_, colorManagement_,
+                                     viewTransform_, ocioUseEnv_, ocioConfigPath_, workingSpace_, grade_);
     displayCacheId_ = contentId_;
     displayCacheColorMgmt_ = colorManagement_;
     displayCacheView_ = viewTransform_;
+    displayCacheChannel_ = int(channelMode_);
     displayCacheWorking_ = workingSpace_;
     displayCacheOcioEnv_ = ocioUseEnv_;
     displayCacheOcioPath_ = ocioConfigPath_;
@@ -284,7 +331,7 @@ void FloatPreviewCanvas::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.fillRect(rect(), QColor(18, 20, 22));
 
-    if (!linearRgb_ || width_ <= 0 || height_ <= 0) {
+    if (!linearRgba_ || width_ <= 0 || height_ <= 0) {
         p.setPen(QColor(120, 126, 134));
         p.drawText(rect(), Qt::AlignCenter, placeholder_);
         return;
@@ -312,7 +359,7 @@ void FloatPreviewCanvas::resizeEvent(QResizeEvent* event) {
 }
 
 void FloatPreviewCanvas::wheelEvent(QWheelEvent* event) {
-    if (!linearRgb_) {
+    if (!linearRgba_) {
         event->ignore();
         return;
     }
@@ -428,8 +475,8 @@ TextureViewerWidget::LoadPayload TextureViewerWidget::decodeFrame(const QString&
                 row[x * 4 + 3] = px[3] / 255.0f;
             }
         }
-        downscaleLinearRgb(rgba.data(), qimage.width(), qimage.height(), payload.linearRgb,
-                           payload.previewW, payload.previewH);
+        downscaleLinearRgba(rgba.data(), qimage.width(), qimage.height(), payload.linearRgba,
+                            payload.previewW, payload.previewH);
         return payload;
     }
 
@@ -447,7 +494,7 @@ TextureViewerWidget::LoadPayload TextureViewerWidget::decodeFrame(const QString&
     }
     payload.sourceWidth = image.width();
     payload.sourceHeight = image.height();
-    extractLinearFromFloatImage(image, payload.linearRgb, payload.previewW, payload.previewH);
+    extractLinearFromFloatImage(image, payload.linearRgba, payload.previewW, payload.previewH);
     return payload;
 }
 
@@ -455,8 +502,8 @@ QLineEdit* TextureViewerWidget::makeRangeEdit(const QString& tip) {
     auto* edit = new QLineEdit(this);
     edit->setAlignment(Qt::AlignCenter);
     edit->setFixedSize(kFrameBoxWidth, kFrameBoxHeight);
-    edit->setMaxLength(6);
-    edit->setValidator(new QIntValidator(1, 999999, edit));
+    edit->setMaxLength(7);
+    edit->setValidator(new QIntValidator(-999999, 999999, edit));
     edit->setToolTip(tip);
     edit->setStyleSheet(QStringLiteral(
         "QLineEdit {"
@@ -470,6 +517,23 @@ QLineEdit* TextureViewerWidget::makeRangeEdit(const QString& tip) {
         "}"
         "QLineEdit:focus { border: 1px solid #50aaff; }"));
     return edit;
+}
+
+QPushButton* TextureViewerWidget::makeGradeLabel(const QString& text, const QString& tip) {
+    auto* btn = new QPushButton(text, this);
+    btn->setFlat(true);
+    btn->setCursor(Qt::PointingHandCursor);
+    btn->setToolTip(tip);
+    btn->setStyleSheet(QStringLiteral(
+        "QPushButton {"
+        "  color: #9aa0a6;"
+        "  background: transparent;"
+        "  border: none;"
+        "  padding: 0 2px;"
+        "  text-align: left;"
+        "}"
+        "QPushButton:hover { color: #d8dae0; text-decoration: underline; }"));
+    return btn;
 }
 
 QDoubleSpinBox* TextureViewerWidget::makeGradeSpin(double minV, double maxV, double step, double value,
@@ -494,6 +558,43 @@ QDoubleSpinBox* TextureViewerWidget::makeGradeSpin(double minV, double maxV, dou
     return spin;
 }
 
+QToolButton* TextureViewerWidget::makeChannelButton(const QString& tip, const QColor& fill, bool checker) {
+    auto* btn = new QToolButton(this);
+    btn->setCheckable(true);
+    btn->setAutoRaise(true);
+    btn->setToolTip(tip);
+    btn->setFixedSize(28, 20);
+    btn->setCursor(Qt::PointingHandCursor);
+
+    QString background = fill.name();
+    if (checker) {
+        QPixmap pix(12, 12);
+        QPainter pp(&pix);
+        pp.fillRect(0, 0, 6, 6, QColor(150, 150, 150));
+        pp.fillRect(6, 6, 6, 6, QColor(150, 150, 150));
+        pp.fillRect(6, 0, 6, 6, QColor(210, 210, 210));
+        pp.fillRect(0, 6, 6, 6, QColor(210, 210, 210));
+        pp.end();
+        btn->setIcon(QIcon(pix));
+        btn->setIconSize(QSize(12, 12));
+        background = QStringLiteral("#3a3d42");
+    }
+
+    btn->setStyleSheet(QStringLiteral(
+        "QToolButton {"
+        "  background: %1;"
+        "  color: #14161a;"
+        "  border: 1px solid #22242a;"
+        "  border-radius: 2px;"
+        "  font-size: 10px;"
+        "  font-weight: 700;"
+        "}"
+        "QToolButton:hover { border: 1px solid #7a7e86; }"
+        "QToolButton:checked { border: 2px solid #50aaff; }")
+        .arg(background));
+    return btn;
+}
+
 QSlider* makeGradeSlider(QWidget* parent, int steps = 1000) {
     auto* slider = new QSlider(Qt::Horizontal, parent);
     slider->setRange(0, steps);
@@ -506,9 +607,43 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(4);
 
+    // Toolbar order: content (View) combo, channel buttons, Display (Classic/OCIO + view
+    // transform), then Fit + zoom%.
     auto* modeRow = new QHBoxLayout();
     modeRow->setContentsMargins(0, 0, 0, 0);
     modeRow->setSpacing(6);
+
+    modeRow->addWidget(new QLabel(QStringLiteral("View")));
+    contentCombo_ = new QComboBox();
+    contentCombo_->addItem(QStringLiteral("Source Images"), int(ViewerContentKind::SourceImages));
+    contentCombo_->addItem(QStringLiteral("Converted TX"), int(ViewerContentKind::ConvertedTx));
+    contentCombo_->setMinimumWidth(130);
+    contentCombo_->setToolTip(QStringLiteral("Preview the source images or the converted output."));
+    modeRow->addWidget(contentCombo_);
+
+    channelGroup_ = new QButtonGroup(this);
+    channelGroup_->setExclusive(true);
+    auto addChannelButton = [&](ViewerChannelMode mode, const QString& text, const QString& tip,
+                                const QColor& fill, bool checker = false) {
+        QToolButton* btn = makeChannelButton(tip, fill, checker);
+        btn->setText(text);
+        channelGroup_->addButton(btn, int(mode));
+        modeRow->addWidget(btn);
+        return btn;
+    };
+    QToolButton* rgbaBtn =
+        addChannelButton(ViewerChannelMode::RGBA, QStringLiteral("RGBA"),
+                         QStringLiteral("Show all channels in colour"), QColor(210, 213, 218));
+    addChannelButton(ViewerChannelMode::R, QStringLiteral("R"),
+                     QStringLiteral("Isolate red channel (grey)"), QColor(224, 96, 96));
+    addChannelButton(ViewerChannelMode::G, QStringLiteral("G"),
+                     QStringLiteral("Isolate green channel (grey)"), QColor(104, 200, 110));
+    addChannelButton(ViewerChannelMode::B, QStringLiteral("B"),
+                     QStringLiteral("Isolate blue channel (grey)"), QColor(102, 146, 232));
+    addChannelButton(ViewerChannelMode::A, QStringLiteral("A"),
+                     QStringLiteral("Isolate alpha channel (grey)"), QColor(160, 160, 160), true);
+    rgbaBtn->setChecked(true);
+
     modeRow->addWidget(new QLabel(QStringLiteral("Display")));
     colorMgmtCombo_ = new QComboBox();
     colorMgmtCombo_->addItem(QStringLiteral("Classic"), kColorClassic);
@@ -527,12 +662,7 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     viewCombo_->setMinimumWidth(100);
     viewCombo_->setToolTip(QStringLiteral("Monitor view transform."));
     modeRow->addWidget(viewCombo_);
-    modeRow->addWidget(new QLabel(QStringLiteral("View")));
-    contentCombo_ = new QComboBox();
-    contentCombo_->addItem(QStringLiteral("Source Images"), int(ViewerContentKind::SourceImages));
-    contentCombo_->addItem(QStringLiteral("Converted TX"), int(ViewerContentKind::ConvertedTx));
-    contentCombo_->setMinimumWidth(130);
-    modeRow->addWidget(contentCombo_);
+
     fitBtn_ = new QPushButton(QStringLiteral("Fit"));
     fitBtn_->setFixedWidth(44);
     fitBtn_->setToolTip(QStringLiteral("Fit image to view (double-click canvas)"));
@@ -544,15 +674,15 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     modeRow->addStretch(1);
     root->addLayout(modeRow);
 
+    // Grade row: click the label ("Bright" / "Contrast" / "Gamma") to reset just that param.
     auto* gradeRow = new QHBoxLayout();
     gradeRow->setContentsMargins(0, 0, 0, 0);
     gradeRow->setSpacing(4);
-    const QString gradeStyle = QStringLiteral("color: #9aa0a6;");
-    auto addGrade = [&](const QString& name, QDoubleSpinBox** spin, QSlider** slider, double minV,
-                        double maxV, double step, double value, const QString& tip) {
-        auto* lab = new QLabel(name);
-        lab->setStyleSheet(gradeStyle);
-        gradeRow->addWidget(lab);
+    auto addGrade = [&](QPushButton** labelBtn, const QString& text, QDoubleSpinBox** spin,
+                        QSlider** slider, double minV, double maxV, double step, double value,
+                        const QString& tip) {
+        *labelBtn = makeGradeLabel(text, tip);
+        gradeRow->addWidget(*labelBtn);
         *spin = makeGradeSpin(minV, maxV, step, value, tip);
         *slider = makeGradeSlider(this);
         const double t = (value - minV) / std::max(1e-9, maxV - minV);
@@ -560,22 +690,20 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
         gradeRow->addWidget(*slider, 1);
         gradeRow->addWidget(*spin);
     };
-    addGrade(QStringLiteral("Bright"), &brightnessSpin_, &brightnessSlider_, -1.0, 1.0, 0.05, 0.0,
-             QStringLiteral("Brightness (−1 … +1)"));
-    addGrade(QStringLiteral("Contrast"), &contrastSpin_, &contrastSlider_, 0.0, 3.0, 0.05, 1.0,
-             QStringLiteral("Contrast (1 = neutral)"));
-    addGrade(QStringLiteral("Gamma"), &gammaSpin_, &gammaSlider_, 0.20, 3.0, 0.05, 1.0,
-             QStringLiteral("Display gamma (1 = neutral)"));
-    gradeResetBtn_ = new QPushButton(QStringLiteral("Reset"));
-    gradeResetBtn_->setFixedWidth(52);
-    gradeResetBtn_->setToolTip(QStringLiteral("Reset brightness / contrast / gamma"));
-    gradeRow->addWidget(gradeResetBtn_);
+    addGrade(&brightnessLabelBtn_, QStringLiteral("Bright"), &brightnessSpin_, &brightnessSlider_,
+             -5.0, 5.0, 0.05, 0.0,
+             QStringLiteral("Brightness in stops, applied in linear (click \"Bright\" to reset to 0)"));
+    addGrade(&contrastLabelBtn_, QStringLiteral("Contrast"), &contrastSpin_, &contrastSlider_, 0.0, 3.0,
+             0.05, 1.0, QStringLiteral("Contrast about the 0.18 linear pivot (click \"Contrast\" to reset to 1)"));
+    addGrade(&gammaLabelBtn_, QStringLiteral("Gamma"), &gammaSpin_, &gammaSlider_, 0.20, 3.0, 0.05, 1.0,
+             QStringLiteral("Linear gamma before the view transform (click \"Gamma\" to reset to 1)"));
     root->addLayout(gradeRow);
 
     canvas_ = new FloatPreviewCanvas(this);
     root->addWidget(canvas_, 1);
 
     // Solstice-style scrub row: [start] [scrubber] [end] — no transport/play buttons.
+    // Numbers shown here are absolute UDIM / $F frame numbers, not tile indices.
     auto* scrubHost = new QWidget(this);
     scrubHost->setObjectName(QStringLiteral("viewerTimeline"));
     scrubHost->setFixedHeight(28);
@@ -605,7 +733,6 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     connect(startEdit_, &QLineEdit::editingFinished, this, &TextureViewerWidget::onStartEdited);
     connect(endEdit_, &QLineEdit::editingFinished, this, &TextureViewerWidget::onEndEdited);
     connect(fitBtn_, &QPushButton::clicked, this, &TextureViewerWidget::fitView);
-    connect(gradeResetBtn_, &QPushButton::clicked, this, &TextureViewerWidget::resetGrade);
     connect(canvas_, &FloatPreviewCanvas::zoomChanged, this, [this](double z) {
         zoomLabel_->setText(QStringLiteral("%1%").arg(int(std::lround(z * 100.0))));
     });
@@ -619,6 +746,9 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
         contentKind_ = ViewerContentKind(contentCombo_->currentData().toInt());
         refreshFromPipeline();
     });
+    connect(channelGroup_, &QButtonGroup::idClicked, this,
+            [this](int id) { setChannelMode(ViewerChannelMode(id)); });
+
     auto wireGrade = [this](QDoubleSpinBox* spin, QSlider* slider, double minV, double maxV) {
         const double span = std::max(1e-9, maxV - minV);
         connect(spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
@@ -634,9 +764,14 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
             applyGradeFromUi();
         });
     };
-    wireGrade(brightnessSpin_, brightnessSlider_, -1.0, 1.0);
+    wireGrade(brightnessSpin_, brightnessSlider_, -5.0, 5.0);
     wireGrade(contrastSpin_, contrastSlider_, 0.0, 3.0);
     wireGrade(gammaSpin_, gammaSlider_, 0.20, 3.0);
+
+    // Clicking a grade label resets only that parameter.
+    connect(brightnessLabelBtn_, &QPushButton::clicked, this, [this] { brightnessSpin_->setValue(0.0); });
+    connect(contrastLabelBtn_, &QPushButton::clicked, this, [this] { contrastSpin_->setValue(1.0); });
+    connect(gammaLabelBtn_, &QPushButton::clicked, this, [this] { gammaSpin_->setValue(1.0); });
 
     rebuildTimeline();
 }
@@ -648,20 +783,10 @@ void TextureViewerWidget::applyGradeFromUi() {
     canvas_->setGrade(grade_);
 }
 
-void TextureViewerWidget::resetGrade() {
-    const QSignalBlocker b0(brightnessSpin_);
-    const QSignalBlocker b1(contrastSpin_);
-    const QSignalBlocker b2(gammaSpin_);
-    const QSignalBlocker s0(brightnessSlider_);
-    const QSignalBlocker s1(contrastSlider_);
-    const QSignalBlocker s2(gammaSlider_);
-    brightnessSpin_->setValue(0.0);
-    contrastSpin_->setValue(1.0);
-    gammaSpin_->setValue(1.0);
-    brightnessSlider_->setValue(500);
-    contrastSlider_->setValue(int(std::lround((1.0 / 3.0) * 1000.0)));
-    gammaSlider_->setValue(int(std::lround(((1.0 - 0.2) / (3.0 - 0.2)) * 1000.0)));
-    applyGradeFromUi();
+void TextureViewerWidget::setChannelMode(ViewerChannelMode mode) {
+    channelMode_ = mode;
+    canvas_->setChannelMode(mode);
+    updateInfoBar();
 }
 
 void TextureViewerWidget::setOcioConfig(bool useEnv, const QString& configPath) {
@@ -677,6 +802,14 @@ void TextureViewerWidget::setPipelinePaths(const QString& sourcePath, const QStr
     refreshFromPipeline();
 }
 
+void TextureViewerWidget::setOutputExtension(const QString& ext) {
+    const QString trimmed = ext.trimmed();
+    const QString next = trimmed.isEmpty() ? QStringLiteral("tx") : trimmed;
+    if (outputExt_ == next) return;
+    outputExt_ = next;
+    if (contentKind_ == ViewerContentKind::ConvertedTx) refreshFromPipeline();
+}
+
 void TextureViewerWidget::setContentKind(ViewerContentKind kind) {
     contentKind_ = kind;
     if (contentCombo_) {
@@ -687,34 +820,33 @@ void TextureViewerWidget::setContentKind(ViewerContentKind kind) {
     refreshFromPipeline();
 }
 
-QString TextureViewerWidget::guessConvertedTxPath(const QString& sourcePath,
-                                                 const QString& outputFolder) {
+QString TextureViewerWidget::guessConvertedOutputPath(const QString& sourcePath,
+                                                      const QString& outputFolder, const QString& ext) {
     const QString src = sourcePath.trimmed();
     const QString outDir = outputFolder.trimmed();
+    const QString extension = ext.trimmed().isEmpty() ? QStringLiteral("tx") : ext.trimmed();
     if (src.isEmpty() || outDir.isEmpty()) return {};
+
+    auto swapExt = [&](QString name) {
+        const int dot = name.lastIndexOf(QLatin1Char('.'));
+        if (dot > 0) return name.left(dot) + QLatin1Char('.') + extension;
+        return name + QLatin1Char('.') + extension;
+    };
 
     QFileInfo info(src);
     QString name = info.fileName();
     if (pathHasUdimToken(name) || src.contains(QStringLiteral("$F"))) {
-        const int dot = name.lastIndexOf(QLatin1Char('.'));
-        if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
-        else name += QStringLiteral(".tx");
+        name = swapExt(name);
     } else if (pathHasUdimToken(src)) {
-        name = info.fileName();
-        const int dot = name.lastIndexOf(QLatin1Char('.'));
-        if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
-        else name += QStringLiteral(".tx");
+        name = swapExt(info.fileName());
     } else {
         QString udimPattern;
         std::vector<int> tiles;
         if (resolveUdimPattern(src, QString(), udimPattern, tiles)) {
             QFileInfo pinfo(udimPattern);
-            name = pinfo.fileName();
-            const int dot = name.lastIndexOf(QLatin1Char('.'));
-            if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
-            else name += QStringLiteral(".tx");
+            name = swapExt(pinfo.fileName());
         } else {
-            name = info.completeBaseName() + QStringLiteral(".tx");
+            name = info.completeBaseName() + QLatin1Char('.') + extension;
         }
     }
     return QDir(outDir).filePath(name);
@@ -726,6 +858,8 @@ void TextureViewerWidget::clearView() {
     loadedCount_ = 0;
     ++loadGeneration_;
     canvas_->clear();
+    rangeStart_ = 1;
+    rangeEnd_ = 1;
     rebuildTimeline();
     infoLabel_->setText(QStringLiteral("No texture"));
 }
@@ -735,7 +869,7 @@ void TextureViewerWidget::refreshFromPipeline() {
     if (contentKind_ == ViewerContentKind::SourceImages) {
         path = pipelineSource_;
     } else {
-        path = guessConvertedTxPath(pipelineSource_, pipelineOutputFolder_);
+        path = guessConvertedOutputPath(pipelineSource_, pipelineOutputFolder_, outputExt_);
     }
     if (path.isEmpty()) {
         clearView();
@@ -788,13 +922,14 @@ void TextureViewerWidget::setSourcePath(const QString& pathIn) {
 
     const QString path = pathIn.trimmed();
     if (path.isEmpty()) {
+        rangeStart_ = 1;
+        rangeEnd_ = 1;
         rebuildTimeline();
         infoLabel_->setText(QStringLiteral("No texture"));
         return;
     }
 
     QStringList paths;
-    QList<int> udims;
     QString pattern;
     std::vector<int> tiles;
     if (resolveUdimPattern(path, QString(), pattern, tiles) && !tiles.empty()) {
@@ -802,44 +937,48 @@ void TextureViewerWidget::setSourcePath(const QString& pathIn) {
             const QString tile = expandUdimToken(pattern, udim);
             if (!QFileInfo::exists(tile)) continue;
             paths.push_back(tile);
-            udims.push_back(udim);
         }
     }
 
     if (paths.isEmpty() && path.contains(QStringLiteral("$F"))) {
-        const int scanEnd = std::max(rangeEnd_, 10000);
+        const int scanEnd = std::max(10000, rangeEnd_);
         const auto expanded = txExpandFrameSources(path.toStdString(), 1, scanEnd);
-        for (const std::string& p : expanded) {
-            paths.push_back(QString::fromStdString(p));
-            udims.push_back(0);
-        }
+        for (const std::string& p : expanded) paths.push_back(QString::fromStdString(p));
     }
 
     if (paths.isEmpty()) {
         if (!QFileInfo::exists(path)) {
             // Missing source / .tx → default placeholder, not an error banner.
+            rangeStart_ = 1;
+            rangeEnd_ = 1;
             rebuildTimeline();
             infoLabel_->setText(QStringLiteral("No texture"));
             return;
         }
         paths.push_back(path);
-        udims.push_back(0);
     }
 
     frames_.resize(paths.size());
     for (int i = 0; i < paths.size(); ++i) {
         frames_[i].path = paths[i];
-        frames_[i].udim = udims[i];
+        frames_[i].frameNumber = txExtractFrameNumber(paths[i].toStdString());
     }
 
     ocioWorkingSpace_ = prefersAcesCgWorkingSpace(paths.first()) ? kWorkingSpaceAcesCg
                                                                  : kWorkingSpaceSrgbLinear;
     canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
                               ocioWorkingSpace_);
+    canvas_->setChannelMode(channelMode_);
     canvas_->setGrade(grade_);
 
-    rangeStart_ = 1;
-    rangeEnd_ = std::max(1, int(frames_.size()));
+    int minFrame = frames_.first().frameNumber;
+    int maxFrame = frames_.first().frameNumber;
+    for (const FrameSlot& f : frames_) {
+        minFrame = std::min(minFrame, f.frameNumber);
+        maxFrame = std::max(maxFrame, f.frameNumber);
+    }
+    rangeStart_ = minFrame;
+    rangeEnd_ = maxFrame;
     rebuildTimeline();
     canvas_->setPlaceholder(QStringLiteral("Loading sequence…"));
     emit statusMessage(QStringLiteral("Viewer: loading %1 tile(s)…").arg(frames_.size()));
@@ -878,9 +1017,9 @@ void TextureViewerWidget::onFrameLoaded(quint64 generation, LoadPayload payload)
     slot.fileBytes = payload.fileBytes;
     slot.previewW = payload.previewW;
     slot.previewH = payload.previewH;
-    slot.linearRgb = std::move(payload.linearRgb);
+    slot.linearRgba = std::move(payload.linearRgba);
     slot.error = payload.error;
-    slot.ready = payload.error.isEmpty() && !slot.linearRgb.empty();
+    slot.ready = payload.error.isEmpty() && !slot.linearRgba.empty();
 
     if (payload.index == frameIndex_) showCurrentFrame();
 
@@ -898,22 +1037,44 @@ QString TextureViewerWidget::currentPath() const {
     return frames_[frameIndex_].path;
 }
 
+int TextureViewerWidget::indexForFrameNumber(int frame) const {
+    if (frames_.isEmpty()) return 0;
+    int bestIdx = 0;
+    int bestDist = std::abs(frames_[0].frameNumber - frame);
+    for (int i = 1; i < frames_.size(); ++i) {
+        const int d = std::abs(frames_[i].frameNumber - frame);
+        if (d < bestDist) {
+            bestDist = d;
+            bestIdx = i;
+        }
+    }
+    return bestIdx;
+}
+
+int TextureViewerWidget::frameNumberAt(int index) const {
+    if (index < 0 || index >= frames_.size()) return rangeStart_;
+    return frames_[index].frameNumber;
+}
+
 void TextureViewerWidget::setTimelineFrame(int frame) {
-    // Scrubber is 1-based within [rangeStart_, rangeEnd_].
-    const int index = std::clamp(frame, rangeStart_, rangeEnd_) - 1;
-    setExprFrame(frame);
-    setFrame(index);
+    // Scrubber shows absolute UDIM / $F numbers; snap to the nearest existing frame.
+    if (frames_.isEmpty()) return;
+    setFrame(indexForFrameNumber(frame));
 }
 
 void TextureViewerWidget::setFrame(int index) {
     if (frames_.isEmpty()) return;
     index = std::clamp(index, 0, int(frames_.size()) - 1);
-    // Keep scrub inside the editable start/end window.
-    index = std::clamp(index, rangeStart_ - 1, rangeEnd_ - 1);
+    // Keep scrub inside the editable start/end window (also expressed as frame numbers).
+    int lo = indexForFrameNumber(rangeStart_);
+    int hi = indexForFrameNumber(rangeEnd_);
+    if (lo > hi) std::swap(lo, hi);
+    index = std::clamp(index, lo, hi);
     frameIndex_ = index;
+    setExprFrame(frameNumberAt(frameIndex_));
     if (!updatingTimeline_) {
         updatingTimeline_ = true;
-        scrubber_->setFrame(frameIndex_ + 1);
+        scrubber_->setFrame(frameNumberAt(frameIndex_));
         updatingTimeline_ = false;
     }
     showCurrentFrame();
@@ -921,15 +1082,21 @@ void TextureViewerWidget::setFrame(int index) {
 
 void TextureViewerWidget::nextFrame() {
     if (frames_.size() <= 1) return;
+    int lo = indexForFrameNumber(rangeStart_);
+    int hi = indexForFrameNumber(rangeEnd_);
+    if (lo > hi) std::swap(lo, hi);
     const int next = frameIndex_ + 1;
-    if (next > rangeEnd_ - 1) setFrame(rangeStart_ - 1);
+    if (next > hi) setFrame(lo);
     else setFrame(next);
 }
 
 void TextureViewerWidget::prevFrame() {
     if (frames_.size() <= 1) return;
+    int lo = indexForFrameNumber(rangeStart_);
+    int hi = indexForFrameNumber(rangeEnd_);
+    if (lo > hi) std::swap(lo, hi);
     const int prev = frameIndex_ - 1;
-    if (prev < rangeStart_ - 1) setFrame(rangeEnd_ - 1);
+    if (prev < lo) setFrame(hi);
     else setFrame(prev);
 }
 
@@ -939,14 +1106,21 @@ void TextureViewerWidget::onStartEdited() {
     if (updatingTimeline_ || !startEdit_) return;
     bool ok = false;
     int value = startEdit_->text().trimmed().toInt(&ok);
-    const int maxFrame = std::max(1, int(frames_.size()));
     if (!ok) {
         updatingTimeline_ = true;
         startEdit_->setText(QString::number(rangeStart_));
         updatingTimeline_ = false;
         return;
     }
-    value = std::clamp(value, 1, maxFrame);
+    if (!frames_.isEmpty()) {
+        int lo = frames_.first().frameNumber;
+        int hi = frames_.first().frameNumber;
+        for (const FrameSlot& f : frames_) {
+            lo = std::min(lo, f.frameNumber);
+            hi = std::max(hi, f.frameNumber);
+        }
+        value = std::clamp(value, lo, hi);
+    }
     rangeStart_ = value;
     if (rangeEnd_ < rangeStart_) rangeEnd_ = rangeStart_;
     rebuildTimeline();
@@ -957,14 +1131,21 @@ void TextureViewerWidget::onEndEdited() {
     if (updatingTimeline_ || !endEdit_) return;
     bool ok = false;
     int value = endEdit_->text().trimmed().toInt(&ok);
-    const int maxFrame = std::max(1, int(frames_.size()));
     if (!ok) {
         updatingTimeline_ = true;
         endEdit_->setText(QString::number(rangeEnd_));
         updatingTimeline_ = false;
         return;
     }
-    value = std::clamp(value, 1, maxFrame);
+    if (!frames_.isEmpty()) {
+        int lo = frames_.first().frameNumber;
+        int hi = frames_.first().frameNumber;
+        for (const FrameSlot& f : frames_) {
+            lo = std::min(lo, f.frameNumber);
+            hi = std::max(hi, f.frameNumber);
+        }
+        value = std::clamp(value, lo, hi);
+    }
     rangeEnd_ = value;
     if (rangeEnd_ < rangeStart_) rangeStart_ = rangeEnd_;
     rebuildTimeline();
@@ -972,21 +1153,24 @@ void TextureViewerWidget::onEndEdited() {
 }
 
 void TextureViewerWidget::rebuildTimeline() {
-    const int n = std::max(1, int(frames_.size()));
-    if (frames_.isEmpty()) {
-        rangeStart_ = 1;
-        rangeEnd_ = 1;
-    } else {
-        rangeStart_ = std::clamp(rangeStart_, 1, n);
-        rangeEnd_ = std::clamp(rangeEnd_, 1, n);
-        if (rangeEnd_ < rangeStart_) rangeEnd_ = rangeStart_;
+    int lo = 1;
+    int hi = 1;
+    if (!frames_.isEmpty()) {
+        lo = hi = frames_.first().frameNumber;
+        for (const FrameSlot& f : frames_) {
+            lo = std::min(lo, f.frameNumber);
+            hi = std::max(hi, f.frameNumber);
+        }
     }
+    rangeStart_ = std::clamp(rangeStart_, lo, hi);
+    rangeEnd_ = std::clamp(rangeEnd_, lo, hi);
+    if (rangeEnd_ < rangeStart_) rangeEnd_ = rangeStart_;
 
     updatingTimeline_ = true;
     if (startEdit_) startEdit_->setText(QString::number(rangeStart_));
     if (endEdit_) endEdit_->setText(QString::number(rangeEnd_));
     scrubber_->setRange(rangeStart_, rangeEnd_);
-    scrubber_->setFrame(std::clamp(frameIndex_ + 1, rangeStart_, rangeEnd_));
+    scrubber_->setFrame(std::clamp(frameNumberAt(frameIndex_), rangeStart_, rangeEnd_));
     updatingTimeline_ = false;
 }
 
@@ -1003,6 +1187,7 @@ void TextureViewerWidget::updateInfoBar() {
     if (viewTransform_ == kViewRec709Aces) viewBit = QStringLiteral("Rec.709");
     else if (viewTransform_ == kViewRec2020) viewBit = QStringLiteral("Rec.2020");
     else if (viewTransform_ == kViewRaw) viewBit = QStringLiteral("Raw");
+    const QString channelBit = channelModeLabel(channelMode_);
     if (!slot.error.isEmpty()) {
         infoLabel_->setText(slot.error);
         return;
@@ -1014,13 +1199,14 @@ void TextureViewerWidget::updateInfoBar() {
                                 .arg(frames_.size()));
         return;
     }
-    infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  %5/%6  ·  float  ·  %7/%8")
+    infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  %5/%6  ·  %7  ·  float  ·  %8/%9")
                             .arg(QFileInfo(slot.path).fileName())
                             .arg(slot.sourceWidth)
                             .arg(slot.sourceHeight)
                             .arg(formatBytes(slot.fileBytes))
                             .arg(modeBit)
                             .arg(viewBit)
+                            .arg(channelBit)
                             .arg(loadedCount_)
                             .arg(frames_.size()));
 }
@@ -1035,13 +1221,13 @@ void TextureViewerWidget::pushFrameToCanvas() {
         canvas_->setPlaceholder(slot.error);
         return;
     }
-    if (!slot.ready || slot.linearRgb.empty()) {
+    if (!slot.ready || slot.linearRgba.empty()) {
         canvas_->setPlaceholder(QStringLiteral("Loading…"));
         return;
     }
     const quint64 id = (quint64(loadGeneration_.load()) << 32) ^ quint64(frameIndex_ + 1) ^
                        (quint64(slot.previewW) << 16) ^ quint64(slot.previewH);
-    canvas_->setLinearImage(slot.linearRgb.data(), slot.previewW, slot.previewH, id);
+    canvas_->setLinearImage(slot.linearRgba.data(), slot.previewW, slot.previewH, id);
 }
 
 void TextureViewerWidget::showCurrentFrame() {
