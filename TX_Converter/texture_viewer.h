@@ -1,9 +1,8 @@
-// Texture preview for TX Converter: right-side float canvas, tick timeline, OCIO/sRGB.
+// Texture preview for TX Converter: float canvas, Solstice-style scrubber, grade controls.
 #pragma once
 
 #include <QPointF>
 #include <QString>
-#include <QStringList>
 #include <QVector>
 #include <QWidget>
 
@@ -13,41 +12,22 @@
 class QLabel;
 class QComboBox;
 class QPushButton;
+class QLineEdit;
+class QDoubleSpinBox;
 
 namespace sol {
+
+class TimelineScrubber;
 
 enum class ViewerDisplayMode : int {
     ClassicSrgb = 0,
     OcioSrgbAces = 1,
 };
 
-// Horizontal timeline with a tick per frame — no UDIM/frame text.
-class FrameTimelineWidget : public QWidget {
-    Q_OBJECT
-public:
-    explicit FrameTimelineWidget(QWidget* parent = nullptr);
-
-    void setFrameCount(int count);
-    void setCurrentFrame(int index);
-    int currentFrame() const { return current_; }
-    int frameCount() const { return count_; }
-
-signals:
-    void frameChanged(int index);
-
-protected:
-    void paintEvent(QPaintEvent* event) override;
-    void mousePressEvent(QMouseEvent* event) override;
-    void mouseMoveEvent(QMouseEvent* event) override;
-    QSize sizeHint() const override;
-    QSize minimumSizeHint() const override;
-
-private:
-    int indexAtX(int x) const;
-    void seekToX(int x);
-
-    int count_ = 0;
-    int current_ = 0;
+struct ViewerGrade {
+    float brightness = 0.0f;  // -1..1 add after contrast
+    float contrast = 1.0f;    // pivot 0.5
+    float gamma = 1.0f;       // display gamma (>0)
 };
 
 // Paints linear float RGB with a live display transform; supports zoom + drag.
@@ -61,6 +41,7 @@ public:
     void setLinearImage(const float* rgb, int width, int height, quint64 contentId);
     void setDisplayMode(ViewerDisplayMode mode, bool ocioUseEnv, const QString& ocioConfigPath,
                         int workingSpace);
+    void setGrade(const ViewerGrade& grade);
     void fitToView();
     void resetView();
     double zoom() const { return zoom_; }
@@ -92,6 +73,7 @@ private:
     bool ocioUseEnv_ = true;
     QString ocioConfigPath_;
     int workingSpace_ = 1;
+    ViewerGrade grade_;
 
     QImage displayCache_;
     quint64 displayCacheId_ = 0;
@@ -99,9 +81,10 @@ private:
     int displayCacheWorking_ = -1;
     QString displayCacheOcioPath_;
     bool displayCacheOcioEnv_ = true;
+    ViewerGrade displayCacheGrade_;
 
     double zoom_ = 1.0;
-    QPointF pan_{0.0, 0.0};  // pan in widget pixels
+    QPointF pan_{0.0, 0.0};
     bool fitted_ = true;
     bool dragging_ = false;
     QPoint lastMouse_;
@@ -123,7 +106,8 @@ public:
     int currentFrame() const { return frameIndex_; }
 
 public slots:
-    void setFrame(int index);
+    void setFrame(int index);       // 0-based tile index
+    void setTimelineFrame(int frame);  // 1-based scrubber frame
     void nextFrame();
     void prevFrame();
     void fitView();
@@ -140,7 +124,7 @@ private:
         qint64 fileBytes = 0;
         int previewW = 0;
         int previewH = 0;
-        std::vector<float> linearRgb;  // linear RGB, source of truth for display
+        std::vector<float> linearRgb;
         QString error;
         bool ready = false;
     };
@@ -163,6 +147,13 @@ private:
     void startPreloadAll();
     void onFrameLoaded(quint64 generation, LoadPayload payload);
     void pushFrameToCanvas();
+    void applyGradeFromUi();
+    void resetGrade();
+    void onStartEdited();
+    void onEndEdited();
+    QLineEdit* makeRangeEdit(const QString& tip);
+    QDoubleSpinBox* makeGradeSpin(double minV, double maxV, double step, double value,
+                                  const QString& tip);
 
     static LoadPayload decodeFrame(const QString& path, int index);
 
@@ -170,19 +161,29 @@ private:
     QLabel* infoLabel_ = nullptr;
     QLabel* zoomLabel_ = nullptr;
     QComboBox* displayCombo_ = nullptr;
-    FrameTimelineWidget* timeline_ = nullptr;
-    QPushButton* prevBtn_ = nullptr;
-    QPushButton* nextBtn_ = nullptr;
     QPushButton* fitBtn_ = nullptr;
+    QPushButton* gradeResetBtn_ = nullptr;
+
+    QDoubleSpinBox* brightnessSpin_ = nullptr;
+    QDoubleSpinBox* contrastSpin_ = nullptr;
+    QDoubleSpinBox* gammaSpin_ = nullptr;
+
+    QLineEdit* startEdit_ = nullptr;
+    QLineEdit* endEdit_ = nullptr;
+    TimelineScrubber* scrubber_ = nullptr;
 
     QVector<FrameSlot> frames_;
     int frameIndex_ = 0;
     int loadedCount_ = 0;
+    int rangeStart_ = 1;
+    int rangeEnd_ = 1;
+    bool updatingTimeline_ = false;
 
     ViewerDisplayMode displayMode_ = ViewerDisplayMode::ClassicSrgb;
     bool ocioUseEnv_ = true;
     QString ocioConfigPath_;
     int ocioWorkingSpace_ = 1;
+    ViewerGrade grade_;
 
     std::atomic<quint64> loadGeneration_{0};
 };

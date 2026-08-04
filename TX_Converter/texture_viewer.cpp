@@ -1,10 +1,13 @@
 #include "texture_viewer.h"
 
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QImageReader>
+#include <QIntValidator>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMetaObject>
 #include <QMouseEvent>
 #include <QPainter>
@@ -19,7 +22,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <string>
 
 #include "core/image.h"
@@ -27,11 +29,14 @@
 #include "io/image_io.h"
 #include "io/ocio_util.h"
 #include "scene/types.h"
+#include "ui/timeline_bar.h"
 
 namespace sol {
 namespace {
 
 constexpr int kMaxPreviewEdge = 2048;
+constexpr int kFrameBoxWidth = 40;
+constexpr int kFrameBoxHeight = 16;
 
 bool isFloatPreviewPath(const QString& path) {
     const QString ext = QFileInfo(path).suffix().toLower();
@@ -49,6 +54,23 @@ QString formatBytes(qint64 bytes) {
     if (bytes < 1024) return QStringLiteral("%1 B").arg(bytes);
     if (bytes < 1024 * 1024) return QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 1);
     return QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
+}
+
+bool gradeEquals(const ViewerGrade& a, const ViewerGrade& b) {
+    return a.brightness == b.brightness && a.contrast == b.contrast && a.gamma == b.gamma;
+}
+
+Vec3 applyGrade(Vec3 c, const ViewerGrade& grade) {
+    // Contrast around mid-grey, then brightness offset, then gamma.
+    c.x = (c.x - 0.5f) * grade.contrast + 0.5f + grade.brightness;
+    c.y = (c.y - 0.5f) * grade.contrast + 0.5f + grade.brightness;
+    c.z = (c.z - 0.5f) * grade.contrast + 0.5f + grade.brightness;
+    const float g = std::max(0.01f, grade.gamma);
+    const float invG = 1.0f / g;
+    c.x = std::pow(std::max(0.0f, c.x), invG);
+    c.y = std::pow(std::max(0.0f, c.y), invG);
+    c.z = std::pow(std::max(0.0f, c.z), invG);
+    return c;
 }
 
 void downscaleLinearRgb(const float* src, int srcW, int srcH, std::vector<float>& outRgb, int& outW,
@@ -106,7 +128,7 @@ Vec3 classicDisplayRgb(Vec3 linear) {
 }
 
 QImage bakeDisplayImage(const float* linearRgb, int w, int h, ViewerDisplayMode mode, bool ocioUseEnv,
-                        const QString& ocioConfigPath, int workingSpace) {
+                        const QString& ocioConfigPath, int workingSpace, const ViewerGrade& grade) {
     QImage out(w, h, QImage::Format_RGB888);
     if (!linearRgb || w <= 0 || h <= 0) return out;
 
@@ -124,6 +146,7 @@ QImage bakeDisplayImage(const float* linearRgb, int w, int h, ViewerDisplayMode 
             Vec3 display =
                 (mode == ViewerDisplayMode::OcioSrgbAces && ocioOk) ? ocioApplyViewPrepared(linear)
                                                                     : classicDisplayRgb(linear);
+            display = applyGrade(display, grade);
             uchar* px = line + size_t(x) * 3;
             px[0] = static_cast<uchar>(clampf(display.x, 0.0f, 1.0f) * 255.0f + 0.5f);
             px[1] = static_cast<uchar>(clampf(display.y, 0.0f, 1.0f) * 255.0f + 0.5f);
@@ -134,96 +157,6 @@ QImage bakeDisplayImage(const float* linearRgb, int w, int h, ViewerDisplayMode 
 }
 
 }  // namespace
-
-// ---------------------------------------------------------------------------
-// FrameTimelineWidget
-// ---------------------------------------------------------------------------
-
-FrameTimelineWidget::FrameTimelineWidget(QWidget* parent) : QWidget(parent) {
-    setMouseTracking(true);
-    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-}
-
-void FrameTimelineWidget::setFrameCount(int count) {
-    count_ = std::max(0, count);
-    current_ = std::clamp(current_, 0, std::max(0, count_ - 1));
-    update();
-}
-
-void FrameTimelineWidget::setCurrentFrame(int index) {
-    if (count_ <= 0) {
-        current_ = 0;
-        update();
-        return;
-    }
-    current_ = std::clamp(index, 0, count_ - 1);
-    update();
-}
-
-QSize FrameTimelineWidget::sizeHint() const { return QSize(200, 22); }
-QSize FrameTimelineWidget::minimumSizeHint() const { return QSize(40, 18); }
-
-int FrameTimelineWidget::indexAtX(int x) const {
-    if (count_ <= 0) return 0;
-    const int left = 1;
-    const int right = std::max(left + 1, width() - 1);
-    const int span = right - left;
-    if (count_ == 1) return 0;
-    const float t = float(std::clamp(x, left, right) - left) / float(span);
-    return std::clamp(int(std::lround(t * float(count_ - 1))), 0, count_ - 1);
-}
-
-void FrameTimelineWidget::seekToX(int x) {
-    const int index = indexAtX(x);
-    if (index == current_) return;
-    current_ = index;
-    update();
-    emit frameChanged(current_);
-}
-
-void FrameTimelineWidget::mousePressEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton && count_ > 0) seekToX(event->pos().x());
-}
-
-void FrameTimelineWidget::mouseMoveEvent(QMouseEvent* event) {
-    if ((event->buttons() & Qt::LeftButton) && count_ > 0) seekToX(event->pos().x());
-}
-
-void FrameTimelineWidget::paintEvent(QPaintEvent*) {
-    QPainter p(this);
-    p.setRenderHint(QPainter::Antialiasing, false);
-
-    const QRect r = rect();
-    p.fillRect(r, QColor(22, 24, 27));
-    p.setPen(QColor(50, 54, 60));
-    p.drawRect(r.adjusted(0, 0, -1, -1));
-
-    if (count_ <= 0) return;
-
-    // Edge-to-edge track (1 px inset so the border stays visible).
-    const int left = 1;
-    const int right = std::max(left + 1, width() - 2);
-    const int span = right - left;
-    const int trackY = height() / 2;
-    p.setPen(QPen(QColor(64, 70, 78), 2));
-    p.drawLine(left, trackY, right, trackY);
-
-    for (int i = 0; i < count_; ++i) {
-        const float t = (count_ == 1) ? 0.5f : float(i) / float(count_ - 1);
-        const int x = left + int(std::lround(t * float(span)));
-        const bool active = (i == current_);
-        const int tickH = active ? 8 : 5;
-        p.setPen(QPen(active ? QColor(220, 180, 90) : QColor(130, 138, 148), active ? 2 : 1));
-        p.drawLine(x, trackY - tickH, x, trackY + tickH);
-    }
-
-    const float t = (count_ == 1) ? 0.5f : float(current_) / float(count_ - 1);
-    const int x = left + int(std::lround(t * float(span)));
-    p.setBrush(QColor(232, 176, 64));
-    p.setPen(Qt::NoPen);
-    const QPoint pts[3] = {QPoint(x, trackY - 10), QPoint(x - 4, trackY - 4), QPoint(x + 4, trackY - 4)};
-    p.drawPolygon(pts, 3);
-}
 
 // ---------------------------------------------------------------------------
 // FloatPreviewCanvas
@@ -274,7 +207,12 @@ void FloatPreviewCanvas::setDisplayMode(ViewerDisplayMode mode, bool ocioUseEnv,
     ocioUseEnv_ = ocioUseEnv;
     ocioConfigPath_ = ocioConfigPath;
     workingSpace_ = workingSpace;
-    // Invalidate only the 8-bit view cache — float source stays put (no laggy rebake of sequence).
+    invalidateDisplayCache();
+    update();
+}
+
+void FloatPreviewCanvas::setGrade(const ViewerGrade& grade) {
+    grade_ = grade;
     invalidateDisplayCache();
     update();
 }
@@ -288,16 +226,18 @@ void FloatPreviewCanvas::ensureDisplayCache() {
     if (!linearRgb_ || width_ <= 0 || height_ <= 0) return;
     if (!displayCache_.isNull() && displayCacheId_ == contentId_ &&
         displayCacheMode_ == displayMode_ && displayCacheWorking_ == workingSpace_ &&
-        displayCacheOcioEnv_ == ocioUseEnv_ && displayCacheOcioPath_ == ocioConfigPath_) {
+        displayCacheOcioEnv_ == ocioUseEnv_ && displayCacheOcioPath_ == ocioConfigPath_ &&
+        gradeEquals(displayCacheGrade_, grade_)) {
         return;
     }
     displayCache_ = bakeDisplayImage(linearRgb_, width_, height_, displayMode_, ocioUseEnv_,
-                                     ocioConfigPath_, workingSpace_);
+                                     ocioConfigPath_, workingSpace_, grade_);
     displayCacheId_ = contentId_;
     displayCacheMode_ = displayMode_;
     displayCacheWorking_ = workingSpace_;
     displayCacheOcioEnv_ = ocioUseEnv_;
     displayCacheOcioPath_ = ocioConfigPath_;
+    displayCacheGrade_ = grade_;
 }
 
 void FloatPreviewCanvas::fitToView() {
@@ -380,11 +320,8 @@ void FloatPreviewCanvas::wheelEvent(QWheelEvent* event) {
     fitted_ = false;
     const QPointF mouse = event->position();
     const QRectF before = imageRect();
-    const double oldZoom = zoom_;
     const double factor = std::pow(1.0015, event->angleDelta().y());
     zoom_ = std::clamp(zoom_ * factor, 0.05, 64.0);
-
-    // Keep the texel under the cursor stable.
     if (before.width() > 1.0 && before.height() > 1.0) {
         const double u = (mouse.x() - before.x()) / before.width();
         const double v = (mouse.y() - before.y()) / before.height();
@@ -392,7 +329,6 @@ void FloatPreviewCanvas::wheelEvent(QWheelEvent* event) {
         const QPointF afterPt(after.x() + u * after.width(), after.y() + v * after.height());
         pan_ += mouse - afterPt;
     }
-    (void)oldZoom;
     clampPan();
     emit zoomChanged(zoom_);
     update();
@@ -516,6 +452,49 @@ TextureViewerWidget::LoadPayload TextureViewerWidget::decodeFrame(const QString&
     return payload;
 }
 
+QLineEdit* TextureViewerWidget::makeRangeEdit(const QString& tip) {
+    auto* edit = new QLineEdit(this);
+    edit->setAlignment(Qt::AlignCenter);
+    edit->setFixedSize(kFrameBoxWidth, kFrameBoxHeight);
+    edit->setMaxLength(6);
+    edit->setValidator(new QIntValidator(1, 999999, edit));
+    edit->setToolTip(tip);
+    edit->setStyleSheet(QStringLiteral(
+        "QLineEdit {"
+        "  background: #1a1c20;"
+        "  color: #d8dae0;"
+        "  border: 1px solid #7a7e86;"
+        "  border-radius: 2px;"
+        "  padding: 0 2px;"
+        "  font-size: 11px;"
+        "  font-weight: 600;"
+        "}"
+        "QLineEdit:focus { border: 1px solid #50aaff; }"));
+    return edit;
+}
+
+QDoubleSpinBox* TextureViewerWidget::makeGradeSpin(double minV, double maxV, double step, double value,
+                                                   const QString& tip) {
+    auto* spin = new QDoubleSpinBox(this);
+    spin->setRange(minV, maxV);
+    spin->setSingleStep(step);
+    spin->setDecimals(2);
+    spin->setValue(value);
+    spin->setFixedWidth(72);
+    spin->setToolTip(tip);
+    spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
+    spin->setStyleSheet(QStringLiteral(
+        "QDoubleSpinBox {"
+        "  background: #1a1c20;"
+        "  color: #d8dae0;"
+        "  border: 1px solid #7a7e86;"
+        "  border-radius: 2px;"
+        "  padding: 1px 4px;"
+        "}"
+        "QDoubleSpinBox:focus { border: 1px solid #50aaff; }"));
+    return spin;
+}
+
 TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -528,51 +507,108 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     displayCombo_ = new QComboBox();
     displayCombo_->addItem(QStringLiteral("Classic sRGB"), int(ViewerDisplayMode::ClassicSrgb));
     displayCombo_->addItem(QStringLiteral("OCIO sRGB (ACES)"), int(ViewerDisplayMode::OcioSrgbAces));
-    displayCombo_->setMinimumWidth(160);
+    displayCombo_->setMinimumWidth(150);
     modeRow->addWidget(displayCombo_);
     fitBtn_ = new QPushButton(QStringLiteral("Fit"));
     fitBtn_->setFixedWidth(44);
     fitBtn_->setToolTip(QStringLiteral("Fit image to view (double-click canvas)"));
     modeRow->addWidget(fitBtn_);
     zoomLabel_ = new QLabel(QStringLiteral("100%"));
-    zoomLabel_->setMinimumWidth(48);
+    zoomLabel_->setMinimumWidth(44);
     zoomLabel_->setStyleSheet(QStringLiteral("color: #9aa0a6;"));
     modeRow->addWidget(zoomLabel_);
     modeRow->addStretch(1);
     root->addLayout(modeRow);
 
+    auto* gradeRow = new QHBoxLayout();
+    gradeRow->setContentsMargins(0, 0, 0, 0);
+    gradeRow->setSpacing(6);
+    const QString gradeStyle = QStringLiteral("color: #9aa0a6;");
+    auto* bLab = new QLabel(QStringLiteral("Bright"));
+    bLab->setStyleSheet(gradeStyle);
+    gradeRow->addWidget(bLab);
+    brightnessSpin_ = makeGradeSpin(-1.0, 1.0, 0.05, 0.0, QStringLiteral("Brightness (−1 … +1)"));
+    gradeRow->addWidget(brightnessSpin_);
+    auto* cLab = new QLabel(QStringLiteral("Contrast"));
+    cLab->setStyleSheet(gradeStyle);
+    gradeRow->addWidget(cLab);
+    contrastSpin_ = makeGradeSpin(0.0, 3.0, 0.05, 1.0, QStringLiteral("Contrast (1 = neutral)"));
+    gradeRow->addWidget(contrastSpin_);
+    auto* gLab = new QLabel(QStringLiteral("Gamma"));
+    gLab->setStyleSheet(gradeStyle);
+    gradeRow->addWidget(gLab);
+    gammaSpin_ = makeGradeSpin(0.20, 3.0, 0.05, 1.0, QStringLiteral("Display gamma (1 = neutral)"));
+    gradeRow->addWidget(gammaSpin_);
+    gradeResetBtn_ = new QPushButton(QStringLiteral("Reset"));
+    gradeResetBtn_->setFixedWidth(52);
+    gradeResetBtn_->setToolTip(QStringLiteral("Reset brightness / contrast / gamma"));
+    gradeRow->addWidget(gradeResetBtn_);
+    gradeRow->addStretch(1);
+    root->addLayout(gradeRow);
+
     canvas_ = new FloatPreviewCanvas(this);
     root->addWidget(canvas_, 1);
 
-    // Timeline row: edge-to-edge, only prev/next chrome.
-    auto* tlRow = new QHBoxLayout();
-    tlRow->setContentsMargins(0, 0, 0, 0);
-    tlRow->setSpacing(2);
-    prevBtn_ = new QPushButton(QStringLiteral("◀"));
-    prevBtn_->setFixedSize(22, 22);
-    nextBtn_ = new QPushButton(QStringLiteral("▶"));
-    nextBtn_->setFixedSize(22, 22);
-    timeline_ = new FrameTimelineWidget();
-    tlRow->addWidget(prevBtn_);
-    tlRow->addWidget(timeline_, 1);
-    tlRow->addWidget(nextBtn_);
-    root->addLayout(tlRow);
+    // Solstice-style scrub row: [start] [scrubber] [end] — no transport/play buttons.
+    auto* scrubHost = new QWidget(this);
+    scrubHost->setObjectName(QStringLiteral("viewerTimeline"));
+    scrubHost->setFixedHeight(28);
+    scrubHost->setStyleSheet(QStringLiteral(
+        "QWidget#viewerTimeline {"
+        "  background: #2e3136;"
+        "  border-top: 1px solid #22242a;"
+        "  border-bottom: 1px solid #22242a;"
+        "}"));
+    auto* scrubRow = new QHBoxLayout(scrubHost);
+    scrubRow->setContentsMargins(4, 4, 4, 4);
+    scrubRow->setSpacing(0);
+    startEdit_ = makeRangeEdit(QStringLiteral("Start frame"));
+    endEdit_ = makeRangeEdit(QStringLiteral("End frame"));
+    scrubber_ = new TimelineScrubber(scrubHost);
+    scrubRow->addWidget(startEdit_, 0);
+    scrubRow->addWidget(scrubber_, 1);
+    scrubRow->addWidget(endEdit_, 0);
+    root->addWidget(scrubHost);
 
     infoLabel_ = new QLabel(QStringLiteral("Drop a source path or click Preview"));
     infoLabel_->setWordWrap(true);
     infoLabel_->setStyleSheet(QStringLiteral("color: #b0b4ba;"));
     root->addWidget(infoLabel_);
 
-    connect(timeline_, &FrameTimelineWidget::frameChanged, this, &TextureViewerWidget::setFrame);
-    connect(prevBtn_, &QPushButton::clicked, this, &TextureViewerWidget::prevFrame);
-    connect(nextBtn_, &QPushButton::clicked, this, &TextureViewerWidget::nextFrame);
+    connect(scrubber_, &TimelineScrubber::frameChanged, this, &TextureViewerWidget::setTimelineFrame);
+    connect(startEdit_, &QLineEdit::editingFinished, this, &TextureViewerWidget::onStartEdited);
+    connect(endEdit_, &QLineEdit::editingFinished, this, &TextureViewerWidget::onEndEdited);
     connect(fitBtn_, &QPushButton::clicked, this, &TextureViewerWidget::fitView);
+    connect(gradeResetBtn_, &QPushButton::clicked, this, &TextureViewerWidget::resetGrade);
     connect(canvas_, &FloatPreviewCanvas::zoomChanged, this, [this](double z) {
         zoomLabel_->setText(QStringLiteral("%1%").arg(int(std::lround(z * 100.0))));
     });
     connect(displayCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         setDisplayMode(ViewerDisplayMode(displayCombo_->currentData().toInt()));
     });
+    auto gradeChanged = [this](double) { applyGradeFromUi(); };
+    connect(brightnessSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, gradeChanged);
+    connect(contrastSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, gradeChanged);
+    connect(gammaSpin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, gradeChanged);
+
+    rebuildTimeline();
+}
+
+void TextureViewerWidget::applyGradeFromUi() {
+    grade_.brightness = float(brightnessSpin_->value());
+    grade_.contrast = float(contrastSpin_->value());
+    grade_.gamma = float(gammaSpin_->value());
+    canvas_->setGrade(grade_);
+}
+
+void TextureViewerWidget::resetGrade() {
+    const QSignalBlocker b0(brightnessSpin_);
+    const QSignalBlocker b1(contrastSpin_);
+    const QSignalBlocker b2(gammaSpin_);
+    brightnessSpin_->setValue(0.0);
+    contrastSpin_->setValue(1.0);
+    gammaSpin_->setValue(1.0);
+    applyGradeFromUi();
 }
 
 void TextureViewerWidget::setOcioConfig(bool useEnv, const QString& configPath) {
@@ -594,7 +630,6 @@ void TextureViewerWidget::setDisplayMode(ViewerDisplayMode mode) {
             emit statusMessage(QStringLiteral("Viewer: %1").arg(QString::fromStdString(st.message)));
         }
     }
-    // Live view transform on float buffer — only current frame's display cache rebuilds.
     canvas_->setDisplayMode(displayMode_, ocioUseEnv_, ocioConfigPath_, ocioWorkingSpace_);
     updateInfoBar();
 }
@@ -648,7 +683,10 @@ void TextureViewerWidget::setSourcePath(const QString& pathIn) {
     ocioWorkingSpace_ = prefersAcesCgWorkingSpace(paths.first()) ? kWorkingSpaceAcesCg
                                                                  : kWorkingSpaceSrgbLinear;
     canvas_->setDisplayMode(displayMode_, ocioUseEnv_, ocioConfigPath_, ocioWorkingSpace_);
+    canvas_->setGrade(grade_);
 
+    rangeStart_ = 1;
+    rangeEnd_ = std::max(1, int(frames_.size()));
     rebuildTimeline();
     canvas_->setPlaceholder(QStringLiteral("Loading sequence…"));
     emit statusMessage(QStringLiteral("Viewer: loading %1 tile(s)…").arg(frames_.size()));
@@ -707,32 +745,95 @@ QString TextureViewerWidget::currentPath() const {
     return frames_[frameIndex_].path;
 }
 
+void TextureViewerWidget::setTimelineFrame(int frame) {
+    // Scrubber is 1-based within [rangeStart_, rangeEnd_].
+    const int index = std::clamp(frame, rangeStart_, rangeEnd_) - 1;
+    setFrame(index);
+}
+
 void TextureViewerWidget::setFrame(int index) {
     if (frames_.isEmpty()) return;
     index = std::clamp(index, 0, int(frames_.size()) - 1);
+    // Keep scrub inside the editable start/end window.
+    index = std::clamp(index, rangeStart_ - 1, rangeEnd_ - 1);
     frameIndex_ = index;
-    timeline_->setCurrentFrame(frameIndex_);
+    if (!updatingTimeline_) {
+        updatingTimeline_ = true;
+        scrubber_->setFrame(frameIndex_ + 1);
+        updatingTimeline_ = false;
+    }
     showCurrentFrame();
 }
 
 void TextureViewerWidget::nextFrame() {
     if (frames_.size() <= 1) return;
-    setFrame((frameIndex_ + 1) % frames_.size());
+    const int next = frameIndex_ + 1;
+    if (next > rangeEnd_ - 1) setFrame(rangeStart_ - 1);
+    else setFrame(next);
 }
 
 void TextureViewerWidget::prevFrame() {
     if (frames_.size() <= 1) return;
-    setFrame((frameIndex_ - 1 + frames_.size()) % frames_.size());
+    const int prev = frameIndex_ - 1;
+    if (prev < rangeStart_ - 1) setFrame(rangeEnd_ - 1);
+    else setFrame(prev);
 }
 
 void TextureViewerWidget::fitView() { canvas_->fitToView(); }
 
+void TextureViewerWidget::onStartEdited() {
+    if (updatingTimeline_ || !startEdit_) return;
+    bool ok = false;
+    int value = startEdit_->text().trimmed().toInt(&ok);
+    const int maxFrame = std::max(1, int(frames_.size()));
+    if (!ok) {
+        updatingTimeline_ = true;
+        startEdit_->setText(QString::number(rangeStart_));
+        updatingTimeline_ = false;
+        return;
+    }
+    value = std::clamp(value, 1, maxFrame);
+    rangeStart_ = value;
+    if (rangeEnd_ < rangeStart_) rangeEnd_ = rangeStart_;
+    rebuildTimeline();
+    setFrame(frameIndex_);
+}
+
+void TextureViewerWidget::onEndEdited() {
+    if (updatingTimeline_ || !endEdit_) return;
+    bool ok = false;
+    int value = endEdit_->text().trimmed().toInt(&ok);
+    const int maxFrame = std::max(1, int(frames_.size()));
+    if (!ok) {
+        updatingTimeline_ = true;
+        endEdit_->setText(QString::number(rangeEnd_));
+        updatingTimeline_ = false;
+        return;
+    }
+    value = std::clamp(value, 1, maxFrame);
+    rangeEnd_ = value;
+    if (rangeEnd_ < rangeStart_) rangeStart_ = rangeEnd_;
+    rebuildTimeline();
+    setFrame(frameIndex_);
+}
+
 void TextureViewerWidget::rebuildTimeline() {
-    const int n = frames_.size();
-    prevBtn_->setEnabled(n > 1);
-    nextBtn_->setEnabled(n > 1);
-    timeline_->setFrameCount(n);
-    timeline_->setCurrentFrame(std::clamp(frameIndex_, 0, std::max(0, n - 1)));
+    const int n = std::max(1, int(frames_.size()));
+    if (frames_.isEmpty()) {
+        rangeStart_ = 1;
+        rangeEnd_ = 1;
+    } else {
+        rangeStart_ = std::clamp(rangeStart_, 1, n);
+        rangeEnd_ = std::clamp(rangeEnd_, 1, n);
+        if (rangeEnd_ < rangeStart_) rangeEnd_ = rangeStart_;
+    }
+
+    updatingTimeline_ = true;
+    if (startEdit_) startEdit_->setText(QString::number(rangeStart_));
+    if (endEdit_) endEdit_->setText(QString::number(rangeEnd_));
+    scrubber_->setRange(rangeStart_, rangeEnd_);
+    scrubber_->setFrame(std::clamp(frameIndex_ + 1, rangeStart_, rangeEnd_));
+    updatingTimeline_ = false;
 }
 
 void TextureViewerWidget::updateInfoBar() {
@@ -779,7 +880,6 @@ void TextureViewerWidget::pushFrameToCanvas() {
         canvas_->setPlaceholder(QStringLiteral("Loading…"));
         return;
     }
-    // contentId uniquely tags this frame buffer so display cache invalidates on scrub.
     const quint64 id = (quint64(loadGeneration_.load()) << 32) ^ quint64(frameIndex_ + 1) ^
                        (quint64(slot.previewW) << 16) ^ quint64(slot.previewH);
     canvas_->setLinearImage(slot.linearRgb.data(), slot.previewW, slot.previewH, id);
@@ -788,7 +888,6 @@ void TextureViewerWidget::pushFrameToCanvas() {
 void TextureViewerWidget::showCurrentFrame() {
     if (frames_.isEmpty()) return;
     frameIndex_ = std::clamp(frameIndex_, 0, int(frames_.size()) - 1);
-    timeline_->setCurrentFrame(frameIndex_);
     pushFrameToCanvas();
     updateInfoBar();
 }

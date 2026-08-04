@@ -633,7 +633,9 @@ if(SOLSTICE_BUILD_APP)
         TX_Converter/main.cpp
         TX_Converter/texture_viewer.cpp
         TX_Converter/texture_viewer.h
-        src/ui/theme.cpp)
+        src/ui/theme.cpp
+        src/ui/timeline_bar.cpp
+        src/ui/timeline_bar.h)
     target_include_directories(TX_Converter PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
     target_link_libraries(TX_Converter PRIVATE solstice_lib Qt6::Widgets)
     set_target_properties(TX_Converter PROPERTIES OUTPUT_NAME "TX_Converter")
