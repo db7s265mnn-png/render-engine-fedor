@@ -113,7 +113,11 @@ public:
             const bool manual = !useEnvCheck_->isChecked();
             ocioEdit_->setEnabled(manual);
         };
-        connect(useEnvCheck_, &QCheckBox::toggled, this, [syncOcioEnabled](bool) { syncOcioEnabled(); });
+        connect(useEnvCheck_, &QCheckBox::toggled, this, [this, syncOcioEnabled](bool) {
+            syncOcioEnabled();
+            syncViewerOcio();
+        });
+        connect(ocioEdit_, &QLineEdit::editingFinished, this, [this] { syncViewerOcio(); });
         syncOcioEnabled();
 
         convertLay->addWidget(formBox);
@@ -121,7 +125,7 @@ public:
         auto* hint = new QLabel(
             QStringLiteral("Output is always ACEScg (Arnold-style). "
                            "UDIM: put <UDIM> in the source path to convert the whole sequence. "
-                           "Preview timeline length = number of UDIM tiles on disk."));
+                           "Viewer preloads the full tile sequence; timeline ticks = tiles."));
         hint->setWordWrap(true);
         hint->setStyleSheet(QStringLiteral("color: #969aa0;"));
         convertLay->addWidget(hint);
@@ -161,6 +165,7 @@ public:
                 QStringLiteral(
                     "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.tx);;All (*)"));
             if (!path.isEmpty()) {
+                syncViewerOcio();
                 viewer_->setSourcePath(path);
             }
         });
@@ -168,6 +173,7 @@ public:
         connect(viewer_, &sol::TextureViewerWidget::statusMessage, this, [this](const QString& msg) {
             status_->setText(msg);
         });
+        syncViewerOcio();
 
         splitter->addWidget(viewBox);
         splitter->setStretchFactor(0, 0);
@@ -201,12 +207,18 @@ private:
         else colorSpaceCombo_->setCurrentIndex(0);
     }
 
+    void syncViewerOcio() {
+        if (!viewer_) return;
+        viewer_->setOcioConfig(useEnvCheck_->isChecked(), ocioEdit_->text().trimmed());
+    }
+
     void previewSource() {
         const QString src = sourceEdit_->text().trimmed();
         if (src.isEmpty()) {
             status_->setText(QStringLiteral("Set a Source path to preview."));
             return;
         }
+        syncViewerOcio();
         viewer_->setSourcePath(src);
     }
 
@@ -246,6 +258,7 @@ private:
             }
         }
         const QString txPath = QDir(outDir).filePath(name);
+        syncViewerOcio();
         viewer_->setSourcePath(txPath);
     }
 

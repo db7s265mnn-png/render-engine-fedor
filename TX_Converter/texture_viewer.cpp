@@ -1,15 +1,18 @@
 #include "texture_viewer.h"
 
+#include <QComboBox>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QImageReader>
 #include <QLabel>
 #include <QMetaObject>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPaintEvent>
 #include <QPointer>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
-#include <QSlider>
 #include <QSignalBlocker>
 #include <QThreadPool>
 #include <QTimer>
@@ -22,27 +25,13 @@
 #include "core/image.h"
 #include "core/math.h"
 #include "io/image_io.h"
+#include "io/ocio_util.h"
+#include "scene/types.h"
 
 namespace sol {
 namespace {
 
 constexpr int kMaxPreviewEdge = 2048;
-constexpr int kCacheLimit = 12;
-
-float linearToSrgbChannel(float c) {
-    c = clampf(c, 0.0f, 1.0f);
-    if (c <= 0.0031308f) return 12.92f * c;
-    return 1.055f * std::pow(c, 1.0f / 2.4f) - 0.055f;
-}
-
-Vec3 previewRgb(Vec3 linear) {
-    // Soft clip for HDR / float .tx so bright values stay visible.
-    linear.x = linear.x / (1.0f + std::max(0.0f, linear.x));
-    linear.y = linear.y / (1.0f + std::max(0.0f, linear.y));
-    linear.z = linear.z / (1.0f + std::max(0.0f, linear.z));
-    return Vec3(linearToSrgbChannel(linear.x), linearToSrgbChannel(linear.y),
-                linearToSrgbChannel(linear.z));
-}
 
 bool isFloatPreviewPath(const QString& path) {
     const QString ext = QFileInfo(path).suffix().toLower();
@@ -52,27 +41,47 @@ bool isFloatPreviewPath(const QString& path) {
            ext == QLatin1String("tiff");
 }
 
+bool prefersAcesCgWorkingSpace(const QString& path) {
+    const QString ext = QFileInfo(path).suffix().toLower();
+    // Converted Arnold/OIIO .tx tiles are ACEScg in this tool.
+    return ext == QLatin1String("tx");
+}
+
 QString formatBytes(qint64 bytes) {
     if (bytes < 1024) return QStringLiteral("%1 B").arg(bytes);
     if (bytes < 1024 * 1024) return QStringLiteral("%1 KB").arg(bytes / 1024.0, 0, 'f', 1);
     return QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
 }
 
-}  // namespace
-
-QImage downscaleForPreview(QImage image) {
-    if (image.isNull()) return {};
-    const int edge = std::max(image.width(), image.height());
-    if (edge <= kMaxPreviewEdge) return image.convertToFormat(QImage::Format_RGB888);
-    return image
-        .scaled(kMaxPreviewEdge, kMaxPreviewEdge, Qt::KeepAspectRatio, Qt::FastTransformation)
-        .convertToFormat(QImage::Format_RGB888);
+void downscaleLinearRgb(const float* src, int srcW, int srcH, std::vector<float>& outRgb, int& outW,
+                        int& outH) {
+    int stepX = 1;
+    int stepY = 1;
+    outW = srcW;
+    outH = srcH;
+    const int edge = std::max(srcW, srcH);
+    if (edge > kMaxPreviewEdge) {
+        stepX = std::max(1, (srcW + kMaxPreviewEdge - 1) / kMaxPreviewEdge);
+        stepY = std::max(1, (srcH + kMaxPreviewEdge - 1) / kMaxPreviewEdge);
+        outW = std::max(1, srcW / stepX);
+        outH = std::max(1, srcH / stepY);
+    }
+    outRgb.resize(size_t(outW) * size_t(outH) * 3);
+    for (int y = 0; y < outH; ++y) {
+        const int sy = std::min(srcH - 1, y * stepY);
+        const float* row = src + size_t(sy) * size_t(srcW) * 4;
+        float* dst = outRgb.data() + size_t(y) * size_t(outW) * 3;
+        for (int x = 0; x < outW; ++x) {
+            const int sx = std::min(srcW - 1, x * stepX);
+            const float* px = row + size_t(sx) * 4;
+            dst[x * 3 + 0] = px[0];
+            dst[x * 3 + 1] = px[1];
+            dst[x * 3 + 2] = px[2];
+        }
+    }
 }
 
-QImage floatImageToPreview(const Image& image) {
-    if (image.empty()) return {};
-
-    // Prefer a mip ≤ preview budget when available (.tx / maketx pyramids).
+void extractLinearFromFloatImage(const Image& image, std::vector<float>& outRgb, int& outW, int& outH) {
     int srcW = image.width();
     int srcH = image.height();
     const float* src = image.data();
@@ -88,88 +97,255 @@ QImage floatImageToPreview(const Image& image) {
             }
         }
     }
-
-    int outW = srcW;
-    int outH = srcH;
-    int stepX = 1;
-    int stepY = 1;
-    const int edge = std::max(srcW, srcH);
-    if (edge > kMaxPreviewEdge) {
-        stepX = std::max(1, (srcW + kMaxPreviewEdge - 1) / kMaxPreviewEdge);
-        stepY = std::max(1, (srcH + kMaxPreviewEdge - 1) / kMaxPreviewEdge);
-        outW = std::max(1, srcW / stepX);
-        outH = std::max(1, srcH / stepY);
-    }
-
-    QImage out(outW, outH, QImage::Format_RGB888);
-    for (int y = 0; y < outH; ++y) {
-        uchar* line = out.scanLine(y);
-        const int sy = std::min(srcH - 1, y * stepY);
-        const float* row = src + size_t(sy) * size_t(srcW) * 4;
-        for (int x = 0; x < outW; ++x) {
-            const int sx = std::min(srcW - 1, x * stepX);
-            const float* px = row + size_t(sx) * 4;
-            const Vec3 c = previewRgb(Vec3(px[0], px[1], px[2]));
-            uchar* dst = line + size_t(x) * 3;
-            dst[0] = static_cast<uchar>(c.x * 255.0f + 0.5f);
-            dst[1] = static_cast<uchar>(c.y * 255.0f + 0.5f);
-            dst[2] = static_cast<uchar>(c.z * 255.0f + 0.5f);
-        }
-    }
-    return out;
+    downscaleLinearRgb(src, srcW, srcH, outRgb, outW, outH);
 }
 
-TextureViewerWidget::PreviewResult TextureViewerWidget::loadPreviewImage(const QString& path) {
-    PreviewResult result;
-    const QFileInfo info(path);
-    result.fileBytes = info.size();
+Vec3 classicDisplayRgb(Vec3 linear) {
+    // Soft clip for HDR highlights, then classic sRGB encode.
+    linear.x = linear.x / (1.0f + std::max(0.0f, linear.x));
+    linear.y = linear.y / (1.0f + std::max(0.0f, linear.y));
+    linear.z = linear.z / (1.0f + std::max(0.0f, linear.z));
+    return linearToSrgbVec(linear);
+}
 
-    if (!info.exists()) {
-        result.error = QStringLiteral("file not found: %1").arg(path);
-        return result;
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// FrameTimelineWidget
+// ---------------------------------------------------------------------------
+
+FrameTimelineWidget::FrameTimelineWidget(QWidget* parent) : QWidget(parent) {
+    setMouseTracking(true);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+}
+
+void FrameTimelineWidget::setFrameCount(int count) {
+    count_ = std::max(0, count);
+    current_ = std::clamp(current_, 0, std::max(0, count_ - 1));
+    update();
+}
+
+void FrameTimelineWidget::setCurrentFrame(int index) {
+    if (count_ <= 0) {
+        current_ = 0;
+        update();
+        return;
+    }
+    current_ = std::clamp(index, 0, count_ - 1);
+    update();
+}
+
+void FrameTimelineWidget::setTickLabels(const QStringList& labels) {
+    labels_ = labels;
+    update();
+}
+
+QSize FrameTimelineWidget::sizeHint() const { return QSize(320, 36); }
+QSize FrameTimelineWidget::minimumSizeHint() const { return QSize(120, 28); }
+
+void FrameTimelineWidget::resizeEvent(QResizeEvent* event) {
+    QWidget::resizeEvent(event);
+    update();
+}
+
+int FrameTimelineWidget::indexAtX(int x) const {
+    if (count_ <= 0) return 0;
+    const int left = 8;
+    const int right = width() - 8;
+    const int span = std::max(1, right - left);
+    if (count_ == 1) return 0;
+    const float t = float(std::clamp(x, left, right) - left) / float(span);
+    return std::clamp(int(std::lround(t * float(count_ - 1))), 0, count_ - 1);
+}
+
+void FrameTimelineWidget::seekToX(int x) {
+    const int index = indexAtX(x);
+    if (index == current_) return;
+    current_ = index;
+    update();
+    emit frameChanged(current_);
+}
+
+void FrameTimelineWidget::mousePressEvent(QMouseEvent* event) {
+    if (event->button() == Qt::LeftButton && count_ > 0) seekToX(event->pos().x());
+}
+
+void FrameTimelineWidget::mouseMoveEvent(QMouseEvent* event) {
+    if ((event->buttons() & Qt::LeftButton) && count_ > 0) seekToX(event->pos().x());
+}
+
+void FrameTimelineWidget::paintEvent(QPaintEvent*) {
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    const QRect r = rect().adjusted(1, 1, -1, -1);
+    p.fillRect(r, QColor(26, 28, 31));
+    p.setPen(QColor(58, 62, 68));
+    p.drawRoundedRect(r, 3, 3);
+
+    if (count_ <= 0) {
+        p.setPen(QColor(120, 126, 134));
+        p.drawText(r, Qt::AlignCenter, QStringLiteral("no frames"));
+        return;
     }
 
-    // LDR (PNG/JPEG/…): decode with Qt and downscale — no float Image round-trip.
-    // File size may be ~40 MB; full RGBA decode is large, but we never keep 8K float buffers.
+    const int left = 8;
+    const int right = width() - 8;
+    const int span = std::max(1, right - left);
+    const int trackY = height() / 2;
+    p.setPen(QPen(QColor(70, 76, 84), 2));
+    p.drawLine(left, trackY, right, trackY);
+
+    const bool drawLabels = count_ <= 24 && !labels_.isEmpty();
+    for (int i = 0; i < count_; ++i) {
+        const float t = (count_ == 1) ? 0.5f : float(i) / float(count_ - 1);
+        const int x = left + int(std::lround(t * float(span)));
+        const bool active = (i == current_);
+        const int tickH = active ? 12 : 7;
+        p.setPen(QPen(active ? QColor(220, 180, 90) : QColor(140, 148, 158), active ? 2 : 1));
+        p.drawLine(x, trackY - tickH, x, trackY + tickH);
+
+        if (drawLabels && i < labels_.size() && !labels_[i].isEmpty()) {
+            p.setPen(active ? QColor(230, 200, 120) : QColor(110, 116, 124));
+            QFont f = font();
+            f.setPointSize(std::max(7, f.pointSize() - 2));
+            p.setFont(f);
+            p.drawText(QRect(x - 18, trackY + 8, 36, 12), Qt::AlignHCenter | Qt::AlignTop, labels_[i]);
+        }
+    }
+
+    // Playhead
+    {
+        const float t = (count_ == 1) ? 0.5f : float(current_) / float(count_ - 1);
+        const int x = left + int(std::lround(t * float(span)));
+        p.setBrush(QColor(232, 176, 64));
+        p.setPen(Qt::NoPen);
+        const QPoint pts[3] = {QPoint(x, trackY - 14), QPoint(x - 5, trackY - 6),
+                               QPoint(x + 5, trackY - 6)};
+        p.drawPolygon(pts, 3);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TextureViewerWidget
+// ---------------------------------------------------------------------------
+
+TextureViewerWidget::LoadPayload TextureViewerWidget::decodeFrame(const QString& path, int index) {
+    LoadPayload payload;
+    payload.index = index;
+    payload.path = path;
+    const QFileInfo info(path);
+    payload.fileBytes = info.size();
+
+    if (!info.exists()) {
+        payload.error = QStringLiteral("file not found: %1").arg(path);
+        return payload;
+    }
+
     if (!isFloatPreviewPath(path)) {
         QImageReader reader(path);
         reader.setAllocationLimit(0);
         reader.setAutoTransform(true);
         QImage qimage = reader.read();
+        if (qimage.isNull()) qimage.load(path);
         if (qimage.isNull()) {
-            qimage.load(path);
+            payload.error = QStringLiteral("unsupported or unreadable image: %1 (%2)")
+                                .arg(path, reader.errorString());
+            return payload;
         }
-        if (qimage.isNull()) {
-            result.error = QStringLiteral("unsupported or unreadable image: %1 (%2)")
-                               .arg(path, reader.errorString());
-            return result;
+        qimage = qimage.convertToFormat(QImage::Format_RGBA8888);
+        payload.sourceWidth = qimage.width();
+        payload.sourceHeight = qimage.height();
+
+        if (std::max(qimage.width(), qimage.height()) > kMaxPreviewEdge) {
+            qimage = qimage
+                         .scaled(kMaxPreviewEdge, kMaxPreviewEdge, Qt::KeepAspectRatio,
+                                 Qt::FastTransformation)
+                         .convertToFormat(QImage::Format_RGBA8888);
         }
-        result.sourceWidth = qimage.width();
-        result.sourceHeight = qimage.height();
-        result.image = downscaleForPreview(std::move(qimage));
-        return result;
+
+        std::vector<float> rgba(size_t(qimage.width()) * size_t(qimage.height()) * 4);
+        for (int y = 0; y < qimage.height(); ++y) {
+            const uchar* line = qimage.constScanLine(y);
+            float* row = rgba.data() + size_t(y) * size_t(qimage.width()) * 4;
+            for (int x = 0; x < qimage.width(); ++x) {
+                const uchar* px = line + size_t(x) * 4;
+                row[x * 4 + 0] = srgbToLinear(px[0] / 255.0f);
+                row[x * 4 + 1] = srgbToLinear(px[1] / 255.0f);
+                row[x * 4 + 2] = srgbToLinear(px[2] / 255.0f);
+                row[x * 4 + 3] = px[3] / 255.0f;
+            }
+        }
+        downscaleLinearRgb(rgba.data(), qimage.width(), qimage.height(), payload.linearRgb,
+                           payload.previewW, payload.previewH);
+        return payload;
     }
 
     Image image;
     std::string err;
-    if (!loadImage(path.toStdString(), image, err, true)) {
-        result.error = QString::fromStdString(err.empty() ? "load failed" : err);
-        return result;
+    if (!loadImage(path.toStdString(), image, err, /*srgbColor=*/false)) {
+        // Float TX/EXR: leave linear. For 8-bit TIFF fall back with sRGB decode.
+        if (!loadImage(path.toStdString(), image, err, true)) {
+            payload.error = QString::fromStdString(err.empty() ? "load failed" : err);
+            return payload;
+        }
     }
     if (image.empty()) {
-        result.error = QStringLiteral("empty image");
-        return result;
+        payload.error = QStringLiteral("empty image");
+        return payload;
     }
-    result.sourceWidth = image.width();
-    result.sourceHeight = image.height();
-    result.image = floatImageToPreview(image);
-    return result;
+    payload.sourceWidth = image.width();
+    payload.sourceHeight = image.height();
+    extractLinearFromFloatImage(image, payload.linearRgb, payload.previewW, payload.previewH);
+    return payload;
+}
+
+void TextureViewerWidget::bakeDisplay(FrameSlot& slot) const {
+    slot.display = {};
+    if (!slot.ready || slot.linearRgb.empty() || slot.previewW <= 0 || slot.previewH <= 0) return;
+
+    QImage out(slot.previewW, slot.previewH, QImage::Format_RGB888);
+    const bool useOcio = displayMode_ == ViewerDisplayMode::OcioSrgbAces;
+    bool ocioOk = false;
+    if (useOcio) {
+        ocioEnsureConfig(ocioUseEnv_, ocioConfigPath_.toStdString());
+        ocioOk = ocioPrepareView(ocioWorkingSpace_, kViewSrgbAces);
+    }
+
+    for (int y = 0; y < slot.previewH; ++y) {
+        uchar* line = out.scanLine(y);
+        const float* row = slot.linearRgb.data() + size_t(y) * size_t(slot.previewW) * 3;
+        for (int x = 0; x < slot.previewW; ++x) {
+            Vec3 linear(row[x * 3 + 0], row[x * 3 + 1], row[x * 3 + 2]);
+            Vec3 display;
+            if (useOcio && ocioOk) {
+                display = ocioApplyViewPrepared(linear);
+            } else {
+                display = classicDisplayRgb(linear);
+            }
+            uchar* px = line + size_t(x) * 3;
+            px[0] = static_cast<uchar>(clampf(display.x, 0.0f, 1.0f) * 255.0f + 0.5f);
+            px[1] = static_cast<uchar>(clampf(display.y, 0.0f, 1.0f) * 255.0f + 0.5f);
+            px[2] = static_cast<uchar>(clampf(display.z, 0.0f, 1.0f) * 255.0f + 0.5f);
+        }
+    }
+    slot.display = std::move(out);
 }
 
 TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(6);
+
+    auto* modeRow = new QHBoxLayout();
+    modeRow->addWidget(new QLabel(QStringLiteral("Display")));
+    displayCombo_ = new QComboBox();
+    displayCombo_->addItem(QStringLiteral("Classic sRGB"), int(ViewerDisplayMode::ClassicSrgb));
+    displayCombo_->addItem(QStringLiteral("OCIO sRGB (ACES)"), int(ViewerDisplayMode::OcioSrgbAces));
+    displayCombo_->setMinimumWidth(180);
+    modeRow->addWidget(displayCombo_);
+    modeRow->addStretch(1);
+    root->addLayout(modeRow);
 
     scroll_ = new QScrollArea(this);
     scroll_->setWidgetResizable(true);
@@ -195,12 +371,9 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     prevBtn_->setFixedWidth(36);
     nextBtn_ = new QPushButton(QStringLiteral("▶"));
     nextBtn_->setFixedWidth(36);
-    timeline_ = new QSlider(Qt::Horizontal);
-    timeline_->setMinimum(0);
-    timeline_->setMaximum(0);
-    timeline_->setEnabled(false);
+    timeline_ = new FrameTimelineWidget();
     frameLabel_ = new QLabel(QStringLiteral("—"));
-    frameLabel_->setMinimumWidth(140);
+    frameLabel_->setMinimumWidth(150);
     tlRow->addWidget(prevBtn_);
     tlRow->addWidget(timeline_, 1);
     tlRow->addWidget(nextBtn_);
@@ -212,21 +385,73 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     resizeDebounce_->setInterval(40);
     connect(resizeDebounce_, &QTimer::timeout, this, &TextureViewerWidget::updateImageLabel);
 
-    connect(timeline_, &QSlider::valueChanged, this, &TextureViewerWidget::setFrame);
+    connect(timeline_, &FrameTimelineWidget::frameChanged, this, &TextureViewerWidget::setFrame);
     connect(prevBtn_, &QPushButton::clicked, this, &TextureViewerWidget::prevFrame);
     connect(nextBtn_, &QPushButton::clicked, this, &TextureViewerWidget::nextFrame);
+    connect(displayCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        const ViewerDisplayMode mode =
+            ViewerDisplayMode(displayCombo_->currentData().toInt());
+        setDisplayMode(mode);
+    });
+}
+
+void TextureViewerWidget::setOcioConfig(bool useEnv, const QString& configPath) {
+    ocioUseEnv_ = useEnv;
+    ocioConfigPath_ = configPath.trimmed();
+    if (displayMode_ == ViewerDisplayMode::OcioSrgbAces) {
+        ocioEnsureConfig(ocioUseEnv_, ocioConfigPath_.toStdString());
+        rebakeAllDisplays();
+        showCurrentFrame();
+        refreshDisplayModeUi();
+    }
+}
+
+void TextureViewerWidget::setDisplayMode(ViewerDisplayMode mode) {
+    if (displayMode_ == mode && displayCombo_->currentData().toInt() == int(mode)) {
+        // Still rebake if OCIO just became available — fall through only on change.
+    }
+    const bool changed = displayMode_ != mode;
+    displayMode_ = mode;
+    {
+        const QSignalBlocker block(displayCombo_);
+        const int idx = displayCombo_->findData(int(mode));
+        if (idx >= 0) displayCombo_->setCurrentIndex(idx);
+    }
+    if (mode == ViewerDisplayMode::OcioSrgbAces) {
+        const OcioStatus st = ocioEnsureConfig(ocioUseEnv_, ocioConfigPath_.toStdString());
+        if (!st.configLoaded) {
+            emit statusMessage(QStringLiteral("Viewer: %1").arg(QString::fromStdString(st.message)));
+        }
+    }
+    if (changed || mode == ViewerDisplayMode::OcioSrgbAces) {
+        rebakeAllDisplays();
+        showCurrentFrame();
+    }
+    refreshDisplayModeUi();
+}
+
+void TextureViewerWidget::refreshDisplayModeUi() {
+    if (displayMode_ != ViewerDisplayMode::OcioSrgbAces) return;
+    if (!ocioLibraryAvailable()) {
+        emit statusMessage(QStringLiteral("Viewer: OCIO library not linked — using classic sRGB encode"));
+    }
+}
+
+void TextureViewerWidget::rebakeAllDisplays() {
+    // Prepare OCIO once for the batch.
+    if (displayMode_ == ViewerDisplayMode::OcioSrgbAces) {
+        ocioEnsureConfig(ocioUseEnv_, ocioConfigPath_.toStdString());
+        ocioPrepareView(ocioWorkingSpace_, kViewSrgbAces);
+    }
+    for (FrameSlot& slot : frames_) {
+        if (slot.ready) bakeDisplay(slot);
+    }
 }
 
 void TextureViewerWidget::setSourcePath(const QString& pathIn) {
-    paths_.clear();
-    udims_.clear();
+    frames_.clear();
     frameIndex_ = 0;
-    previewImage_ = {};
-    sourceWidth_ = sourceHeight_ = 0;
-    fileBytes_ = 0;
-    loadedPath_.clear();
-    cache_.clear();
-    cacheOrder_.clear();
+    loadedCount_ = 0;
     ++loadGeneration_;
 
     const QString path = pathIn.trimmed();
@@ -239,18 +464,20 @@ void TextureViewerWidget::setSourcePath(const QString& pathIn) {
         return;
     }
 
+    QStringList paths;
+    QList<int> udims;
     QString pattern;
     std::vector<int> tiles;
     if (resolveUdimPattern(path, QString(), pattern, tiles) && !tiles.empty()) {
         for (int udim : tiles) {
             const QString tile = expandUdimToken(pattern, udim);
             if (!QFileInfo::exists(tile)) continue;
-            paths_.push_back(tile);
-            udims_.push_back(udim);
+            paths.push_back(tile);
+            udims.push_back(udim);
         }
     }
 
-    if (paths_.isEmpty()) {
+    if (paths.isEmpty()) {
         if (!QFileInfo::exists(path)) {
             rebuildTimeline();
             imageLabel_->setText(QStringLiteral("File not found"));
@@ -259,42 +486,105 @@ void TextureViewerWidget::setSourcePath(const QString& pathIn) {
             emit statusMessage(QStringLiteral("Viewer: file not found"));
             return;
         }
-        paths_.push_back(path);
-        udims_.push_back(0);
+        paths.push_back(path);
+        udims.push_back(0);
     }
 
+    frames_.resize(paths.size());
+    for (int i = 0; i < paths.size(); ++i) {
+        frames_[i].path = paths[i];
+        frames_[i].udim = udims[i];
+    }
+
+    // Working space: ACEScg for .tx sequence, else scene-linear sRGB.
+    ocioWorkingSpace_ = prefersAcesCgWorkingSpace(paths.first()) ? kWorkingSpaceAcesCg
+                                                                 : kWorkingSpaceSrgbLinear;
+
     rebuildTimeline();
-    showCurrentFrame(true);
+    imageLabel_->setText(QStringLiteral("Loading sequence…"));
+    imageLabel_->setPixmap({});
+    emit statusMessage(QStringLiteral("Viewer: loading %1 tile(s)…").arg(frames_.size()));
+    startPreloadAll();
+}
+
+void TextureViewerWidget::startPreloadAll() {
+    const quint64 generation = loadGeneration_.load();
+    QPointer<TextureViewerWidget> self(this);
+    // Cap concurrency a bit so 8K PNG decode doesn't thrash RAM.
+    const int ideal = std::max(1, QThreadPool::globalInstance()->maxThreadCount());
+    QThreadPool::globalInstance()->setMaxThreadCount(ideal);
+
+    for (int i = 0; i < frames_.size(); ++i) {
+        const QString path = frames_[i].path;
+        QThreadPool::globalInstance()->start([self, path, i, generation]() {
+            LoadPayload payload = decodeFrame(path, i);
+            if (!self) return;
+            QMetaObject::invokeMethod(
+                self,
+                [self, generation, payload = std::move(payload)]() mutable {
+                    if (!self) return;
+                    self->onFrameLoaded(generation, std::move(payload));
+                },
+                Qt::QueuedConnection);
+        });
+    }
+}
+
+void TextureViewerWidget::onFrameLoaded(quint64 generation, LoadPayload payload) {
+    if (generation != loadGeneration_.load()) return;
+    if (payload.index < 0 || payload.index >= frames_.size()) return;
+    if (frames_[payload.index].path != payload.path) return;
+
+    FrameSlot& slot = frames_[payload.index];
+    if (!slot.ready) ++loadedCount_;
+
+    slot.sourceWidth = payload.sourceWidth;
+    slot.sourceHeight = payload.sourceHeight;
+    slot.fileBytes = payload.fileBytes;
+    slot.previewW = payload.previewW;
+    slot.previewH = payload.previewH;
+    slot.linearRgb = std::move(payload.linearRgb);
+    slot.error = payload.error;
+    slot.ready = payload.error.isEmpty() && !slot.linearRgb.empty();
+    if (slot.ready) bakeDisplay(slot);
+
+    if (payload.index == frameIndex_) showCurrentFrame();
+
+    if (loadedCount_ >= frames_.size()) {
+        emit statusMessage(QStringLiteral("Viewer: sequence ready (%1 tile(s))").arg(frames_.size()));
+    } else {
+        emit statusMessage(QStringLiteral("Viewer: loaded %1/%2…")
+                               .arg(loadedCount_)
+                               .arg(frames_.size()));
+    }
+    updateInfoBar();
 }
 
 QString TextureViewerWidget::currentPath() const {
-    if (frameIndex_ < 0 || frameIndex_ >= paths_.size()) return {};
-    return paths_[frameIndex_];
+    if (frameIndex_ < 0 || frameIndex_ >= frames_.size()) return {};
+    return frames_[frameIndex_].path;
 }
 
 void TextureViewerWidget::setFrame(int index) {
-    if (paths_.isEmpty()) return;
-    index = std::clamp(index, 0, int(paths_.size()) - 1);
-    if (index == frameIndex_ && !previewImage_.isNull() && loadedPath_ == paths_[index]) {
-        updateImageLabel();
+    if (frames_.isEmpty()) return;
+    index = std::clamp(index, 0, int(frames_.size()) - 1);
+    if (index == frameIndex_) {
+        showCurrentFrame();
         return;
     }
     frameIndex_ = index;
-    if (timeline_->value() != frameIndex_) {
-        const QSignalBlocker block(timeline_);
-        timeline_->setValue(frameIndex_);
-    }
-    showCurrentFrame(false);
+    timeline_->setCurrentFrame(frameIndex_);
+    showCurrentFrame();
 }
 
 void TextureViewerWidget::nextFrame() {
-    if (paths_.size() <= 1) return;
-    setFrame((frameIndex_ + 1) % paths_.size());
+    if (frames_.size() <= 1) return;
+    setFrame((frameIndex_ + 1) % frames_.size());
 }
 
 void TextureViewerWidget::prevFrame() {
-    if (paths_.size() <= 1) return;
-    setFrame((frameIndex_ - 1 + paths_.size()) % paths_.size());
+    if (frames_.size() <= 1) return;
+    setFrame((frameIndex_ - 1 + frames_.size()) % frames_.size());
 }
 
 void TextureViewerWidget::fitView() { updateImageLabel(); }
@@ -305,128 +595,93 @@ void TextureViewerWidget::resizeEvent(QResizeEvent* event) {
 }
 
 void TextureViewerWidget::rebuildTimeline() {
-    const int n = paths_.size();
-    timeline_->setEnabled(n > 1);
+    const int n = frames_.size();
     prevBtn_->setEnabled(n > 1);
     nextBtn_->setEnabled(n > 1);
-    const QSignalBlocker block(timeline_);
-    timeline_->setMinimum(0);
-    timeline_->setMaximum(std::max(0, n - 1));
-    timeline_->setValue(std::clamp(frameIndex_, 0, std::max(0, n - 1)));
+    timeline_->setFrameCount(n);
+    timeline_->setCurrentFrame(std::clamp(frameIndex_, 0, std::max(0, n - 1)));
+
+    QStringList labels;
+    labels.reserve(n);
+    for (const FrameSlot& slot : frames_) {
+        if (slot.udim > 0) labels << QString::number(slot.udim);
+        else labels << QString();
+    }
+    timeline_->setTickLabels(labels);
 }
 
-void TextureViewerWidget::touchCache(const QString& path, const PreviewResult& result) {
-    if (result.image.isNull()) return;
-    if (!cache_.contains(path)) {
-        cacheOrder_.push_back(path);
-    } else {
-        cacheOrder_.removeAll(path);
-        cacheOrder_.push_back(path);
-    }
-    cache_.insert(path, result);
-    while (cacheOrder_.size() > kCacheLimit) {
-        const QString oldest = cacheOrder_.takeFirst();
-        cache_.remove(oldest);
-    }
-}
-
-void TextureViewerWidget::applyPreview(const QString& path, int frameIndex, quint64 generation,
-                                       const PreviewResult& result) {
-    if (generation != loadGeneration_.load()) return;
-    if (frameIndex < 0 || frameIndex >= paths_.size() || paths_[frameIndex] != path) return;
-
-    const int udim = (frameIndex < udims_.size()) ? udims_[frameIndex] : 0;
-    loadedPath_ = path;
-    previewImage_ = result.image;
-    sourceWidth_ = result.sourceWidth;
-    sourceHeight_ = result.sourceHeight;
-    fileBytes_ = result.fileBytes;
-
-    if (previewImage_.isNull()) {
-        imageLabel_->setPixmap({});
-        imageLabel_->setText(result.error.isEmpty() ? QStringLiteral("Load failed") : result.error);
-        infoLabel_->setText(path);
-        emit statusMessage(QStringLiteral("Viewer: %1").arg(result.error));
-        frameLabel_->setText(udim > 0 ? QStringLiteral("UDIM %1").arg(udim) : QStringLiteral("—"));
+void TextureViewerWidget::updateInfoBar() {
+    if (frames_.isEmpty() || frameIndex_ < 0 || frameIndex_ >= frames_.size()) {
+        frameLabel_->setText(QStringLiteral("—"));
         return;
     }
-
-    touchCache(path, result);
-
-    const QString sizeBit = formatBytes(fileBytes_);
-    if (udim > 0) {
+    const FrameSlot& slot = frames_[frameIndex_];
+    const QString modeBit = (displayMode_ == ViewerDisplayMode::OcioSrgbAces)
+                                ? QStringLiteral("OCIO")
+                                : QStringLiteral("sRGB");
+    if (slot.udim > 0) {
         frameLabel_->setText(QStringLiteral("UDIM %1 (%2/%3)")
-                                 .arg(udim)
-                                 .arg(frameIndex + 1)
-                                 .arg(paths_.size()));
-        infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  tile %5/%6")
-                                .arg(QFileInfo(path).fileName())
-                                .arg(sourceWidth_)
-                                .arg(sourceHeight_)
-                                .arg(sizeBit)
-                                .arg(frameIndex + 1)
-                                .arg(paths_.size()));
+                                 .arg(slot.udim)
+                                 .arg(frameIndex_ + 1)
+                                 .arg(frames_.size()));
     } else {
-        frameLabel_->setText(QStringLiteral("1/1"));
-        infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4")
-                                .arg(QFileInfo(path).fileName())
-                                .arg(sourceWidth_)
-                                .arg(sourceHeight_)
-                                .arg(sizeBit));
+        frameLabel_->setText(QStringLiteral("%1/%2").arg(frameIndex_ + 1).arg(frames_.size()));
+    }
+
+    if (!slot.error.isEmpty()) {
+        infoLabel_->setText(slot.error);
+        return;
+    }
+    if (!slot.ready) {
+        infoLabel_->setText(QStringLiteral("Loading %1… (%2/%3)")
+                                .arg(QFileInfo(slot.path).fileName())
+                                .arg(loadedCount_)
+                                .arg(frames_.size()));
+        return;
+    }
+    infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  %5  ·  %6/%7 ready")
+                            .arg(QFileInfo(slot.path).fileName())
+                            .arg(slot.sourceWidth)
+                            .arg(slot.sourceHeight)
+                            .arg(formatBytes(slot.fileBytes))
+                            .arg(modeBit)
+                            .arg(loadedCount_)
+                            .arg(frames_.size()));
+}
+
+void TextureViewerWidget::showCurrentFrame() {
+    if (frames_.isEmpty()) return;
+    frameIndex_ = std::clamp(frameIndex_, 0, int(frames_.size()) - 1);
+    timeline_->setCurrentFrame(frameIndex_);
+    updateInfoBar();
+
+    const FrameSlot& slot = frames_[frameIndex_];
+    if (!slot.error.isEmpty()) {
+        imageLabel_->setPixmap({});
+        imageLabel_->setText(slot.error);
+        return;
+    }
+    if (!slot.ready || slot.display.isNull()) {
+        imageLabel_->setPixmap({});
+        imageLabel_->setText(QStringLiteral("Loading…"));
+        return;
     }
     updateImageLabel();
-    emit statusMessage(QStringLiteral("Viewer: %1").arg(QFileInfo(path).fileName()));
-}
-
-void TextureViewerWidget::showCurrentFrame(bool forceReload) {
-    if (paths_.isEmpty()) return;
-    frameIndex_ = std::clamp(frameIndex_, 0, int(paths_.size()) - 1);
-    const QString path = paths_[frameIndex_];
-    const int frameIndex = frameIndex_;
-
-    if (!forceReload && path == loadedPath_ && !previewImage_.isNull()) {
-        updateImageLabel();
-        return;
-    }
-
-    if (!forceReload) {
-        const auto it = cache_.constFind(path);
-        if (it != cache_.cend() && !it->image.isNull()) {
-            applyPreview(path, frameIndex, loadGeneration_.load(), *it);
-            return;
-        }
-    }
-
-    const quint64 generation = ++loadGeneration_;
-    imageLabel_->setText(QStringLiteral("Loading…"));
-    imageLabel_->setPixmap({});
-    emit statusMessage(QStringLiteral("Viewer: loading %1…").arg(QFileInfo(path).fileName()));
-
-    QPointer<TextureViewerWidget> self(this);
-    QThreadPool::globalInstance()->start([self, path, frameIndex, generation]() {
-        PreviewResult result = loadPreviewImage(path);
-        if (!self) return;
-        QMetaObject::invokeMethod(
-            self,
-            [self, path, frameIndex, generation, result = std::move(result)]() mutable {
-                if (!self) return;
-                self->applyPreview(path, frameIndex, generation, result);
-            },
-            Qt::QueuedConnection);
-    });
 }
 
 void TextureViewerWidget::updateImageLabel() {
-    if (previewImage_.isNull()) return;
+    if (frames_.isEmpty() || frameIndex_ < 0 || frameIndex_ >= frames_.size()) return;
+    const FrameSlot& slot = frames_[frameIndex_];
+    if (slot.display.isNull()) return;
+
     const QSize viewport = scroll_->viewport()->size();
     if (viewport.width() < 8 || viewport.height() < 8) {
-        imageLabel_->setPixmap(QPixmap::fromImage(previewImage_));
+        imageLabel_->setPixmap(QPixmap::fromImage(slot.display));
         imageLabel_->adjustSize();
         return;
     }
-    // previewImage_ is already ≤ 2K; FastTransformation is enough for fit-to-view.
     const QImage scaled =
-        previewImage_.scaled(viewport, Qt::KeepAspectRatio, Qt::FastTransformation);
+        slot.display.scaled(viewport, Qt::KeepAspectRatio, Qt::FastTransformation);
     imageLabel_->setPixmap(QPixmap::fromImage(scaled));
     imageLabel_->adjustSize();
 }
