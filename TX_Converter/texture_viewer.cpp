@@ -2,6 +2,7 @@
 
 #include <QAbstractSpinBox>
 #include <QComboBox>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -31,6 +32,7 @@
 #include "core/math.h"
 #include "io/image_io.h"
 #include "io/ocio_util.h"
+#include "io/tx_convert.h"
 #include "scene/types.h"
 #include "ui/timeline_bar.h"
 
@@ -519,6 +521,12 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     displayCombo_->addItem(QStringLiteral("OCIO sRGB (ACES)"), int(ViewerDisplayMode::OcioSrgbAces));
     displayCombo_->setMinimumWidth(150);
     modeRow->addWidget(displayCombo_);
+    modeRow->addWidget(new QLabel(QStringLiteral("View")));
+    contentCombo_ = new QComboBox();
+    contentCombo_->addItem(QStringLiteral("Source Images"), int(ViewerContentKind::SourceImages));
+    contentCombo_->addItem(QStringLiteral("Converted TX"), int(ViewerContentKind::ConvertedTx));
+    contentCombo_->setMinimumWidth(130);
+    modeRow->addWidget(contentCombo_);
     fitBtn_ = new QPushButton(QStringLiteral("Fit"));
     fitBtn_->setFixedWidth(44);
     fitBtn_->setToolTip(QStringLiteral("Fit image to view (double-click canvas)"));
@@ -582,7 +590,7 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     scrubRow->addWidget(endEdit_, 0);
     root->addWidget(scrubHost);
 
-    infoLabel_ = new QLabel(QStringLiteral("Drop a source path or click Preview"));
+    infoLabel_ = new QLabel(QStringLiteral("No texture"));
     infoLabel_->setWordWrap(true);
     infoLabel_->setStyleSheet(QStringLiteral("color: #b0b4ba;"));
     root->addWidget(infoLabel_);
@@ -597,6 +605,10 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     });
     connect(displayCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         setDisplayMode(ViewerDisplayMode(displayCombo_->currentData().toInt()));
+    });
+    connect(contentCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        contentKind_ = ViewerContentKind(contentCombo_->currentData().toInt());
+        refreshFromPipeline();
     });
     auto wireGrade = [this](QDoubleSpinBox* spin, QSlider* slider, double minV, double maxV) {
         const double span = std::max(1e-9, maxV - minV);
@@ -649,6 +661,79 @@ void TextureViewerWidget::setOcioConfig(bool useEnv, const QString& configPath) 
     canvas_->setDisplayMode(displayMode_, ocioUseEnv_, ocioConfigPath_, ocioWorkingSpace_);
 }
 
+void TextureViewerWidget::setPipelinePaths(const QString& sourcePath, const QString& outputFolder) {
+    pipelineSource_ = sourcePath.trimmed();
+    pipelineOutputFolder_ = outputFolder.trimmed();
+    refreshFromPipeline();
+}
+
+void TextureViewerWidget::setContentKind(ViewerContentKind kind) {
+    contentKind_ = kind;
+    if (contentCombo_) {
+        const QSignalBlocker block(contentCombo_);
+        const int idx = contentCombo_->findData(int(kind));
+        if (idx >= 0) contentCombo_->setCurrentIndex(idx);
+    }
+    refreshFromPipeline();
+}
+
+QString TextureViewerWidget::guessConvertedTxPath(const QString& sourcePath,
+                                                 const QString& outputFolder) {
+    const QString src = sourcePath.trimmed();
+    const QString outDir = outputFolder.trimmed();
+    if (src.isEmpty() || outDir.isEmpty()) return {};
+
+    QFileInfo info(src);
+    QString name = info.fileName();
+    if (pathHasUdimToken(name) || src.contains(QStringLiteral("$F"))) {
+        const int dot = name.lastIndexOf(QLatin1Char('.'));
+        if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
+        else name += QStringLiteral(".tx");
+    } else if (pathHasUdimToken(src)) {
+        name = info.fileName();
+        const int dot = name.lastIndexOf(QLatin1Char('.'));
+        if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
+        else name += QStringLiteral(".tx");
+    } else {
+        QString udimPattern;
+        std::vector<int> tiles;
+        if (resolveUdimPattern(src, QString(), udimPattern, tiles)) {
+            QFileInfo pinfo(udimPattern);
+            name = pinfo.fileName();
+            const int dot = name.lastIndexOf(QLatin1Char('.'));
+            if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
+            else name += QStringLiteral(".tx");
+        } else {
+            name = info.completeBaseName() + QStringLiteral(".tx");
+        }
+    }
+    return QDir(outDir).filePath(name);
+}
+
+void TextureViewerWidget::clearView() {
+    frames_.clear();
+    frameIndex_ = 0;
+    loadedCount_ = 0;
+    ++loadGeneration_;
+    canvas_->clear();
+    rebuildTimeline();
+    infoLabel_->setText(QStringLiteral("No texture"));
+}
+
+void TextureViewerWidget::refreshFromPipeline() {
+    QString path;
+    if (contentKind_ == ViewerContentKind::SourceImages) {
+        path = pipelineSource_;
+    } else {
+        path = guessConvertedTxPath(pipelineSource_, pipelineOutputFolder_);
+    }
+    if (path.isEmpty()) {
+        clearView();
+        return;
+    }
+    setSourcePath(path);
+}
+
 void TextureViewerWidget::setDisplayMode(ViewerDisplayMode mode) {
     displayMode_ = mode;
     {
@@ -676,8 +761,7 @@ void TextureViewerWidget::setSourcePath(const QString& pathIn) {
     const QString path = pathIn.trimmed();
     if (path.isEmpty()) {
         rebuildTimeline();
-        infoLabel_->setText(QStringLiteral("No path"));
-        emit statusMessage(QStringLiteral("Viewer: empty path"));
+        infoLabel_->setText(QStringLiteral("No texture"));
         return;
     }
 
@@ -694,12 +778,20 @@ void TextureViewerWidget::setSourcePath(const QString& pathIn) {
         }
     }
 
+    if (paths.isEmpty() && path.contains(QStringLiteral("$F"))) {
+        const int scanEnd = std::max(rangeEnd_, 10000);
+        const auto expanded = txExpandFrameSources(path.toStdString(), 1, scanEnd);
+        for (const std::string& p : expanded) {
+            paths.push_back(QString::fromStdString(p));
+            udims.push_back(0);
+        }
+    }
+
     if (paths.isEmpty()) {
         if (!QFileInfo::exists(path)) {
+            // Missing source / .tx → default placeholder, not an error banner.
             rebuildTimeline();
-            canvas_->setPlaceholder(QStringLiteral("File not found"));
-            infoLabel_->setText(path);
-            emit statusMessage(QStringLiteral("Viewer: file not found"));
+            infoLabel_->setText(QStringLiteral("No texture"));
             return;
         }
         paths.push_back(path);

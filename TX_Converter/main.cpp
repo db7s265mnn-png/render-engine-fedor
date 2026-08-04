@@ -40,7 +40,7 @@ public:
         auto* splitter = new QSplitter(Qt::Horizontal, this);
         splitter->setChildrenCollapsible(false);
 
-        // ---- Left: Convert + open buttons ----
+        // ---- Left: Convert controls ----
         auto* leftPanel = new QWidget();
         leftPanel->setMinimumWidth(320);
         leftPanel->setMaximumWidth(520);
@@ -75,7 +75,7 @@ public:
                 }
                 if (!path.isEmpty()) {
                     edit->setText(path);
-                    if (!directory) previewSource();
+                    syncPipeline();
                 }
             });
             return row;
@@ -131,42 +131,18 @@ public:
         auto* hint = new QLabel(
             QStringLiteral("Output is always ACEScg (Arnold-style). "
                            "UDIM: put <UDIM> in the source path to convert the whole sequence. "
-                           "Viewer keeps float buffers; wheel = zoom, drag = pan."));
+                           "Viewer: switch Source Images / Converted TX. "
+                           "Wheel = zoom, drag = pan."));
         hint->setWordWrap(true);
         hint->setStyleSheet(QStringLiteral("color: #969aa0;"));
         leftLay->addWidget(hint);
 
-        auto* btnRow = new QHBoxLayout();
-        auto* previewBtn = new QPushButton(QStringLiteral("Preview Source"));
         auto* convertBtn = new QPushButton(QStringLiteral("Convert"));
         convertBtn->setMinimumHeight(32);
-        previewBtn->setMinimumHeight(32);
-        btnRow->addWidget(previewBtn);
-        btnRow->addWidget(convertBtn, 1);
-        leftLay->addLayout(btnRow);
-        connect(previewBtn, &QPushButton::clicked, this, [this] { previewSource(); });
+        leftLay->addWidget(convertBtn);
         connect(convertBtn, &QPushButton::clicked, this, &TxConverterWindow::onConvert);
-        connect(sourceEdit_, &QLineEdit::editingFinished, this, [this] {
-            if (!sourceEdit_->text().trimmed().isEmpty()) previewSource();
-        });
-
-        auto* viewBtnRow = new QHBoxLayout();
-        auto* openViewBtn = new QPushButton(QStringLiteral("Open in Viewer…"));
-        auto* previewOutBtn = new QPushButton(QStringLiteral("Preview Output Folder .tx"));
-        viewBtnRow->addWidget(openViewBtn);
-        viewBtnRow->addWidget(previewOutBtn);
-        leftLay->addLayout(viewBtnRow);
-        connect(openViewBtn, &QPushButton::clicked, this, [this] {
-            const auto picked = sol::TextureFileDialog::getOpenTexture(
-                this, QStringLiteral("Preview texture"), sourceEdit_->text(),
-                QStringLiteral(
-                    "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.tx);;All (*)"));
-            if (!picked.path.isEmpty()) {
-                syncViewerOcio();
-                viewer_->setSourcePath(picked.path);
-            }
-        });
-        connect(previewOutBtn, &QPushButton::clicked, this, [this] { previewOutputTx(); });
+        connect(sourceEdit_, &QLineEdit::editingFinished, this, [this] { syncPipeline(); });
+        connect(outputEdit_, &QLineEdit::editingFinished, this, [this] { syncPipeline(); });
 
         leftLay->addStretch(1);
         splitter->addWidget(leftPanel);
@@ -178,10 +154,6 @@ public:
         viewLay->setSpacing(4);
         viewer_ = new sol::TextureViewerWidget(viewBox);
         viewLay->addWidget(viewer_);
-        connect(viewer_, &sol::TextureViewerWidget::statusMessage, this, [this](const QString& msg) {
-            status_->setText(msg);
-        });
-        syncViewerOcio();
         splitter->addWidget(viewBox);
 
         splitter->setStretchFactor(0, 0);
@@ -193,6 +165,12 @@ public:
         status_ = new QLabel(QStringLiteral("Ready."));
         status_->setWordWrap(true);
         root->addWidget(status_);
+
+        connect(viewer_, &sol::TextureViewerWidget::statusMessage, this, [this](const QString& msg) {
+            status_->setText(msg);
+        });
+        syncViewerOcio();
+        syncPipeline();
     }
 
 private:
@@ -220,49 +198,10 @@ private:
         viewer_->setOcioConfig(useEnvCheck_->isChecked(), ocioEdit_->text().trimmed());
     }
 
-    void previewSource() {
-        const QString src = sourceEdit_->text().trimmed();
-        if (src.isEmpty()) {
-            status_->setText(QStringLiteral("Set a Source path to preview."));
-            return;
-        }
+    void syncPipeline() {
+        if (!viewer_) return;
         syncViewerOcio();
-        viewer_->setSourcePath(src);
-    }
-
-    void previewOutputTx() {
-        const QString src = sourceEdit_->text().trimmed();
-        const QString outDir = outputEdit_->text().trimmed();
-        if (src.isEmpty() || outDir.isEmpty()) {
-            QMessageBox::information(this, QStringLiteral("TX Converter"),
-                                     QStringLiteral("Set Source and Output Folder first."));
-            return;
-        }
-        QFileInfo info(src);
-        QString name = info.fileName();
-        if (sol::pathHasUdimToken(name)) {
-            const int dot = name.lastIndexOf(QLatin1Char('.'));
-            if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
-            else name += QStringLiteral(".tx");
-        } else if (sol::pathHasUdimToken(src)) {
-            name = info.fileName();
-            const int dot = name.lastIndexOf(QLatin1Char('.'));
-            if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
-        } else {
-            QString udimPattern;
-            std::vector<int> tiles;
-            if (sol::resolveUdimPattern(src, QString(), udimPattern, tiles)) {
-                QFileInfo pinfo(udimPattern);
-                name = pinfo.fileName();
-                const int dot = name.lastIndexOf(QLatin1Char('.'));
-                if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
-            } else {
-                name = info.completeBaseName() + QStringLiteral(".tx");
-            }
-        }
-        const QString txPath = QDir(outDir).filePath(name);
-        syncViewerOcio();
-        viewer_->setSourcePath(txPath);
+        viewer_->setPipelinePaths(sourceEdit_->text().trimmed(), outputEdit_->text().trimmed());
     }
 
     void onConvert() {
@@ -288,7 +227,8 @@ private:
             if (r.ok) ++success;
         if (ok) {
             status_->setText(QStringLiteral("Done — %1 file(s) → %2").arg(success).arg(outDir));
-            previewOutputTx();
+            // Show converted .tx immediately.
+            viewer_->setContentKind(sol::TextureViewerWidget::ViewerContentKind::ConvertedTx);
         } else {
             status_->setText(QStringLiteral("Finished with errors (%1 ok): %2")
                                  .arg(success)

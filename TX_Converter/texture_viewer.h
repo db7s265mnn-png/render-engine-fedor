@@ -95,9 +95,21 @@ private:
 class TextureViewerWidget : public QWidget {
     Q_OBJECT
 public:
+    enum class ViewerContentKind {
+        SourceImages = 0,
+        ConvertedTx = 1,
+    };
+
     explicit TextureViewerWidget(QWidget* parent = nullptr);
 
-    void setSourcePath(const QString& path);
+    // Source path + output folder from the converter panel. Auto-refreshes the view.
+    void setPipelinePaths(const QString& sourcePath, const QString& outputFolder);
+    void setContentKind(ViewerContentKind kind);
+    ViewerContentKind contentKind() const { return contentKind_; }
+
+    // Same basename as Source under Output Folder (handles UDIM / $F / single file).
+    static QString guessConvertedTxPath(const QString& sourcePath, const QString& outputFolder);
+
     void setOcioConfig(bool useEnv, const QString& configPath);
     void setDisplayMode(ViewerDisplayMode mode);
     ViewerDisplayMode displayMode() const { return displayMode_; }
@@ -144,6 +156,9 @@ private:
         QString error;
     };
 
+    void setSourcePath(const QString& path);
+    void clearView();
+    void refreshFromPipeline();
     void rebuildTimeline();
     void updateInfoBar();
     void showCurrentFrame();
@@ -164,8 +179,13 @@ private:
     QLabel* infoLabel_ = nullptr;
     QLabel* zoomLabel_ = nullptr;
     QComboBox* displayCombo_ = nullptr;
+    QComboBox* contentCombo_ = nullptr;
     QPushButton* fitBtn_ = nullptr;
     QPushButton* gradeResetBtn_ = nullptr;
+
+    QString pipelineSource_;
+    QString pipelineOutputFolder_;
+    ViewerContentKind contentKind_ = ViewerContentKind::SourceImages;
 
     QDoubleSpinBox* brightnessSpin_ = nullptr;
     QDoubleSpinBox* contrastSpin_ = nullptr;

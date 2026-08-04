@@ -14,8 +14,9 @@ Built with the main app (`TX_Converter` / `TX_Converter.exe`).
 3. **Color Space** — input space; output is always **ACEScg**.
 4. **Advanced** — full colour-space list from the OCIO config.
 5. **Use OCIO from Environment** — read `OCIO` (default on).
-6. **Preview Source** — view the source (or UDIM sequence). Timeline length = tile count.
-7. **Preview Output Folder .tx** — view converted `.tx` next to the output folder.
+6. **Convert** — run maketx into the output folder, then switch the viewer to **Converted TX**.
+7. **Viewer → View** — **Source Images** or **Converted TX** (same basename under Output Folder).
+   Auto-refreshes when Source / Output Folder change. Missing files show the default placeholder.
 
 Requires `maketx` (or `oiiotool`). The Windows zip ships `maketx.exe` next to
 `TX_Converter.exe`. On other platforms, put them on `PATH`. OCIO config comes from
