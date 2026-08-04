@@ -548,7 +548,9 @@ TxConvertResult txConvertOne(const TxConvertRequest& reqIn) {
 
     // TX path.
     if (needsOiiotoolPreprocess(req)) {
+        // Force cleanup even if the process is killed — keep temps out of the output folder.
         QTemporaryDir tmp;
+        tmp.setAutoRemove(true);
         if (!tmp.isValid()) {
             result.error = "could not create temp dir for TX preprocess";
             return result;
@@ -573,6 +575,14 @@ TxConvertResult txConvertOne(const TxConvertRequest& reqIn) {
     writeSidecarSource(dstQ, req.sourcePath);
     result.ok = true;
     return result;
+}
+
+void removeConvertSidecars(const std::vector<TxConvertResult>& results) {
+    for (const TxConvertResult& r : results) {
+        if (r.outputPath.empty()) continue;
+        const QString side = QString::fromStdString(r.outputPath) + QStringLiteral(".txsrc");
+        QFile::remove(side);
+    }
 }
 
 bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string& outputDir,
@@ -660,6 +670,9 @@ bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string&
         for (int t = 0; t < maxParallel; ++t) threads.emplace_back(worker);
         for (auto& th : threads) th.join();
     }
+    // Sidecars are only used during allocate/update in this run — don't leave .txsrc in the
+    // output folder.
+    removeConvertSidecars(results);
     return allOk.load();
 }
 

@@ -693,7 +693,30 @@ QToolButton* TextureViewerWidget::makeChannelButton(const QString& tip, const QC
 QSlider* makeGradeSlider(QWidget* parent, int steps = 1000) {
     auto* slider = new QSlider(Qt::Horizontal, parent);
     slider->setRange(0, steps);
-    slider->setFixedWidth(110);
+    slider->setMinimumWidth(140);
+    slider->setMinimumHeight(22);
+    slider->setStyleSheet(QStringLiteral(
+        "QSlider::groove:horizontal {"
+        "  height: 10px;"
+        "  background: #3a3e44;"
+        "  border: 1px solid #2a2d32;"
+        "  border-radius: 2px;"
+        "}"
+        "QSlider::sub-page:horizontal {"
+        "  background: #5a6570;"
+        "  border-radius: 2px;"
+        "}"
+        "QSlider::handle:horizontal {"
+        "  width: 14px;"
+        "  height: 14px;"
+        "  margin: -3px 0;"
+        "  background: #d0d4da;"
+        "  border: 1px solid #1e2024;"
+        "  border-radius: 2px;"
+        "}"
+        "QSlider::handle:horizontal:hover {"
+        "  background: #e8ecf0;"
+        "}"));
     return slider;
 }
 

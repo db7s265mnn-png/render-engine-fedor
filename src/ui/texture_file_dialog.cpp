@@ -81,20 +81,21 @@ TextureFileDialog::TextureFileDialog(QWidget* parent) : QDialog(parent) {
     sequenceCheck_ = new QCheckBox(QStringLiteral("Sequence"));
     sequenceCheck_->setToolTip(
         QStringLiteral("Group UDIM / frame sequences into a single entry (min 2 files)."));
+    sequenceCheck_->setChecked(true);
     opts->addWidget(sequenceCheck_);
     opts->addWidget(new QLabel(QStringLiteral("Token")));
     tokenCombo_ = new QComboBox();
     tokenCombo_->addItem(QStringLiteral("<UDIM>"), int(SequenceTokenKind::Udim));
     tokenCombo_->addItem(QStringLiteral("$F"), int(SequenceTokenKind::F));
-    tokenCombo_->setEnabled(false);
+    tokenCombo_->setEnabled(true);
     tokenCombo_->setToolTip(QStringLiteral("Token written into the path when Sequence is on."));
     opts->addWidget(tokenCombo_);
     opts->addStretch(1);
     root->addLayout(opts);
 
     hintLabel_ = new QLabel(
-        QStringLiteral("Sequence off: load the selected file only. "
-                       "Sequence on: group tiles/frames and insert <UDIM> or $F."));
+        QStringLiteral("Sequence on: group tiles/frames and insert <UDIM> or $F. "
+                       "Sequence off: load the selected file only."));
     hintLabel_->setWordWrap(true);
     hintLabel_->setStyleSheet(QStringLiteral("color: #9aa0a6;"));
     root->addWidget(hintLabel_);
