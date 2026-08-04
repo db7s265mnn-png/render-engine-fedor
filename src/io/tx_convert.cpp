@@ -574,7 +574,7 @@ TxConvertResult txConvertOne(const TxConvertRequest& reqIn) {
 
 bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string& outputDir,
                       const TxConvertOptions& options, std::vector<TxConvertResult>& results,
-                      std::string& error) {
+                      std::string& error, const TxConvertProgressFn& progress) {
     results.clear();
     const QString pathQ = QString::fromStdString(sourcePathOrPattern);
     std::vector<std::string> sources;
@@ -591,8 +591,12 @@ bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string&
         return false;
     }
 
+    const int total = int(sources.size());
+    if (progress) progress(0, total, {});
+
     bool allOk = true;
-    for (const std::string& src : sources) {
+    for (int i = 0; i < total; ++i) {
+        const std::string& src = sources[size_t(i)];
         TxConvertRequest req;
         req.sourcePath = src;
         req.outputPath = txAllocateOutputPath(src, outputDir, options.format);
@@ -610,6 +614,7 @@ bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string&
             if (error.empty()) error = r.error;
             logWarning("tx_convert: " + r.error);
         }
+        if (progress) progress(i + 1, total, src);
     }
     return allOk;
 }

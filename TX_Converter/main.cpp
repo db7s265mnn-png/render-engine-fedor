@@ -13,15 +13,21 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QSplitter>
 #include <QSize>
+#include <QEventLoop>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#include <algorithm>
+#include <cmath>
 
 #include "core/log.h"
 #include "core/expr_eval.h"
 #include "io/image_io.h"
+#include "io/ocio_util.h"
 #include "io/tx_convert.h"
 #include "texture_viewer.h"
 #include "ui/texture_file_dialog.h"
@@ -157,8 +163,12 @@ public:
         connect(useEnvCheck_, &QCheckBox::toggled, this, [this, syncOcioEnabled](bool) {
             syncOcioEnabled();
             syncViewerOcio();
+            refreshOcioStatus();
         });
-        connect(ocioEdit_, &QLineEdit::editingFinished, this, [this] { syncViewerOcio(); });
+        connect(ocioEdit_, &QLineEdit::editingFinished, this, [this] {
+            syncViewerOcio();
+            refreshOcioStatus();
+        });
         syncOcioEnabled();
 
         connect(formatCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
@@ -180,6 +190,7 @@ public:
 
         auto* convertBtn = new QPushButton(QStringLiteral("Convert"));
         convertBtn->setMinimumHeight(32);
+        convertBtn_ = convertBtn;
         leftLay->addWidget(convertBtn);
         connect(convertBtn, &QPushButton::clicked, this, &TxConverterWindow::onConvert);
         connect(sourceEdit_, &QLineEdit::editingFinished, this, [this] {
@@ -188,7 +199,28 @@ public:
         });
         connect(outputEdit_, &QLineEdit::editingFinished, this, [this] { syncPipeline(); });
 
+        progressBar_ = new QProgressBar();
+        progressBar_->setRange(0, 100);
+        progressBar_->setValue(0);
+        progressBar_->setTextVisible(true);
+        progressBar_->setFormat(QStringLiteral("%p%"));
+        progressBar_->setVisible(false);
+        leftLay->addWidget(progressBar_);
+
+        progressLabel_ = new QLabel();
+        progressLabel_->setWordWrap(true);
+        progressLabel_->setStyleSheet(QStringLiteral("color: #a8adb4;"));
+        progressLabel_->setVisible(false);
+        leftLay->addWidget(progressLabel_);
+
         leftLay->addStretch(1);
+
+        ocioStatus_ = new QLabel(QStringLiteral("OCIO: checking…"));
+        ocioStatus_->setWordWrap(true);
+        ocioStatus_->setAlignment(Qt::AlignLeft | Qt::AlignBottom);
+        ocioStatus_->setStyleSheet(QStringLiteral("color: #969aa0; padding: 4px 0 0 0;"));
+        leftLay->addWidget(ocioStatus_);
+
         splitter->addWidget(leftPanel);
 
         auto* viewBox = new QGroupBox(QStringLiteral("Texture Viewer"));
@@ -213,6 +245,7 @@ public:
             status_->setText(msg);
         });
         syncViewerOcio();
+        refreshOcioStatus();
         syncPipeline();
     }
 
@@ -223,6 +256,82 @@ private:
 
     sol::TxOutputFormat effectiveFormat() const {
         return sol::txResolveFormat(selectedFormat(), sourceEdit_->text().trimmed().toStdString());
+    }
+
+    static bool configLooksLikeAces(const std::string& configPath) {
+        if (configPath.empty()) return false;
+        const auto spaces = sol::txColorSpacesFromConfig(configPath);
+        for (const std::string& s : spaces) {
+            const QString lower = QString::fromStdString(s).toLower();
+            if (lower.contains(QLatin1String("acescg")) || lower.contains(QLatin1String("aces")))
+                return true;
+        }
+        // Filename heuristic for ACES configs (e.g. aces_1.3/config.ocio).
+        const QString pathLower = QString::fromStdString(configPath).toLower();
+        return pathLower.contains(QLatin1String("aces"));
+    }
+
+    void refreshOcioStatus() {
+        if (!ocioStatus_) return;
+        const bool useEnv = useEnvCheck_ && useEnvCheck_->isChecked();
+        const std::string settings =
+            ocioEdit_ ? ocioEdit_->text().trimmed().toStdString() : std::string();
+        const sol::OcioStatus st = sol::ocioEnsureConfig(useEnv, settings);
+        const bool hasAces = st.configLoaded && configLooksLikeAces(st.configPath);
+
+        if (st.configLoaded && hasAces) {
+            const QString where = st.fromEnvironment ? QStringLiteral("OCIO env")
+                                                     : QStringLiteral("config path");
+            ocioStatus_->setText(
+                QStringLiteral("OCIO + ACES: loaded — all good\n%1 [%2]")
+                    .arg(QString::fromStdString(st.configPath), where));
+            ocioStatus_->setStyleSheet(QStringLiteral("color: #7cbc7c; padding: 4px 0 0 0;"));
+            ocioStatus_->setToolTip(QString::fromStdString(st.message));
+        } else if (st.configLoaded) {
+            ocioStatus_->setText(
+                QStringLiteral("OCIO: loaded, but ACES spaces not detected\n%1")
+                    .arg(QString::fromStdString(st.configPath)));
+            ocioStatus_->setStyleSheet(QStringLiteral("color: #c9a86c; padding: 4px 0 0 0;"));
+            ocioStatus_->setToolTip(QString::fromStdString(st.message));
+        } else {
+            ocioStatus_->setText(QString::fromStdString(
+                st.message.empty() ? "OCIO: not found" : st.message));
+            ocioStatus_->setStyleSheet(QStringLiteral("color: #c97a7a; padding: 4px 0 0 0;"));
+            ocioStatus_->setToolTip(ocioStatus_->text());
+        }
+    }
+
+    void setConvertProgress(int completed, int total, const QString& currentFile) {
+        if (!progressBar_ || !progressLabel_) return;
+        const int tot = std::max(0, total);
+        const int done = std::clamp(completed, 0, tot);
+        progressBar_->setVisible(true);
+        progressLabel_->setVisible(true);
+        progressBar_->setRange(0, tot > 0 ? tot : 1);
+        progressBar_->setValue(done);
+        progressBar_->setFormat(QStringLiteral("%v / %m"));
+        const int remainingPct =
+            tot > 0 ? int(std::lround(100.0 * double(tot - done) / double(tot))) : 0;
+        if (tot <= 0) {
+            progressLabel_->setText(QStringLiteral("Preparing…"));
+        } else if (done >= tot) {
+            progressLabel_->setText(QStringLiteral("Finishing… %1/%2").arg(done).arg(tot));
+        } else {
+            const QString name = currentFile.isEmpty() ? QStringLiteral("…")
+                                                       : QFileInfo(currentFile).fileName();
+            progressLabel_->setText(
+                QStringLiteral("%1% remaining · %2/%3 · %4")
+                    .arg(remainingPct)
+                    .arg(done)
+                    .arg(tot)
+                    .arg(name));
+        }
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    }
+
+    void hideConvertProgress() {
+        if (progressBar_) progressBar_->setVisible(false);
+        if (progressLabel_) progressLabel_->setVisible(false);
     }
 
     void syncFormatUi() {
@@ -368,9 +477,20 @@ private:
         std::vector<sol::TxConvertResult> results;
         std::string error;
         status_->setText(QStringLiteral("Converting…"));
-        QApplication::processEvents();
-        const bool ok = sol::txConvertPattern(src.toStdString(), outDir.toStdString(), opt, results,
-                                              error);
+        if (convertBtn_) convertBtn_->setEnabled(false);
+        setConvertProgress(0, 1, {});
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
+        const bool ok = sol::txConvertPattern(
+            src.toStdString(), outDir.toStdString(), opt, results, error,
+            [this](int completed, int total, const std::string& path) {
+                setConvertProgress(completed, total, QString::fromStdString(path));
+            });
+
+        hideConvertProgress();
+        if (convertBtn_) convertBtn_->setEnabled(true);
+        refreshOcioStatus();
+
         int success = 0;
         for (const auto& r : results)
             if (r.ok) ++success;
@@ -399,6 +519,10 @@ private:
     QCheckBox* useEnvCheck_ = nullptr;
     QWidget* colorSpaceLabel_ = nullptr;
     QWidget* ocioLabel_ = nullptr;
+    QPushButton* convertBtn_ = nullptr;
+    QProgressBar* progressBar_ = nullptr;
+    QLabel* progressLabel_ = nullptr;
+    QLabel* ocioStatus_ = nullptr;
     QLabel* status_ = nullptr;
     sol::TextureViewerWidget* viewer_ = nullptr;
 };

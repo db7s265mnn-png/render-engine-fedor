@@ -2,6 +2,7 @@
 // Used by automatic cook-time conversion and by the TX_Converter app.
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -97,13 +98,16 @@ struct TxConvertResult {
     std::string error;
 };
 
+// Progress: completed / total (after each file). Optional.
+using TxConvertProgressFn = std::function<void(int completed, int total, const std::string& sourcePath)>;
+
 // Convert one texture (TX via maketx; PNG/JPG via oiiotool; TX reformat = oiiotool then maketx).
 TxConvertResult txConvertOne(const TxConvertRequest& req);
 
 // Convert source (possibly UDIM / $F pattern) into `outputDir`.
 bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string& outputDir,
                       const TxConvertOptions& options, std::vector<TxConvertResult>& results,
-                      std::string& error);
+                      std::string& error, const TxConvertProgressFn& progress = {});
 
 // Backward-compatible TX-only helper (cook-time cache).
 bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string& outputDir,
