@@ -51,18 +51,33 @@ public:
     void clear();
     void setPlaceholder(const QString& text);
     // rgba = tightly packed RGBA float (4 components per pixel).
-    void setLinearImage(const float* rgba, int width, int height, quint64 contentId);
+    void setLinearImage(const float* rgba, int width, int height, quint64 contentId,
+                        bool preserveCamera = true);
     void setDisplayParams(int colorManagement, int viewTransform, bool ocioUseEnv,
                           const QString& ocioConfigPath, int workingSpace);
     void setChannelMode(ViewerChannelMode mode);
     // interactive=true: cheaper preview bake while scrubbing grade sliders.
     void setGrade(const ViewerGrade& grade, bool interactive = false);
+    // Restore a previously baked display image (skip OCIO rebake on Source/Output toggle).
+    void setPreparedDisplay(QImage image, int pixelStep = 1);
+    QImage preparedDisplay() const { return displayCache_; }
+    int preparedDisplayStep() const { return displayCacheStep_; }
+    bool hasPreparedDisplay() const { return !displayCache_.isNull(); }
+    // True when the baked display matches the current image + grade + display params.
+    bool preparedDisplayCurrent() const;
+    // Synchronously bake the display cache (for Source/Output toggle hot path).
+    void warmDisplayCache();
     void fitToView();
     void resetView();
     double zoom() const { return zoom_; }
     QPointF pan() const { return pan_; }
     bool fitted() const { return fitted_; }
     void setCamera(double zoom, const QPointF& pan, bool fitted);
+    // Fit zoom for the current image in the current widget size (1.0 if unknown).
+    double fitZoom() const;
+    // Relative navigation: zoomOverFit=1 → fitted; panFrac is pan/(imageExtent*zoom).
+    void captureRelativeNav(double& zoomOverFit, QPointF& panFrac, bool& fitted) const;
+    void applyRelativeNav(double zoomOverFit, const QPointF& panFrac, bool fitted);
 
 signals:
     void zoomChanged(double zoom);
@@ -182,6 +197,8 @@ private:
         qint64 fileBytes = 0;
         int previewW = 0;
         int previewH = 0;
+        int fileChannelCount = 0;  // channels in the file on disk (1/3/4…)
+        int fileBitDepth = 0;      // bits per channel (8/16/32)
         std::vector<float> linearRgba;  // RGBA float
         QString error;
         bool ready = false;
@@ -223,16 +240,23 @@ private:
         }
     };
 
-    // Per Source/Output display settings for A/B compare.
+    // Per Source/Output display settings for A/B compare (navigation is shared).
     struct ViewDisplayState {
         ViewerGrade grade;
         ViewerChannelMode channelMode = ViewerChannelMode::RGBA;
         int colorManagement = kColorOcio;
         int viewTransform = kViewSrgbAces;
-        double zoom = 1.0;
-        QPointF pan{0.0, 0.0};
-        bool fitted = true;
         bool initialized = false;
+        // Hot display bake — restored on toggle to avoid OCIO lag.
+        QImage hotDisplay;
+        quint64 hotContentId = 0;
+        int hotFrameIndex = -1;
+        int hotPixelStep = 1;
+        ViewerGrade hotGrade;
+        ViewerChannelMode hotChannel = ViewerChannelMode::RGBA;
+        int hotColorManagement = kColorOcio;
+        int hotViewTransform = kViewSrgbAces;
+        int hotWorkingSpace = 1;
     };
 
     struct LoadPayload {
@@ -243,6 +267,8 @@ private:
         qint64 fileBytes = 0;
         int previewW = 0;
         int previewH = 0;
+        int fileChannelCount = 0;
+        int fileBitDepth = 0;
         std::vector<float> linearRgba;
         QString error;
     };
@@ -260,6 +286,10 @@ private:
     void captureDisplayState(ViewerContentKind kind);
     void applyDisplayState(ViewerContentKind kind);
     void syncContentButtons();
+    void updateContentButtonStyles();
+    void updateZoomLabel();
+    bool tryRestoreHotDisplay();
+    quint64 frameContentId(const SequenceCache& cache, int index) const;
     void bindActiveCacheToUi();
     void loadSequenceInto(SequenceCache& cache, const QString& path);
     void clearActiveView();
@@ -328,6 +358,12 @@ private:
     SequenceCache convertedCache_;
     ViewDisplayState sourceDisplay_;
     ViewDisplayState outputDisplay_;
+    // Shared Source/Output navigation (relative to fit so different resolutions match).
+    double sharedZoomOverFit_ = 1.0;
+    QPointF sharedPanFrac_{0.0, 0.0};
+    bool sharedFitted_ = true;
+    bool sharedNavValid_ = false;
+    bool applySharedOnNextPush_ = false;
     int frameIndex_ = 0;
     int sharedFrameNumber_ = 1;
     bool updatingTimeline_ = false;

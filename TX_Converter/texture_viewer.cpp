@@ -47,7 +47,18 @@
 #include "io/ocio_util.h"
 #include "io/tx_convert.h"
 #include "scene/types.h"
+#include "solstice_config.h"
 #include "ui/timeline_bar.h"
+
+#if SOLSTICE_HAVE_OPENEXR
+#  include <ImfChannelList.h>
+#  include <ImfHeader.h>
+#  include <ImfInputFile.h>
+#endif
+
+#if SOLSTICE_HAVE_TIFF
+#  include <tiffio.h>
+#endif
 
 namespace sol {
 namespace {
@@ -75,15 +86,104 @@ QString formatBytes(qint64 bytes) {
     return QStringLiteral("%1 MB").arg(bytes / (1024.0 * 1024.0), 0, 'f', 1);
 }
 
-QString channelModeLabel(ViewerChannelMode mode) {
-    switch (mode) {
-        case ViewerChannelMode::R: return QStringLiteral("R");
-        case ViewerChannelMode::G: return QStringLiteral("G");
-        case ViewerChannelMode::B: return QStringLiteral("B");
-        case ViewerChannelMode::A: return QStringLiteral("A");
-        case ViewerChannelMode::RGBA:
-        default: return QStringLiteral("RGBA");
+void metaFromQImage(const QImage& img, int& channels, int& bitDepth) {
+    channels = img.hasAlphaChannel() ? 4 : 3;
+    bitDepth = 8;
+    switch (img.format()) {
+        case QImage::Format_Grayscale8:
+        case QImage::Format_Indexed8:
+            channels = 1;
+            bitDepth = 8;
+            break;
+        case QImage::Format_Grayscale16:
+            channels = 1;
+            bitDepth = 16;
+            break;
+        case QImage::Format_RGB16:
+        case QImage::Format_RGB555:
+        case QImage::Format_RGB888:
+        case QImage::Format_RGB32:
+            channels = 3;
+            bitDepth = 8;
+            break;
+        case QImage::Format_RGBA8888:
+        case QImage::Format_ARGB32:
+        case QImage::Format_ARGB32_Premultiplied:
+            channels = 4;
+            bitDepth = 8;
+            break;
+        case QImage::Format_RGBX64:
+        case QImage::Format_RGBA64:
+        case QImage::Format_RGBA64_Premultiplied:
+            channels = (img.format() == QImage::Format_RGBX64) ? 3 : 4;
+            bitDepth = 16;
+            break;
+        default: {
+            const int depth = img.depth();
+            if (depth <= 8) {
+                channels = 1;
+                bitDepth = 8;
+            } else if (depth <= 24) {
+                channels = 3;
+                bitDepth = 8;
+            } else if (depth <= 32) {
+                channels = img.hasAlphaChannel() ? 4 : 3;
+                bitDepth = 8;
+            } else {
+                channels = img.hasAlphaChannel() ? 4 : 3;
+                bitDepth = 16;
+            }
+            break;
+        }
     }
+}
+
+bool probeTiffMeta(const QString& path, int& channels, int& bitDepth) {
+#if SOLSTICE_HAVE_TIFF
+    TIFF* tif = TIFFOpen(path.toLocal8Bit().constData(), "r");
+    if (!tif) return false;
+    uint16_t samples = 0;
+    uint16_t bits = 0;
+    TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLESPERPIXEL, &samples);
+    TIFFGetFieldDefaulted(tif, TIFFTAG_BITSPERSAMPLE, &bits);
+    TIFFClose(tif);
+    if (samples < 1 || bits < 1) return false;
+    channels = int(std::min<uint16_t>(samples, 4));
+    bitDepth = int(bits);
+    return true;
+#else
+    (void)path;
+    (void)channels;
+    (void)bitDepth;
+    return false;
+#endif
+}
+
+bool probeExrMeta(const QString& path, int& channels, int& bitDepth) {
+#if SOLSTICE_HAVE_OPENEXR
+    try {
+        Imf::InputFile file(path.toLocal8Bit().constData());
+        const Imf::ChannelList& list = file.header().channels();
+        int count = 0;
+        Imf::PixelType deepest = Imf::HALF;
+        for (Imf::ChannelList::ConstIterator it = list.begin(); it != list.end(); ++it) {
+            ++count;
+            if (it.channel().type == Imf::FLOAT) deepest = Imf::FLOAT;
+            else if (it.channel().type == Imf::UINT && deepest != Imf::FLOAT) deepest = Imf::UINT;
+        }
+        if (count < 1) return false;
+        channels = std::min(count, 4);
+        bitDepth = (deepest == Imf::FLOAT || deepest == Imf::UINT) ? 32 : 16;
+        return true;
+    } catch (...) {
+        return false;
+    }
+#else
+    (void)path;
+    (void)channels;
+    (void)bitDepth;
+    return false;
+#endif
 }
 
 bool gradeEquals(const ViewerGrade& a, const ViewerGrade& b) {
@@ -257,17 +357,80 @@ void FloatPreviewCanvas::setPlaceholder(const QString& text) {
     update();
 }
 
-void FloatPreviewCanvas::setLinearImage(const float* rgba, int width, int height, quint64 contentId) {
+void FloatPreviewCanvas::setLinearImage(const float* rgba, int width, int height, quint64 contentId,
+                                        bool preserveCamera) {
     linearRgba_ = rgba;
     width_ = width;
     height_ = height;
     contentId_ = contentId;
     invalidateBaseLinear();
-    if (fitted_) fitToView();
+    if (!preserveCamera || fitted_) fitToView();
     else {
         clampPan();
         update();
     }
+}
+
+void FloatPreviewCanvas::setPreparedDisplay(QImage image, int pixelStep) {
+    if (image.isNull()) return;
+    displayCache_ = std::move(image);
+    displayCacheId_ = contentId_;
+    displayCacheColorMgmt_ = colorManagement_;
+    displayCacheView_ = viewTransform_;
+    displayCacheChannel_ = int(channelMode_);
+    displayCacheWorking_ = workingSpace_;
+    displayCacheOcioEnv_ = ocioUseEnv_;
+    displayCacheOcioPath_ = ocioConfigPath_;
+    displayCacheGrade_ = grade_;
+    displayCacheStep_ = std::max(1, pixelStep);
+    update();
+}
+
+void FloatPreviewCanvas::warmDisplayCache() {
+    ensureDisplayCache();
+}
+
+bool FloatPreviewCanvas::preparedDisplayCurrent() const {
+    if (displayCache_.isNull() || contentId_ == 0) return false;
+    return displayCacheId_ == contentId_ && displayCacheColorMgmt_ == colorManagement_ &&
+           displayCacheView_ == viewTransform_ && displayCacheChannel_ == int(channelMode_) &&
+           displayCacheWorking_ == workingSpace_ && displayCacheOcioEnv_ == ocioUseEnv_ &&
+           displayCacheOcioPath_ == ocioConfigPath_ && gradeEquals(displayCacheGrade_, grade_) &&
+           displayCacheStep_ == 1;
+}
+
+double FloatPreviewCanvas::fitZoom() const {
+    if (width_ <= 0 || height_ <= 0 || this->width() < 2 || this->height() < 2) return 1.0;
+    const double sx = double(this->width()) / double(width_);
+    const double sy = double(this->height()) / double(height_);
+    return std::min(sx, sy);
+}
+
+void FloatPreviewCanvas::captureRelativeNav(double& zoomOverFit, QPointF& panFrac, bool& fitted) const {
+    fitted = fitted_;
+    const double fz = fitZoom();
+    zoomOverFit = (fz > 1e-12) ? (zoom_ / fz) : 1.0;
+    if (fitted_) zoomOverFit = 1.0;
+    const double iw = double(std::max(1, width_)) * std::max(1e-6, zoom_);
+    const double ih = double(std::max(1, height_)) * std::max(1e-6, zoom_);
+    panFrac = QPointF(pan_.x() / iw, pan_.y() / ih);
+}
+
+void FloatPreviewCanvas::applyRelativeNav(double zoomOverFit, const QPointF& panFrac, bool fitted) {
+    if (width_ <= 0 || height_ <= 0) return;
+    if (fitted || zoomOverFit <= 1.0001) {
+        fitToView();
+        return;
+    }
+    fitted_ = false;
+    const double fz = fitZoom();
+    zoom_ = std::clamp(fz * std::max(0.05, zoomOverFit), 0.05, 64.0);
+    const double iw = double(width_) * zoom_;
+    const double ih = double(height_) * zoom_;
+    pan_ = QPointF(panFrac.x() * iw, panFrac.y() * ih);
+    clampPan();
+    emit zoomChanged(zoom_);
+    update();
 }
 
 void FloatPreviewCanvas::setDisplayParams(int colorManagement, int viewTransform, bool ocioUseEnv,
@@ -550,6 +713,7 @@ TextureViewerWidget::LoadPayload TextureViewerWidget::decodeFrame(const QString&
                                 .arg(path, reader.errorString());
             return payload;
         }
+        metaFromQImage(qimage, payload.fileChannelCount, payload.fileBitDepth);
         qimage = qimage.convertToFormat(QImage::Format_RGBA8888);
         payload.sourceWidth = qimage.width();
         payload.sourceHeight = qimage.height();
@@ -624,6 +788,27 @@ TextureViewerWidget::LoadPayload TextureViewerWidget::decodeFrame(const QString&
     }
     payload.sourceWidth = image.width();
     payload.sourceHeight = image.height();
+
+    const QString ext = info.suffix().toLower();
+    if (ext == QLatin1String("tx") || ext == QLatin1String("tif") || ext == QLatin1String("tiff")) {
+        if (!probeTiffMeta(path, payload.fileChannelCount, payload.fileBitDepth)) {
+            payload.fileChannelCount = 4;
+            payload.fileBitDepth = 16;
+        }
+    } else if (ext == QLatin1String("exr")) {
+        if (!probeExrMeta(path, payload.fileChannelCount, payload.fileBitDepth)) {
+            payload.fileChannelCount = 4;
+            payload.fileBitDepth = 16;
+        }
+    } else if (ext == QLatin1String("hdr") || ext == QLatin1String("rgbe") ||
+               ext == QLatin1String("pic")) {
+        payload.fileChannelCount = 3;
+        payload.fileBitDepth = 32;
+    } else {
+        payload.fileChannelCount = 4;
+        payload.fileBitDepth = 32;
+    }
+
     extractLinearFromFloatImage(image, payload.linearRgba, payload.previewW, payload.previewH);
     return payload;
 }
@@ -767,21 +952,47 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
 
     contentGroup_ = new QButtonGroup(this);
     contentGroup_->setExclusive(true);
+    const QString contentBtnStyle = QStringLiteral(
+        "QToolButton {"
+        "  min-width: 56px;"
+        "  min-height: 22px;"
+        "  font-size: 11px;"
+        "  font-weight: 600;"
+        "  background: #3a3e44;"
+        "  border: 1px solid #4a4f57;"
+        "  border-radius: 6px;"
+        "  color: #e8eaed;"
+        "  padding: 3px 10px;"
+        "}"
+        "QToolButton:checked {"
+        "  background: rgba(255, 190, 90, 90);"
+        "  border-color: #ffbe5a;"
+        "  color: #ffffff;"
+        "}"
+        "QToolButton:hover { background: #474c54; }"
+        "QToolButton:checked:hover { background: rgba(255, 190, 90, 120); }");
     sourceBtn_ = new QToolButton();
     sourceBtn_->setText(QStringLiteral("Source"));
     sourceBtn_->setCheckable(true);
-    sourceBtn_->setToolTip(QStringLiteral("Show source images (hotkey 1).\n"
-                                          "Grade / Display / channels are remembered per view."));
+    sourceBtn_->setToolTip(QStringLiteral(
+        "Show source images (hotkey 1).\n"
+        "Pan/zoom is shared with Output for A/B compare.\n"
+        "Grade / Display / channels are remembered per view."));
     sourceBtn_->setChecked(true);
+    sourceBtn_->setStyleSheet(contentBtnStyle);
     outputBtn_ = new QToolButton();
     outputBtn_->setText(QStringLiteral("Output"));
     outputBtn_->setCheckable(true);
-    outputBtn_->setToolTip(QStringLiteral("Show converted output (hotkey 2).\n"
-                                          "Grade / Display / channels are remembered per view."));
+    outputBtn_->setToolTip(QStringLiteral(
+        "Show converted output (hotkey 2).\n"
+        "Pan/zoom is shared with Source for A/B compare.\n"
+        "Grade / Display / channels are remembered per view."));
+    outputBtn_->setStyleSheet(contentBtnStyle);
     contentGroup_->addButton(sourceBtn_, int(ViewerContentKind::SourceImages));
     contentGroup_->addButton(outputBtn_, int(ViewerContentKind::ConvertedTx));
     modeRow->addWidget(sourceBtn_);
     modeRow->addWidget(outputBtn_);
+    updateContentButtonStyles();
 
     channelGroup_ = new QButtonGroup(this);
     channelGroup_->setExclusive(true);
@@ -926,9 +1137,7 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     connect(startEdit_, &QLineEdit::editingFinished, this, &TextureViewerWidget::onStartEdited);
     connect(endEdit_, &QLineEdit::editingFinished, this, &TextureViewerWidget::onEndEdited);
     connect(fitBtn_, &QPushButton::clicked, this, &TextureViewerWidget::fitView);
-    connect(canvas_, &FloatPreviewCanvas::zoomChanged, this, [this](double z) {
-        zoomLabel_->setText(QStringLiteral("%1%").arg(int(std::lround(z * 100.0))));
-    });
+    connect(canvas_, &FloatPreviewCanvas::zoomChanged, this, [this](double) { updateZoomLabel(); });
     connect(colorMgmtCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         setColorManagement(colorMgmtCombo_->currentData().toInt());
     });
@@ -1012,6 +1221,7 @@ void TextureViewerWidget::applyGradeFromUi(bool interactive) {
     grade_.contrast = float(contrastSpin_->value());
     grade_.gamma = float(gammaSpin_->value());
     canvas_->setGrade(grade_, interactive);
+    if (!interactive) canvas_->warmDisplayCache();
     captureDisplayState(contentKind_);
 }
 
@@ -1121,7 +1331,7 @@ void TextureViewerWidget::updateBufferStatus() {
 void TextureViewerWidget::enforceMemoryBudget(SequenceCache* preferKeep) {
     if (bufferBytesUsed() <= memoryBudgetBytes_) return;
 
-    auto unloadUntilOk = [&](SequenceCache& cache, int keepIndex) {
+    auto unloadDistant = [&](SequenceCache& cache, int keepIndex) {
         for (int pass = 0; pass < cache.frames.size(); ++pass) {
             if (bufferBytesUsed() <= memoryBudgetBytes_) return;
             int best = -1;
@@ -1141,19 +1351,30 @@ void TextureViewerWidget::enforceMemoryBudget(SequenceCache* preferKeep) {
         }
     };
 
-    // Free the inactive cache first (only while over budget).
+    // Keep both Source and Output hot for A/B compare — only trim distant frames.
+    // Prefer unloading from the non-active cache first, but never wipe it wholesale
+    // (that caused lag on every Source/Output toggle as pixels reloaded from disk).
     SequenceCache* other =
-        (preferKeep == &sourceCache_) ? &convertedCache_
+        (preferKeep == &sourceCache_)   ? &convertedCache_
         : (preferKeep == &convertedCache_) ? &sourceCache_
                                            : &convertedCache_;
-    if (other != preferKeep) {
-        other->clearPixels();
-        other->loadedCount = 0;
-    }
+
+    auto keepIndexFor = [&](const SequenceCache& cache) -> int {
+        if (cache.frames.isEmpty()) return -1;
+        if (&cache == &activeCache()) return frameIndex_;
+        // Keep the frame that matches the shared timeline number for instant toggle.
+        for (int i = 0; i < cache.frames.size(); ++i) {
+            if (cache.frames[i].frameNumber == sharedFrameNumber_) return i;
+        }
+        return 0;
+    };
+
+    if (other) unloadDistant(*other, keepIndexFor(*other));
     if (bufferBytesUsed() > memoryBudgetBytes_ && preferKeep) {
-        const int keep = (preferKeep == &activeCache()) ? frameIndex_ : -1;
-        unloadUntilOk(*preferKeep, keep);
+        unloadDistant(*preferKeep, keepIndexFor(*preferKeep));
     }
+    // Last resort: also allow trimming the preferred keep-frame only if still over budget
+    // and there are other loaded frames left (keepIndex still protected above).
 }
 
 void TextureViewerWidget::setPipelinePaths(const QString& sourcePath, const QString& outputFolder) {
@@ -1197,9 +1418,23 @@ void TextureViewerWidget::captureDisplayState(ViewerContentKind kind) {
     st.colorManagement = colorManagement_;
     st.viewTransform = viewTransform_;
     if (canvas_) {
-        st.zoom = canvas_->zoom();
-        st.pan = canvas_->pan();
-        st.fitted = canvas_->fitted();
+        canvas_->captureRelativeNav(sharedZoomOverFit_, sharedPanFrac_, sharedFitted_);
+        sharedNavValid_ = true;
+        if (canvas_->preparedDisplayCurrent()) {
+            st.hotDisplay = canvas_->preparedDisplay();
+            st.hotContentId = frameContentId(cacheFor(kind), frameIndex_);
+            st.hotFrameIndex = frameIndex_;
+            st.hotPixelStep = canvas_->preparedDisplayStep();
+            st.hotGrade = grade_;
+            st.hotChannel = channelMode_;
+            st.hotColorManagement = colorManagement_;
+            st.hotViewTransform = viewTransform_;
+            st.hotWorkingSpace = ocioWorkingSpace_;
+        } else {
+            st.hotDisplay = {};
+            st.hotContentId = 0;
+            st.hotFrameIndex = -1;
+        }
     }
     st.initialized = true;
 }
@@ -1254,9 +1489,7 @@ void TextureViewerWidget::applyDisplayState(ViewerContentKind kind) {
     canvas_->setGrade(grade_, false);
     canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
                               ocioWorkingSpace_);
-    if (st.initialized) {
-        canvas_->setCamera(st.zoom, st.pan, st.fitted);
-    }
+    // Navigation is shared — applied after the frame is pushed (see pushFrameToCanvas).
 
     applyingDisplayState_ = false;
     updateInfoBar();
@@ -1266,6 +1499,44 @@ void TextureViewerWidget::syncContentButtons() {
     if (!contentGroup_) return;
     const QSignalBlocker b(contentGroup_);
     if (QAbstractButton* btn = contentGroup_->button(int(contentKind_))) btn->setChecked(true);
+    updateContentButtonStyles();
+}
+
+void TextureViewerWidget::updateContentButtonStyles() {
+    // Stylesheet :checked handles the orange Start-style highlight; keep focus polish.
+    if (sourceBtn_) sourceBtn_->update();
+    if (outputBtn_) outputBtn_->update();
+}
+
+void TextureViewerWidget::updateZoomLabel() {
+    if (!zoomLabel_ || !canvas_) return;
+    const double fit = canvas_->fitZoom();
+    const double rel = (fit > 1e-12) ? (canvas_->zoom() / fit) : 1.0;
+    const int pct = int(std::lround((canvas_->fitted() ? 1.0 : rel) * 100.0));
+    zoomLabel_->setText(QStringLiteral("%1%").arg(std::max(1, pct)));
+}
+
+quint64 TextureViewerWidget::frameContentId(const SequenceCache& cache, int index) const {
+    if (index < 0 || index >= cache.frames.size()) return 0;
+    const FrameSlot& slot = cache.frames[index];
+    const ViewerContentKind kind =
+        (&cache == &sourceCache_) ? ViewerContentKind::SourceImages : ViewerContentKind::ConvertedTx;
+    return (quint64(cache.generation) << 32) ^ quint64(index + 1) ^ (quint64(slot.previewW) << 16) ^
+           quint64(slot.previewH) ^ (quint64(kind) << 48);
+}
+
+bool TextureViewerWidget::tryRestoreHotDisplay() {
+    if (!canvas_) return false;
+    ViewDisplayState& st = displayStateFor(contentKind_);
+    if (st.hotDisplay.isNull()) return false;
+    const SequenceCache& cache = activeCache();
+    const quint64 id = frameContentId(cache, frameIndex_);
+    if (st.hotContentId != id || st.hotFrameIndex != frameIndex_) return false;
+    if (!gradeEquals(st.hotGrade, grade_) || st.hotChannel != channelMode_) return false;
+    if (st.hotColorManagement != colorManagement_ || st.hotViewTransform != viewTransform_) return false;
+    if (st.hotWorkingSpace != ocioWorkingSpace_) return false;
+    canvas_->setPreparedDisplay(st.hotDisplay, st.hotPixelStep);
+    return true;
 }
 
 void TextureViewerWidget::keyPressEvent(QKeyEvent* event) {
@@ -1296,8 +1567,9 @@ void TextureViewerWidget::setContentKind(ViewerContentKind kind) {
     captureDisplayState(contentKind_);
     contentKind_ = kind;
     syncContentButtons();
-    refreshFromPipeline(false);
+    applySharedOnNextPush_ = true;
     applyDisplayState(contentKind_);
+    refreshFromPipeline(false);
 }
 
 QString TextureViewerWidget::guessConvertedOutputPath(const QString& sourcePath,
@@ -1511,6 +1783,8 @@ void TextureViewerWidget::onFrameLoaded(ViewerContentKind kind, quint64 generati
     slot.fileBytes = payload.fileBytes;
     slot.previewW = payload.previewW;
     slot.previewH = payload.previewH;
+    slot.fileChannelCount = payload.fileChannelCount;
+    slot.fileBitDepth = payload.fileBitDepth;
     slot.linearRgba = std::move(payload.linearRgba);
     slot.error = payload.error;
     slot.ready = payload.error.isEmpty() && !slot.linearRgba.empty();
@@ -1620,7 +1894,12 @@ void TextureViewerWidget::prevFrame() {
 
 void TextureViewerWidget::fitView() {
     canvas_->fitToView();
+    sharedZoomOverFit_ = 1.0;
+    sharedPanFrac_ = QPointF(0.0, 0.0);
+    sharedFitted_ = true;
+    sharedNavValid_ = true;
     captureDisplayState(contentKind_);
+    updateZoomLabel();
 }
 
 void TextureViewerWidget::onStartEdited() {
@@ -1712,7 +1991,6 @@ void TextureViewerWidget::updateInfoBar() {
     if (viewTransform_ == kViewRec709Aces) viewBit = QStringLiteral("Rec.709");
     else if (viewTransform_ == kViewRec2020) viewBit = QStringLiteral("Rec.2020");
     else if (viewTransform_ == kViewRaw) viewBit = QStringLiteral("Raw");
-    const QString channelBit = channelModeLabel(channelMode_);
     if (!slot.error.isEmpty()) {
         infoLabel_->setText(slot.error);
         return;
@@ -1724,14 +2002,17 @@ void TextureViewerWidget::updateInfoBar() {
                                 .arg(cache.frames.size()));
         return;
     }
-    infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  %5/%6  ·  %7  ·  float  ·  %8/%9")
+    const int channels = slot.fileChannelCount > 0 ? slot.fileChannelCount : 4;
+    const int bits = slot.fileBitDepth > 0 ? slot.fileBitDepth : 32;
+    infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  %5/%6  ·  %7ch  ·  %8-bit  ·  %9/%10")
                             .arg(QFileInfo(slot.path).fileName())
                             .arg(slot.sourceWidth)
                             .arg(slot.sourceHeight)
                             .arg(formatBytes(slot.fileBytes))
                             .arg(modeBit)
                             .arg(viewBit)
-                            .arg(channelBit)
+                            .arg(channels)
+                            .arg(bits)
                             .arg(cache.loadedCount)
                             .arg(cache.frames.size()));
 }
@@ -1751,10 +2032,17 @@ void TextureViewerWidget::pushFrameToCanvas() {
         canvas_->setPlaceholder(QStringLiteral("Loading…"));
         return;
     }
-    const quint64 id = (quint64(cache.generation) << 32) ^ quint64(frameIndex_ + 1) ^
-                       (quint64(slot.previewW) << 16) ^ quint64(slot.previewH) ^
-                       (quint64(contentKind_) << 48);
-    canvas_->setLinearImage(slot.linearRgba.data(), slot.previewW, slot.previewH, id);
+    const quint64 id = frameContentId(cache, frameIndex_);
+    canvas_->setLinearImage(slot.linearRgba.data(), slot.previewW, slot.previewH, id,
+                            /*preserveCamera=*/true);
+    if (!tryRestoreHotDisplay()) {
+        canvas_->warmDisplayCache();
+    }
+    if (applySharedOnNextPush_ && sharedNavValid_) {
+        canvas_->applyRelativeNav(sharedZoomOverFit_, sharedPanFrac_, sharedFitted_);
+        applySharedOnNextPush_ = false;
+    }
+    updateZoomLabel();
 }
 
 void TextureViewerWidget::showCurrentFrame() {
