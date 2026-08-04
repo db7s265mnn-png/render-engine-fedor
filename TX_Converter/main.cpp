@@ -1,8 +1,10 @@
-// Standalone TX Converter — same maketx/OCIO core as Bob Render auto-TX.
+// Standalone TX Converter — maketx/OCIO core + texture / UDIM preview.
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDir>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -10,11 +12,14 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSplitter>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include "core/log.h"
+#include "io/image_io.h"
 #include "io/tx_convert.h"
+#include "texture_viewer.h"
 #include "ui/theme.h"
 
 namespace {
@@ -23,9 +28,19 @@ class TxConverterWindow : public QWidget {
 public:
     TxConverterWindow() {
         setWindowTitle(QStringLiteral("TX Converter"));
-        resize(640, 320);
+        resize(980, 720);
 
         auto* root = new QVBoxLayout(this);
+        root->setContentsMargins(10, 10, 10, 10);
+        root->setSpacing(8);
+
+        auto* splitter = new QSplitter(Qt::Vertical, this);
+        splitter->setChildrenCollapsible(false);
+
+        // ---- Convert panel ----
+        auto* convertPanel = new QWidget();
+        auto* convertLay = new QVBoxLayout(convertPanel);
+        convertLay->setContentsMargins(0, 0, 0, 0);
 
         auto* formBox = new QGroupBox(QStringLiteral("Convert"));
         auto* form = new QFormLayout(formBox);
@@ -51,13 +66,16 @@ public:
                         QStringLiteral(
                             "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.tx);;All (*)"));
                 }
-                if (!path.isEmpty()) edit->setText(path);
+                if (!path.isEmpty()) {
+                    edit->setText(path);
+                    if (!directory) previewSource();
+                }
             });
             return row;
         };
 
         form->addRow(QStringLiteral("Source"), makeBrowseRow(&sourceEdit_, false));
-        sourceEdit_->setPlaceholderText(QStringLiteral("texture.png or tile_<UDIM>.exr"));
+        sourceEdit_->setPlaceholderText(QStringLiteral("texture.png or tile_<UDIM>.exr / .tx"));
         form->addRow(QStringLiteral("Output Folder"), makeBrowseRow(&outputEdit_, true));
         outputEdit_->setText(QStringLiteral("tx_cache"));
 
@@ -97,25 +115,69 @@ public:
         connect(useEnvCheck_, &QCheckBox::toggled, this, [syncOcioEnabled](bool) { syncOcioEnabled(); });
         syncOcioEnabled();
 
-        root->addWidget(formBox);
+        convertLay->addWidget(formBox);
 
         auto* hint = new QLabel(
             QStringLiteral("Output is always ACEScg (Arnold-style). "
                            "UDIM: put <UDIM> in the source path to convert the whole sequence. "
-                           "TX names match the source basename; collisions use _copy_N."));
+                           "Preview timeline length = number of UDIM tiles on disk."));
         hint->setWordWrap(true);
         hint->setStyleSheet(QStringLiteral("color: #969aa0;"));
-        root->addWidget(hint);
+        convertLay->addWidget(hint);
 
+        auto* btnRow = new QHBoxLayout();
+        auto* previewBtn = new QPushButton(QStringLiteral("Preview Source"));
         auto* convertBtn = new QPushButton(QStringLiteral("Convert"));
-        convertBtn->setMinimumHeight(36);
-        root->addWidget(convertBtn);
+        convertBtn->setMinimumHeight(32);
+        previewBtn->setMinimumHeight(32);
+        btnRow->addWidget(previewBtn);
+        btnRow->addWidget(convertBtn, 1);
+        convertLay->addLayout(btnRow);
+        connect(previewBtn, &QPushButton::clicked, this, [this] { previewSource(); });
         connect(convertBtn, &QPushButton::clicked, this, &TxConverterWindow::onConvert);
+        connect(sourceEdit_, &QLineEdit::editingFinished, this, [this] {
+            if (!sourceEdit_->text().trimmed().isEmpty()) previewSource();
+        });
+
+        splitter->addWidget(convertPanel);
+
+        // ---- Viewer panel ----
+        auto* viewBox = new QGroupBox(QStringLiteral("Texture Viewer"));
+        auto* viewLay = new QVBoxLayout(viewBox);
+        viewer_ = new sol::TextureViewerWidget(viewBox);
+        viewLay->addWidget(viewer_);
+
+        auto* viewBtnRow = new QHBoxLayout();
+        auto* openViewBtn = new QPushButton(QStringLiteral("Open in Viewer…"));
+        auto* previewOutBtn = new QPushButton(QStringLiteral("Preview Output Folder .tx"));
+        viewBtnRow->addWidget(openViewBtn);
+        viewBtnRow->addWidget(previewOutBtn);
+        viewBtnRow->addStretch(1);
+        viewLay->addLayout(viewBtnRow);
+        connect(openViewBtn, &QPushButton::clicked, this, [this] {
+            const QString path = QFileDialog::getOpenFileName(
+                this, QStringLiteral("Preview texture"), sourceEdit_->text(),
+                QStringLiteral(
+                    "Images (*.png *.jpg *.jpeg *.exr *.hdr *.tif *.tiff *.bmp *.tx);;All (*)"));
+            if (!path.isEmpty()) {
+                viewer_->setSourcePath(path);
+            }
+        });
+        connect(previewOutBtn, &QPushButton::clicked, this, [this] { previewOutputTx(); });
+        connect(viewer_, &sol::TextureViewerWidget::statusMessage, this, [this](const QString& msg) {
+            status_->setText(msg);
+        });
+
+        splitter->addWidget(viewBox);
+        splitter->setStretchFactor(0, 0);
+        splitter->setStretchFactor(1, 1);
+        splitter->setSizes({280, 440});
+
+        root->addWidget(splitter, 1);
 
         status_ = new QLabel(QStringLiteral("Ready."));
         status_->setWordWrap(true);
         root->addWidget(status_);
-        root->addStretch(1);
     }
 
 private:
@@ -136,6 +198,54 @@ private:
         if (idx >= 0) colorSpaceCombo_->setCurrentIndex(idx);
         else if (!current.isEmpty()) colorSpaceCombo_->setEditText(current);
         else colorSpaceCombo_->setCurrentIndex(0);
+    }
+
+    void previewSource() {
+        const QString src = sourceEdit_->text().trimmed();
+        if (src.isEmpty()) {
+            status_->setText(QStringLiteral("Set a Source path to preview."));
+            return;
+        }
+        viewer_->setSourcePath(src);
+    }
+
+    void previewOutputTx() {
+        const QString src = sourceEdit_->text().trimmed();
+        const QString outDir = outputEdit_->text().trimmed();
+        if (src.isEmpty() || outDir.isEmpty()) {
+            QMessageBox::information(this, QStringLiteral("TX Converter"),
+                                     QStringLiteral("Set Source and Output Folder first."));
+            return;
+        }
+        // Prefer converted .tx named like the source basename (or UDIM pattern → .tx).
+        QString pattern = src;
+        // If source is an image, guess .tx next to output dir with same stem pattern.
+        QFileInfo info(src);
+        QString name = info.fileName();
+        // Replace extension with .tx for single file; keep <UDIM> for sequences.
+        if (sol::pathHasUdimToken(name)) {
+            const int dot = name.lastIndexOf(QLatin1Char('.'));
+            if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
+            else name += QStringLiteral(".tx");
+        } else if (sol::pathHasUdimToken(src)) {
+            name = info.fileName();
+            const int dot = name.lastIndexOf(QLatin1Char('.'));
+            if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
+        } else {
+            // Concrete UDIM tile or single file → resolve pattern then .tx
+            QString udimPattern;
+            std::vector<int> tiles;
+            if (sol::resolveUdimPattern(src, QString(), udimPattern, tiles)) {
+                QFileInfo pinfo(udimPattern);
+                name = pinfo.fileName();
+                const int dot = name.lastIndexOf(QLatin1Char('.'));
+                if (dot > 0) name = name.left(dot) + QStringLiteral(".tx");
+            } else {
+                name = info.completeBaseName() + QStringLiteral(".tx");
+            }
+        }
+        const QString txPath = QDir(outDir).filePath(name);
+        viewer_->setSourcePath(txPath);
     }
 
     void onConvert() {
@@ -160,6 +270,7 @@ private:
             if (r.ok) ++success;
         if (ok) {
             status_->setText(QStringLiteral("Done — %1 file(s) → %2").arg(success).arg(outDir));
+            previewOutputTx();
         } else {
             status_->setText(QStringLiteral("Finished with errors (%1 ok): %2")
                                  .arg(success)
@@ -176,6 +287,7 @@ private:
     QCheckBox* advancedCheck_ = nullptr;
     QCheckBox* useEnvCheck_ = nullptr;
     QLabel* status_ = nullptr;
+    sol::TextureViewerWidget* viewer_ = nullptr;
 };
 
 }  // namespace

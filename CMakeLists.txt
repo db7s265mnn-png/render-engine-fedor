@@ -628,10 +628,13 @@ if(SOLSTICE_BUILD_APP)
     file(WRITE "${CMAKE_BINARY_DIR}/solstice_build_id.txt" "${SOLSTICE_BUILD_ID}\n")
     file(WRITE "${CMAKE_BINARY_DIR}/solstice_output_name.txt" "${SOLSTICE_OUTPUT_NAME}\n")
 
-    # Standalone TX Converter (same maketx/OCIO core as auto-TX).
+    # Standalone TX Converter (same maketx/OCIO core as auto-TX) + texture viewer.
     qt_add_executable(TX_Converter WIN32 MACOSX_BUNDLE
         TX_Converter/main.cpp
+        TX_Converter/texture_viewer.cpp
+        TX_Converter/texture_viewer.h
         src/ui/theme.cpp)
+    target_include_directories(TX_Converter PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
     target_link_libraries(TX_Converter PRIVATE solstice_lib Qt6::Widgets)
     set_target_properties(TX_Converter PROPERTIES OUTPUT_NAME "TX_Converter")
 endif()
