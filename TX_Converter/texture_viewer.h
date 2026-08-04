@@ -60,6 +60,9 @@ public:
     void fitToView();
     void resetView();
     double zoom() const { return zoom_; }
+    QPointF pan() const { return pan_; }
+    bool fitted() const { return fitted_; }
+    void setCamera(double zoom, const QPointF& pan, bool fitted);
 
 signals:
     void zoomChanged(double zoom);
@@ -167,6 +170,9 @@ public slots:
 signals:
     void statusMessage(const QString& text);
 
+protected:
+    void keyPressEvent(QKeyEvent* event) override;
+
 private:
     struct FrameSlot {
         QString path;
@@ -217,6 +223,18 @@ private:
         }
     };
 
+    // Per Source/Output display settings for A/B compare.
+    struct ViewDisplayState {
+        ViewerGrade grade;
+        ViewerChannelMode channelMode = ViewerChannelMode::RGBA;
+        int colorManagement = kColorOcio;
+        int viewTransform = kViewSrgbAces;
+        double zoom = 1.0;
+        QPointF pan{0.0, 0.0};
+        bool fitted = true;
+        bool initialized = false;
+    };
+
     struct LoadPayload {
         int index = 0;
         QString path;
@@ -234,12 +252,16 @@ private:
     SequenceCache& activeCache();
     const SequenceCache& activeCache() const;
     SequenceCache& inactiveCache();
+    ViewDisplayState& displayStateFor(ViewerContentKind kind);
+    const ViewDisplayState& displayStateFor(ViewerContentKind kind) const;
 
     void rememberSharedFrame();
     void restoreSharedFrame();
+    void captureDisplayState(ViewerContentKind kind);
+    void applyDisplayState(ViewerContentKind kind);
+    void syncContentButtons();
     void bindActiveCacheToUi();
     void loadSequenceInto(SequenceCache& cache, const QString& path);
-    void ensureActiveSequence();
     void clearActiveView();
     void refreshFromPipeline(bool forceReload = false);
     void rebuildTimeline();
@@ -269,7 +291,9 @@ private:
     QLabel* infoLabel_ = nullptr;
     QLabel* zoomLabel_ = nullptr;
     QLabel* bufferLabel_ = nullptr;
-    QComboBox* contentCombo_ = nullptr;
+    QToolButton* sourceBtn_ = nullptr;
+    QToolButton* outputBtn_ = nullptr;
+    QButtonGroup* contentGroup_ = nullptr;
     QComboBox* colorMgmtCombo_ = nullptr;
     QComboBox* viewCombo_ = nullptr;
     QButtonGroup* channelGroup_ = nullptr;
@@ -282,6 +306,7 @@ private:
     QString outputExt_ = QStringLiteral("tx");
     ViewerContentKind contentKind_ = ViewerContentKind::SourceImages;
     ViewerChannelMode channelMode_ = ViewerChannelMode::RGBA;
+    bool applyingDisplayState_ = false;
 
     QPushButton* brightnessLabelBtn_ = nullptr;
     QPushButton* contrastLabelBtn_ = nullptr;
@@ -301,6 +326,8 @@ private:
 
     SequenceCache sourceCache_;
     SequenceCache convertedCache_;
+    ViewDisplayState sourceDisplay_;
+    ViewDisplayState outputDisplay_;
     int frameIndex_ = 0;
     int sharedFrameNumber_ = 1;
     bool updatingTimeline_ = false;

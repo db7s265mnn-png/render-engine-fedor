@@ -1,5 +1,6 @@
 #include "texture_viewer.h"
 
+#include <QAbstractButton>
 #include <QAbstractSpinBox>
 #include <QButtonGroup>
 #include <QColor>
@@ -24,6 +25,7 @@
 #include <QResizeEvent>
 #include <QSignalBlocker>
 #include <QSlider>
+#include <QShortcut>
 #include <QSpinBox>
 #include <QThreadPool>
 #include <QTimer>
@@ -368,6 +370,19 @@ void FloatPreviewCanvas::fitToView() {
 
 void FloatPreviewCanvas::resetView() { fitToView(); }
 
+void FloatPreviewCanvas::setCamera(double zoom, const QPointF& pan, bool fitted) {
+    fitted_ = fitted;
+    zoom_ = std::clamp(zoom, 0.05, 64.0);
+    pan_ = pan;
+    if (fitted_) {
+        fitToView();
+        return;
+    }
+    clampPan();
+    emit zoomChanged(zoom_);
+    update();
+}
+
 QRectF FloatPreviewCanvas::imageRect() const {
     if (width_ <= 0 || height_ <= 0) return {};
     const double w = double(width_) * zoom_;
@@ -495,6 +510,11 @@ void FloatPreviewCanvas::keyPressEvent(QKeyEvent* event) {
     if (event->key() == Qt::Key_F && !event->modifiers()) {
         fitToView();
         event->accept();
+        return;
+    }
+    if ((event->key() == Qt::Key_1 || event->key() == Qt::Key_2) && !event->modifiers()) {
+        // Let the parent viewer handle Source/Output hotkeys.
+        event->ignore();
         return;
     }
     QWidget::keyPressEvent(event);
@@ -682,19 +702,28 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(4);
 
-    // Toolbar order: content (View) combo, channel buttons, Display (Classic/OCIO + view
-    // transform), then Fit + zoom%.
+    // Toolbar: Source / Output (1 / 2), channels, Display, Fit, RAM budget.
     auto* modeRow = new QHBoxLayout();
     modeRow->setContentsMargins(0, 0, 0, 0);
     modeRow->setSpacing(6);
 
-    modeRow->addWidget(new QLabel(QStringLiteral("View")));
-    contentCombo_ = new QComboBox();
-    contentCombo_->addItem(QStringLiteral("Source Images"), int(ViewerContentKind::SourceImages));
-    contentCombo_->addItem(QStringLiteral("Converted"), int(ViewerContentKind::ConvertedTx));
-    contentCombo_->setMinimumWidth(120);
-    contentCombo_->setToolTip(QStringLiteral("Preview the source images or the converted output."));
-    modeRow->addWidget(contentCombo_);
+    contentGroup_ = new QButtonGroup(this);
+    contentGroup_->setExclusive(true);
+    sourceBtn_ = new QToolButton();
+    sourceBtn_->setText(QStringLiteral("Source"));
+    sourceBtn_->setCheckable(true);
+    sourceBtn_->setToolTip(QStringLiteral("Show source images (hotkey 1).\n"
+                                          "Grade / Display / channels are remembered per view."));
+    sourceBtn_->setChecked(true);
+    outputBtn_ = new QToolButton();
+    outputBtn_->setText(QStringLiteral("Output"));
+    outputBtn_->setCheckable(true);
+    outputBtn_->setToolTip(QStringLiteral("Show converted output (hotkey 2).\n"
+                                          "Grade / Display / channels are remembered per view."));
+    contentGroup_->addButton(sourceBtn_, int(ViewerContentKind::SourceImages));
+    contentGroup_->addButton(outputBtn_, int(ViewerContentKind::ConvertedTx));
+    modeRow->addWidget(sourceBtn_);
+    modeRow->addWidget(outputBtn_);
 
     channelGroup_ = new QButtonGroup(this);
     channelGroup_->setExclusive(true);
@@ -848,10 +877,8 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     connect(viewCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         setViewTransform(viewCombo_->currentData().toInt());
     });
-    connect(contentCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
-        rememberSharedFrame();
-        contentKind_ = ViewerContentKind(contentCombo_->currentData().toInt());
-        refreshFromPipeline(false);
+    connect(contentGroup_, &QButtonGroup::idClicked, this, [this](int id) {
+        setContentKind(ViewerContentKind(id));
     });
     connect(channelGroup_, &QButtonGroup::idClicked, this,
             [this](int id) { setChannelMode(ViewerChannelMode(id)); });
@@ -860,6 +887,16 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
         setMemoryBudgetBytes(qint64(gb) * 1024LL * 1024LL * 1024LL);
     });
     setMemoryBudgetBytes(qint64(memoryGbSpin_->value()) * 1024LL * 1024LL * 1024LL);
+    setFocusPolicy(Qt::StrongFocus);
+
+    auto* hotSource = new QShortcut(QKeySequence(Qt::Key_1), this);
+    hotSource->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(hotSource, &QShortcut::activated, this,
+            [this] { setContentKind(ViewerContentKind::SourceImages); });
+    auto* hotOutput = new QShortcut(QKeySequence(Qt::Key_2), this);
+    hotOutput->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(hotOutput, &QShortcut::activated, this,
+            [this] { setContentKind(ViewerContentKind::ConvertedTx); });
 
     gradeTimer_ = new QTimer(this);
     gradeTimer_->setSingleShot(true);
@@ -896,6 +933,8 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
     connect(contrastLabelBtn_, &QPushButton::clicked, this, [this] { contrastSpin_->setValue(1.0); });
     connect(gammaLabelBtn_, &QPushButton::clicked, this, [this] { gammaSpin_->setValue(1.0); });
 
+    captureDisplayState(ViewerContentKind::SourceImages);
+    captureDisplayState(ViewerContentKind::ConvertedTx);
     rebuildTimeline();
 }
 
@@ -910,15 +949,18 @@ void TextureViewerWidget::scheduleGradeApply(bool interactive) {
 }
 
 void TextureViewerWidget::applyGradeFromUi(bool interactive) {
+    if (applyingDisplayState_) return;
     grade_.brightness = float(brightnessSpin_->value());
     grade_.contrast = float(contrastSpin_->value());
     grade_.gamma = float(gammaSpin_->value());
     canvas_->setGrade(grade_, interactive);
+    captureDisplayState(contentKind_);
 }
 
 void TextureViewerWidget::setChannelMode(ViewerChannelMode mode) {
     channelMode_ = mode;
     canvas_->setChannelMode(mode);
+    if (!applyingDisplayState_) captureDisplayState(contentKind_);
     updateInfoBar();
 }
 
@@ -1081,15 +1123,123 @@ void TextureViewerWidget::setOutputExtension(const QString& ext) {
     if (contentKind_ == ViewerContentKind::ConvertedTx) refreshFromPipeline(true);
 }
 
-void TextureViewerWidget::setContentKind(ViewerContentKind kind) {
-    rememberSharedFrame();
-    contentKind_ = kind;
-    if (contentCombo_) {
-        const QSignalBlocker block(contentCombo_);
-        const int idx = contentCombo_->findData(int(kind));
-        if (idx >= 0) contentCombo_->setCurrentIndex(idx);
+TextureViewerWidget::ViewDisplayState& TextureViewerWidget::displayStateFor(ViewerContentKind kind) {
+    return kind == ViewerContentKind::SourceImages ? sourceDisplay_ : outputDisplay_;
+}
+
+const TextureViewerWidget::ViewDisplayState& TextureViewerWidget::displayStateFor(
+    ViewerContentKind kind) const {
+    return kind == ViewerContentKind::SourceImages ? sourceDisplay_ : outputDisplay_;
+}
+
+void TextureViewerWidget::captureDisplayState(ViewerContentKind kind) {
+    ViewDisplayState& st = displayStateFor(kind);
+    st.grade = grade_;
+    st.channelMode = channelMode_;
+    st.colorManagement = colorManagement_;
+    st.viewTransform = viewTransform_;
+    if (canvas_) {
+        st.zoom = canvas_->zoom();
+        st.pan = canvas_->pan();
+        st.fitted = canvas_->fitted();
     }
+    st.initialized = true;
+}
+
+void TextureViewerWidget::applyDisplayState(ViewerContentKind kind) {
+    ViewDisplayState& st = displayStateFor(kind);
+    applyingDisplayState_ = true;
+
+    grade_ = st.grade;
+    channelMode_ = st.channelMode;
+    colorManagement_ = st.colorManagement;
+    viewTransform_ = st.viewTransform;
+
+    if (brightnessSpin_) {
+        const QSignalBlocker b1(brightnessSpin_);
+        const QSignalBlocker b2(brightnessSlider_);
+        brightnessSpin_->setValue(grade_.brightness);
+        const double span = 10.0;
+        brightnessSlider_->setValue(
+            int(std::lround(std::clamp((grade_.brightness - (-5.0)) / span, 0.0, 1.0) * 1000.0)));
+    }
+    if (contrastSpin_) {
+        const QSignalBlocker b1(contrastSpin_);
+        const QSignalBlocker b2(contrastSlider_);
+        contrastSpin_->setValue(grade_.contrast);
+        contrastSlider_->setValue(
+            int(std::lround(std::clamp(grade_.contrast / 3.0, 0.0, 1.0) * 1000.0)));
+    }
+    if (gammaSpin_) {
+        const QSignalBlocker b1(gammaSpin_);
+        const QSignalBlocker b2(gammaSlider_);
+        gammaSpin_->setValue(grade_.gamma);
+        const double span = 3.0 - 0.20;
+        gammaSlider_->setValue(
+            int(std::lround(std::clamp((grade_.gamma - 0.20) / span, 0.0, 1.0) * 1000.0)));
+    }
+    if (channelGroup_) {
+        if (QAbstractButton* btn = channelGroup_->button(int(channelMode_))) btn->setChecked(true);
+    }
+    if (colorMgmtCombo_) {
+        const QSignalBlocker b(colorMgmtCombo_);
+        const int idx = colorMgmtCombo_->findData(colorManagement_);
+        if (idx >= 0) colorMgmtCombo_->setCurrentIndex(idx);
+    }
+    if (viewCombo_) {
+        const QSignalBlocker b(viewCombo_);
+        const int idx = viewCombo_->findData(viewTransform_);
+        if (idx >= 0) viewCombo_->setCurrentIndex(idx);
+    }
+
+    canvas_->setChannelMode(channelMode_);
+    canvas_->setGrade(grade_, false);
+    canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
+                              ocioWorkingSpace_);
+    if (st.initialized) {
+        canvas_->setCamera(st.zoom, st.pan, st.fitted);
+    }
+
+    applyingDisplayState_ = false;
+    updateInfoBar();
+}
+
+void TextureViewerWidget::syncContentButtons() {
+    if (!contentGroup_) return;
+    const QSignalBlocker b(contentGroup_);
+    if (QAbstractButton* btn = contentGroup_->button(int(contentKind_))) btn->setChecked(true);
+}
+
+void TextureViewerWidget::keyPressEvent(QKeyEvent* event) {
+    if (!event->modifiers()) {
+        if (event->key() == Qt::Key_1) {
+            setContentKind(ViewerContentKind::SourceImages);
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_2) {
+            setContentKind(ViewerContentKind::ConvertedTx);
+            event->accept();
+            return;
+        }
+    }
+    QWidget::keyPressEvent(event);
+}
+
+void TextureViewerWidget::setContentKind(ViewerContentKind kind) {
+    if (kind != ViewerContentKind::SourceImages && kind != ViewerContentKind::ConvertedTx) {
+        kind = ViewerContentKind::SourceImages;
+    }
+    if (kind == contentKind_) {
+        syncContentButtons();
+        return;
+    }
+    rememberSharedFrame();
+    captureDisplayState(contentKind_);
+    contentKind_ = kind;
+    syncContentButtons();
     refreshFromPipeline(false);
+    applyDisplayState(contentKind_);
 }
 
 QString TextureViewerWidget::guessConvertedOutputPath(const QString& sourcePath,
@@ -1161,6 +1311,7 @@ void TextureViewerWidget::bindActiveCacheToUi() {
     if (cache.frames.isEmpty()) return;
     ocioWorkingSpace_ = prefersAcesCgWorkingSpace(cache.frames.first().path) ? kWorkingSpaceAcesCg
                                                                              : kWorkingSpaceSrgbLinear;
+    // Keep per-view grade / display / channels; only refresh OCIO working space for the file type.
     canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
                               ocioWorkingSpace_);
     canvas_->setChannelMode(channelMode_);
@@ -1231,7 +1382,7 @@ void TextureViewerWidget::loadSequenceInto(SequenceCache& cache, const QString& 
 void TextureViewerWidget::setColorManagement(int mode) {
     mode = (mode == kColorClassic) ? kColorClassic : kColorOcio;
     colorManagement_ = mode;
-    if (colorMgmtCombo_) {
+    if (colorMgmtCombo_ && !applyingDisplayState_) {
         const QSignalBlocker block(colorMgmtCombo_);
         const int idx = colorMgmtCombo_->findData(mode);
         if (idx >= 0) colorMgmtCombo_->setCurrentIndex(idx);
@@ -1244,6 +1395,7 @@ void TextureViewerWidget::setColorManagement(int mode) {
     }
     canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
                               ocioWorkingSpace_);
+    if (!applyingDisplayState_) captureDisplayState(contentKind_);
     updateInfoBar();
 }
 
@@ -1253,13 +1405,14 @@ void TextureViewerWidget::setViewTransform(int view) {
         view = kViewSrgbAces;
     }
     viewTransform_ = view;
-    if (viewCombo_) {
+    if (viewCombo_ && !applyingDisplayState_) {
         const QSignalBlocker block(viewCombo_);
         const int idx = viewCombo_->findData(view);
         if (idx >= 0) viewCombo_->setCurrentIndex(idx);
     }
     canvas_->setDisplayParams(colorManagement_, viewTransform_, ocioUseEnv_, ocioConfigPath_,
                               ocioWorkingSpace_);
+    if (!applyingDisplayState_) captureDisplayState(contentKind_);
     updateInfoBar();
 }
 
@@ -1407,7 +1560,10 @@ void TextureViewerWidget::prevFrame() {
     else setFrame(prev);
 }
 
-void TextureViewerWidget::fitView() { canvas_->fitToView(); }
+void TextureViewerWidget::fitView() {
+    canvas_->fitToView();
+    captureDisplayState(contentKind_);
+}
 
 void TextureViewerWidget::onStartEdited() {
     if (updatingTimeline_ || !startEdit_) return;
