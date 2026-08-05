@@ -303,12 +303,16 @@ jobs:
           & "dist/maketx.exe" --help | Select-Object -First 3
           & "dist/oiiotool.exe" --help | Select-Object -First 3
 
-          # --- TX Converter–only package (no Render / MaterialX / examples) ---
+          # --- TX Tools–only package (no Render / MaterialX / examples) ---
           $txDist = "dist-tx-converter"
           if (Test-Path $txDist) { Remove-Item -Recurse -Force $txDist }
           New-Item -ItemType Directory -Force -Path $txDist | Out-Null
-          $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Converter*.exe" | Select-Object -First 1
-          if (-not $txExe) { throw "Grendizer_TX_Converter.exe missing from dist" }
+          $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Tools*.exe" | Select-Object -First 1
+          if (-not $txExe) {
+            # Legacy name fallback during rename transition
+            $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Converter*.exe" | Select-Object -First 1
+          }
+          if (-not $txExe) { throw "Grendizer_TX_Tools.exe missing from dist" }
           Copy-Item $txExe.FullName $txDist/ -Force
           # Qt runtime already deployed next to both exes in build/bin → copied into dist;
           # pull platforms / imageformats / styles / qt.conf from dist.
@@ -349,12 +353,12 @@ jobs:
           if (Test-Path "TX_Converter/README.md") {
             Copy-Item "TX_Converter/README.md" "$txDist/README.md" -Force
           }
-          if (-not (Test-Path "$txDist/maketx.exe")) { throw "maketx.exe missing from TX Converter package" }
-          if (-not (Test-Path "$txDist/oiiotool.exe")) { throw "oiiotool.exe missing from TX Converter package" }
+          if (-not (Test-Path "$txDist/maketx.exe")) { throw "maketx.exe missing from TX Tools package" }
+          if (-not (Test-Path "$txDist/oiiotool.exe")) { throw "oiiotool.exe missing from TX Tools package" }
           if (-not (Get-ChildItem $txDist -Filter "OpenColorIO*.dll" -ErrorAction SilentlyContinue)) {
-            throw "OpenColorIO.dll missing from TX Converter package"
+            throw "OpenColorIO.dll missing from TX Tools package"
           }
-          Write-Host "TX Converter–only package contents:"
+          Write-Host "TX Tools–only package contents:"
           Get-ChildItem $txDist -Recurse | Select-Object -ExpandProperty FullName
 
       - name: Render a frame with the packaged exe
@@ -375,7 +379,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Grendizer-TX-Converter-windows-x64-${{ env.BUILD_ID }}
+          name: Grendizer-TX-Tools-windows-x64-${{ env.BUILD_ID }}
           path: dist-tx-converter/
 
       - uses: actions/upload-artifact@v4

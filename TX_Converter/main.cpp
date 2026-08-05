@@ -1,4 +1,4 @@
-// Standalone TX Converter — maketx/OCIO core + texture / UDIM preview.
+// Standalone TX Tools — maketx/OCIO core + texture / UDIM preview.
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
@@ -43,7 +43,7 @@ class TxConverterWindow : public QWidget {
 public:
     TxConverterWindow() {
 #ifndef SOLSTICE_TX_CONVERTER_NAME
-#define SOLSTICE_TX_CONVERTER_NAME "Grendizer_TX_Converter"
+#define SOLSTICE_TX_CONVERTER_NAME "Grendizer_TX_Tools"
 #endif
         setWindowTitle(QStringLiteral(SOLSTICE_TX_CONVERTER_NAME));
         QIcon appIcon(QStringLiteral(":/icons/app_icon.png"));
@@ -184,18 +184,6 @@ public:
         syncFormatUi();
 
         leftLay->addWidget(formBox);
-
-        auto* hint = new QLabel(
-            QStringLiteral("TX → ACEScg (Color Space). Convert always rewrites the output folder. "
-                           "Bit Depth: Original from source, or explicit 8u/16u/16h/32f. "
-                           "Channels: Original from source (1→R, 3→RGB, 4→RGBA). "
-                           "EXR/TIFF/PNG keep source colour (resize / bit / channels only). "
-                           "Viewer Classic = linear→sRGB (no tone map). "
-                           "R/G/B/A write 1 channel; RGB = 3; RGBA = 4. "
-                           "Output folder must be chosen. F = fit, 1/2 = Source/Output."));
-        hint->setWordWrap(true);
-        hint->setStyleSheet(QStringLiteral("color: #969aa0;"));
-        leftLay->addWidget(hint);
 
         auto* convertBtn = new QPushButton(QStringLiteral("Convert"));
         convertBtn->setMinimumHeight(32);
@@ -458,12 +446,12 @@ private:
         const QString src = sourceEdit_->text().trimmed();
         const QString outDir = outputEdit_->text().trimmed();
         if (src.isEmpty()) {
-            QMessageBox::warning(this, QStringLiteral("TX Converter"),
+            QMessageBox::warning(this, QStringLiteral("TX Tools"),
                                  QStringLiteral("Choose a source texture."));
             return;
         }
         if (outDir.isEmpty()) {
-            QMessageBox::warning(this, QStringLiteral("TX Converter"),
+            QMessageBox::warning(this, QStringLiteral("TX Tools"),
                                  QStringLiteral("Choose an output folder before converting."));
             return;
         }
@@ -538,7 +526,7 @@ private:
             status_->setText(QStringLiteral("Finished with errors (%1 ok): %2")
                                  .arg(success)
                                  .arg(QString::fromStdString(*error)));
-            QMessageBox::warning(this, QStringLiteral("TX Converter"),
+            QMessageBox::warning(this, QStringLiteral("TX Tools"),
                                  QString::fromStdString(error->empty() ? "conversion failed" : *error));
         }
     }

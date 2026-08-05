@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(Solstice VERSION 0.9.0 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
-set(SOLSTICE_TX_CONVERTER_NAME "Grendizer_TX_Converter" CACHE STRING "User-visible TX Converter name")
+set(SOLSTICE_TX_CONVERTER_NAME "Grendizer_TX_Tools" CACHE STRING "User-visible TX Tools app name")
 
 # Build identity: PROJECT_VERSION + short git SHA so exe / Help can be traced.
 set(SOLSTICE_GIT_SHA "unknown")
@@ -633,7 +633,7 @@ if(SOLSTICE_BUILD_APP)
     file(WRITE "${CMAKE_BINARY_DIR}/solstice_build_id.txt" "${SOLSTICE_BUILD_ID}\n")
     file(WRITE "${CMAKE_BINARY_DIR}/solstice_output_name.txt" "${SOLSTICE_OUTPUT_NAME}\n")
 
-    # Standalone TX Converter (same maketx/OCIO core as auto-TX) + texture viewer.
+    # Standalone TX Tools (maketx/OCIO core + texture viewer).
     set(TX_CONVERTER_ICON_SOURCES resources/icons.qrc)
     if(WIN32)
         list(APPEND TX_CONVERTER_ICON_SOURCES resources/app_icon.rc)
@@ -653,7 +653,7 @@ if(SOLSTICE_BUILD_APP)
     set_target_properties(TX_Converter PROPERTIES
         OUTPUT_NAME "${SOLSTICE_TX_CONVERTER_NAME}"
         MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_TX_CONVERTER_NAME}"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.grendizer.txconverter")
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.grendizer.txtools")
     target_compile_definitions(TX_Converter PRIVATE
         SOLSTICE_TX_CONVERTER_NAME="${SOLSTICE_TX_CONVERTER_NAME}")
 endif()

@@ -1,4 +1,4 @@
-// Texture preview for TX Converter: float canvas, Solstice-style scrubber, grade controls.
+// Texture preview for TX Tools: float canvas, Solstice-style scrubber, grade controls.
 #pragma once
 
 #include <QPointF>

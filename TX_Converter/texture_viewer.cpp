@@ -874,20 +874,20 @@ QToolButton* TextureViewerWidget::makeChannelButton(const QString& tip, const QC
     btn->setCheckable(true);
     btn->setAutoRaise(true);
     btn->setToolTip(tip);
-    btn->setFixedSize(28, 20);
+    btn->setFixedSize(22, 22);  // square — Houdini-style channel swatches
     btn->setCursor(Qt::PointingHandCursor);
 
     QString background = fill.name();
     if (checker) {
-        QPixmap pix(12, 12);
+        QPixmap pix(14, 14);
         QPainter pp(&pix);
-        pp.fillRect(0, 0, 6, 6, QColor(150, 150, 150));
-        pp.fillRect(6, 6, 6, 6, QColor(150, 150, 150));
-        pp.fillRect(6, 0, 6, 6, QColor(210, 210, 210));
-        pp.fillRect(0, 6, 6, 6, QColor(210, 210, 210));
+        pp.fillRect(0, 0, 7, 7, QColor(150, 150, 150));
+        pp.fillRect(7, 7, 7, 7, QColor(150, 150, 150));
+        pp.fillRect(7, 0, 7, 7, QColor(210, 210, 210));
+        pp.fillRect(0, 7, 7, 7, QColor(210, 210, 210));
         pp.end();
         btn->setIcon(QIcon(pix));
-        btn->setIconSize(QSize(12, 12));
+        btn->setIconSize(QSize(14, 14));
         background = QStringLiteral("#3a3d42");
     }
 
@@ -897,6 +897,7 @@ QToolButton* TextureViewerWidget::makeChannelButton(const QString& tip, const QC
         "  color: #14161a;"
         "  border: 1px solid #22242a;"
         "  border-radius: 2px;"
+        "  padding: 0;"
         "  font-size: 10px;"
         "  font-weight: 700;"
         "}"
@@ -996,12 +997,13 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
                                 bool checker = false, bool rgbaIcon = false) {
         QToolButton* btn = makeChannelButton(tip, fill, checker);
         if (rgbaIcon) {
+            // Houdini-style RGBA composite: pure R / B / G + grey A quadrant.
             QPixmap pix(14, 14);
             pix.fill(Qt::transparent);
             QPainter pp(&pix);
-            pp.fillRect(0, 0, 7, 7, QColor(220, 70, 70));
-            pp.fillRect(7, 0, 7, 7, QColor(70, 120, 220));
-            pp.fillRect(0, 7, 7, 7, QColor(70, 190, 90));
+            pp.fillRect(0, 0, 7, 7, QColor(255, 0, 0));
+            pp.fillRect(7, 0, 7, 7, QColor(0, 0, 255));
+            pp.fillRect(0, 7, 7, 7, QColor(0, 255, 0));
             pp.fillRect(7, 7, 7, 7, QColor(180, 180, 180));
             pp.end();
             btn->setIcon(QIcon(pix));
@@ -1011,15 +1013,16 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
         modeRow->addWidget(btn);
         return btn;
     };
+    // Pure primaries — match Houdini COP/mplay channel swatches.
     QToolButton* rgbaBtn =
         addChannelButton(ViewerChannelMode::RGBA, QStringLiteral("Show all channels in colour"),
                          QColor(58, 61, 66), false, true);
     addChannelButton(ViewerChannelMode::R, QStringLiteral("Isolate red channel (grey)"),
-                     QColor(224, 96, 96));
+                     QColor(255, 0, 0));
     addChannelButton(ViewerChannelMode::G, QStringLiteral("Isolate green channel (grey)"),
-                     QColor(104, 200, 110));
+                     QColor(0, 255, 0));
     addChannelButton(ViewerChannelMode::B, QStringLiteral("Isolate blue channel (grey)"),
-                     QColor(102, 146, 232));
+                     QColor(0, 0, 255));
     addChannelButton(ViewerChannelMode::A, QStringLiteral("Isolate alpha channel (grey)"),
                      QColor(160, 160, 160), true);
     rgbaBtn->setChecked(true);

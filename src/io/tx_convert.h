@@ -1,5 +1,5 @@
 // Shared maketx / oiiotool conversion core (Arnold-style TX + PNG/JPG reformat).
-// Used by automatic cook-time conversion and by the TX_Converter app.
+// Used by automatic cook-time conversion and by the TX Tools app.
 #pragma once
 
 #include <functional>
