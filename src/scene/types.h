@@ -433,7 +433,7 @@ enum WorkingColorSpace : int {
 // OCIO = config Display/View.
 enum ColorManagementMode : int {
     kColorClassic = 0,
-    kColorOcio = 1,  // render view default; TX Converter viewer defaults to Classic
+    kColorOcio = 1,  // default
 };
 
 // Monitor view transform (chrome strip). Labels: sRGB / Rec.709 / Rec.2020 / Raw.

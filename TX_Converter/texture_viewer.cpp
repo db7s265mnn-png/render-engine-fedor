@@ -1036,8 +1036,7 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
         QStringLiteral("Classic: linear → sRGB (no OCIO, no tone map; Houdini-style).\n"
                        "OCIO: OpenColorIO Display/View (ACES RRT/ODT)."));
     colorMgmtCombo_->setMinimumWidth(90);
-    // Texture A/B defaults to Classic so Source PNG and Output TX match without RRT.
-    colorMgmtCombo_->setCurrentIndex(0);
+    colorMgmtCombo_->setCurrentIndex(1);  // OCIO default
     modeRow->addWidget(colorMgmtCombo_);
     viewCombo_ = new QComboBox();
     viewCombo_->addItem(QStringLiteral("sRGB"), kViewSrgbAces);
