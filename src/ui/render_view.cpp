@@ -381,7 +381,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     colorManagementCombo_->addItem(QStringLiteral("OCIO"), 1);
     colorManagementCombo_->setCurrentIndex(1);
     colorManagementCombo_->setToolTip(
-        QStringLiteral("Classic: gamma / linear (no OCIO).\n"
+        QStringLiteral("Classic: linear → sRGB (no OCIO, no tone map; Houdini-style).\n"
                        "OCIO: OpenColorIO Display/View from the config."));
     colorManagementCombo_->setStyleSheet(comboStyle + QStringLiteral(" QComboBox { max-width: 90px; }"));
     stripLayout->addWidget(colorManagementCombo_);

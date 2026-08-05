@@ -322,9 +322,8 @@ Vec3 classicApplyView(Vec3 linearWorking, int workingSpace, int viewTransform) {
                     saturatef(linearWorking.z));
     }
     Vec3 c = linearWorking;
+    // Houdini-style without OCIO: no filmic tone map — only space convert + OETF.
     if (workingSpace == kWorkingSpaceAcesCg) c = acescgToLinearSrgb(c);
-    // Soft HDR compress then transfer (old Classic sRGB path).
-    c = reinhard(c);
     if (viewTransform == kViewRec2020) return encodeGamma24Vec(c);
     // sRGB and Rec.709 share a close OETF; use the sRGB curve for Classic.
     return linearToSrgbVec(c);

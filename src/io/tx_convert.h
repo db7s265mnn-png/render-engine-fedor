@@ -76,7 +76,7 @@ struct TxConvertRequest {
     std::string outputPath;       // destination path
     std::string inputColorSpace;  // TX only; empty/ACEScg/Raw → no convert
     std::string ocioConfigPath;   // optional --colorconfig (TX only)
-    bool updateOnly = true;       // skip when output newer than source
+    bool updateOnly = false;      // true = skip when output newer than source; Convert sets false
     TxOutputFormat format = TxOutputFormat::Tx;
     int bitDepth = 0;             // 0 = source; else 8 / 16 / 32 (JPG always 8)
     int longSide = 0;             // 0 = original; else max edge, aspect kept
@@ -92,7 +92,7 @@ struct TxConvertOptions {
     TxChannelMode channels = TxChannelMode::RGBA;
     int frameStart = 1;
     int frameEnd = 1;
-    bool updateOnly = true;
+    bool updateOnly = false;  // Convert always rewrites; true only for internal incremental paths
     // Parallel convert: 0 = auto from memoryBudgetBytes. Caps concurrent maketx/oiiotool jobs.
     int maxParallelJobs = 0;
     // Soft memory budget for concurrency estimate (default 32 GiB).

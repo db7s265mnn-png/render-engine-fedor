@@ -186,8 +186,9 @@ public:
         leftLay->addWidget(formBox);
 
         auto* hint = new QLabel(
-            QStringLiteral("TX → ACEScg. EXR/TIFF/PNG/JPG/Original keep source colour "
-                           "(resize / bit / channels only). "
+            QStringLiteral("TX → ACEScg (Color Space). Convert always rewrites the output folder. "
+                           "EXR/TIFF/PNG/JPG keep source colour (resize / bit / channels only). "
+                           "Viewer Classic = linear→sRGB (no tone map). "
                            "R/G/B/A write 1 channel; RGB = 3; RGBA = 4. "
                            "Output folder must be chosen. F = fit, 1/2 = Source/Output."));
         hint->setWordWrap(true);
@@ -474,7 +475,8 @@ private:
         opt.channels = sol::TxChannelMode(channelsCombo_->currentData().toInt());
         opt.frameStart = viewer_ ? viewer_->rangeStart() : 1;
         opt.frameEnd = viewer_ ? viewer_->rangeEnd() : 1;
-        opt.updateOnly = true;
+        // Always rewrite outputs on Convert — Color Space / bit / channels must apply.
+        opt.updateOnly = false;
         opt.memoryBudgetBytes =
             viewer_ ? viewer_->memoryBudgetBytes() : (32LL * 1024 * 1024 * 1024);
         if (effective == sol::TxOutputFormat::Tx) {

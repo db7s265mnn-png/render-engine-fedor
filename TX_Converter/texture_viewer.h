@@ -105,7 +105,7 @@ private:
     int height_ = 0;
     quint64 contentId_ = 0;
 
-    int colorManagement_ = kColorOcio;
+    int colorManagement_ = kColorClassic;
     int viewTransform_ = kViewSrgbAces;
     ViewerChannelMode channelMode_ = ViewerChannelMode::RGBA;
     bool ocioUseEnv_ = true;
@@ -244,7 +244,7 @@ private:
     struct ViewDisplayState {
         ViewerGrade grade;
         ViewerChannelMode channelMode = ViewerChannelMode::RGBA;
-        int colorManagement = kColorOcio;
+        int colorManagement = kColorClassic;
         int viewTransform = kViewSrgbAces;
         bool initialized = false;
         // Hot display bake — restored on toggle to avoid OCIO lag.
@@ -254,7 +254,7 @@ private:
         int hotPixelStep = 1;
         ViewerGrade hotGrade;
         ViewerChannelMode hotChannel = ViewerChannelMode::RGBA;
-        int hotColorManagement = kColorOcio;
+        int hotColorManagement = kColorClassic;
         int hotViewTransform = kViewSrgbAces;
         int hotWorkingSpace = 1;
     };
@@ -369,7 +369,7 @@ private:
     bool updatingTimeline_ = false;
     qint64 memoryBudgetBytes_ = 32LL * 1024 * 1024 * 1024;
 
-    int colorManagement_ = kColorOcio;
+    int colorManagement_ = kColorClassic;
     int viewTransform_ = kViewSrgbAces;
     bool ocioUseEnv_ = true;
     QString ocioConfigPath_;

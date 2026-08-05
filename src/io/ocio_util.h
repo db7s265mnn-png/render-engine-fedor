@@ -22,8 +22,9 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath);
 // Log current OCIO status (library + config). Call at app start and Start/Render.
 void ocioLogStatus(bool useEnv, const std::string& settingsPath);
 
-// Classic (non-OCIO) monitor transform: Raw = linear clamp; else tone + transfer.
-// When workingSpace is ACEScg, converts to linear Rec.709/sRGB primaries first.
+// Classic (non-OCIO) monitor transform (Houdini-style without OCIO):
+// Raw = linear clamp; else working→display primaries + sRGB/Rec.2020 OETF.
+// No Reinhard / ACES RRT — textures and beauty keep linear response until the curve.
 Vec3 classicApplyView(Vec3 linearWorking, int workingSpace, int viewTransform);
 
 // Apply display view: Classic or OCIO based on colorManagement.

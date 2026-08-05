@@ -429,10 +429,11 @@ enum WorkingColorSpace : int {
     kWorkingSpaceAcesCg = 1,
 };
 
-// mplay-style colour management: Classic = gamma/linear; OCIO = config Display/View.
+// mplay-style colour management: Classic = linear→sRGB OETF (no tone map);
+// OCIO = config Display/View.
 enum ColorManagementMode : int {
     kColorClassic = 0,
-    kColorOcio = 1,  // default
+    kColorOcio = 1,  // render view default; TX Converter viewer defaults to Classic
 };
 
 // Monitor view transform (chrome strip). Labels: sRGB / Rec.709 / Rec.2020 / Raw.
