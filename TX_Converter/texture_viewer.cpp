@@ -713,7 +713,9 @@ TextureViewerWidget::LoadPayload TextureViewerWidget::decodeFrame(const QString&
                                 .arg(path, reader.errorString());
             return payload;
         }
-        metaFromQImage(qimage, payload.fileChannelCount, payload.fileBitDepth);
+        int unusedBits = 0;
+        metaFromQImage(qimage, payload.fileChannelCount, unusedBits);
+        payload.filePixelType = txProbePixelType(path.toStdString());
         qimage = qimage.convertToFormat(QImage::Format_RGBA8888);
         payload.sourceWidth = qimage.width();
         payload.sourceHeight = qimage.height();
@@ -790,24 +792,18 @@ TextureViewerWidget::LoadPayload TextureViewerWidget::decodeFrame(const QString&
     payload.sourceHeight = image.height();
 
     const QString ext = info.suffix().toLower();
+    int unusedBits = 0;
     if (ext == QLatin1String("tx") || ext == QLatin1String("tif") || ext == QLatin1String("tiff")) {
-        if (!probeTiffMeta(path, payload.fileChannelCount, payload.fileBitDepth)) {
-            payload.fileChannelCount = 4;
-            payload.fileBitDepth = 16;
-        }
+        if (!probeTiffMeta(path, payload.fileChannelCount, unusedBits)) payload.fileChannelCount = 4;
     } else if (ext == QLatin1String("exr")) {
-        if (!probeExrMeta(path, payload.fileChannelCount, payload.fileBitDepth)) {
-            payload.fileChannelCount = 4;
-            payload.fileBitDepth = 16;
-        }
+        if (!probeExrMeta(path, payload.fileChannelCount, unusedBits)) payload.fileChannelCount = 4;
     } else if (ext == QLatin1String("hdr") || ext == QLatin1String("rgbe") ||
                ext == QLatin1String("pic")) {
         payload.fileChannelCount = 3;
-        payload.fileBitDepth = 32;
     } else {
         payload.fileChannelCount = 4;
-        payload.fileBitDepth = 32;
     }
+    payload.filePixelType = txProbePixelType(path.toStdString());
 
     extractLinearFromFloatImage(image, payload.linearRgba, payload.previewW, payload.previewH);
     return payload;
@@ -1785,7 +1781,7 @@ void TextureViewerWidget::onFrameLoaded(ViewerContentKind kind, quint64 generati
     slot.previewW = payload.previewW;
     slot.previewH = payload.previewH;
     slot.fileChannelCount = payload.fileChannelCount;
-    slot.fileBitDepth = payload.fileBitDepth;
+    slot.filePixelType = payload.filePixelType;
     slot.linearRgba = std::move(payload.linearRgba);
     slot.error = payload.error;
     slot.ready = payload.error.isEmpty() && !slot.linearRgba.empty();
@@ -2004,8 +2000,9 @@ void TextureViewerWidget::updateInfoBar() {
         return;
     }
     const int channels = slot.fileChannelCount > 0 ? slot.fileChannelCount : 4;
-    const int bits = slot.fileBitDepth > 0 ? slot.fileBitDepth : 32;
-    infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  %5/%6  ·  %7ch  ·  %8-bit  ·  %9/%10")
+    const QString depthLabel =
+        QString::fromStdString(txPixelTypeDisplayLabel(slot.filePixelType));
+    infoLabel_->setText(QStringLiteral("%1  ·  %2×%3  ·  %4  ·  %5/%6  ·  %7ch  ·  %8  ·  %9/%10")
                             .arg(QFileInfo(slot.path).fileName())
                             .arg(slot.sourceWidth)
                             .arg(slot.sourceHeight)
@@ -2013,7 +2010,7 @@ void TextureViewerWidget::updateInfoBar() {
                             .arg(modeBit)
                             .arg(viewBit)
                             .arg(channels)
-                            .arg(bits)
+                            .arg(depthLabel)
                             .arg(cache.loadedCount)
                             .arg(cache.frames.size()));
 }

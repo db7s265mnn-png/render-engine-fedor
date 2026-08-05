@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "io/tx_convert.h"
 #include "scene/types.h"
 
 class QLabel;
@@ -198,7 +199,7 @@ private:
         int previewW = 0;
         int previewH = 0;
         int fileChannelCount = 0;  // channels in the file on disk (1/3/4…)
-        int fileBitDepth = 0;      // bits per channel (8/16/32)
+        TxPixelType filePixelType = TxPixelType::Float;
         std::vector<float> linearRgba;  // RGBA float
         QString error;
         bool ready = false;
@@ -268,7 +269,7 @@ private:
         int previewW = 0;
         int previewH = 0;
         int fileChannelCount = 0;
-        int fileBitDepth = 0;
+        TxPixelType filePixelType = TxPixelType::Float;
         std::vector<float> linearRgba;
         QString error;
     };

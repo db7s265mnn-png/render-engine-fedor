@@ -28,6 +28,15 @@ enum class TxChannelMode : int {
     A = 5,
 };
 
+// Output pixel storage. Original = probe source (depth + uint/half/float kind).
+enum class TxPixelType : int {
+    Original = 0,
+    UInt8 = 1,
+    UInt16 = 2,
+    Half = 3,   // 16-bit float
+    Float = 4,  // 32-bit float
+};
+
 // Curated ACES / Utility input spaces (default UI). Output TX is always ACEScg.
 std::vector<std::string> txCuratedColorSpaces();
 
@@ -40,6 +49,19 @@ std::string txResolveOcioConfig(bool useEnv, const std::string& settingsPath);
 
 // True when input space should skip --colorconvert (already ACEScg / Raw / empty).
 bool txSkipColorConvert(const std::string& inputColorSpace);
+
+// Probe on-disk pixel type (never returns Original). Falls back to Float if unknown.
+TxPixelType txProbePixelType(const std::string& path);
+
+// Resolve Original → probed type; clamp to what `format` can store (e.g. PNG → uint only).
+TxPixelType txResolvePixelType(TxPixelType selected, const std::string& sourcePath,
+                               TxOutputFormat format);
+
+// oiiotool/maketx -d token: "uint8" / "uint16" / "half" / "float".
+std::string txPixelTypeOiiArg(TxPixelType type);
+
+// UI / info-bar label: "8-bit uint", "16-bit half", "16-bit uint", "32-bit float".
+std::string txPixelTypeDisplayLabel(TxPixelType type);
 
 // Expand a path that may contain <UDIM> / %(UDIM)d into concrete tile paths that exist.
 // Non-UDIM paths return a single-element list if the file exists (or the path as-is).
@@ -78,7 +100,7 @@ struct TxConvertRequest {
     std::string ocioConfigPath;   // optional --colorconfig (TX only)
     bool updateOnly = false;      // true = skip when output newer than source; Convert sets false
     TxOutputFormat format = TxOutputFormat::Tx;
-    int bitDepth = 0;             // 0 = source; else 8 / 16 / 32 (JPG always 8)
+    TxPixelType pixelType = TxPixelType::Original;  // resolved before write
     int longSide = 0;             // 0 = original; else max edge, aspect kept
     TxChannelMode channels = TxChannelMode::RGBA;
 };
@@ -87,7 +109,7 @@ struct TxConvertOptions {
     std::string inputColorSpace;
     std::string ocioConfigPath;
     TxOutputFormat format = TxOutputFormat::Tx;
-    int bitDepth = 0;  // 0 = source depth
+    TxPixelType pixelType = TxPixelType::Original;
     int longSide = 0;
     TxChannelMode channels = TxChannelMode::RGBA;
     int frameStart = 1;

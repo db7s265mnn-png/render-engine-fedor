@@ -660,7 +660,12 @@ bool loadImage(const std::string& path, Image& out, std::string& error, bool srg
     }
     if (ext == "tx" || ext == "tif" || ext == "tiff") {
 #if SOLSTICE_HAVE_TIFF
-        return loadTiffWithMips(loadPath, out, error, srgbColor);
+        if (loadTiffWithMips(loadPath, out, error, srgbColor)) return true;
+#if SOLSTICE_HAVE_OPENEXR
+        // Half TX may be OpenEXR-backed (.tx with EXR payload).
+        if (ext == "tx" && loadExr(loadPath, out, error)) return true;
+#endif
+        return false;
 #else
         if (ext == "tx") {
             error = "this build has no libtiff support — cannot load .tx mipmaps";

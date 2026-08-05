@@ -4,6 +4,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QImage>
+#include <QImageReader>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
@@ -22,6 +24,17 @@
 
 #include "core/expr_eval.h"
 #include "core/log.h"
+#include "solstice_config.h"
+
+#if SOLSTICE_HAVE_OPENEXR
+#  include <ImfChannelList.h>
+#  include <ImfHeader.h>
+#  include <ImfInputFile.h>
+#endif
+
+#if SOLSTICE_HAVE_TIFF
+#  include <tiffio.h>
+#endif
 
 namespace sol {
 namespace {
@@ -148,26 +161,15 @@ bool queryImageSize(const QString& path, int& outW, int& outH, std::string& erro
     return outW > 0 && outH > 0;
 }
 
-QString oiioDepthArg(int bitDepth, TxOutputFormat format) {
-    if (format == TxOutputFormat::Jpg) return QStringLiteral("uint8");
-    if (bitDepth <= 0) {
-        return QStringLiteral("float");
+QString oiioDepthArg(TxPixelType type) {
+    switch (type) {
+        case TxPixelType::UInt8: return QStringLiteral("uint8");
+        case TxPixelType::UInt16: return QStringLiteral("uint16");
+        case TxPixelType::Half: return QStringLiteral("half");
+        case TxPixelType::Float:
+        case TxPixelType::Original:
+        default: return QStringLiteral("float");
     }
-    // TX (tiled TIFF via --oiio): TIFF stores uint8 / uint16 / float.
-    // half is not reliable in TIFF (often promoted to float) — use uint16 for "16".
-    if (format == TxOutputFormat::Tx) {
-        if (bitDepth <= 8) return QStringLiteral("uint8");
-        if (bitDepth <= 16) return QStringLiteral("uint16");
-        return QStringLiteral("float");
-    }
-    if (format == TxOutputFormat::Exr || format == TxOutputFormat::Tiff) {
-        return (bitDepth <= 16) ? QStringLiteral("half") : QStringLiteral("float");
-    }
-    if (bitDepth <= 8) return QStringLiteral("uint8");
-    if (bitDepth <= 16) {
-        return (format == TxOutputFormat::Png) ? QStringLiteral("uint16") : QStringLiteral("half");
-    }
-    return QStringLiteral("float");
 }
 
 bool isSingleChannelMode(TxChannelMode mode) {
@@ -191,7 +193,7 @@ bool needsOiiotoolPreprocess(const TxConvertRequest& req) {
     if (req.format != TxOutputFormat::Tx) return true;
     if (req.longSide > 0) return true;
     if (req.channels != TxChannelMode::RGBA) return true;
-    // Bit depth is applied by maketx -d on the final .tx — no preprocess for depth alone.
+    // Pixel type is applied by maketx -d on the final .tx.
     return false;
 }
 
@@ -235,9 +237,10 @@ bool oiiotoolRewrite(const QString& src, const QString& dst, const TxConvertRequ
     }
 
     // TX depth is applied later by maketx -d; keep preprocess temps full precision.
-    if (req.format != TxOutputFormat::Tx &&
-        (req.bitDepth > 0 || req.format == TxOutputFormat::Jpg)) {
-        args << QStringLiteral("-d") << oiioDepthArg(req.bitDepth, req.format);
+    if (req.format != TxOutputFormat::Tx) {
+        const TxPixelType pt =
+            (req.format == TxOutputFormat::Jpg) ? TxPixelType::UInt8 : req.pixelType;
+        args << QStringLiteral("-d") << oiioDepthArg(pt);
     }
     args << QStringLiteral("-o") << dst;
 
@@ -252,8 +255,10 @@ bool oiiotoolRewrite(const QString& src, const QString& dst, const TxConvertRequ
 
 bool maketxWrite(const QString& src, const QString& dst, const TxConvertRequest& req,
                  std::string& error) {
-    const QString depthArg =
-        (req.bitDepth > 0) ? oiioDepthArg(req.bitDepth, TxOutputFormat::Tx) : QString();
+    const TxPixelType pt = req.pixelType == TxPixelType::Original ? TxPixelType::Float : req.pixelType;
+    const QString depthArg = oiioDepthArg(pt);
+    // half is not reliably stored in TIFF-backed .tx — use OpenEXR container.
+    const bool useExrContainer = (pt == TxPixelType::Half);
 
     if (g_maketxPath.empty()) {
         // Fall back to oiiotool mipmaps when maketx is missing.
@@ -269,8 +274,13 @@ bool maketxWrite(const QString& src, const QString& dst, const TxConvertRequest&
             args << QStringLiteral("--colorconvert") << QString::fromStdString(req.inputColorSpace)
                  << QStringLiteral("ACES - ACEScg");
         }
-        if (!depthArg.isEmpty()) args << QStringLiteral("-d") << depthArg;
-        args << QStringLiteral("--mipmaps") << QStringLiteral("-o") << dst;
+        args << QStringLiteral("-d") << depthArg;
+        args << QStringLiteral("--mipmaps");
+        if (useExrContainer) {
+            args << QStringLiteral("-o:format=openexr") << dst;
+        } else {
+            args << QStringLiteral("-o") << dst;
+        }
         std::string err;
         if (!runProcess(g_oiiotoolPath, args, err)) {
             error = "oiiotool maketx-fallback failed: " + err;
@@ -282,7 +292,8 @@ bool maketxWrite(const QString& src, const QString& dst, const TxConvertRequest&
     QStringList args;
     if (req.updateOnly) args << QStringLiteral("-u");
     args << QStringLiteral("--oiio");
-    if (!depthArg.isEmpty()) args << QStringLiteral("-d") << depthArg;
+    if (useExrContainer) args << QStringLiteral("--format") << QStringLiteral("openexr");
+    args << QStringLiteral("-d") << depthArg;
     if (!txSkipColorConvert(req.inputColorSpace)) {
         if (!req.ocioConfigPath.empty())
             args << QStringLiteral("--colorconfig") << QString::fromStdString(req.ocioConfigPath);
@@ -292,8 +303,8 @@ bool maketxWrite(const QString& src, const QString& dst, const TxConvertRequest&
     }
     args << src << QStringLiteral("-o") << dst;
 
-    logInfo("tx_convert: maketx " + src.toStdString() + " → " + dst.toStdString() +
-            (depthArg.isEmpty() ? "" : (" -d " + depthArg.toStdString())));
+    logInfo("tx_convert: maketx " + src.toStdString() + " → " + dst.toStdString() + " -d " +
+            depthArg.toStdString() + (useExrContainer ? " (openexr)" : ""));
     std::string err;
     if (!runProcess(g_maketxPath, args, err)) {
         error = "maketx failed: " + err;
@@ -383,6 +394,134 @@ bool txSkipColorConvert(const std::string& inputColorSpace) {
         lower == QLatin1String("role_data") || lower == QLatin1String("data"))
         return true;
     return false;
+}
+
+std::string txPixelTypeOiiArg(TxPixelType type) {
+    switch (type) {
+        case TxPixelType::UInt8: return "uint8";
+        case TxPixelType::UInt16: return "uint16";
+        case TxPixelType::Half: return "half";
+        case TxPixelType::Float:
+        case TxPixelType::Original:
+        default: return "float";
+    }
+}
+
+std::string txPixelTypeDisplayLabel(TxPixelType type) {
+    switch (type) {
+        case TxPixelType::UInt8: return "8-bit uint";
+        case TxPixelType::UInt16: return "16-bit uint";
+        case TxPixelType::Half: return "16-bit half";
+        case TxPixelType::Float: return "32-bit float";
+        case TxPixelType::Original:
+        default: return "original";
+    }
+}
+
+TxPixelType txProbePixelType(const std::string& path) {
+    const QString qpath = QString::fromStdString(path);
+    const QString ext = QFileInfo(qpath).suffix().toLower();
+
+#if SOLSTICE_HAVE_TIFF
+    if (ext == QLatin1String("tx") || ext == QLatin1String("tif") || ext == QLatin1String("tiff")) {
+        TIFF* tif = TIFFOpen(qpath.toLocal8Bit().constData(), "r");
+        if (tif) {
+            uint16_t bits = 0;
+            uint16_t sampleFormat = SAMPLEFORMAT_UINT;
+            TIFFGetFieldDefaulted(tif, TIFFTAG_BITSPERSAMPLE, &bits);
+            TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLEFORMAT, &sampleFormat);
+            TIFFClose(tif);
+            if (bits <= 8) return TxPixelType::UInt8;
+            if (bits <= 16) {
+                if (sampleFormat == SAMPLEFORMAT_IEEEFP) return TxPixelType::Half;
+                return TxPixelType::UInt16;
+            }
+            return TxPixelType::Float;
+        }
+#if SOLSTICE_HAVE_OPENEXR
+        // TX may be OpenEXR-backed (half).
+        try {
+            Imf::InputFile file(qpath.toLocal8Bit().constData());
+            const Imf::ChannelList& list = file.header().channels();
+            Imf::PixelType deepest = Imf::HALF;
+            bool any = false;
+            for (Imf::ChannelList::ConstIterator it = list.begin(); it != list.end(); ++it) {
+                any = true;
+                if (it.channel().type == Imf::FLOAT) deepest = Imf::FLOAT;
+                else if (it.channel().type == Imf::UINT && deepest != Imf::FLOAT) deepest = Imf::UINT;
+            }
+            if (any) {
+                if (deepest == Imf::FLOAT) return TxPixelType::Float;
+                if (deepest == Imf::UINT) return TxPixelType::UInt16;
+                return TxPixelType::Half;
+            }
+        } catch (...) {
+        }
+#endif
+    }
+#endif
+
+#if SOLSTICE_HAVE_OPENEXR
+    if (ext == QLatin1String("exr")) {
+        try {
+            Imf::InputFile file(qpath.toLocal8Bit().constData());
+            const Imf::ChannelList& list = file.header().channels();
+            Imf::PixelType deepest = Imf::HALF;
+            bool any = false;
+            for (Imf::ChannelList::ConstIterator it = list.begin(); it != list.end(); ++it) {
+                any = true;
+                if (it.channel().type == Imf::FLOAT) deepest = Imf::FLOAT;
+                else if (it.channel().type == Imf::UINT && deepest != Imf::FLOAT) deepest = Imf::UINT;
+            }
+            if (any) {
+                if (deepest == Imf::FLOAT) return TxPixelType::Float;
+                if (deepest == Imf::UINT) return TxPixelType::UInt16;
+                return TxPixelType::Half;
+            }
+        } catch (...) {
+        }
+        return TxPixelType::Half;
+    }
+#endif
+
+    if (ext == QLatin1String("hdr") || ext == QLatin1String("rgbe") || ext == QLatin1String("pic"))
+        return TxPixelType::Float;
+
+    QImageReader reader(qpath);
+    reader.setAllocationLimit(0);
+    const QImage::Format fmt = reader.imageFormat();
+    if (fmt == QImage::Format_Grayscale16 || fmt == QImage::Format_RGBX64 ||
+        fmt == QImage::Format_RGBA64 || fmt == QImage::Format_RGBA64_Premultiplied) {
+        return TxPixelType::UInt16;
+    }
+    QImage img = reader.read();
+    if (img.isNull()) img.load(qpath);
+    if (!img.isNull()) {
+        if (img.format() == QImage::Format_Grayscale16 || img.format() == QImage::Format_RGBX64 ||
+            img.format() == QImage::Format_RGBA64 ||
+            img.format() == QImage::Format_RGBA64_Premultiplied) {
+            return TxPixelType::UInt16;
+        }
+        if (img.depth() > 32) return TxPixelType::UInt16;
+        return TxPixelType::UInt8;
+    }
+    return TxPixelType::Float;
+}
+
+TxPixelType txResolvePixelType(TxPixelType selected, const std::string& sourcePath,
+                               TxOutputFormat format) {
+    TxPixelType t = selected;
+    if (t == TxPixelType::Original) t = txProbePixelType(sourcePath);
+
+    if (format == TxOutputFormat::Jpg) return TxPixelType::UInt8;
+    if (format == TxOutputFormat::Png) {
+        if (t == TxPixelType::Half || t == TxPixelType::Float) return TxPixelType::UInt16;
+        if (t == TxPixelType::UInt16) return TxPixelType::UInt16;
+        return TxPixelType::UInt8;
+    }
+    // EXR / TIFF / TX: all four concrete types allowed.
+    if (t == TxPixelType::Original) return TxPixelType::Float;
+    return t;
 }
 
 int txExtractFrameNumber(const std::string& path) {
@@ -520,6 +659,7 @@ TxConvertResult txConvertOne(const TxConvertRequest& reqIn) {
     // Original is resolved to a concrete format before writing.
     if (req.format == TxOutputFormat::Original)
         req.format = txResolveFormat(TxOutputFormat::Original, req.sourcePath);
+    req.pixelType = txResolvePixelType(req.pixelType, req.sourcePath, req.format);
     result.outputPath = req.outputPath;
     initTools();
     if (g_maketxPath.empty() && g_oiiotoolPath.empty()) {
@@ -536,9 +676,12 @@ TxConvertResult txConvertOne(const TxConvertRequest& reqIn) {
         return result;
     }
 
-    // Already matching TX with no reformat — return as-is.
+    // Already matching TX with no reformat — return as-is only when writing onto itself.
+    const QFileInfo dstInfoEarly(QString::fromStdString(req.outputPath));
     if (req.format == TxOutputFormat::Tx && srcInfo.suffix().toLower() == QLatin1String("tx") &&
-        !needsOiiotoolPreprocess(req)) {
+        !needsOiiotoolPreprocess(req) &&
+        dstInfoEarly.absoluteFilePath() == srcInfo.absoluteFilePath() &&
+        txProbePixelType(req.sourcePath) == req.pixelType) {
         result.ok = true;
         result.outputPath = req.sourcePath;
         return result;
@@ -668,7 +811,7 @@ bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string&
             req.ocioConfigPath = options.ocioConfigPath;
             req.updateOnly = options.updateOnly;
             req.format = options.format;
-            req.bitDepth = options.bitDepth;
+            req.pixelType = options.pixelType;
             req.longSide = options.longSide;
             req.channels = options.channels;
 

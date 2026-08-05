@@ -187,7 +187,8 @@ public:
 
         auto* hint = new QLabel(
             QStringLiteral("TX → ACEScg (Color Space). Convert always rewrites the output folder. "
-                           "EXR/TIFF/PNG/JPG keep source colour (resize / bit / channels only). "
+                           "Bit Depth: Original from source, or explicit 8u/16u/16h/32f. "
+                           "EXR/TIFF/PNG keep source colour (resize / bit / channels only). "
                            "Viewer Classic = linear→sRGB (no tone map). "
                            "R/G/B/A write 1 channel; RGB = 3; RGBA = 4. "
                            "Output folder must be chosen. F = fit, 1/2 = Source/Output."));
@@ -358,33 +359,32 @@ private:
         }
         if (ocioLabel_) ocioLabel_->setVisible(isTx);
 
-        // Bit depth
-        const int prevBit = bitDepthCombo_->currentData().isValid() ? bitDepthCombo_->currentData().toInt()
-                                                                    : 0;
+        // Bit depth / pixel type
+        const int prevType = bitDepthCombo_->currentData().isValid()
+                                 ? bitDepthCombo_->currentData().toInt()
+                                 : int(sol::TxPixelType::Original);
         bitDepthCombo_->blockSignals(true);
         bitDepthCombo_->clear();
         if (isJpg) {
-            bitDepthCombo_->addItem(QStringLiteral("8"), 8);
             if (QWidget* field = form_->labelForField(bitDepthCombo_)) field->setVisible(false);
             bitDepthCombo_->setVisible(false);
         } else {
             if (QWidget* field = form_->labelForField(bitDepthCombo_)) field->setVisible(true);
             bitDepthCombo_->setVisible(true);
-            if (isExr || isTiff) {
-                bitDepthCombo_->addItem(QStringLiteral("16"), 16);
-                bitDepthCombo_->addItem(QStringLiteral("32"), 32);
-            } else if (isPng) {
-                bitDepthCombo_->addItem(QStringLiteral("8"), 8);
-                bitDepthCombo_->addItem(QStringLiteral("16"), 16);
-            } else {  // TX
-                bitDepthCombo_->addItem(QStringLiteral("8"), 8);
-                bitDepthCombo_->addItem(QStringLiteral("16"), 16);
-                bitDepthCombo_->addItem(QStringLiteral("32"), 32);
+            bitDepthCombo_->addItem(QStringLiteral("Original"), int(sol::TxPixelType::Original));
+            if (isPng) {
+                bitDepthCombo_->addItem(QStringLiteral("8 (uint)"), int(sol::TxPixelType::UInt8));
+                bitDepthCombo_->addItem(QStringLiteral("16 (uint)"), int(sol::TxPixelType::UInt16));
+            } else {
+                // TX / EXR / TIFF / Original→those
+                bitDepthCombo_->addItem(QStringLiteral("8 (uint)"), int(sol::TxPixelType::UInt8));
+                bitDepthCombo_->addItem(QStringLiteral("16 (uint)"), int(sol::TxPixelType::UInt16));
+                bitDepthCombo_->addItem(QStringLiteral("16 (half)"), int(sol::TxPixelType::Half));
+                bitDepthCombo_->addItem(QStringLiteral("32 (float)"), int(sol::TxPixelType::Float));
             }
-            int prefer = isExr || isTiff || isTx ? 16 : 8;
-            if (bitDepthCombo_->findData(prevBit) >= 0) prefer = prevBit;
-            const int idx = bitDepthCombo_->findData(prefer);
-            bitDepthCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
+            int idx = bitDepthCombo_->findData(prevType);
+            if (idx < 0) idx = 0;  // Original default
+            bitDepthCombo_->setCurrentIndex(idx);
         }
         bitDepthCombo_->blockSignals(false);
 
@@ -470,7 +470,9 @@ private:
 
         sol::TxConvertOptions opt;
         opt.format = selected;  // Original kept; resolved inside convert
-        opt.bitDepth = bitDepthCombo_->isVisible() ? bitDepthCombo_->currentData().toInt() : 8;
+        opt.pixelType = bitDepthCombo_->isVisible()
+                            ? sol::TxPixelType(bitDepthCombo_->currentData().toInt())
+                            : sol::TxPixelType::UInt8;
         opt.longSide = resolutionCombo_->currentData().toInt();
         opt.channels = sol::TxChannelMode(channelsCombo_->currentData().toInt());
         opt.frameStart = viewer_ ? viewer_->rangeStart() : 1;
