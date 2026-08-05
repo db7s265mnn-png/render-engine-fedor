@@ -153,6 +153,13 @@ QString oiioDepthArg(int bitDepth, TxOutputFormat format) {
     if (bitDepth <= 0) {
         return QStringLiteral("float");
     }
+    // TX (tiled TIFF via --oiio): TIFF stores uint8 / uint16 / float.
+    // half is not reliable in TIFF (often promoted to float) — use uint16 for "16".
+    if (format == TxOutputFormat::Tx) {
+        if (bitDepth <= 8) return QStringLiteral("uint8");
+        if (bitDepth <= 16) return QStringLiteral("uint16");
+        return QStringLiteral("float");
+    }
     if (format == TxOutputFormat::Exr || format == TxOutputFormat::Tiff) {
         return (bitDepth <= 16) ? QStringLiteral("half") : QStringLiteral("float");
     }
@@ -184,7 +191,7 @@ bool needsOiiotoolPreprocess(const TxConvertRequest& req) {
     if (req.format != TxOutputFormat::Tx) return true;
     if (req.longSide > 0) return true;
     if (req.channels != TxChannelMode::RGBA) return true;
-    if (req.bitDepth == 8 || req.bitDepth == 16 || req.bitDepth == 32) return true;
+    // Bit depth is applied by maketx -d on the final .tx — no preprocess for depth alone.
     return false;
 }
 
@@ -227,7 +234,9 @@ bool oiiotoolRewrite(const QString& src, const QString& dst, const TxConvertRequ
              << QStringLiteral("ACES - ACEScg");
     }
 
-    if (req.bitDepth > 0 || req.format == TxOutputFormat::Jpg) {
+    // TX depth is applied later by maketx -d; keep preprocess temps full precision.
+    if (req.format != TxOutputFormat::Tx &&
+        (req.bitDepth > 0 || req.format == TxOutputFormat::Jpg)) {
         args << QStringLiteral("-d") << oiioDepthArg(req.bitDepth, req.format);
     }
     args << QStringLiteral("-o") << dst;
@@ -243,6 +252,9 @@ bool oiiotoolRewrite(const QString& src, const QString& dst, const TxConvertRequ
 
 bool maketxWrite(const QString& src, const QString& dst, const TxConvertRequest& req,
                  std::string& error) {
+    const QString depthArg =
+        (req.bitDepth > 0) ? oiioDepthArg(req.bitDepth, TxOutputFormat::Tx) : QString();
+
     if (g_maketxPath.empty()) {
         // Fall back to oiiotool mipmaps when maketx is missing.
         if (g_oiiotoolPath.empty()) {
@@ -257,6 +269,7 @@ bool maketxWrite(const QString& src, const QString& dst, const TxConvertRequest&
             args << QStringLiteral("--colorconvert") << QString::fromStdString(req.inputColorSpace)
                  << QStringLiteral("ACES - ACEScg");
         }
+        if (!depthArg.isEmpty()) args << QStringLiteral("-d") << depthArg;
         args << QStringLiteral("--mipmaps") << QStringLiteral("-o") << dst;
         std::string err;
         if (!runProcess(g_oiiotoolPath, args, err)) {
@@ -269,6 +282,7 @@ bool maketxWrite(const QString& src, const QString& dst, const TxConvertRequest&
     QStringList args;
     if (req.updateOnly) args << QStringLiteral("-u");
     args << QStringLiteral("--oiio");
+    if (!depthArg.isEmpty()) args << QStringLiteral("-d") << depthArg;
     if (!txSkipColorConvert(req.inputColorSpace)) {
         if (!req.ocioConfigPath.empty())
             args << QStringLiteral("--colorconfig") << QString::fromStdString(req.ocioConfigPath);
@@ -278,7 +292,8 @@ bool maketxWrite(const QString& src, const QString& dst, const TxConvertRequest&
     }
     args << src << QStringLiteral("-o") << dst;
 
-    logInfo("tx_convert: maketx " + src.toStdString() + " → " + dst.toStdString());
+    logInfo("tx_convert: maketx " + src.toStdString() + " → " + dst.toStdString() +
+            (depthArg.isEmpty() ? "" : (" -d " + depthArg.toStdString())));
     std::string err;
     if (!runProcess(g_maketxPath, args, err)) {
         error = "maketx failed: " + err;
