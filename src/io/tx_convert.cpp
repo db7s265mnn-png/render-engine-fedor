@@ -192,8 +192,8 @@ QString oiioChannelArg(TxChannelMode mode) {
 bool needsOiiotoolPreprocess(const TxConvertRequest& req) {
     if (req.format != TxOutputFormat::Tx) return true;
     if (req.longSide > 0) return true;
+    // After resolve, Original is never left — any non-RGBA needs --ch via oiiotool.
     if (req.channels != TxChannelMode::RGBA) return true;
-    // Pixel type is applied by maketx -d on the final .tx.
     return false;
 }
 
@@ -524,6 +524,89 @@ TxPixelType txResolvePixelType(TxPixelType selected, const std::string& sourcePa
     return t;
 }
 
+int txProbeChannelCount(const std::string& path) {
+    const QString qpath = QString::fromStdString(path);
+    const QString ext = QFileInfo(qpath).suffix().toLower();
+
+#if SOLSTICE_HAVE_TIFF
+    if (ext == QLatin1String("tx") || ext == QLatin1String("tif") || ext == QLatin1String("tiff")) {
+        TIFF* tif = TIFFOpen(qpath.toLocal8Bit().constData(), "r");
+        if (tif) {
+            uint16_t samples = 0;
+            TIFFGetFieldDefaulted(tif, TIFFTAG_SAMPLESPERPIXEL, &samples);
+            TIFFClose(tif);
+            if (samples >= 1) return int(std::min<uint16_t>(samples, 4));
+        }
+#if SOLSTICE_HAVE_OPENEXR
+        try {
+            Imf::InputFile file(qpath.toLocal8Bit().constData());
+            int count = 0;
+            for (Imf::ChannelList::ConstIterator it = file.header().channels().begin();
+                 it != file.header().channels().end(); ++it) {
+                ++count;
+            }
+            if (count >= 1) return std::min(count, 4);
+        } catch (...) {
+        }
+#endif
+    }
+#endif
+
+#if SOLSTICE_HAVE_OPENEXR
+    if (ext == QLatin1String("exr")) {
+        try {
+            Imf::InputFile file(qpath.toLocal8Bit().constData());
+            int count = 0;
+            for (Imf::ChannelList::ConstIterator it = file.header().channels().begin();
+                 it != file.header().channels().end(); ++it) {
+                ++count;
+            }
+            if (count >= 1) return std::min(count, 4);
+        } catch (...) {
+        }
+        return 4;
+    }
+#endif
+
+    if (ext == QLatin1String("hdr") || ext == QLatin1String("rgbe") || ext == QLatin1String("pic"))
+        return 3;
+
+    QImageReader reader(qpath);
+    reader.setAllocationLimit(0);
+    QImage img = reader.read();
+    if (img.isNull()) img.load(qpath);
+    if (!img.isNull()) {
+        if (img.format() == QImage::Format_Grayscale8 || img.format() == QImage::Format_Grayscale16 ||
+            img.format() == QImage::Format_Indexed8 || img.depth() <= 8) {
+            // Indexed/grey often 1 channel; depth<=8 alone is weak — prefer format.
+            if (img.format() == QImage::Format_Grayscale8 ||
+                img.format() == QImage::Format_Grayscale16 ||
+                img.format() == QImage::Format_Indexed8)
+                return 1;
+        }
+        if (!img.hasAlphaChannel()) return 3;
+        return 4;
+    }
+    return 4;
+}
+
+TxChannelMode txResolveChannelMode(TxChannelMode selected, const std::string& sourcePath,
+                                   TxOutputFormat format) {
+    TxChannelMode mode = selected;
+    if (mode == TxChannelMode::Original) {
+        const int n = txProbeChannelCount(sourcePath);
+        if (n <= 1) mode = TxChannelMode::R;
+        else if (n == 2) mode = TxChannelMode::RGB;  // no RG mode — keep two as RGB
+        else if (n == 3) mode = TxChannelMode::RGB;
+        else mode = TxChannelMode::RGBA;
+    }
+    if (format == TxOutputFormat::Jpg) {
+        if (mode == TxChannelMode::RGBA || mode == TxChannelMode::A) mode = TxChannelMode::RGB;
+        if (mode == TxChannelMode::Original) mode = TxChannelMode::RGB;
+    }
+    return mode;
+}
+
 int txExtractFrameNumber(const std::string& path) {
     const QString base = QFileInfo(QString::fromStdString(path)).completeBaseName();
     const QRegularExpression re(QStringLiteral(R"((?:^|[._-])(\d+)$)"));
@@ -660,6 +743,7 @@ TxConvertResult txConvertOne(const TxConvertRequest& reqIn) {
     if (req.format == TxOutputFormat::Original)
         req.format = txResolveFormat(TxOutputFormat::Original, req.sourcePath);
     req.pixelType = txResolvePixelType(req.pixelType, req.sourcePath, req.format);
+    req.channels = txResolveChannelMode(req.channels, req.sourcePath, req.format);
     result.outputPath = req.outputPath;
     initTools();
     if (g_maketxPath.empty() && g_oiiotoolPath.empty()) {

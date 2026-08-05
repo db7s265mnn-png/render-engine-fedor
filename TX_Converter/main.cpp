@@ -188,6 +188,7 @@ public:
         auto* hint = new QLabel(
             QStringLiteral("TX → ACEScg (Color Space). Convert always rewrites the output folder. "
                            "Bit Depth: Original from source, or explicit 8u/16u/16h/32f. "
+                           "Channels: Original from source (1→R, 3→RGB, 4→RGBA). "
                            "EXR/TIFF/PNG keep source colour (resize / bit / channels only). "
                            "Viewer Classic = linear→sRGB (no tone map). "
                            "R/G/B/A write 1 channel; RGB = 3; RGBA = 4. "
@@ -388,11 +389,13 @@ private:
         }
         bitDepthCombo_->blockSignals(false);
 
-        // Channels — JPG has no alpha.
-        const int prevCh = channelsCombo_->currentData().isValid() ? channelsCombo_->currentData().toInt()
-                                                                   : int(sol::TxChannelMode::RGBA);
+        // Channels — Original default; JPG has no alpha.
+        const int prevCh = channelsCombo_->currentData().isValid()
+                               ? channelsCombo_->currentData().toInt()
+                               : int(sol::TxChannelMode::Original);
         channelsCombo_->blockSignals(true);
         channelsCombo_->clear();
+        channelsCombo_->addItem(QStringLiteral("Original"), int(sol::TxChannelMode::Original));
         if (isJpg) {
             channelsCombo_->addItem(QStringLiteral("RGB"), int(sol::TxChannelMode::RGB));
             channelsCombo_->addItem(QStringLiteral("R"), int(sol::TxChannelMode::R));
@@ -407,7 +410,7 @@ private:
             channelsCombo_->addItem(QStringLiteral("A"), int(sol::TxChannelMode::A));
         }
         int chIdx = channelsCombo_->findData(prevCh);
-        if (chIdx < 0) chIdx = 0;
+        if (chIdx < 0) chIdx = 0;  // Original
         channelsCombo_->setCurrentIndex(chIdx);
         channelsCombo_->blockSignals(false);
 

@@ -26,6 +26,7 @@ enum class TxChannelMode : int {
     G = 3,
     B = 4,
     A = 5,
+    Original = 6,  // probe source: 1→R, 3→RGB, 4→RGBA
 };
 
 // Output pixel storage. Original = probe source (depth + uint/half/float kind).
@@ -62,6 +63,13 @@ std::string txPixelTypeOiiArg(TxPixelType type);
 
 // UI / info-bar label: "8-bit uint", "16-bit half", "16-bit uint", "32-bit float".
 std::string txPixelTypeDisplayLabel(TxPixelType type);
+
+// Probe on-disk channel count (1 / 3 / 4 typical). Falls back to 4 if unknown.
+int txProbeChannelCount(const std::string& path);
+
+// Resolve Original → R / RGB / RGBA from source; clamp for JPG (no alpha).
+TxChannelMode txResolveChannelMode(TxChannelMode selected, const std::string& sourcePath,
+                                   TxOutputFormat format);
 
 // Expand a path that may contain <UDIM> / %(UDIM)d into concrete tile paths that exist.
 // Non-UDIM paths return a single-element list if the file exists (or the path as-is).
@@ -102,7 +110,7 @@ struct TxConvertRequest {
     TxOutputFormat format = TxOutputFormat::Tx;
     TxPixelType pixelType = TxPixelType::Original;  // resolved before write
     int longSide = 0;             // 0 = original; else max edge, aspect kept
-    TxChannelMode channels = TxChannelMode::RGBA;
+    TxChannelMode channels = TxChannelMode::Original;
 };
 
 struct TxConvertOptions {
@@ -111,7 +119,7 @@ struct TxConvertOptions {
     TxOutputFormat format = TxOutputFormat::Tx;
     TxPixelType pixelType = TxPixelType::Original;
     int longSide = 0;
-    TxChannelMode channels = TxChannelMode::RGBA;
+    TxChannelMode channels = TxChannelMode::Original;
     int frameStart = 1;
     int frameEnd = 1;
     bool updateOnly = false;  // Convert always rewrites; true only for internal incremental paths

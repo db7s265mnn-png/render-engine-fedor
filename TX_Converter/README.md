@@ -16,7 +16,8 @@ Built with the main app (`Grendizer_TX_Converter` / `Grendizer_TX_Converter.exe`
 4. **Bit Depth** — **Original** (from source) or explicit `8 (uint)` / `16 (uint)` / `16 (half)` / `32 (float)`.
    JPG hides the control; PNG = Original / 8u / 16u only.
 5. **Resolution** — Original or long-side presets 256…8192 (aspect preserved).
-6. **Channels** — format-aware (JPG: RGB/R/G/B; others: RGBA…A).
+6. **Channels** — **Original** (default: 1→R, 3→RGB, 4→RGBA; mono stays 1ch) or explicit RGBA/RGB/R/G/B/A.
+   JPG: Original / RGB / R / G / B (no alpha).
 7. **Color Space / OCIO** — shown for **TX** (and Original→TX) only.
 8. **Convert** — TX via maketx (+ oiiotool preprocess when needed); EXR/PNG/JPG/Original via oiiotool.
 9. **Viewer** — View first, channel swatches, Classic/OCIO + monitor view.
