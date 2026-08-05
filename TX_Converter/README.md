@@ -13,7 +13,8 @@ Built with the main app (`Grendizer_TX_Converter` / `Grendizer_TX_Converter.exe`
 2. **Output Folder** — must be chosen (empty by default; Convert blocks if unset).
 3. **Format** — **Original** / **EXR** / **TX** (default) / **PNG** / **JPG**.
    Original follows the source extension and its bit/channel rules.
-4. **Bit Depth** — adapts (JPG hidden; PNG 8/16; EXR 16/32; TX 8/16/32).
+4. **Bit Depth** — **Original** (from source) or explicit `8 (uint)` / `16 (uint)` / `16 (half)` / `32 (float)`.
+   JPG hides the control; PNG = Original / 8u / 16u only.
 5. **Resolution** — Original or long-side presets 256…8192 (aspect preserved).
 6. **Channels** — format-aware (JPG: RGB/R/G/B; others: RGBA…A).
 7. **Color Space / OCIO** — shown for **TX** (and Original→TX) only.

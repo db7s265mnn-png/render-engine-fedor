@@ -303,6 +303,60 @@ jobs:
           & "dist/maketx.exe" --help | Select-Object -First 3
           & "dist/oiiotool.exe" --help | Select-Object -First 3
 
+          # --- TX Converter–only package (no Render / MaterialX / examples) ---
+          $txDist = "dist-tx-converter"
+          if (Test-Path $txDist) { Remove-Item -Recurse -Force $txDist }
+          New-Item -ItemType Directory -Force -Path $txDist | Out-Null
+          $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Converter*.exe" | Select-Object -First 1
+          if (-not $txExe) { throw "Grendizer_TX_Converter.exe missing from dist" }
+          Copy-Item $txExe.FullName $txDist/ -Force
+          # Qt runtime already deployed next to both exes in build/bin → copied into dist;
+          # pull platforms / imageformats / styles / qt.conf from dist.
+          foreach ($dir in @("platforms", "imageformats", "styles", "iconengines", "tls", "generic")) {
+            if (Test-Path "dist/$dir") {
+              New-Item -ItemType Directory -Force -Path "$txDist/$dir" | Out-Null
+              Copy-Item "dist/$dir/*" "$txDist/$dir/" -Force -ErrorAction SilentlyContinue
+            }
+          }
+          if (Test-Path "dist/qt.conf") { Copy-Item "dist/qt.conf" $txDist/ -Force }
+          # Qt + MSVC runtime DLLs sitting next to the converter in dist
+          Get-ChildItem dist -Filter "Qt6*.dll" | ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
+          Get-ChildItem dist -Filter "vcruntime*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
+          Get-ChildItem dist -Filter "msvcp*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
+          Get-ChildItem dist -Filter "concrt*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
+          # Embree (solstice_lib links Embree even for the converter binary)
+          Get-ChildItem dist -Filter "embree*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
+          Get-ChildItem dist -Filter "tbb*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
+          # OCIO + OIIO tools + image codec / EXR runtimes
+          foreach ($pat in @(
+            "OpenColorIO*.dll",
+            "OpenImageIO*.dll",
+            "maketx.exe", "oiiotool.exe",
+            "jpeg*.dll", "libjpeg*.dll", "turbojpeg*.dll",
+            "tiff*.dll", "libtiff*.dll",
+            "zlib*.dll", "libzlib*.dll", "zdll*.dll",
+            "libpng*.dll", "png*.dll",
+            "Imath*.dll", "OpenEXR*.dll", "IlmThread*.dll", "Half*.dll", "Iex*.dll"
+          )) {
+            Get-ChildItem -Path dist -Filter $pat -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
+          }
+          if (Test-Path "TX_Converter/README.md") {
+            Copy-Item "TX_Converter/README.md" "$txDist/README.md" -Force
+          }
+          if (-not (Test-Path "$txDist/maketx.exe")) { throw "maketx.exe missing from TX Converter package" }
+          if (-not (Test-Path "$txDist/oiiotool.exe")) { throw "oiiotool.exe missing from TX Converter package" }
+          if (-not (Get-ChildItem $txDist -Filter "OpenColorIO*.dll" -ErrorAction SilentlyContinue)) {
+            throw "OpenColorIO.dll missing from TX Converter package"
+          }
+          Write-Host "TX Converter–only package contents:"
+          Get-ChildItem $txDist -Recurse | Select-Object -ExpandProperty FullName
+
       - name: Render a frame with the packaged exe
         run: |
           $exe = Get-ChildItem -Path dist -Filter "Grendizer_Render-*.exe" | Select-Object -First 1
@@ -318,6 +372,11 @@ jobs:
         with:
           name: Grendizer-Render-windows-x64-${{ env.BUILD_ID }}
           path: dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Grendizer-TX-Converter-windows-x64-${{ env.BUILD_ID }}
+          path: dist-tx-converter/
 
       - uses: actions/upload-artifact@v4
         with:
