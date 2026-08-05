@@ -2,7 +2,13 @@ cmake_minimum_required(VERSION 3.20)
 project(Solstice VERSION 0.9.0 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
-set(SOLSTICE_TX_CONVERTER_NAME "Grendizer_TX_Tools" CACHE STRING "User-visible TX Tools app name")
+set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
+set(SOLSTICE_TX_TOOLS_OMEGA_NAME "Grendizer_TX_Tools_Omega" CACHE STRING "TX Tools Omega (DX12 viewport) name")
+# Legacy alias kept for older scripts; Alpha/Omega names are the real outputs.
+set(SOLSTICE_TX_CONVERTER_NAME "${SOLSTICE_TX_TOOLS_ALPHA_NAME}" CACHE STRING "User-visible TX Tools app name")
+
+option(SOLSTICE_BUILD_TX_TOOLS_ALPHA "Build TX Tools Alpha (Qt viewport)" ON)
+option(SOLSTICE_BUILD_TX_TOOLS_OMEGA "Build TX Tools Omega (DX12 viewport, Windows)" ON)
 
 # Build identity: PROJECT_VERSION + short git SHA so exe / Help can be traced.
 set(SOLSTICE_GIT_SHA "unknown")
@@ -634,11 +640,12 @@ if(SOLSTICE_BUILD_APP)
     file(WRITE "${CMAKE_BINARY_DIR}/solstice_output_name.txt" "${SOLSTICE_OUTPUT_NAME}\n")
 
     # Standalone TX Tools (maketx/OCIO core + texture viewer).
+    # Alpha = Qt FloatPreviewCanvas; Omega = same UI, DX12 viewport (Windows only).
     set(TX_CONVERTER_ICON_SOURCES resources/icons.qrc)
     if(WIN32)
         list(APPEND TX_CONVERTER_ICON_SOURCES resources/app_icon.rc)
     endif()
-    qt_add_executable(TX_Converter WIN32 MACOSX_BUNDLE
+    set(TX_TOOLS_COMMON_SOURCES
         TX_Converter/main.cpp
         TX_Converter/texture_viewer.cpp
         TX_Converter/texture_viewer.h
@@ -648,14 +655,41 @@ if(SOLSTICE_BUILD_APP)
         src/ui/texture_file_dialog.cpp
         src/ui/texture_file_dialog.h
         ${TX_CONVERTER_ICON_SOURCES})
-    target_include_directories(TX_Converter PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
-    target_link_libraries(TX_Converter PRIVATE solstice_lib Qt6::Widgets)
-    set_target_properties(TX_Converter PROPERTIES
-        OUTPUT_NAME "${SOLSTICE_TX_CONVERTER_NAME}"
-        MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_TX_CONVERTER_NAME}"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.grendizer.txtools")
-    target_compile_definitions(TX_Converter PRIVATE
-        SOLSTICE_TX_CONVERTER_NAME="${SOLSTICE_TX_CONVERTER_NAME}")
+
+    set(TX_TOOLS_DEPLOY_TARGETS)
+
+    if(SOLSTICE_BUILD_TX_TOOLS_ALPHA)
+        qt_add_executable(TX_Converter_Alpha WIN32 MACOSX_BUNDLE
+            ${TX_TOOLS_COMMON_SOURCES})
+        target_include_directories(TX_Converter_Alpha PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
+        target_link_libraries(TX_Converter_Alpha PRIVATE solstice_lib Qt6::Widgets)
+        set_target_properties(TX_Converter_Alpha PROPERTIES
+            OUTPUT_NAME "${SOLSTICE_TX_TOOLS_ALPHA_NAME}"
+            MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_TX_TOOLS_ALPHA_NAME}"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "com.grendizer.txtools.alpha")
+        target_compile_definitions(TX_Converter_Alpha PRIVATE
+            SOLSTICE_TX_CONVERTER_NAME="${SOLSTICE_TX_TOOLS_ALPHA_NAME}"
+            SOLSTICE_TX_VIEWER_DX12=0)
+        list(APPEND TX_TOOLS_DEPLOY_TARGETS TX_Converter_Alpha)
+        # Back-compat alias for scripts that still expect TX_Converter.
+        add_executable(TX_Converter ALIAS TX_Converter_Alpha)
+    endif()
+
+    if(WIN32 AND SOLSTICE_BUILD_TX_TOOLS_OMEGA)
+        qt_add_executable(TX_Converter_Omega WIN32
+            ${TX_TOOLS_COMMON_SOURCES}
+            TX_Converter/dx12_preview_canvas.cpp
+            TX_Converter/dx12_preview_canvas.h)
+        target_include_directories(TX_Converter_Omega PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
+        target_link_libraries(TX_Converter_Omega PRIVATE solstice_lib Qt6::Widgets
+            d3d12 dxgi d3dcompiler)
+        set_target_properties(TX_Converter_Omega PROPERTIES
+            OUTPUT_NAME "${SOLSTICE_TX_TOOLS_OMEGA_NAME}")
+        target_compile_definitions(TX_Converter_Omega PRIVATE
+            SOLSTICE_TX_CONVERTER_NAME="${SOLSTICE_TX_TOOLS_OMEGA_NAME}"
+            SOLSTICE_TX_VIEWER_DX12=1)
+        list(APPEND TX_TOOLS_DEPLOY_TARGETS TX_Converter_Omega)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -688,13 +722,18 @@ if(WIN32 AND SOLSTICE_BUILD_APP)
     get_filename_component(SOLSTICE_QT_BIN_DIR "${SOLSTICE_QMAKE_EXECUTABLE}" DIRECTORY)
     find_program(WINDEPLOYQT_EXECUTABLE windeployqt HINTS "${SOLSTICE_QT_BIN_DIR}" ${Qt6_DIR}/../../../bin)
     if(WINDEPLOYQT_EXECUTABLE)
-        add_custom_target(deploy
-            COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to ${SOLSTICE_OUTPUT_NAME} + ${SOLSTICE_TX_CONVERTER_NAME}"
+        set(_sol_deploy_cmds
+            COMMAND ${CMAKE_COMMAND} -E echo "Deploying Qt runtime next to ${SOLSTICE_OUTPUT_NAME} + TX Tools"
             COMMAND ${WINDEPLOYQT_EXECUTABLE} --release --no-translations --no-system-d3d-compiler
-                    --compiler-runtime $<TARGET_FILE:Solstice>
-            COMMAND ${WINDEPLOYQT_EXECUTABLE} --release --no-translations --no-system-d3d-compiler
-                    $<TARGET_FILE:TX_Converter>
-            DEPENDS Solstice TX_Converter)
+                    --compiler-runtime $<TARGET_FILE:Solstice>)
+        set(_sol_deploy_deps Solstice)
+        foreach(_tx ${TX_TOOLS_DEPLOY_TARGETS})
+            list(APPEND _sol_deploy_cmds
+                COMMAND ${WINDEPLOYQT_EXECUTABLE} --release --no-translations --no-system-d3d-compiler
+                        $<TARGET_FILE:${_tx}>)
+            list(APPEND _sol_deploy_deps ${_tx})
+        endforeach()
+        add_custom_target(deploy ${_sol_deploy_cmds} DEPENDS ${_sol_deploy_deps})
     endif()
 endif()
 

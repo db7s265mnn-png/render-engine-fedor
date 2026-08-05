@@ -1,11 +1,22 @@
-# TX Tools (Grendizer_TX_Tools)
+# TX Tools (Alpha / Omega)
 
 Standalone Qt tool that shares Grendizer_Render’s `maketx` / OCIO TX core (`src/io/tx_convert.*`),
 plus a texture viewer (LDR / HDR / `.tx`, UDIM timeline).
 
-## Build
+## Editions
 
-Built with the main app (`Grendizer_TX_Tools` / `Grendizer_TX_Tools.exe`).
+| Edition | Exe | Viewport |
+|---------|-----|----------|
+| **Alpha** | `Grendizer_TX_Tools_Alpha` | Qt `FloatPreviewCanvas` (CPU bake + QPainter) |
+| **Omega** | `Grendizer_TX_Tools_Omega` | Same CPU bake (OCIO/grade → 8-bit RGB in RAM), then stream to **DX12** (Windows only) |
+
+Convert UI, Source/Output, UDIM timeline, grade, and channels are shared — feature parity between editions.
+Omega v1 does not re-implement color on the GPU; display is baked on CPU then uploaded.
+
+CMake options:
+
+- `-DSOLSTICE_BUILD_TX_TOOLS_ALPHA=ON|OFF`
+- `-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON|OFF` (ignored on non-Windows)
 
 ## Usage
 
@@ -24,5 +35,5 @@ Built with the main app (`Grendizer_TX_Tools` / `Grendizer_TX_Tools.exe`).
     Timeline uses filename numbers. **Brightness** = exposure stops (click label to reset).
     Drag to pan (even without zoom), **F** or Fit to frame.
 
-Requires `maketx` and/or `oiiotool`. The Windows zip ships them next to `Grendizer_TX_Tools.exe`.
+Requires `maketx` and/or `oiiotool`. The Windows zip ships them next to the TX Tools exe.
 OCIO config comes from the `OCIO` env var or the OCIO Config field (not bundled).

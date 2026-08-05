@@ -93,12 +93,17 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
 
+    // Shared by Alpha (QPainter) and Omega (DX12 present).
+    void ensureDisplayCache();
+    QRectF imageRect() const;
+    bool hasLinearImage() const { return linearRgba_ != nullptr && width_ > 0 && height_ > 0; }
+    const QString& placeholderText() const { return placeholder_; }
+    const QImage& displayCacheImage() const { return displayCache_; }
+
 private:
     void invalidateDisplayCache();
     void invalidateBaseLinear();
     void ensureBaseLinear();
-    void ensureDisplayCache();
-    QRectF imageRect() const;
     void clampPan();
 
     const float* linearRgba_ = nullptr;

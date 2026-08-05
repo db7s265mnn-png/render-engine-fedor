@@ -50,6 +50,10 @@
 #include "solstice_config.h"
 #include "ui/timeline_bar.h"
 
+#if defined(SOLSTICE_TX_VIEWER_DX12) && SOLSTICE_TX_VIEWER_DX12
+#  include "dx12_preview_canvas.h"
+#endif
+
 #if SOLSTICE_HAVE_OPENEXR
 #  include <ImfChannelList.h>
 #  include <ImfHeader.h>
@@ -1102,7 +1106,11 @@ TextureViewerWidget::TextureViewerWidget(QWidget* parent) : QWidget(parent) {
              QStringLiteral("Linear gamma before the view transform (click \"Gamma\" to reset to 1)"));
     root->addLayout(gradeRow);
 
+#if defined(SOLSTICE_TX_VIEWER_DX12) && SOLSTICE_TX_VIEWER_DX12
+    canvas_ = new Dx12PreviewCanvas(this);
+#else
     canvas_ = new FloatPreviewCanvas(this);
+#endif
     setFocusProxy(canvas_);
     root->addWidget(canvas_, 1);
 

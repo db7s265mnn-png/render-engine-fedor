@@ -43,7 +43,7 @@ class TxConverterWindow : public QWidget {
 public:
     TxConverterWindow() {
 #ifndef SOLSTICE_TX_CONVERTER_NAME
-#define SOLSTICE_TX_CONVERTER_NAME "Grendizer_TX_Tools"
+#define SOLSTICE_TX_CONVERTER_NAME "Grendizer_TX_Tools_Alpha"
 #endif
         setWindowTitle(QStringLiteral(SOLSTICE_TX_CONVERTER_NAME));
         QIcon appIcon(QStringLiteral(":/icons/app_icon.png"));

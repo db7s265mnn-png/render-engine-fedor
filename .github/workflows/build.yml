@@ -198,7 +198,9 @@ jobs:
             -DSOLSTICE_MATERIALX_LIBRARIES="$env:DEPS_PREFIX/libraries" `
             -DSOLSTICE_ENABLE_OPTIX=OFF `
             -DSOLSTICE_ENABLE_OCIO=ON `
-            -DSOLSTICE_MODERN_CPU=ON
+            -DSOLSTICE_MODERN_CPU=ON `
+            -DSOLSTICE_BUILD_TX_TOOLS_ALPHA=OFF `
+            -DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON
 
       - name: Build
         run: cmake --build build --parallel
@@ -303,16 +305,19 @@ jobs:
           & "dist/maketx.exe" --help | Select-Object -First 3
           & "dist/oiiotool.exe" --help | Select-Object -First 3
 
-          # --- TX Tools–only package (no Render / MaterialX / examples) ---
+          # --- TX Tools Omega–only package (no Render / MaterialX / examples) ---
           $txDist = "dist-tx-converter"
           if (Test-Path $txDist) { Remove-Item -Recurse -Force $txDist }
           New-Item -ItemType Directory -Force -Path $txDist | Out-Null
-          $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Tools*.exe" | Select-Object -First 1
+          $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Tools_Omega*.exe" | Select-Object -First 1
           if (-not $txExe) {
-            # Legacy name fallback during rename transition
+            # Fallbacks during rename transition
+            $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Tools*.exe" | Select-Object -First 1
+          }
+          if (-not $txExe) {
             $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Converter*.exe" | Select-Object -First 1
           }
-          if (-not $txExe) { throw "Grendizer_TX_Tools.exe missing from dist" }
+          if (-not $txExe) { throw "Grendizer_TX_Tools_Omega.exe missing from dist" }
           Copy-Item $txExe.FullName $txDist/ -Force
           # Qt runtime already deployed next to both exes in build/bin → copied into dist;
           # pull platforms / imageformats / styles / qt.conf from dist.
@@ -358,7 +363,7 @@ jobs:
           if (-not (Get-ChildItem $txDist -Filter "OpenColorIO*.dll" -ErrorAction SilentlyContinue)) {
             throw "OpenColorIO.dll missing from TX Tools package"
           }
-          Write-Host "TX Tools–only package contents:"
+          Write-Host "TX Tools Omega package contents:"
           Get-ChildItem $txDist -Recurse | Select-Object -ExpandProperty FullName
 
       - name: Render a frame with the packaged exe
@@ -379,7 +384,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Grendizer-TX-Tools-windows-x64-${{ env.BUILD_ID }}
+          name: Grendizer-TX-Tools-Omega-windows-x64-${{ env.BUILD_ID }}
           path: dist-tx-converter/
 
       - uses: actions/upload-artifact@v4
