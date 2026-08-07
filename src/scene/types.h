@@ -292,7 +292,8 @@ struct LightData {
     int type = kLightDistant;
     float intensity = 1.0f;
     float exposure = 0.0f;
-    float pad0 = 0.0f;
+    // Kelvin; 0 = off (use RGB color only). Spectral integrators: blackbody × tint.
+    float colorTemperatureK = 0.0f;
 
     Vec3 color{1.0f, 1.0f, 1.0f};
     float width = 1.0f;   // rect width
@@ -550,10 +551,14 @@ struct RenderSettingsData {
     // Master switch: off = render cages, skip subdiv + geometric displacement.
     int enableDisplacement = 1;
 
-    // PT Spectral (hero-wavelength). Only used when integrator == Spectral Path.
+    // PT Spectral / BDPT Spectral.
     int spectralSamples = 4;      // hero λ count (UI: 2..16)
     int spectralBins = 16;        // fixed bins for multilayer spectral EXR (8..32)
     int spectralExr = 0;          // write spectral multilayer EXR on save when set
+    // Beauty conversion color space (default linear sRGB). See SpectralColorSpace.
+    int spectralColorSpace = 0;   // kSpectralColorSpaceSrgb
+    // Wavelength sampling: 0 = visible importance (pbrt), 1 = uniform stratified.
+    int spectralWavelengthSampling = 0;
     // Film: false-color debug from spectral bins (PT Spectral). Diagnostic group.
     int filmFalseColor = 0;
     int filmFalseColorBin = 0;    // which bin to visualise (0 .. spectralBins-1)

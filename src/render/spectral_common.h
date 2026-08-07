@@ -8,6 +8,7 @@
 #include "render/shading.h"
 #include "render/spectrum.h"
 #include "render/spectrum_rgb.h"
+#include "render/spectrum_types.h"
 
 namespace sol {
 
@@ -33,11 +34,11 @@ struct SpectralBinBuffer {
         const float span = kSpectrumLambdaMax - kSpectrumLambdaMin;
         const int n = std::min(s.n, w.n);
         for (int i = 0; i < n; ++i) {
+            if (w.pdf[i] <= 0.0f) continue;
             float t = (w.lambda[i] - kSpectrumLambdaMin) / span;
             int bin = int(t * float(bins));
             bin = std::clamp(bin, 0, bins - 1);
-            const float pdf = srMax(w.pdf[i], 1e-8f);
-            accum[base + size_t(bin)] += s.values[i] / pdf;
+            accum[base + size_t(bin)] += s.values[i] / w.pdf[i];
         }
     }
 
@@ -48,14 +49,46 @@ struct SpectralBinBuffer {
     }
 };
 
+// MC path weights / NEE aggregates — energy-safe under multiply.
 inline SampledSpectrum upsampleRgb(Vec3 rgb, const SampledWavelengths& w) {
-    // Hybrid RGB-BSDF spectral PT multiplies these spectra along the path.
-    // Linear lobes keep energy: Jakob sigmoid does not (see spectrum_rgb.h).
     return rgbToSpectrumLinear(rgb, w);
 }
 
-// Cap spectral path contributions in linear radiance (Arnold-style), matching
-// RGB clampContribution: scale all λ bins by clamp/max so chromaticity is kept.
+// Authored reflectance (textures / albedo on hit) — Jakob albedo table.
+inline SampledSpectrum upsampleAlbedo(Vec3 rgb, const SampledWavelengths& w) {
+    return rgbToSpectrumReflectance(rgb, w);
+}
+
+// Authored emission / lights / env — Jakob illuminant table.
+inline SampledSpectrum upsampleEmission(Vec3 rgb, const SampledWavelengths& w) {
+    return rgbToSpectrumEmission(rgb, w);
+}
+
+// Light spectrum: optional blackbody CCT, else Jakob illuminant of emittedRadiance().
+inline SampledSpectrum lightEmissionSpectrum(const LightData& light, const SampledWavelengths& w) {
+    const Vec3 rgb = light.emittedRadiance();
+    if (light.colorTemperatureK > 50.0f) {
+        BlackbodySpectrum bb(light.colorTemperatureK);
+        SampledSpectrum s = bb.sample(w);
+        // Match luminance of RGB emission under the same wavelength samples.
+        const Vec3 bbRgb = spectrumToRgb(s, w);
+        const float bbLum = 0.2126f * bbRgb.x + 0.7152f * bbRgb.y + 0.0722f * bbRgb.z;
+        const float wantLum = 0.2126f * rgb.x + 0.7152f * rgb.y + 0.0722f * rgb.z;
+        s *= wantLum / srMax(bbLum, 1e-8f);
+        // Tint with light.color (white → no change).
+        const Vec3 tint = light.color;
+        if (fabsf(tint.x - 1.0f) > 1e-4f || fabsf(tint.y - 1.0f) > 1e-4f ||
+            fabsf(tint.z - 1.0f) > 1e-4f) {
+            SampledSpectrum t = rgbToSpectrumEmission(tint, w);
+            const float tAvg = srMax(spectrumAvg(t), 1e-8f);
+            for (int i = 0; i < s.n; ++i) s.values[i] *= t.values[i] / tAvg;
+        }
+        return s;
+    }
+    return upsampleEmission(rgb, w);
+}
+
+// Cap spectral path contributions in linear radiance (Arnold-style).
 inline SampledSpectrum clampSpectrumIndirect(SampledSpectrum s, float clampValue) {
     if (clampValue <= 0.0f) return s;
     float m = 0.0f;
@@ -66,8 +99,8 @@ inline SampledSpectrum clampSpectrumIndirect(SampledSpectrum s, float clampValue
     return s;
 }
 
-// Lift an RGB BSDF weight; conductors use η/κ, dispersing dielectrics get per-λ Fresnel.
-// baseIor = undispersed IOR; heroIdx selects the wavelength that drove refraction sampling.
+// Lift an RGB BSDF weight; conductors use η/κ, dispersing dielectrics get per-λ Fresnel,
+// thin-film uses continuous-λ Airy (spectral integrators only).
 inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, Vec3 wo, Vec3 wi,
                                       Vec3 rgbWeight, const SampledWavelengths& w, float baseIor,
                                       int heroIdx) {
@@ -79,10 +112,42 @@ inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, V
         if (length(wh) < 1e-6f) return base;
         SampledSpectrum s(w.n);
         for (int i = 0; i < w.n; ++i) {
+            if (w.pdf[i] <= 0.0f) {
+                s.values[i] = 0.0f;
+                continue;
+            }
             const SpectralNk nk = nkFromRgb(mat.conductorEta, mat.conductorK, w.lambda[i]);
             const float F = conductorFresnel(dot(wh, wo), nk.eta, nk.k);
             const float mag = (rgbWeight.x + rgbWeight.y + rgbWeight.z) * (1.0f / 3.0f);
             s.values[i] = mag * (0.25f + 0.75f * F);
+        }
+        return s;
+    }
+
+    // Continuous-λ thin-film: replace RGB 3λ Airy baked into weight with per-λ Airy ratio.
+    if (mat.thinFilmThickness > 0.5f) {
+        const Vec3 wh = normalize(wo + wi);
+        const float cosTheta =
+            clampf(length(wh) > 1e-6f ? dot(wh, wo) : dot(wo, frame.n), 0.0f, 1.0f);
+        const float metallic = saturatef(mat.metallic);
+        const Vec3 baseCol = vmax(Vec3(0.0f), mat.baseColor);
+        const float dielectricF0 = 0.08f * saturatef(mat.specular);
+        const Vec3 f0 = lerp(Vec3(dielectricF0) * vmax(Vec3(0.0f), mat.specularColor), baseCol, metallic);
+        const float r23 =
+            (sqrtf(clampf(f0.x, 0.0f, 1.0f)) + sqrtf(clampf(f0.y, 0.0f, 1.0f)) +
+             sqrtf(clampf(f0.z, 0.0f, 1.0f))) *
+            (1.0f / 3.0f);
+        const Vec3 Frgb = thinFilmFresnel(f0, cosTheta, mat.thinFilmIor, mat.thinFilmThickness);
+        const float FrgbAvg = srMax((Frgb.x + Frgb.y + Frgb.z) * (1.0f / 3.0f), 1e-4f);
+        SampledSpectrum s = base;
+        for (int i = 0; i < w.n; ++i) {
+            if (w.pdf[i] <= 0.0f) {
+                s.values[i] = 0.0f;
+                continue;
+            }
+            const float Fλ = airyReflectanceScalar(cosTheta, mat.thinFilmIor, mat.thinFilmThickness,
+                                                   w.lambda[i], r23);
+            s.values[i] *= Fλ / FrgbAvg;
         }
         return s;
     }
@@ -100,6 +165,10 @@ inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, V
             lobe(dielectricIorFromAbbe(baseIor, mat.dispersionAbbe, w.lambda[heroIdx]));
         SampledSpectrum s = base;
         for (int i = 0; i < w.n; ++i) {
+            if (w.pdf[i] <= 0.0f) {
+                s.values[i] = 0.0f;
+                continue;
+            }
             const float eta = dielectricIorFromAbbe(baseIor, mat.dispersionAbbe, w.lambda[i]);
             s.values[i] *= lobe(eta) / heroLobe;
         }

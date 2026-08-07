@@ -549,6 +549,11 @@ public:
                          .withGroup("Light")
                          .withTooltip("Uncheck to turn this light off without deleting the node"));
         addParameter(Parameter::makeColor("color", "Color", Vec3(1.0f, 1.0f, 1.0f)).withGroup("Light"));
+        addParameter(Parameter::makeFloat("colortemperature", "Color Temperature (K)", 0.0, 0.0, 20000.0)
+                         .withGroup("Light")
+                         .withTooltip("Blackbody CCT in Kelvin for spectral integrators.\n"
+                                      "0 = off (RGB Color only). Typical: 2700 warm, 6500 daylight.\n"
+                                      "RGB Path Tracer ignores this (uses Color)."));
         addParameter(Parameter::makeFloat("intensity", "Intensity", defaultIntensity(), 0.0, 100.0, false)
                          .withGroup("Light"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -10.0, 10.0).withGroup("Light"));
@@ -625,6 +630,7 @@ public:
         light.color = vec3Value("color", Vec3(1.0f));
         light.intensity = float(floatValue("intensity", defaultIntensity()));
         light.exposure = float(floatValue("exposure", 0.0));
+        light.colorTemperatureK = float(floatValue("colortemperature", 0.0));
         light.shadowEnable = boolValue("shadows", true) ? 1 : 0;
         light.selfShadowEnable = boolValue("selfshadows", false) ? 1 : 0;
         light.contributeCaustics = boolValue("caustics", true) ? 1 : 0;
@@ -925,6 +931,18 @@ public:
                          .withVisibleWhen("integrator==4||integrator==5")
                          .withTooltip("When saving EXR with a spectral integrator, also write "
                                       "fixed spectral bin layers (S0..Sn)."));
+        addParameter(Parameter::makeMenu("spectralcolorspace", "Spectral Color Space",
+                                         {"sRGB Linear", "ACEScg", "Rec.2020", "Display P3"}, 0)
+                         .withGroup("Engine")
+                         .withVisibleWhen("integrator==4||integrator==5")
+                         .withTooltip("Color space for spectral → beauty RGB (default sRGB Linear).\n"
+                                      "Uses tabulated CIE XYZ + RGBColorSpace matrices."));
+        addParameter(Parameter::makeMenu("spectralwavesamp", "Wavelength Sampling",
+                                         {"Visible (importance)", "Uniform"}, 0)
+                         .withGroup("Engine")
+                         .withVisibleWhen("integrator==4||integrator==5")
+                         .withTooltip("Visible: pbrt-style PDF peaked near 538 nm (less colour noise).\n"
+                                      "Uniform: stratified across 360–830 nm."));
         addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
@@ -1155,6 +1173,8 @@ public:
         settings.spectralSamples = std::clamp(intValue("spectralsamples", 4), 2, 16);
         settings.spectralBins = std::clamp(intValue("spectralbins", 16), 8, 32);
         settings.spectralExr = boolValue("spectralexr", false) ? 1 : 0;
+        settings.spectralColorSpace = std::clamp(intValue("spectralcolorspace", 0), 0, 3);
+        settings.spectralWavelengthSampling = std::clamp(intValue("spectralwavesamp", 0), 0, 1);
         settings.workingSpace = std::clamp(intValue("workingspace", 1), 0, 1);
         {
             // Menu indices 0/1/2 → bit depths 8/16/32.

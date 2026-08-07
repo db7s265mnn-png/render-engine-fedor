@@ -35,7 +35,7 @@ struct WalkConfig {
 template <typename Tracer>
 SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bdpt::Vert* path,
                       SampledSpectrum* betaPath, int count, Vec3 origin, Vec3 dir, float pdfDirSa,
-                      int maxVerts, const WalkConfig& cfg, const SampledWavelengths& waves,
+                      int maxVerts, const WalkConfig& cfg, SampledWavelengths& waves,
                       int heroIdx) {
     using namespace bdpt;
     SampledSpectrum beta = betaPath[count - 1];
@@ -44,6 +44,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
     RayShadeKind rayKind = RayShadeKind::Camera;
     int currentMedium = -1;
     const float heroLambda = waves.lambda[std::clamp(heroIdx, 0, waves.n - 1)];
+    bool didScatter = false;
 
     while (count < maxVerts) {
         Vert& prev = path[count - 1];
@@ -272,6 +273,10 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
 
         beta *= weight;
         if (!spectrumIsFinite(beta) || spectrumNearBlack(beta)) break;
+        if (cfg.eyePath && !didScatter) {
+            waves.terminateSecondary();
+            didScatter = true;
+        }
         pdfSaFwd = bs.specular ? 0.0f : bs.pdf;
         origin = offsetRayOrigin(cur.p, cur.ng, wiWorld);
         dir = wiWorld;
@@ -293,7 +298,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
 template <typename Tracer>
 inline Vec3 traceRadianceBdptSpectral(
     const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction, Rng& rng,
-    const SampledWavelengths& waves, int heroIdx,
+    SampledWavelengths& waves, int heroIdx,
 #if SOLSTICE_HAVE_OPENPGL
     PathGuiding::ThreadState* guiding,
 #endif
@@ -323,7 +328,15 @@ inline Vec3 traceRadianceBdptSpectral(
         float pdfDirSa = 0.0f;
         if (startLightPath(scene, rng, light[0], emitDir, pdfDirSa)) {
             nLight = 1;
-            lightBeta[0] = upsampleRgb(light[0].beta, waves);
+            if (light[0].lightIndex >= 0) {
+                lightBeta[0] = lightEmissionSpectrum(scene.lights[light[0].lightIndex], waves);
+                const float rgbLum = length(light[0].beta);
+                const Vec3 sRgb = spectrumToRgb(lightBeta[0], waves);
+                const float sLum = length(sRgb);
+                if (sLum > 1e-8f && rgbLum > 0.0f) lightBeta[0] *= rgbLum / sLum;
+            } else {
+                lightBeta[0] = upsampleEmission(light[0].beta, waves);
+            }
             light[0].beta = spectrumToRgb(lightBeta[0], waves);
             lightOriginDelta =
                 light[0].lightIndex >= 0 && scene.lights[light[0].lightIndex].type == kLightPoint;
@@ -440,7 +453,7 @@ inline Vec3 traceRadianceBdptSpectral(
                 if (front || v.mat.doubleSided) {
                     SampledSpectrum c =
                         eyeBeta[t - 1] *
-                        upsampleRgb(v.mat.emissionColor * v.mat.emissionStrength, waves);
+                        upsampleEmission(v.mat.emissionColor * v.mat.emissionStrength, waves);
                     if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
                     if (spectrumIsFinite(c)) radiance += c;
                 }
@@ -796,7 +809,7 @@ inline Vec3 traceRadianceBdptSpectral(
     for (int i = 0; i < radiance.n; ++i)
         radiance.values[i] = srMax(0.0f, radiance.values[i]);
     if (outSpectrum) *outSpectrum = radiance;
-    const Vec3 rgb = spectrumToRgb(radiance, waves);
+    const Vec3 rgb = spectrumToRgb(radiance, waves, settings.spectralColorSpace);
     return isFinite(rgb) ? rgb : Vec3(0.0f);
 }
 
@@ -813,10 +826,14 @@ public:
                  SpectralBinBuffer* bins) const {
         const int sampleCount =
             std::clamp(ctx.scene->settings.spectralSamples, 2, kMaxSpectrumSamples);
-        const SampledWavelengths waves =
-            SampledWavelengths::sampleUniform(sampleCount, ctx.rng->nextFloat());
-        const int heroIdx =
+        SampledWavelengths waves =
+            (ctx.scene->settings.spectralWavelengthSampling == 1)
+                ? SampledWavelengths::sampleUniform(sampleCount, ctx.rng->nextFloat())
+                : SampledWavelengths::sampleVisible(sampleCount, ctx.rng->nextFloat());
+        const int heroPick =
             std::clamp(int(ctx.rng->nextFloat() * float(waves.n)), 0, waves.n - 1);
+        waves.promoteHero(heroPick);
+        const int heroIdx = 0;
         SampledSpectrum radiance = SampledSpectrum::zero(waves.n);
 #if SOLSTICE_HAVE_OPENPGL
         const Vec3 rgb = traceRadianceBdptSpectral(

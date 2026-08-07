@@ -39,6 +39,7 @@
 #include "render/shading.h"
 #include "render/spectrum.h"
 #include "render/spectrum_rgb.h"
+#include "render/spectrum_types.h"
 #include "scene/scene.h"
 #include "scene/displace.h"
 #include "scene/tessellate.h"
@@ -3103,6 +3104,32 @@ void testSpectralHeroBasics() {
     check(eta.x > 0.0f && k.x > 0.0f, "Au η/κ rgb seed");
     SpectralNk nk550 = nkFromRgb(eta, k, 550.0f);
     check(nk550.eta > 0.0f && nk550.k > 0.0f, "nkFromRgb");
+
+    // Tabulated CIE + TerminateSecondary + blackbody + visible sampling.
+    {
+        float cx, cy, cz;
+        cieXyzAtLambda(555.0f, cx, cy, cz);
+        check(cy > 0.9f && cy <= 1.01f, "CIE Y peak near 555");
+        SampledWavelengths vis = SampledWavelengths::sampleVisible(4, 0.3f);
+        check(vis.pdf[0] > 0.0f, "visible pdf");
+        vis.promoteHero(2);
+        const float pdf0 = vis.pdf[0];
+        vis.terminateSecondary();
+        check(vis.secondaryTerminated(), "secondary terminated");
+        check(std::fabs(vis.pdf[0] - pdf0 / 4.0f) < 1e-6f, "terminate scales pdf[0]");
+        check(vis.pdf[1] == 0.0f && vis.pdf[2] == 0.0f, "secondary pdf zero");
+        BlackbodySpectrum bb(6500.0f);
+        SampledSpectrum bbs = bb.sample(w);
+        check(spectrumAvg(bbs) > 0.1f, "blackbody sample");
+        ConstantSpectrum ones(1.0f);
+        check(ones.sample(w).values[0] == 1.0f, "constant spectrum");
+        Vec3 aces = spectrumToRgb(white, w, kSpectralColorSpaceAcesCg);
+        check(aces.x > 0.0f && aces.y > 0.0f && aces.z > 0.0f, "ACEScg convert");
+        const float fBlue = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 450.0f, 0.2f);
+        const float fRed = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 650.0f, 0.2f);
+        check(std::fabs(fBlue - fRed) > 1e-4f, "thin-film Airy chromatic");
+    }
+
     std::printf("  spectral hero ok rgb=(%.3f,%.3f,%.3f) grey=(%.3f,%.3f,%.3f) hdri=(%.3f,%.3f,%.3f) "
                 "nB=%.4f nR=%.4f\n",
                 rgb.x, rgb.y, rgb.z, greyOut.x, greyOut.y, greyOut.z, hdriOut.x, hdriOut.y, hdriOut.z,

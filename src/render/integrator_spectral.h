@@ -1,6 +1,6 @@
 // PT Spectral — hero-wavelength unidirectional path tracer (CPU / Embree).
-// v1: surface PT + NEE/MIS, no SSS / MNEE / photons / guiding.
-// RGB BSDF sampling reused; colours lifted via smooth RGB→spectrum upsample.
+// RGB BSDF sampling reused; authored colours via Jakob; MC weights linear.
+// Wavelength PDF + TerminateSecondary after first scattering (pbrt-v4).
 #pragma once
 
 #include <algorithm>
@@ -26,16 +26,21 @@ public:
         const RenderSettingsData& settings = scene.settings;
 
         const int nLambda = std::clamp(settings.spectralSamples, 2, kMaxSpectrumSamples);
-        const SampledWavelengths waves = SampledWavelengths::sampleUniform(nLambda, rng.nextFloat());
-        // Hero λ for geometric dispersion (same role as RGB hero channel). Average λ
-        // collapses Abbe to ~nd and kills visible rainbows — pick one sample instead.
-        const int heroIdx = std::clamp(int(rng.nextFloat() * float(waves.n)), 0, waves.n - 1);
+        SampledWavelengths waves =
+            (settings.spectralWavelengthSampling == 1)
+                ? SampledWavelengths::sampleUniform(nLambda, rng.nextFloat())
+                : SampledWavelengths::sampleVisible(nLambda, rng.nextFloat());
+        // Hero λ for geometric dispersion — promote to slot 0 before TerminateSecondary.
+        const int heroPick = std::clamp(int(rng.nextFloat() * float(waves.n)), 0, waves.n - 1);
+        waves.promoteHero(heroPick);
+        const int heroIdx = 0;
         const float heroLambda = waves.lambda[heroIdx];
 
         SampledSpectrum radiance = SampledSpectrum::zero(waves.n);
         SampledSpectrum throughput = SampledSpectrum::constant(waves.n, 1.0f);
         float bsdfPdf = 0.0f;
         bool specularBounce = true;
+        bool didScatter = false;
         int depth = 0;
         int passThrough = 0;
         Vec3 origin = ctx.origin;
@@ -60,7 +65,14 @@ public:
                                     lightSelectionPdfIndex(scene, origin, scene.domeLightIndex);
                                 weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                             }
-                            SampledSpectrum contrib = throughput * upsampleRgb(envL, waves) * weight;
+                            // Env: RGB texture → Jakob illuminant (or blackbody if CCT set).
+                            SampledSpectrum envS =
+                                (dome.colorTemperatureK > 50.0f)
+                                    ? lightEmissionSpectrum(dome, waves) *
+                                          (length(envL) /
+                                           srMax(1e-6f, length(dome.emittedRadiance())))
+                                    : upsampleEmission(envL, waves);
+                            SampledSpectrum contrib = throughput * envS * weight;
                             if (depth > 0 && !specularBounce)
                                 contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                             radiance += contrib;
@@ -93,7 +105,11 @@ public:
                             lightSelectionPdfIndex(scene, origin, si.lightIndex);
                         weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                     }
-                    SampledSpectrum contrib = throughput * upsampleRgb(emitted, waves) * weight;
+                    SampledSpectrum Le = lightEmissionSpectrum(light, waves);
+                    // areaLightEmission may include cosine/visibility scaling vs emittedRadiance.
+                    const float rgbScale =
+                        length(emitted) / srMax(1e-6f, length(light.emittedRadiance()));
+                    SampledSpectrum contrib = throughput * Le * (weight * rgbScale);
                     if (depth > 0 && !specularBounce)
                         contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                     radiance += contrib;
@@ -113,8 +129,8 @@ public:
             if (mat.emissionStrength > 0.0f && !isBlack(mat.emissionColor)) {
                 const bool frontFacing = dot(si.ns, -direction) > 0.0f;
                 if (frontFacing || mat.doubleSided)
-                    radiance +=
-                        throughput * upsampleRgb(mat.emissionColor * mat.emissionStrength, waves);
+                    radiance += throughput *
+                                upsampleEmission(mat.emissionColor * mat.emissionStrength, waves);
             }
 
             if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
@@ -129,7 +145,6 @@ public:
             const Vec3 wo = -direction;
             const Frame frame(si.ns);
 
-            // Geometric dispersion: bend with hero λ (per-path). Keep base IOR for spectral lift.
             const float baseIor = mat.ior;
             if (mat.dispersionAbbe > 0.0f && mat.transmission > 1e-4f) {
                 mat.ior = dielectricIorFromAbbe(baseIor, mat.dispersionAbbe, heroLambda);
@@ -149,14 +164,18 @@ public:
             if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
 
             const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
-            // Indirect Clamp is applied to path contributions only (Arnold-style
-            // pixel radiance) — not to BSDF bounce weights.
             SampledSpectrum wSpec =
                 liftBsdfWeight(mat, frame, wo, wiWorld, bs.weight, waves, baseIor, heroIdx);
             throughput *= wSpec;
             bsdfPdf = bs.pdf;
             specularBounce = bs.specular;
             rayKind = nextRayShadeKind(bs, computeLobes(mat));
+
+            // First any scattering → terminate secondary wavelengths (pbrt).
+            if (!didScatter) {
+                waves.terminateSecondary();
+                didScatter = true;
+            }
 
             origin = offsetRayOrigin(si.p, si.ng, wiWorld);
             direction = wiWorld;
@@ -171,7 +190,7 @@ public:
         }
 
         if (bins) bins->addSample(x, y, radiance, waves);
-        Vec3 rgb = spectrumToRgb(radiance, waves);
+        Vec3 rgb = spectrumToRgb(radiance, waves, settings.spectralColorSpace);
         return isFinite(rgb) ? rgb : Vec3(0.0f);
     }
 };

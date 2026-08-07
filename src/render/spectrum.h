@@ -1,5 +1,4 @@
-// Hero-wavelength SampledSpectrum (PBRT-style) for PT Spectral.
-// RGB framebuffer conversion uses CIE XYZ → sRGB (D65).
+// Hero-wavelength SampledSpectrum (PBRT-v4 style) for spectral integrators.
 #pragma once
 
 #include <algorithm>
@@ -7,6 +6,8 @@
 #include <cstdint>
 
 #include "core/math.h"
+#include "render/cie_tables.h"
+#include "render/color_space.h"
 
 namespace sol {
 
@@ -19,19 +20,65 @@ struct SampledWavelengths {
     float pdf[kMaxSpectrumSamples]{};
     int n = 0;
 
+    // Stratified uniform wavelengths on [λmin, λmax].
     static SampledWavelengths sampleUniform(int count, float uPrimary) {
         SampledWavelengths w;
         w.n = std::clamp(count, 1, kMaxSpectrumSamples);
         const float span = kSpectrumLambdaMax - kSpectrumLambdaMin;
         const float pdf = 1.0f / span;
-        // Stratified hero wavelengths across the visible range.
         const float offset = std::clamp(uPrimary, 0.0f, 0.999999f);
         for (int i = 0; i < w.n; ++i) {
             const float t = (float(i) + offset) / float(w.n);
             w.lambda[i] = kSpectrumLambdaMin + t * span;
-            w.pdf[i] = pdf;  // uniform density on [λmin, λmax]
+            w.pdf[i] = pdf;
         }
         return w;
+    }
+
+    // Importance-sample visible wavelengths (pbrt SampleVisible — CIE Y–like PDF).
+    static SampledWavelengths sampleVisible(int count, float uPrimary) {
+        SampledWavelengths w;
+        w.n = std::clamp(count, 1, kMaxSpectrumSamples);
+        for (int i = 0; i < w.n; ++i) {
+            float up = uPrimary + float(i) / float(w.n);
+            if (up > 1.0f) up -= 1.0f;
+            w.lambda[i] = sampleVisibleWavelength(up);
+            w.pdf[i] = visibleWavelengthPdf(w.lambda[i]);
+        }
+        return w;
+    }
+
+    // pbrt VisibleWavelengthsPDF / SampleVisibleWavelengths.
+    static float visibleWavelengthPdf(float lambdaNm) {
+        if (lambdaNm < kSpectrumLambdaMin || lambdaNm > kSpectrumLambdaMax) return 0.0f;
+        const float x = 0.0072f * (lambdaNm - 538.0f);
+        const float c = coshf(x);
+        return 0.0039398042f / (c * c);
+    }
+    static float sampleVisibleWavelength(float u) {
+        const float x = clampf(0.85691062f - 1.82750197f * u, -0.999999f, 0.999999f);
+        return 538.0f - 138.888889f * (0.5f * logf((1.0f + x) / (1.0f - x)));
+    }
+
+    // Move hero sample to slot 0 (for TerminateSecondary + geometric dispersion).
+    void promoteHero(int heroIdx) {
+        heroIdx = std::clamp(heroIdx, 0, std::max(0, n - 1));
+        if (heroIdx == 0 || n <= 0) return;
+        std::swap(lambda[0], lambda[heroIdx]);
+        std::swap(pdf[0], pdf[heroIdx]);
+    }
+
+    bool secondaryTerminated() const {
+        for (int i = 1; i < n; ++i)
+            if (pdf[i] != 0.0f) return false;
+        return true;
+    }
+
+    // After first scattering: keep λ₀ only; scale pdf so ToXYZ stays unbiased (pbrt).
+    void terminateSecondary() {
+        if (secondaryTerminated()) return;
+        for (int i = 1; i < n; ++i) pdf[i] = 0.0f;
+        pdf[0] /= float(std::max(1, n));
     }
 };
 
@@ -98,44 +145,49 @@ inline float spectrumAvg(const SampledSpectrum& s) {
     return sum / float(s.n);
 }
 
-// CIE 1931 2° XYZ matching (5 nm), 360..830 inclusive → 95 entries.
+// Safe divide for terminated wavelengths (pdf == 0 → 0).
+inline float safeDivSpectrum(float num, float pdf) {
+    return (pdf > 0.0f) ? (num / pdf) : 0.0f;
+}
+
+// Tabulated CIE (preferred). Kept name cieXyzAtLambda for call-site compat.
 inline void cieXyzAtLambda(float lambda, float& x, float& y, float& z) {
-    // Compact analytic fit (Wyman et al. / multi-lobe Gaussians) — good enough for hero PT.
-    auto gauss = [](float lam, float mu, float s1, float s2) {
-        const float g = lam < mu ? s1 : s2;
-        const float d = (lam - mu) / g;
-        return expf(-0.5f * d * d);
-    };
-    x = 1.065f * gauss(lambda, 595.8f, 33.33f, 37.05f) + 0.366f * gauss(lambda, 446.8f, 16.01f, 22.40f);
-    y = 1.014f * gauss(lambda, 556.7f, 46.07f, 40.83f);
-    z = 1.839f * gauss(lambda, 449.1f, 19.44f, 28.54f);
+    cieXyzAtLambdaTabulated(lambda, x, y, z);
 }
 
-// XYZ → linear sRGB (D65).
-inline Vec3 xyzToLinearSrgb(float X, float Y, float Z) {
-    float r = 3.2404542f * X - 1.5371385f * Y - 0.4985314f * Z;
-    float g = -0.9692660f * X + 1.8760108f * Y + 0.0415560f * Z;
-    float b = 0.0556434f * X - 0.2040259f * Y + 1.0572252f * Z;
-    return Vec3(r, g, b);
+inline Xyz spectrumToXyz(const SampledSpectrum& s, const SampledWavelengths& w) {
+    if (s.n <= 0 || w.n <= 0) return {};
+    const int n = std::min(s.n, w.n);
+    float X = 0.0f, Y = 0.0f, Z = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        float cx, cy, cz;
+        cieXyzAtLambda(w.lambda[i], cx, cy, cz);
+        const float invPdf = safeDivSpectrum(1.0f, w.pdf[i]);
+        X += s.values[i] * cx * invPdf;
+        Y += s.values[i] * cy * invPdf;
+        Z += s.values[i] * cz * invPdf;
+    }
+    const float invN = 1.0f / float(n);
+    // Absolute XYZ scale (pbrt): divide by ∫ ȳ(λ) dλ.
+    const float scale = invN / cie_tab::kCieYIntegral1nm;
+    return Xyz(X * scale, Y * scale, Z * scale);
 }
 
-// SampledSpectrum → linear sRGB, dividing out wavelength pdfs.
-// White-balances against a unit (equal-energy) spectrum under the same samples so
-// flat spectra map to neutral RGB (fixes the pink cast from Y-only normalisation).
-inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w) {
+// SampledSpectrum → RGB. Tabulated CIE CMFs + RGBColorSpace, with equal-energy
+// white-balance so flat spectra stay neutral under Jakob-authored RGB assets.
+inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
+                          const RGBColorSpace& cs = colorSpaceSrgb()) {
     if (s.n <= 0 || w.n <= 0) return Vec3(0.0f);
     const int n = std::min(s.n, w.n);
     float X = 0.0f, Y = 0.0f, Z = 0.0f;
     float Xw = 0.0f, Yw = 0.0f, Zw = 0.0f;
     for (int i = 0; i < n; ++i) {
-        const float pdf = srMax(w.pdf[i], 1e-8f);
         float cx, cy, cz;
         cieXyzAtLambda(w.lambda[i], cx, cy, cz);
-        const float invPdf = 1.0f / pdf;
+        const float invPdf = safeDivSpectrum(1.0f, w.pdf[i]);
         X += s.values[i] * cx * invPdf;
         Y += s.values[i] * cy * invPdf;
         Z += s.values[i] * cz * invPdf;
-        // Reference white: unit spectrum under the same samples.
         Xw += cx * invPdf;
         Yw += cy * invPdf;
         Zw += cz * invPdf;
@@ -147,7 +199,6 @@ inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w)
     Xw *= invN;
     Yw *= invN;
     Zw *= invN;
-    // Chromatic white-point: unit spectrum → relative XYZ (1,1,1).
     if (Xw > 1e-8f && Yw > 1e-8f && Zw > 1e-8f) {
         X /= Xw;
         Y /= Yw;
@@ -157,21 +208,22 @@ inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w)
         Y /= Yw;
         Z /= Yw;
     }
-    // (1,1,1) XYZ through the D65 matrix is not (1,1,1) RGB — renormalise so a
-    // flat spectrum lands on neutral white and greys match Path Tracer albedo.
-    Vec3 rgb = xyzToLinearSrgb(X, Y, Z);
-    const Vec3 whiteRgb = xyzToLinearSrgb(1.0f, 1.0f, 1.0f);
+    Vec3 rgb = cs.toRgb(Xyz(X, Y, Z));
+    const Vec3 whiteRgb = cs.toRgb(Xyz(1.0f, 1.0f, 1.0f));
     rgb.x /= srMax(1e-8f, whiteRgb.x);
     rgb.y /= srMax(1e-8f, whiteRgb.y);
     rgb.z /= srMax(1e-8f, whiteRgb.z);
     return Vec3(srMax(0.0f, rgb.x), srMax(0.0f, rgb.y), srMax(0.0f, rgb.z));
 }
 
+inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w, int colorSpaceId) {
+    return spectrumToRgb(s, w, colorSpaceById(colorSpaceId));
+}
+
 // False-color: map a spectral bin / wavelength to a visible debug color.
 inline Vec3 wavelengthToFalseColor(float lambdaNm) {
     const float t = saturatef((lambdaNm - kSpectrumLambdaMin) / (kSpectrumLambdaMax - kSpectrumLambdaMin));
-    // Smooth hue sweep: violet → blue → cyan → green → yellow → red.
-    const float h = (1.0f - t) * 0.75f;  // 270° → 0° in HSV-ish
+    const float h = (1.0f - t) * 0.75f;
     const float s = 1.0f, v = 1.0f;
     const float c = v * s;
     const float x = c * (1.0f - fabsf(fmodf(h * 6.0f, 2.0f) - 1.0f));
