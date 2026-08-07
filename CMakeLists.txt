@@ -7,6 +7,7 @@ set(SOLSTICE_TX_TOOLS_OMEGA_NAME "Grendizer_TX_Tools_Omega" CACHE STRING "TX Too
 # Legacy alias kept for older scripts; Alpha/Omega names are the real outputs.
 set(SOLSTICE_TX_CONVERTER_NAME "${SOLSTICE_TX_TOOLS_ALPHA_NAME}" CACHE STRING "User-visible TX Tools app name")
 
+# TX Tools editions (both ON by default; Omega is Windows-only).
 option(SOLSTICE_BUILD_TX_TOOLS_ALPHA "Build TX Tools Alpha (Qt viewport)" ON)
 option(SOLSTICE_BUILD_TX_TOOLS_OMEGA "Build TX Tools Omega (DX12 viewport, Windows)" ON)
 

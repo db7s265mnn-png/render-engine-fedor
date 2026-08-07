@@ -13,10 +13,12 @@ plus a texture viewer (LDR / HDR / `.tx`, UDIM timeline).
 Convert UI, Source/Output, UDIM timeline, grade, and channels are shared — feature parity between editions.
 Omega v1 does not re-implement color on the GPU; display is baked on CPU then uploaded.
 
-CMake options:
+CMake options (both default **ON**; Omega is Windows-only):
 
 - `-DSOLSTICE_BUILD_TX_TOOLS_ALPHA=ON|OFF`
-- `-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON|OFF` (ignored on non-Windows)
+- `-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON|OFF`
+
+CI always builds and packages **both** editions.
 
 ## Usage
 

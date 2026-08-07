@@ -199,7 +199,7 @@ jobs:
             -DSOLSTICE_ENABLE_OPTIX=OFF `
             -DSOLSTICE_ENABLE_OCIO=ON `
             -DSOLSTICE_MODERN_CPU=ON `
-            -DSOLSTICE_BUILD_TX_TOOLS_ALPHA=OFF `
+            -DSOLSTICE_BUILD_TX_TOOLS_ALPHA=ON `
             -DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON
 
       - name: Build
@@ -305,66 +305,57 @@ jobs:
           & "dist/maketx.exe" --help | Select-Object -First 3
           & "dist/oiiotool.exe" --help | Select-Object -First 3
 
-          # --- TX Tools Omega–only package (no Render / MaterialX / examples) ---
-          $txDist = "dist-tx-converter"
-          if (Test-Path $txDist) { Remove-Item -Recurse -Force $txDist }
-          New-Item -ItemType Directory -Force -Path $txDist | Out-Null
-          $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Tools_Omega*.exe" | Select-Object -First 1
-          if (-not $txExe) {
-            # Fallbacks during rename transition
-            $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Tools*.exe" | Select-Object -First 1
-          }
-          if (-not $txExe) {
-            $txExe = Get-ChildItem -Path dist -Filter "Grendizer_TX_Converter*.exe" | Select-Object -First 1
-          }
-          if (-not $txExe) { throw "Grendizer_TX_Tools_Omega.exe missing from dist" }
-          Copy-Item $txExe.FullName $txDist/ -Force
-          # Qt runtime already deployed next to both exes in build/bin → copied into dist;
-          # pull platforms / imageformats / styles / qt.conf from dist.
-          foreach ($dir in @("platforms", "imageformats", "styles", "iconengines", "tls", "generic")) {
-            if (Test-Path "dist/$dir") {
-              New-Item -ItemType Directory -Force -Path "$txDist/$dir" | Out-Null
-              Copy-Item "dist/$dir/*" "$txDist/$dir/" -Force -ErrorAction SilentlyContinue
+          # --- TX Tools packages: Alpha (Qt viewport) + Omega (DX12 viewport) ---
+          function New-TxToolsPackage {
+            param(
+              [Parameter(Mandatory=$true)][string]$Edition,   # Alpha | Omega
+              [Parameter(Mandatory=$true)][string]$ExeFilter,
+              [Parameter(Mandatory=$true)][string]$OutDir
+            )
+            if (Test-Path $OutDir) { Remove-Item -Recurse -Force $OutDir }
+            New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+            $txExe = Get-ChildItem -Path dist -Filter $ExeFilter | Select-Object -First 1
+            if (-not $txExe) { throw "Grendizer_TX_Tools_$Edition.exe missing from dist (filter=$ExeFilter)" }
+            Copy-Item $txExe.FullName $OutDir/ -Force
+            foreach ($dir in @("platforms", "imageformats", "styles", "iconengines", "tls", "generic")) {
+              if (Test-Path "dist/$dir") {
+                New-Item -ItemType Directory -Force -Path "$OutDir/$dir" | Out-Null
+                Copy-Item "dist/$dir/*" "$OutDir/$dir/" -Force -ErrorAction SilentlyContinue
+              }
             }
+            if (Test-Path "dist/qt.conf") { Copy-Item "dist/qt.conf" $OutDir/ -Force }
+            Get-ChildItem dist -Filter "Qt6*.dll" | ForEach-Object { Copy-Item $_.FullName $OutDir/ -Force }
+            foreach ($pat in @("vcruntime*.dll", "msvcp*.dll", "concrt*.dll", "embree*.dll", "tbb*.dll")) {
+              Get-ChildItem dist -Filter $pat -ErrorAction SilentlyContinue |
+                ForEach-Object { Copy-Item $_.FullName $OutDir/ -Force }
+            }
+            foreach ($pat in @(
+              "OpenColorIO*.dll",
+              "OpenImageIO*.dll",
+              "maketx.exe", "oiiotool.exe",
+              "jpeg*.dll", "libjpeg*.dll", "turbojpeg*.dll",
+              "tiff*.dll", "libtiff*.dll",
+              "zlib*.dll", "libzlib*.dll", "zdll*.dll",
+              "libpng*.dll", "png*.dll",
+              "Imath*.dll", "OpenEXR*.dll", "IlmThread*.dll", "Half*.dll", "Iex*.dll"
+            )) {
+              Get-ChildItem -Path dist -Filter $pat -ErrorAction SilentlyContinue |
+                ForEach-Object { Copy-Item $_.FullName $OutDir/ -Force }
+            }
+            if (Test-Path "TX_Converter/README.md") {
+              Copy-Item "TX_Converter/README.md" "$OutDir/README.md" -Force
+            }
+            if (-not (Test-Path "$OutDir/maketx.exe")) { throw "maketx.exe missing from TX Tools $Edition package" }
+            if (-not (Test-Path "$OutDir/oiiotool.exe")) { throw "oiiotool.exe missing from TX Tools $Edition package" }
+            if (-not (Get-ChildItem $OutDir -Filter "OpenColorIO*.dll" -ErrorAction SilentlyContinue)) {
+              throw "OpenColorIO.dll missing from TX Tools $Edition package"
+            }
+            Write-Host "TX Tools $Edition package contents:"
+            Get-ChildItem $OutDir -Recurse | Select-Object -ExpandProperty FullName
           }
-          if (Test-Path "dist/qt.conf") { Copy-Item "dist/qt.conf" $txDist/ -Force }
-          # Qt + MSVC runtime DLLs sitting next to the converter in dist
-          Get-ChildItem dist -Filter "Qt6*.dll" | ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
-          Get-ChildItem dist -Filter "vcruntime*.dll" -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
-          Get-ChildItem dist -Filter "msvcp*.dll" -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
-          Get-ChildItem dist -Filter "concrt*.dll" -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
-          # Embree (solstice_lib links Embree even for the converter binary)
-          Get-ChildItem dist -Filter "embree*.dll" -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
-          Get-ChildItem dist -Filter "tbb*.dll" -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
-          # OCIO + OIIO tools + image codec / EXR runtimes
-          foreach ($pat in @(
-            "OpenColorIO*.dll",
-            "OpenImageIO*.dll",
-            "maketx.exe", "oiiotool.exe",
-            "jpeg*.dll", "libjpeg*.dll", "turbojpeg*.dll",
-            "tiff*.dll", "libtiff*.dll",
-            "zlib*.dll", "libzlib*.dll", "zdll*.dll",
-            "libpng*.dll", "png*.dll",
-            "Imath*.dll", "OpenEXR*.dll", "IlmThread*.dll", "Half*.dll", "Iex*.dll"
-          )) {
-            Get-ChildItem -Path dist -Filter $pat -ErrorAction SilentlyContinue |
-              ForEach-Object { Copy-Item $_.FullName $txDist/ -Force }
-          }
-          if (Test-Path "TX_Converter/README.md") {
-            Copy-Item "TX_Converter/README.md" "$txDist/README.md" -Force
-          }
-          if (-not (Test-Path "$txDist/maketx.exe")) { throw "maketx.exe missing from TX Tools package" }
-          if (-not (Test-Path "$txDist/oiiotool.exe")) { throw "oiiotool.exe missing from TX Tools package" }
-          if (-not (Get-ChildItem $txDist -Filter "OpenColorIO*.dll" -ErrorAction SilentlyContinue)) {
-            throw "OpenColorIO.dll missing from TX Tools package"
-          }
-          Write-Host "TX Tools Omega package contents:"
-          Get-ChildItem $txDist -Recurse | Select-Object -ExpandProperty FullName
+
+          New-TxToolsPackage -Edition "Alpha" -ExeFilter "Grendizer_TX_Tools_Alpha*.exe" -OutDir "dist-tx-alpha"
+          New-TxToolsPackage -Edition "Omega" -ExeFilter "Grendizer_TX_Tools_Omega*.exe" -OutDir "dist-tx-omega"
 
       - name: Render a frame with the packaged exe
         run: |
@@ -384,8 +375,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          name: Grendizer-TX-Tools-Alpha-windows-x64-${{ env.BUILD_ID }}
+          path: dist-tx-alpha/
+
+      - uses: actions/upload-artifact@v4
+        with:
           name: Grendizer-TX-Tools-Omega-windows-x64-${{ env.BUILD_ID }}
-          path: dist-tx-converter/
+          path: dist-tx-omega/
 
       - uses: actions/upload-artifact@v4
         with:
