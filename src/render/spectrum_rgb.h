@@ -46,8 +46,11 @@ inline void applyRgbScaleToSpectrum(SampledSpectrum& s, const SampledWavelengths
 
 // Round-trip polish so spectrumToRgb(s) ≈ rgb. Tight clamp — large corrections
 // were a second energy-amplification path on HDRI / gold glass.
+// Skip when secondaries are terminated: single-λ spectrumToRgb is a spectral-locus
+// chromaticity, so RGB align scales poison greys/glass (warm / red cast).
 inline void alignSpectrumToRgb(SampledSpectrum& s, const SampledWavelengths& w, Vec3 rgb,
                                float maxBoost = 4.0f) {
+    if (w.secondaryTerminated()) return;
     const Vec3 got = spectrumToRgb(s, w);
     Vec3 scale(1.0f);
     if (got.x > 1e-8f) scale.x = rgb.x / got.x;

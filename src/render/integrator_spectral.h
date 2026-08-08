@@ -40,7 +40,6 @@ public:
         SampledSpectrum throughput = SampledSpectrum::constant(waves.n, 1.0f);
         float bsdfPdf = 0.0f;
         bool specularBounce = true;
-        bool didScatter = false;
         int depth = 0;
         int passThrough = 0;
         Vec3 origin = ctx.origin;
@@ -171,10 +170,11 @@ public:
             specularBounce = bs.specular;
             rayKind = nextRayShadeKind(bs, computeLobes(mat));
 
-            // First any scattering → terminate secondary wavelengths (pbrt).
-            if (!didScatter) {
+            // Terminate secondaries after first *non-specular* scatter (pbrt).
+            // Specular glass/mirror keeps all λ so enter×exit×env stays neutral;
+            // aligning RGB→spectrum under a single λ was tinting glass presets red.
+            if (!bs.specular && !waves.secondaryTerminated()) {
                 waves.terminateSecondary();
-                didScatter = true;
             }
 
             origin = offsetRayOrigin(si.p, si.ng, wiWorld);

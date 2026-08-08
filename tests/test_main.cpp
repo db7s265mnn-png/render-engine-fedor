@@ -40,6 +40,7 @@
 #include "render/spectrum.h"
 #include "render/spectrum_rgb.h"
 #include "render/spectrum_types.h"
+#include "render/spectral_common.h"
 #include "scene/scene.h"
 #include "scene/displace.h"
 #include "scene/tessellate.h"
@@ -3149,6 +3150,53 @@ void testSpectralHeroBasics() {
             check(std::fabs(r / g - 1.0f) < 0.08f && std::fabs(b / g - 1.0f) < 0.08f,
                   "Vis+TerminateSecondary white not pink");
             check(std::fabs(r - 1.0f) < 0.15f && std::fabs(g - 1.0f) < 0.15f, "Vis+Terminate white ~1");
+        }
+
+        // Clear glass preset path: specular enter×exit×white env must stay neutral.
+        // Old policy terminated on first specular bounce; align under single-λ tinted red.
+        {
+            Rng rng(11u, 3u);
+            double rSum = 0.0, gSum = 0.0, bSum = 0.0;
+            const int nspp = 6000;
+            Material glass;
+            glass.baseColor = Vec3(1.0f);
+            glass.transmission = 1.0f;
+            glass.ior = 1.5f;
+            glass.roughness = 0.0f;
+            glass.specular = 1.0f;
+            glass.dispersionAbbe = 55.0f;
+            const Frame frame(Vec3(0.0f, 1.0f, 0.0f));
+            const Vec3 wo(0.0f, 1.0f, 0.0f);
+            const Vec3 wi(0.0f, -1.0f, 0.0f);
+            const float eta = 1.5f;
+            for (int s = 0; s < nspp; ++s) {
+                SampledWavelengths wv = SampledWavelengths::sampleVisible(4, rng.nextFloat());
+                const int hero = std::clamp(int(rng.nextFloat() * 4.0f), 0, 3);
+                wv.promoteHero(hero);
+                SampledSpectrum thr = SampledSpectrum::constant(wv.n, 1.0f);
+                thr *= liftBsdfWeight(glass, frame, wo, wi, Vec3(1.0f / (eta * eta)), wv, glass.ior,
+                                      0);
+                // Specular bounce — secondaries stay alive (integrator policy).
+                thr *= liftBsdfWeight(glass, frame, -wo, -wi, Vec3(eta * eta), wv, glass.ior, 0);
+                thr *= rgbToSpectrumEmission(Vec3(1.0f), wv);
+                const Vec3 o = spectrumToRgb(thr, wv);
+                rSum += double(o.x);
+                gSum += double(o.y);
+                bSum += double(o.z);
+            }
+            const float r = float(rSum / nspp), g = float(gSum / nspp), b = float(bSum / nspp);
+            check(std::fabs(r / g - 1.0f) < 0.05f && std::fabs(b / g - 1.0f) < 0.05f,
+                  "glass preset enter×exit×env not reddish");
+            check(std::fabs(r - 1.0f) < 0.08f && std::fabs(g - 1.0f) < 0.08f, "glass preset ~white");
+
+            // Align must be a no-op after TerminateSecondary (poisoned single-λ RGB fit).
+            SampledWavelengths wt = SampledWavelengths::sampleVisible(4, 0.4f);
+            wt.terminateSecondary();
+            SampledSpectrum before = SampledSpectrum::constant(wt.n, 2.25f);
+            SampledSpectrum after = rgbToSpectrumLinear(Vec3(2.25f), wt);
+            check(std::fabs(after.values[0] - before.values[0]) < 1e-5f ||
+                      std::fabs(after.values[0] - 2.25f) < 0.05f,
+                  "no align boost after terminate");
         }
     }
 

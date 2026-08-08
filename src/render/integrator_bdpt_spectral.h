@@ -44,7 +44,6 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
     RayShadeKind rayKind = RayShadeKind::Camera;
     int currentMedium = -1;
     const float heroLambda = waves.lambda[std::clamp(heroIdx, 0, waves.n - 1)];
-    bool didScatter = false;
 
     while (count < maxVerts) {
         Vert& prev = path[count - 1];
@@ -273,9 +272,10 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
 
         beta *= weight;
         if (!spectrumIsFinite(beta) || spectrumNearBlack(beta)) break;
-        if (cfg.eyePath && !didScatter) {
+        // Eye path: terminate secondaries only after first non-specular bounce so
+        // clear glass (specular enter/exit) keeps multi-λ neutrality.
+        if (cfg.eyePath && !bs.specular && !waves.secondaryTerminated()) {
             waves.terminateSecondary();
-            didScatter = true;
         }
         pdfSaFwd = bs.specular ? 0.0f : bs.pdf;
         origin = offsetRayOrigin(cur.p, cur.ng, wiWorld);
