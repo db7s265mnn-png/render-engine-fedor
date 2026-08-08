@@ -175,16 +175,25 @@ inline Xyz spectrumToXyz(const SampledSpectrum& s, const SampledWavelengths& w) 
 
 // SampledSpectrum → RGB. Tabulated CIE CMFs + RGBColorSpace, with equal-energy
 // white-balance so flat spectra stay neutral under Jakob-authored RGB assets.
+//
+// After TerminateSecondary only λ₀ remains. Sample-matched WB then collapses to
+// S(λ₀) on all channels when CMFs are non-zero (destroys chroma) and explodes
+// toward red/pink when ȳ/z̄≈0 in the deep-red Visible tail. Per-sample RGB
+// gamut clamps add a further pink bias. Use fixed ∫CMF white whenever secondary
+// wavelengths are gone (or sample white is singular), and do not clamp — film
+// averages may carry small negatives that cancel.
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
                           const RGBColorSpace& cs = colorSpaceSrgb()) {
     if (s.n <= 0 || w.n <= 0) return Vec3(0.0f);
     const int n = std::min(s.n, w.n);
     float X = 0.0f, Y = 0.0f, Z = 0.0f;
     float Xw = 0.0f, Yw = 0.0f, Zw = 0.0f;
+    int active = 0;
     for (int i = 0; i < n; ++i) {
         float cx, cy, cz;
         cieXyzAtLambda(w.lambda[i], cx, cy, cz);
         const float invPdf = safeDivSpectrum(1.0f, w.pdf[i]);
+        if (w.pdf[i] > 0.0f) ++active;
         X += s.values[i] * cx * invPdf;
         Y += s.values[i] * cy * invPdf;
         Z += s.values[i] * cz * invPdf;
@@ -199,21 +208,29 @@ inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
     Xw *= invN;
     Yw *= invN;
     Zw *= invN;
-    if (Xw > 1e-8f && Yw > 1e-8f && Zw > 1e-8f) {
+
+    // Multi-λ sample-matched WB (low variance for greys / HDRI). Single-λ or
+    // singular CMF white → fixed illuminant-E integrals.
+    const bool sampleWbOk = active >= 2 && Xw > 1e-5f && Yw > 1e-5f && Zw > 1e-5f &&
+                            !w.secondaryTerminated();
+    if (sampleWbOk) {
         X /= Xw;
         Y /= Yw;
         Z /= Zw;
-    } else if (Yw > 1e-8f) {
-        X /= Yw;
-        Y /= Yw;
-        Z /= Yw;
+    } else {
+        X /= cie_tab::kCieXIntegral1nm;
+        Y /= cie_tab::kCieYIntegral1nm;
+        Z /= cie_tab::kCieZIntegral1nm;
     }
+
     Vec3 rgb = cs.toRgb(Xyz(X, Y, Z));
     const Vec3 whiteRgb = cs.toRgb(Xyz(1.0f, 1.0f, 1.0f));
     rgb.x /= srMax(1e-8f, whiteRgb.x);
     rgb.y /= srMax(1e-8f, whiteRgb.y);
     rgb.z /= srMax(1e-8f, whiteRgb.z);
-    return Vec3(srMax(0.0f, rgb.x), srMax(0.0f, rgb.y), srMax(0.0f, rgb.z));
+    // No per-channel max(0): single-λ spectral locus → out-of-gamut negatives
+    // that must average out after TerminateSecondary (else systematic pink).
+    return rgb;
 }
 
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w, int colorSpaceId) {

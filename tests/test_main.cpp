@@ -3128,6 +3128,28 @@ void testSpectralHeroBasics() {
         const float fBlue = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 450.0f, 0.2f);
         const float fRed = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 650.0f, 0.2f);
         check(std::fabs(fBlue - fRed) > 1e-4f, "thin-film Airy chromatic");
+
+        // Visible + TerminateSecondary must not pink-cast equal-energy / white emission.
+        // (Regression: sample-matched WB + RGB clamp on single-λ → R/G ≈ 2.)
+        {
+            Rng rng(42u, 7u);
+            double rSum = 0.0, gSum = 0.0, bSum = 0.0;
+            const int nspp = 8000;
+            for (int s = 0; s < nspp; ++s) {
+                SampledWavelengths wv = SampledWavelengths::sampleVisible(4, rng.nextFloat());
+                SampledSpectrum L = rgbToSpectrumEmission(Vec3(1.0f), wv);
+                wv.terminateSecondary();
+                const Vec3 o = spectrumToRgb(L, wv);
+                rSum += double(o.x);
+                gSum += double(o.y);
+                bSum += double(o.z);
+            }
+            const float r = float(rSum / nspp), g = float(gSum / nspp), b = float(bSum / nspp);
+            check(g > 0.2f, "Vis+Terminate white has energy");
+            check(std::fabs(r / g - 1.0f) < 0.08f && std::fabs(b / g - 1.0f) < 0.08f,
+                  "Vis+TerminateSecondary white not pink");
+            check(std::fabs(r - 1.0f) < 0.15f && std::fabs(g - 1.0f) < 0.15f, "Vis+Terminate white ~1");
+        }
     }
 
     std::printf("  spectral hero ok rgb=(%.3f,%.3f,%.3f) grey=(%.3f,%.3f,%.3f) hdri=(%.3f,%.3f,%.3f) "
