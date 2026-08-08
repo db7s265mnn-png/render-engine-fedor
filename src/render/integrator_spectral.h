@@ -34,7 +34,6 @@ public:
         const int heroPick = std::clamp(int(rng.nextFloat() * float(waves.n)), 0, waves.n - 1);
         waves.promoteHero(heroPick);
         const int heroIdx = 0;
-        const float heroLambda = waves.lambda[heroIdx];
 
         SampledSpectrum radiance = SampledSpectrum::zero(waves.n);
         SampledSpectrum throughput = SampledSpectrum::constant(waves.n, 1.0f);
@@ -145,10 +144,7 @@ public:
             const Frame frame(si.ns);
 
             const float baseIor = mat.ior;
-            if (mat.dispersionAbbe > 0.0f && mat.transmission > 1e-4f) {
-                mat.ior = dielectricIorFromAbbe(baseIor, mat.dispersionAbbe, heroLambda);
-            }
-
+            // NEE stays RGB (glass specular contributes ~0); upsample aggregate.
             const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng);
             if (!isBlack(nee)) {
                 SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
@@ -157,25 +153,29 @@ public:
             }
 
             const Vec3 woLocal = frame.toLocal(wo);
-            BsdfSample bs =
-                bsdfSampleLocal(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
-                                rng.nextFloat());
-            if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
+            const float uLobe = rng.nextFloat();
+            const float u1 = rng.nextFloat();
+            const float u2 = rng.nextFloat();
+            const float uChoice = rng.nextFloat();
+            BsdfSampleSpectral ss =
+                bsdfSampleSpectral(mat, woLocal, uLobe, u1, u2, uChoice, waves, baseIor, heroIdx);
+            if (!ss.valid || ss.pdf <= 0.0f) break;
 
-            const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
-            SampledSpectrum wSpec =
-                liftBsdfWeight(mat, frame, wo, wiWorld, bs.weight, waves, baseIor, heroIdx);
-            throughput *= wSpec;
-            bsdfPdf = bs.pdf;
-            specularBounce = bs.specular;
+            const Vec3 wiWorld = normalize(frame.toWorld(ss.wi));
+            throughput *= ss.weight;
+            bsdfPdf = ss.pdf;
+            specularBounce = ss.specular;
+            BsdfSample bs{};
+            bs.wi = ss.wi;
+            bs.pdf = ss.pdf;
+            bs.specular = ss.specular;
+            bs.transmitted = ss.transmitted;
+            bs.weight = Vec3(1.0f);  // unused after spectral weight
             rayKind = nextRayShadeKind(bs, computeLobes(mat));
 
-            // Terminate secondaries after first *non-specular* scatter (pbrt).
-            // Specular glass/mirror keeps all λ so enter×exit×env stays neutral;
-            // aligning RGB→spectrum under a single λ was tinting glass presets red.
-            if (!bs.specular && !waves.secondaryTerminated()) {
+            const LobeWeights lw = computeLobes(mat);
+            if (shouldTerminateSecondaryWavelengths(bs, lw) && !waves.secondaryTerminated())
                 waves.terminateSecondary();
-            }
 
             origin = offsetRayOrigin(si.p, si.ng, wiWorld);
             direction = wiWorld;

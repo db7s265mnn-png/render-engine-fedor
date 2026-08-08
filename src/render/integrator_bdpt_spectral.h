@@ -20,6 +20,16 @@ inline bool spectrumIsFinite(const SampledSpectrum& s) {
     return true;
 }
 
+inline SampledSpectrum vertBsdfFSpectral(const bdpt::Vert& v, Vec3 woW, Vec3 wiW,
+                                         const SampledWavelengths& w) {
+    if (v.mediumScatter) {
+        const float cosTheta = clampf(dot(woW, wiW), -1.0f, 1.0f);
+        const float p = henyeyGreenstein(cosTheta, v.mediumG);
+        return SampledSpectrum::constant(w.n, p);
+    }
+    return bsdfEvalSpectral(v.mat, v.ng, v.ns, woW, wiW, w, v.mat.ior);
+}
+
 namespace spectral_bdpt {
 
 struct WalkConfig {
@@ -143,8 +153,6 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
         mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject,
                                        si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
         const float baseIor = mat.ior;
-        if (mat.dispersionAbbe > 1e-3f && mat.transmission > 1e-4f)
-            mat.ior = dielectricIorFromAbbe(baseIor, mat.dispersionAbbe, heroLambda);
 
         if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
             origin = offsetRayOrigin(si.p, si.ng, dir);
@@ -157,13 +165,15 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
         v.p = si.p;
         v.ng = si.ng;
         v.ns = si.ns;
-        v.mat = mat;
+        v.mat = mat;  // keep nd (Abbe) — hero η only inside bsdfSampleSpectral
         v.wo = -dir;
         v.beta = spectrumToRgb(beta, waves);
         v.mediumIndex = scene.instances[si.instanceIndex].mediumIndex;
         v.pdfFwd = toAreaPdf(pdfSaFwd, prev.p, si.p, si.ns);
         {
-            const LobeWeights lw = computeLobes(mat);
+            Material matHero = mat;
+            matHero.ior = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, heroLambda);
+            const LobeWeights lw = computeLobes(matHero);
             v.delta = lw.delta && lw.diffuse < 1e-4f;
             v.connectable = !v.delta;
             v.nearSpec = v.delta || isNearSpecularLobe(lw) || isPhotonCausticCasterLobe(lw);
@@ -179,6 +189,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
         BsdfSample bs{};
         bool haveSample = false;
         Vec3 wiWorld;
+        SampledSpectrum weight = SampledSpectrum::zero(waves.n);
 
 #if SOLSTICE_HAVE_OPENPGL
         if (cfg.eyePath && cfg.guiding && cfg.guiding->active()) {
@@ -200,9 +211,16 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
             cur.beta = spectrumToRgb(beta, waves);
             betaPath[count - 1] = beta;
             const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
-            bs = bsdfSampleLocal(specMat, woLocal, uSpec, rng.nextFloat(), rng.nextFloat(),
-                                 rng.nextFloat());
-            if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
+            BsdfSampleSpectral ss =
+                bsdfSampleSpectral(specMat, woLocal, uSpec, rng.nextFloat(), rng.nextFloat(),
+                                   rng.nextFloat(), waves, specMat.ior, heroIdx);
+            if (!ss.valid) break;
+            bs.wi = ss.wi;
+            bs.pdf = ss.pdf;
+            bs.specular = ss.specular;
+            bs.transmitted = ss.transmitted;
+            bs.weight = Vec3(1.0f);
+            weight = ss.weight;
             wiWorld = normalize(frame.toWorld(bs.wi));
             haveSample = true;
         }
@@ -218,15 +236,18 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 if (cfg.guiding->sample(rng.nextFloat(), rng.nextFloat(), wiWorld, guidePdf) &&
                     guidePdf > 0.0f) {
                     const Vec3 wiLocal = frame.toLocal(wiWorld);
+                    SampledSpectrum fSpec =
+                        bsdfEvalSpectral(cur.mat, cur.ng, cur.ns, cur.wo, wiWorld, waves, baseIor);
                     const BsdfEval ev = bsdfEvalLocal(cur.mat, woLocal, wiLocal);
-                    if (ev.pdf > 0.0f && !isBlack(ev.f)) {
+                    if (ev.pdf > 0.0f && spectrumMaxComponent(fSpec) > 0.0f) {
                         const float pg = cfg.guiding->guideProbability();
                         const float mixPdf = pg * guidePdf + (1.0f - pg) * ev.pdf;
                         bs.wi = wiLocal;
                         bs.pdf = mixPdf;
-                        bs.weight = ev.f * (fabsf(wiLocal.z) / mixPdf);
                         bs.specular = false;
                         bs.transmitted = wiLocal.z < 0.0f;
+                        bs.weight = Vec3(1.0f);
+                        weight = fSpec * (fabsf(wiLocal.z) / mixPdf);
                         haveSample = true;
                     }
                 }
@@ -235,9 +256,19 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
 #endif
 
         if (!haveSample) {
-            bs = bsdfSampleLocal(cur.mat, woLocal, rng.nextFloat(), rng.nextFloat(),
-                                 rng.nextFloat(), rng.nextFloat());
-            if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
+            const float uLobe = rng.nextFloat();
+            const float u1 = rng.nextFloat();
+            const float u2 = rng.nextFloat();
+            const float uChoice = rng.nextFloat();
+            BsdfSampleSpectral ss = bsdfSampleSpectral(cur.mat, woLocal, uLobe, u1, u2, uChoice,
+                                                       waves, baseIor, heroIdx);
+            if (!ss.valid) break;
+            bs.wi = ss.wi;
+            bs.pdf = ss.pdf;
+            bs.specular = ss.specular;
+            bs.transmitted = ss.transmitted;
+            bs.weight = Vec3(1.0f);
+            weight = ss.weight;
             wiWorld = normalize(frame.toWorld(bs.wi));
 #if SOLSTICE_HAVE_OPENPGL
             if (cfg.eyePath && cfg.guiding && guideReady && !bs.specular) {
@@ -245,7 +276,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 const float guidePdf = cfg.guiding->pdf(wiWorld);
                 const float mixPdf = pg * guidePdf + (1.0f - pg) * bs.pdf;
                 if (mixPdf > 0.0f) {
-                    bs.weight *= bs.pdf / mixPdf;
+                    weight *= bs.pdf / mixPdf;
                     bs.pdf = mixPdf;
                 }
             }
@@ -259,8 +290,6 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 toAreaPdf(revSa, cur.p, prev.p, prev.type == VType::Surface ? prev.ns : prev.ng);
         }
 
-        SampledSpectrum weight =
-            liftBsdfWeight(cur.mat, frame, cur.wo, wiWorld, bs.weight, waves, baseIor, heroIdx);
 #if SOLSTICE_HAVE_OPENPGL
         if (cfg.eyePath && cfg.guiding && cfg.guiding->active()) {
             const bool deltaSegment = bs.specular || cur.nearSpec;
@@ -272,10 +301,11 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
 
         beta *= weight;
         if (!spectrumIsFinite(beta) || spectrumNearBlack(beta)) break;
-        // Eye path: terminate secondaries only after first non-specular bounce so
-        // clear glass (specular enter/exit) keeps multi-λ neutrality.
-        if (cfg.eyePath && !bs.specular && !waves.secondaryTerminated()) {
-            waves.terminateSecondary();
+        {
+            const LobeWeights lwTerm = computeLobes(cur.mat);
+            if (cfg.eyePath && shouldTerminateSecondaryWavelengths(bs, lwTerm) &&
+                !waves.secondaryTerminated())
+                waves.terminateSecondary();
         }
         pdfSaFwd = bs.specular ? 0.0f : bs.pdf;
         origin = offsetRayOrigin(cur.p, cur.ng, wiWorld);
@@ -413,15 +443,15 @@ inline Vec3 traceRadianceBdptSpectral(
             if (!projectToPixel(camProj, v.p, px, py, cosTheta, dist2) || dist2 < 1e-8f)
                 continue;
             const Vec3 toCam = normalize(camProj.camPos - v.p);
-            const Vec3 f = bsdfF(v, v.wo, toCam);
-            if (isBlack(f) ||
+            const SampledSpectrum f = vertBsdfFSpectral(v, v.wo, toCam, waves);
+            if (spectrumNearBlack(f) ||
                 !connectionVisible(scene, tracer, v.p, v.ng, camProj.camPos, -1))
                 continue;
 
             const float pdfOmega = cameraPdfOmega(camProj, cosTheta);
             const float cosV = fabsf(dot(v.ns, toCam));
             SampledSpectrum c =
-                lightBeta[s - 1] * upsampleRgb(f, waves) * (cosV * pdfOmega / dist2);
+                lightBeta[s - 1] * f * (cosV * pdfOmega / dist2);
             MisOverride ov;
             ov.splatStrategy = true;
             ov.s0Sampled = !(causticsOn && lightPrefixCaustic);
@@ -566,14 +596,14 @@ inline Vec3 traceRadianceBdptSpectral(
                 visibility = shadowVisibility(scene, tracer, o, ls.wi, 1.0e8f);
             }
             if (visibility <= 1e-5f) continue;
-            const Vec3 f = bsdfF(E, E.wo, ls.wi);
-            if (isBlack(f)) continue;
+            const SampledSpectrum f = vertBsdfFSpectral(E, E.wo, ls.wi, waves);
+            if (spectrumNearBlack(f)) continue;
             const float bsdfPdf = ls.delta ? 0.0f : bsdfPdfSa(E, E.wo, ls.wi);
             const float lightPdf = ls.pdf * selectPdf;
             const float w =
                 ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdf);
             SampledSpectrum local =
-                upsampleRgb(f, waves) * upsampleRgb(ls.radiance, waves) *
+                f * upsampleRgb(ls.radiance, waves) *
                 (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf);
             SampledSpectrum c = eyeBeta[t - 1] * local;
             if (t >= 2) c = clampSpectrumIndirect(c, settings.clampDirect);
@@ -696,18 +726,17 @@ inline Vec3 traceRadianceBdptSpectral(
             Le = areaLightEmission(scene, l, wi, lightN);
         }
         if (isBlack(Le)) continue;
-        const Vec3 f = bsdfF(E, E.wo, wi);
-        if (isBlack(f)) continue;
+        const SampledSpectrum f = vertBsdfFSpectral(E, E.wo, wi, waves);
+        if (spectrumNearBlack(f)) continue;
 
         SampledSpectrum local;
         if (l.type == kLightPoint) {
-            local = upsampleRgb(f, waves) * upsampleRgb(Le, waves) *
+            local = f * upsampleRgb(Le, waves) *
                     (fabsf(dot(E.ns, wi)) / srMax(1e-12f, selectPdf));
         } else {
             const float G = geometryTerm(E, Ls);
             if (G <= 0.0f) continue;
-            local = upsampleRgb(f, waves) * upsampleRgb(Le, waves) *
-                    (G / srMax(1e-12f, Ls.pdfFwd));
+            local = f * upsampleRgb(Le, waves) * (G / srMax(1e-12f, Ls.pdfFwd));
         }
 
         MisOverride ov;
@@ -768,9 +797,9 @@ inline Vec3 traceRadianceBdptSpectral(
             const float dist2 = lengthSquared(d);
             if (dist2 < 1e-10f) continue;
             d *= 1.0f / sqrtf(dist2);
-            const Vec3 fE = bsdfF(E, E.wo, d);
-            const Vec3 fL = bsdfF(Lv, Lv.wo, -d);
-            if (isBlack(fE) || isBlack(fL)) continue;
+            const SampledSpectrum fE = vertBsdfFSpectral(E, E.wo, d, waves);
+            const SampledSpectrum fL = vertBsdfFSpectral(Lv, Lv.wo, -d, waves);
+            if (spectrumNearBlack(fE) || spectrumNearBlack(fL)) continue;
             const float G = geometryTerm(E, Lv);
             if (G <= 0.0f ||
                 !connectionVisible(scene, tracer, E.p, E.ng, Lv.p, -1))
@@ -796,7 +825,7 @@ inline Vec3 traceRadianceBdptSpectral(
                                                                   : light[s - 2].ng);
 
             SampledSpectrum c =
-                eyeBeta[t - 1] * upsampleRgb(fE, waves) * upsampleRgb(fL, waves) *
+                eyeBeta[t - 1] * fE * fL *
                 lightBeta[s - 1] * (G * misWeight(eye, t, light, s, ov));
             c = clampSpectrumIndirect(c, settings.clampDirect);
             if (lightPrefixCaustic || Lv.nearSpec || E.nearSpec)

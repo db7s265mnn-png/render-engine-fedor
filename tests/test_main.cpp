@@ -3152,12 +3152,12 @@ void testSpectralHeroBasics() {
             check(std::fabs(r - 1.0f) < 0.15f && std::fabs(g - 1.0f) < 0.15f, "Vis+Terminate white ~1");
         }
 
-        // Clear glass preset path: specular enter×exit×white env must stay neutral.
-        // Old policy terminated on first specular bounce; align under single-λ tinted red.
+        // Clear glass preset: spectral dielectric enter×exit×white env stays neutral.
         {
             Rng rng(11u, 3u);
             double rSum = 0.0, gSum = 0.0, bSum = 0.0;
-            const int nspp = 6000;
+            int accepted = 0;
+            const int nspp = 8000;
             Material glass;
             glass.baseColor = Vec3(1.0f);
             glass.transmission = 1.0f;
@@ -3165,38 +3165,44 @@ void testSpectralHeroBasics() {
             glass.roughness = 0.0f;
             glass.specular = 1.0f;
             glass.dispersionAbbe = 55.0f;
-            const Frame frame(Vec3(0.0f, 1.0f, 0.0f));
-            const Vec3 wo(0.0f, 1.0f, 0.0f);
-            const Vec3 wi(0.0f, -1.0f, 0.0f);
-            const float eta = 1.5f;
             for (int s = 0; s < nspp; ++s) {
                 SampledWavelengths wv = SampledWavelengths::sampleVisible(4, rng.nextFloat());
                 const int hero = std::clamp(int(rng.nextFloat() * 4.0f), 0, 3);
                 wv.promoteHero(hero);
-                SampledSpectrum thr = SampledSpectrum::constant(wv.n, 1.0f);
-                thr *= liftBsdfWeight(glass, frame, wo, wi, Vec3(1.0f / (eta * eta)), wv, glass.ior,
-                                      0);
-                // Specular bounce — secondaries stay alive (integrator policy).
-                thr *= liftBsdfWeight(glass, frame, -wo, -wi, Vec3(eta * eta), wv, glass.ior, 0);
-                thr *= rgbToSpectrumEmission(Vec3(1.0f), wv);
+                // Normal-incidence transmit (uChoice high enough to beat Fresnel ~0.04).
+                BsdfSampleSpectral eIn =
+                    bsdfSampleSpectral(glass, Vec3(0.0f, 0.0f, 1.0f), 0.99f, 0.0f, 0.0f, 0.5f, wv,
+                                       glass.ior, 0);
+                BsdfSampleSpectral eOut =
+                    bsdfSampleSpectral(glass, Vec3(0.0f, 0.0f, -1.0f), 0.99f, 0.0f, 0.0f, 0.5f, wv,
+                                       glass.ior, 0);
+                if (!eIn.valid || !eIn.transmitted || !eOut.valid || !eOut.transmitted) continue;
+                SampledSpectrum thr = eIn.weight * eOut.weight * rgbToSpectrumEmission(Vec3(1.0f), wv);
                 const Vec3 o = spectrumToRgb(thr, wv);
                 rSum += double(o.x);
                 gSum += double(o.y);
                 bSum += double(o.z);
+                ++accepted;
             }
-            const float r = float(rSum / nspp), g = float(gSum / nspp), b = float(bSum / nspp);
+            check(accepted > 1000, "glass spectral samples accepted");
+            const float r = float(rSum / accepted), g = float(gSum / accepted),
+                        b = float(bSum / accepted);
             check(std::fabs(r / g - 1.0f) < 0.05f && std::fabs(b / g - 1.0f) < 0.05f,
-                  "glass preset enter×exit×env not reddish");
-            check(std::fabs(r - 1.0f) < 0.08f && std::fabs(g - 1.0f) < 0.08f, "glass preset ~white");
+                  "glass spectral enter×exit×env not reddish");
+            check(std::fabs(r - 1.0f) < 0.08f && std::fabs(g - 1.0f) < 0.08f, "glass spectral ~white");
 
-            // Align must be a no-op after TerminateSecondary (poisoned single-λ RGB fit).
-            SampledWavelengths wt = SampledWavelengths::sampleVisible(4, 0.4f);
-            wt.terminateSecondary();
-            SampledSpectrum before = SampledSpectrum::constant(wt.n, 2.25f);
-            SampledSpectrum after = rgbToSpectrumLinear(Vec3(2.25f), wt);
-            check(std::fabs(after.values[0] - before.values[0]) < 1e-5f ||
-                      std::fabs(after.values[0] - 2.25f) < 0.05f,
-                  "no align boost after terminate");
+            // TerminateSecondary policy: specular glass must keep secondaries.
+            BsdfSample bsSpec{};
+            bsSpec.specular = true;
+            LobeWeights lwGlass = computeLobes(glass);
+            check(!shouldTerminateSecondaryWavelengths(bsSpec, lwGlass),
+                  "specular glass keeps secondary wavelengths");
+            BsdfSample bsDiff{};
+            bsDiff.specular = false;
+            Material diffuse;
+            diffuse.baseColor = Vec3(0.8f);
+            check(shouldTerminateSecondaryWavelengths(bsDiff, computeLobes(diffuse)),
+                  "diffuse terminates secondary wavelengths");
         }
     }
 
