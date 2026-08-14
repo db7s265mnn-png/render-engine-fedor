@@ -203,6 +203,63 @@ SR_INL SR_HD Vec3 meshPositionAtTime(const MeshView& mesh, uint32_t vertexIndex,
     return a * (1.0f - frac) + b * frac;
 }
 
+SR_INL SR_HD float distancePointToSegment(Vec3 p, Vec3 a, Vec3 b) {
+    const Vec3 ab = b - a;
+    const float ab2 = lengthSquared(ab);
+    if (ab2 < 1e-20f) return length(p - a);
+    const float t = clampf(dot(p - a, ab) / ab2, 0.0f, 1.0f);
+    return length(p - (a + ab * t));
+}
+
+// Screen-space wireframe from triangle edges. Thickness is half-width in pixels.
+SR_INL SR_HD Vec3 shadeWireframe(const SceneView& scene, const RayHit& hit, const SurfaceInteraction& si,
+                                 Vec3 direction) {
+    const float thicknessPx = srMax(0.25f, scene.settings.wireframeThickness);
+    const InstanceData& inst = scene.instances[hit.instanceIndex];
+    const MeshView& mesh = scene.meshes[inst.meshIndex];
+    Mat4 xform, xformInv;
+    instanceXformAtTime(scene, inst, hit.time, xform, xformInv);
+
+    const uint32_t i0 = mesh.indices[hit.primIndex * 3 + 0];
+    const uint32_t i1 = mesh.indices[hit.primIndex * 3 + 1];
+    const uint32_t i2 = mesh.indices[hit.primIndex * 3 + 2];
+    const Vec3 p0 =
+        transformPoint(xform, meshPositionAtTime(mesh, i0, hit.time));
+    const Vec3 p1 =
+        transformPoint(xform, meshPositionAtTime(mesh, i1, hit.time));
+    const Vec3 p2 =
+        transformPoint(xform, meshPositionAtTime(mesh, i2, hit.time));
+
+    const float dEdge = srMin(distancePointToSegment(si.p, p0, p1),
+                              srMin(distancePointToSegment(si.p, p1, p2),
+                                    distancePointToSegment(si.p, p2, p0)));
+
+    const float resX = float(srMax(1, scene.settings.resolutionX));
+    const float resY = float(srMax(1, scene.settings.resolutionY));
+    const float sensorH = scene.camera.sensorWidth * (resY / resX);
+    const float pixelAngle = (sensorH / srMax(1e-3f, scene.camera.focalLength)) / resY;
+    const float pixelWorld = srMax(1e-8f, hit.t) * pixelAngle;
+    const float halfW = thicknessPx * pixelWorld;
+    const float aa = 0.5f * pixelWorld;
+    // 1 on the edge centerline → 0 outside the stroke (+AA).
+    float edge = 0.0f;
+    {
+        const float lo = srMax(0.0f, halfW - aa);
+        const float hi = halfW + aa;
+        if (dEdge <= lo) {
+            edge = 1.0f;
+        } else if (dEdge < hi) {
+            const float t = (dEdge - lo) / srMax(1e-8f, hi - lo);
+            edge = 1.0f - t * t * (3.0f - 2.0f * t);
+        }
+    }
+
+    const float facing = fabsf(dot(si.ns, -direction));
+    const Vec3 face = Vec3(0.06f + 0.10f * facing);
+    const Vec3 wire = Vec3(0.92f, 0.94f, 0.96f);
+    return face * (1.0f - edge) + wire * edge;
+}
+
 // Reconstruct shading attributes from a hit record.
 SR_INL SR_HD bool buildSurfaceInteraction(const SceneView& scene, const RayHit& hit, Vec3 origin, Vec3 dir,
                                           SurfaceInteraction& si) {
@@ -748,6 +805,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         }
 
         if (!didHit) {
+            // Wireframe diagnostic: empty background (no env).
+            if (settings.integrator == kIntegratorWireframe) break;
             if (scene.domeLightIndex >= 0) {
                 if (!suppressCausticLight) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
@@ -792,6 +851,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             ++passThrough;
             if (passThrough > 16) break;
             continue;
+        }
+
+        // Wireframe: shade every visible surface hit (including area lights).
+        if (settings.integrator == kIntegratorWireframe) {
+            radiance += throughput * shadeWireframe(scene, hit, si, direction);
+            break;
         }
 
         // Emission from area light geometry.

@@ -73,6 +73,15 @@ public:
 };
 
 template <typename Tracer>
+class WireframeIntegrator final : public Integrator<Tracer> {
+public:
+    const char* name() const override { return "Wireframe"; }
+    Vec3 Li(IntegratorSampleContext<Tracer>& ctx) const override {
+        return PathIntegrator<Tracer>{}.Li(ctx);
+    }
+};
+
+template <typename Tracer>
 class BdptIntegrator final : public Integrator<Tracer> {
 public:
     const char* name() const override { return "BDPT"; }
