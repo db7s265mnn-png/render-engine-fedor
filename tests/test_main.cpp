@@ -539,6 +539,7 @@ void testRender() {
     smokeIntegrator(kIntegratorBdpt, 1, "BDPT integrator");
     smokeIntegrator(kIntegratorSpectralPath, 1, "PT Spectral");
     smokeIntegrator(kIntegratorSpectralBdpt, 1, "BDPT Spectral");
+    smokeIntegrator(kIntegratorWireframe, 0, "Wireframe");
     // Path guiding smoke: same scene with OpenPGL training enabled (no-op when
     // the build lacks OpenPGL).
     scene->settings.pathGuiding = 1;
