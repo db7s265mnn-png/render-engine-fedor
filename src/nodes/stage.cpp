@@ -6,12 +6,55 @@
 
 #include "io/tx_cache.h"
 #include "scene/displace.h"
+#include "scene/volume_grid.h"
 
 namespace sol {
+
+namespace {
+
+MeshPtr volumeBoundsProxy(const VolumeGrid& grid) {
+    const Bounds3 b = grid.worldBounds();
+    if (!b.valid()) return nullptr;
+    const Vec3 size = b.hi - b.lo;
+    const Vec3 center = (b.lo + b.hi) * 0.5f;
+    MeshPtr box = makeBoxMesh(Vec3(srMax(1e-4f, size.x), srMax(1e-4f, size.y), srMax(1e-4f, size.z)));
+    if (!box) return nullptr;
+    for (Vec3& p : box->positions) p = p + center;
+    box->ensureRenderTriangles();
+    box->computeBounds();
+    return box;
+}
+
+MediumData mediumFromMaterialVolume(const Material& material, int volumeIndex, VolumeGridKind kind) {
+    MediumData m;
+    if (kind == VolumeGridKind::Sdf) {
+        m.type = 3;
+    } else {
+        m.type = 2;
+    }
+    m.volumeIndex = volumeIndex;
+    if (material.hasVolumeShader) {
+        m.density = material.volumeDensity;
+        m.sigmaA = material.volumeAbsorption;
+        m.sigmaS = material.volumeScattering;
+        m.g = material.volumeAnisotropy;
+        m.emission = material.volumeEmission * material.volumeEmissionStrength;
+    } else {
+        m.density = 1.0f;
+        m.sigmaA = Vec3(0.1f);
+        m.sigmaS = Vec3(0.4f);
+        m.g = 0.0f;
+        m.emission = Vec3(0.0f);
+    }
+    return m;
+}
+
+}  // namespace
 
 QString StagePrim::typeName() const {
     switch (type) {
         case PrimType::Mesh: return "Mesh";
+        case PrimType::Volume: return "Volume";
         case PrimType::Camera: return "Camera";
         case PrimType::Scope: return "Scope";
         case PrimType::Light:
@@ -310,6 +353,38 @@ ScenePtr Stage::toScene() const {
                 record.path = prim.path.toStdString();
                 record.type = "Scope";
                 record.sourceNode = prim.sourceNode.toStdString();
+                scene->prims.push_back(record);
+                break;
+            }
+            case PrimType::Volume: {
+                if (!prim.volume || !prim.volume->valid()) break;
+                Material material = prim.material;
+                // Volumes use surface + volume shader params from MaterialX.
+                const int volumeIndex = scene->addVolume(prim.volume);
+                MeshPtr proxy = volumeBoundsProxy(*prim.volume);
+                if (!proxy) break;
+                // Proxy is already in world space; bake prim.xform into instance.
+                const int meshIndex = scene->addMesh(proxy);
+                const int materialIndex = scene->addMaterial(material);
+                InstanceData inst;
+                inst.xform = prim.xform;
+                inst.xformInv = inverse(prim.xform);
+                inst.meshIndex = meshIndex;
+                inst.materialIndex = materialIndex;
+                inst.lightIndex = -1;
+                inst.visibleCamera = 1;
+                inst.volumeIndex = volumeIndex;
+                MediumData medium = mediumFromMaterialVolume(material, volumeIndex, prim.volume->kind());
+                inst.mediumIndex = scene->addMedium(medium, prim.vdbPath.toStdString());
+                scene->instances.push_back(inst);
+
+                PrimRecord record;
+                record.path = prim.path.toStdString();
+                record.type = "Volume";
+                record.sourceNode = prim.sourceNode.toStdString();
+                record.instanceIndex = int(scene->instances.size()) - 1;
+                record.pointCount = 0;
+                record.triangleCount = 0;
                 scene->prims.push_back(record);
                 break;
             }

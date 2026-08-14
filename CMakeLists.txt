@@ -218,11 +218,26 @@ endif()
 # OpenVDB — optional heterogeneous volumes (falls back to homogeneous σ when absent).
 set(SOLSTICE_HAVE_OPENVDB_01 0)
 if(SOLSTICE_ENABLE_OPENVDB)
+    list(APPEND CMAKE_MODULE_PATH "/usr/lib/x86_64-linux-gnu/cmake/OpenVDB")
     find_package(OpenVDB QUIET)
     if(OpenVDB_FOUND)
         set(SOLSTICE_HAVE_OPENVDB_01 1)
     else()
-        message(STATUS "OpenVDB not found — VDB media use homogeneous σa/σs fallback")
+        # Debian/Ubuntu often ships FindOpenVDB without a Config package.
+        find_library(OPENVDB_LIBRARY openvdb)
+        find_path(OPENVDB_INCLUDE_DIR openvdb/openvdb.h)
+        if(OPENVDB_LIBRARY AND OPENVDB_INCLUDE_DIR)
+            set(SOLSTICE_HAVE_OPENVDB_01 1)
+            if(NOT TARGET OpenVDB::openvdb)
+                add_library(OpenVDB::openvdb UNKNOWN IMPORTED)
+                set_target_properties(OpenVDB::openvdb PROPERTIES
+                    IMPORTED_LOCATION "${OPENVDB_LIBRARY}"
+                    INTERFACE_INCLUDE_DIRECTORIES "${OPENVDB_INCLUDE_DIR}")
+            endif()
+            set(OpenVDB_FOUND TRUE)
+        else()
+            message(STATUS "OpenVDB not found — VDB media use homogeneous σa/σs fallback")
+        endif()
     endif()
 endif()
 
@@ -450,6 +465,9 @@ set(SOLSTICE_LIB_SOURCES
     src/scene/scene.cpp
     src/scene/displace.cpp
     src/scene/tessellate.cpp
+    src/scene/triangulate.cpp
+    src/scene/volume_grid.cpp
+    src/scene/dcsdd_contouring.cpp
     src/io/image_io.cpp
     src/io/tx_cache.cpp
     src/io/tx_convert.cpp
@@ -464,6 +482,7 @@ set(SOLSTICE_LIB_SOURCES
     src/render/render_session.cpp
     src/render/scene_picker.cpp
     src/render/motion_blur.cpp
+    src/render/volume_vdb.cpp
     src/render/cpu/embree_device.cpp
     src/render/cpu/polynomial_optics.cpp
     src/render/cpu/path_guiding.cpp
@@ -474,6 +493,7 @@ set(SOLSTICE_LIB_SOURCES
     src/nodes/node_graph.cpp
     src/nodes/node_registry.cpp
     src/nodes/nodes_library.cpp
+    src/nodes/nodes_vdb.cpp
     src/app/default_scene.cpp
     src/app/document.cpp
     src/app/headless.cpp
@@ -491,6 +511,9 @@ set(SOLSTICE_LIB_HEADERS
     src/scene/scene.h
     src/scene/displace.h
     src/scene/tessellate.h
+    src/scene/triangulate.h
+    src/scene/volume_grid.h
+    src/scene/dcsdd_contouring.h
     src/io/image_io.h
     src/io/tx_cache.h
     src/io/tx_convert.h
@@ -522,10 +545,19 @@ set(SOLSTICE_LIB_HEADERS
 add_library(solstice_lib STATIC ${SOLSTICE_LIB_SOURCES} ${SOLSTICE_LIB_HEADERS})
 target_include_directories(solstice_lib PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/generated)
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lentil)
+target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/earcut)
 target_link_libraries(solstice_lib PUBLIC Qt6::Core Qt6::Gui embree)
 
 if(SOLSTICE_HAVE_ALEMBIC_01)
     target_link_libraries(solstice_lib PUBLIC Alembic::Alembic)
+endif()
+if(SOLSTICE_HAVE_OPENVDB_01)
+    target_link_libraries(solstice_lib PUBLIC OpenVDB::openvdb)
+    # OpenVDB pulls TBB / Boost / Blosc transitively on most distros.
+    find_package(TBB QUIET)
+    if(TBB_FOUND)
+        target_link_libraries(solstice_lib PUBLIC TBB::tbb)
+    endif()
 endif()
 if(SOLSTICE_HAVE_OPENEXR_01)
     target_link_libraries(solstice_lib PUBLIC OpenEXR::OpenEXR)

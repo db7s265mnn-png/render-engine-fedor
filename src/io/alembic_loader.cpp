@@ -182,15 +182,14 @@ MeshPtr buildMesh(const Imath::V3f* positions, size_t positionCount, const Int32
                 mesh->uvs.emplace_back(uv.x, uv.y);
             }
         }
-        for (int i = 1; i + 1 < count; ++i) {
-            mesh->indices.push_back(base);
-            mesh->indices.push_back(base + uint32_t(i + 1));
-            mesh->indices.push_back(base + uint32_t(i));
-        }
+        // Keep the authored n-gon cage; densify with earcut at validate/render.
+        mesh->faceVertexCounts.push_back(uint32_t(count));
+        for (int i = 0; i < count; ++i) mesh->faceVertexIndices.push_back(base + uint32_t(i));
         corner += size_t(count);
     }
     if (mesh->normals.size() != mesh->positions.size()) mesh->normals.clear();
     if (mesh->uvs.size() != mesh->positions.size()) mesh->uvs.clear();
+    mesh->ensureRenderTriangles();
     return mesh;
 }
 

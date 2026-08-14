@@ -44,6 +44,9 @@
 #include "scene/scene.h"
 #include "scene/displace.h"
 #include "scene/tessellate.h"
+#include "scene/triangulate.h"
+#include "scene/volume_grid.h"
+#include "scene/dcsdd_contouring.h"
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_TIFF
@@ -4503,6 +4506,50 @@ void testBdptShadersAndSss() {
     }
 }
 
+void testNgonTriangulateAndVdb() {
+    std::printf("n-gon triangulate + OpenVDB\n");
+    // Concave quad (arrowhead) — fan would flip; earcut should keep area positive.
+    Mesh concave;
+    concave.positions = {
+        Vec3(0, 0, 0), Vec3(2, 0, 0), Vec3(1, 0.3f, 0), Vec3(2, 1, 0), Vec3(0, 1, 0),
+    };
+    concave.faceVertexCounts = {5};
+    concave.faceVertexIndices = {0, 1, 2, 3, 4};
+    concave.ensureRenderTriangles();
+    check(concave.indices.size() >= 9, "concave pentagon produces triangles");
+    float area = 0.0f;
+    for (size_t t = 0; t + 2 < concave.indices.size(); t += 3) {
+        const Vec3& a = concave.positions[concave.indices[t]];
+        const Vec3& b = concave.positions[concave.indices[t + 1]];
+        const Vec3& c = concave.positions[concave.indices[t + 2]];
+        area += 0.5f * length(cross(b - a, c - a));
+    }
+    check(area > 1.0f, "concave triangulation area is sane");
+
+#if SOLSTICE_HAVE_OPENVDB
+    MeshPtr box = makeBoxMesh(Vec3(1, 1, 1));
+    check(box && !box->indices.empty(), "box mesh for VDB");
+    VolumeFromPolygonsSettings settings;
+    settings.kind = VolumeGridKind::Sdf;
+    settings.voxelSize = 0.1f;
+    settings.exteriorBand = 3.0f;
+    settings.interiorBand = 3.0f;
+    std::string err;
+    VolumeGridPtr sdf = VolumeGrid::fromPolygons(*box, Mat4::identity(), settings, &err);
+    check(sdf && sdf->valid(), std::string("vdbfrompolygons SDF: ") + err);
+    if (sdf && sdf->valid()) {
+        check(sdf->sampleWorld(Vec3(0, 0, 0)) < 0.0f, "SDF inside box is negative");
+        check(sdf->sampleWorld(Vec3(2, 0, 0)) > 0.0f, "SDF outside box is positive");
+        MeshPtr meshed = sdf->toPolygonsOpenVDB(0.0f, 0.0f);
+        check(meshed && meshed->triangleCount() > 0, "sdftopolygons_vdb produces mesh");
+        MeshPtr dcsdd = dcsddContourVolume(*sdf, 0.15f, {}, &err);
+        check(dcsdd && dcsdd->triangleCount() > 0, std::string("sdftopolygons_dcsdd: ") + err);
+    }
+#else
+    std::printf("  (OpenVDB disabled in this build — skipping volume checks)\n");
+#endif
+}
+
 void testBinaryUsdLoad() {
     std::printf("binary-usd-usdc\n");
 #if SOLSTICE_HAVE_TINYUSDZ
@@ -4558,6 +4605,12 @@ void testBinaryUsdLoad() {
 
 int main() {
     std::printf("Solstice tests\n");
+    if (getenv("SOL_ONLY_VDB")) {
+        registerBuiltinNodes();
+        testNgonTriangulateAndVdb();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (getenv("SOL_ONLY_STRESS")) {
         registerBuiltinNodes();
         testIntegratorSwitchStress();
@@ -4633,6 +4686,7 @@ int main() {
     testMaterialXUdimCubeAsset();
     testBdptShadersAndSss();
     testBinaryUsdLoad();
+    testNgonTriangulateAndVdb();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -59,7 +59,10 @@ SR_INL SR_HD float mediumMajorant(const MediumData& m) {
 SR_INL SR_HD bool mediumIsActive(const SceneView& scene, int mediumIndex) {
     if (mediumIndex < 0 || mediumIndex >= scene.mediumCount || !scene.media) return false;
     const MediumData& m = scene.media[mediumIndex];
-    return m.type != 0 && mediumMajorant(m) > 1e-8f;
+    // type 3 = SDF surface (not a participating medium walk)
+    if (m.type == 0 || m.type == 3) return false;
+    if (m.type == 2) return true;  // fog VDB — majorant from grid at sample time
+    return mediumMajorant(m) > 1e-8f;
 }
 
 // Beer–Lambert transmittance over distance t (homogeneous).

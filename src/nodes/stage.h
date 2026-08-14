@@ -11,7 +11,7 @@
 
 namespace sol {
 
-enum class PrimType { Mesh, Light, Camera, Scope };
+enum class PrimType { Mesh, Light, Camera, Scope, Volume };
 
 struct StagePrim {
     QString path;
@@ -23,6 +23,7 @@ struct StagePrim {
 
     // Geometry
     MeshPtr mesh;
+    VolumeGridPtr volume;  // OpenVDB SDF / fog (PrimType::Volume)
     // Tessellation authored on the shape (subdiv / dicing / bounds pad).
     int subdivType = kSubdivCatclark;
     int subdivIterations = 3;

@@ -6,9 +6,32 @@
 #include <unordered_map>
 
 #include "core/log.h"
+#include "scene/triangulate.h"
+#include "scene/volume_grid.h"
 #include "solstice_config.h"
 
 namespace sol {
+
+void Mesh::ensureRenderTriangles() {
+    if (!indices.empty()) return;
+    if (!hasPolygonCage()) return;
+    triangulateMeshFaces(positions, faceVertexCounts, faceVertexIndices, indices);
+}
+
+void Mesh::ensurePolygonCageFromTriangles() {
+    if (hasPolygonCage()) return;
+    if (indices.size() < 3) return;
+    faceVertexCounts.clear();
+    faceVertexIndices.clear();
+    faceVertexCounts.reserve(indices.size() / 3);
+    faceVertexIndices.reserve(indices.size());
+    for (size_t t = 0; t + 2 < indices.size(); t += 3) {
+        faceVertexCounts.push_back(3);
+        faceVertexIndices.push_back(indices[t + 0]);
+        faceVertexIndices.push_back(indices[t + 1]);
+        faceVertexIndices.push_back(indices[t + 2]);
+    }
+}
 
 void Mesh::computeBounds() {
     bounds = Bounds3();
@@ -66,6 +89,10 @@ void Mesh::computeNormalsIfMissing() {
 }
 
 void Mesh::validate() {
+    // Prefer densifying from the polygon cage when present.
+    if (hasPolygonCage()) {
+        triangulateMeshFaces(positions, faceVertexCounts, faceVertexIndices, indices);
+    }
     // Drop degenerate or out of range triangles so the BVH builders stay happy.
     std::vector<uint32_t> cleaned;
     cleaned.reserve(indices.size());
@@ -199,6 +226,11 @@ EnvMapView EnvironmentMap::view() const {
 int Scene::addMesh(MeshPtr mesh) {
     meshes.push_back(std::move(mesh));
     return static_cast<int>(meshes.size()) - 1;
+}
+
+int Scene::addVolume(VolumeGridPtr volume) {
+    volumes.push_back(std::move(volume));
+    return static_cast<int>(volumes.size()) - 1;
 }
 
 int Scene::addMaterial(const Material& material) {
@@ -547,6 +579,10 @@ SceneView Scene::view() const {
     v.textures = textureViews_.data();
     v.procedurals = procedurals.data();
     v.media = media.empty() ? nullptr : media.data();
+    volumePtrs_.clear();
+    volumePtrs_.reserve(volumes.size());
+    for (const VolumeGridPtr& g : volumes) volumePtrs_.push_back(g.get());
+    v.volumes = volumePtrs_.empty() ? nullptr : volumePtrs_.data();
     v.meshCount = static_cast<int>(meshViews_.size());
     v.instanceCount = static_cast<int>(instances.size());
     v.materialCount = static_cast<int>(materials.size());
@@ -555,6 +591,7 @@ SceneView Scene::view() const {
     v.textureCount = static_cast<int>(textureViews_.size());
     v.proceduralCount = static_cast<int>(procedurals.size());
     v.mediumCount = static_cast<int>(media.size());
+    v.volumeCount = static_cast<int>(volumePtrs_.size());
     v.domeLightIndex = domeLightIndex_;
     v.hasDispersion = 0;
     for (const Material& m : materials) {

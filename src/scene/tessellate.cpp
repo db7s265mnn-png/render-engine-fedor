@@ -117,15 +117,19 @@ struct EdgeHash {
 EdgeKey makeEdgeKey(uint32_t a, uint32_t b) { return EdgeKey{std::min(a, b), std::max(a, b)}; }
 
 bool meshIsTriangleOnly(const Mesh& mesh) {
-    // Our Mesh stores triangles only (3 indices per face). Catclark needs quads;
-    // triangle-only cages fall back to linear.
-    return !mesh.indices.empty();
+    // True when every authored face is a triangle (or there is no polygon cage).
+    if (!mesh.hasPolygonCage()) return !mesh.indices.empty();
+    for (uint32_t c : mesh.faceVertexCounts) {
+        if (c != 3) return false;
+    }
+    return !mesh.faceVertexCounts.empty();
 }
 
 bool meshHasQuadsHint(const Mesh& mesh) {
-    // Current importer always triangulates — treat all cages as tris for catclark
-    // fallback. Reserved for future ngon cages.
-    (void)mesh;
+    if (!mesh.hasPolygonCage()) return false;
+    for (uint32_t c : mesh.faceVertexCounts) {
+        if (c == 4) return true;
+    }
     return false;
 }
 

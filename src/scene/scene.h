@@ -16,7 +16,12 @@ struct Mesh {
     std::vector<Vec3> positions;
     std::vector<Vec3> normals;
     std::vector<Vec2> uvs;
+    // Render triangulation consumed by Embree/OptiX (3 indices per triangle).
     std::vector<uint32_t> indices;
+    // Optional polygon cage (Houdini-style). Empty faceVertexCounts ⇒ triangle-only mesh
+    // where `indices` is both cage and render topology.
+    std::vector<uint32_t> faceVertexCounts;
+    std::vector<uint32_t> faceVertexIndices;
     Bounds3 bounds;
     // Arnold displacement bounds_padding — reapplied by computeBounds() after validate.
     float boundsPadding = 0.0f;
@@ -38,6 +43,14 @@ struct Mesh {
     mutable std::vector<Vec3> motionPositionsPacked_;
 
     size_t triangleCount() const { return indices.size() / 3; }
+    size_t faceCount() const {
+        return faceVertexCounts.empty() ? triangleCount() : faceVertexCounts.size();
+    }
+    bool hasPolygonCage() const { return !faceVertexCounts.empty() && !faceVertexIndices.empty(); }
+    // Build / refresh `indices` from the polygon cage (earcut). No-op if already tris-only.
+    void ensureRenderTriangles();
+    // If only `indices` exist, synthesize a triangle cage so n-gon tools see faces.
+    void ensurePolygonCageFromTriangles();
     void computeBounds();
     // Area weighted vertex normals; only fills in normals when they are missing.
     void computeNormalsIfMissing();
@@ -46,6 +59,9 @@ struct Mesh {
 };
 
 using MeshPtr = std::shared_ptr<Mesh>;
+
+class VolumeGrid;
+using VolumeGridPtr = std::shared_ptr<VolumeGrid>;
 
 struct EnvironmentMap {
     std::string path;
@@ -71,6 +87,7 @@ struct PrimRecord {
 class Scene {
 public:
     std::vector<MeshPtr> meshes;
+    std::vector<VolumeGridPtr> volumes;
     std::vector<InstanceData> instances;
     std::vector<Material> materials;
     std::vector<LightData> lights;
@@ -101,6 +118,7 @@ public:
     std::vector<Mat4> pickXforms;
 
     int addMesh(MeshPtr mesh);
+    int addVolume(VolumeGridPtr volume);
     int addMaterial(const Material& material);
     int addEnvMap(std::shared_ptr<EnvironmentMap> env);
     int addTexture(std::shared_ptr<Image> image);
@@ -129,6 +147,7 @@ private:
     std::vector<MeshView> meshViews_;
     std::vector<EnvMapView> envViews_;
     std::vector<TextureView> textureViews_;
+    mutable std::vector<const VolumeGrid*> volumePtrs_;
     int domeLightIndex_ = -1;
 
     // Light BVH data built in finalize(); exposed via view().

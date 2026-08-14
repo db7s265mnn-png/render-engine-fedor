@@ -25,9 +25,28 @@ hierarchy.
 Face varying normals or UVs force the mesh to be split per face corner; missing normals are
 computed by welding equal positions, so imported meshes stay smooth.
 
+Imported meshes keep an **n-gon cage** (`faceVertexCounts` / `faceVertexIndices`). Embree and
+OptiX still ray-trace triangles densified with Mapbox earcut (concave-safe), matching Houdini-style
+polygon handling.
+
 ### Sphere, Grid, Box, Tube
 Polygonal primitives with a *Prim Name* and the usual transform block. Grid is the usual
 ground plane, Sphere and Box are handy stand-ins while lighting.
+
+## Volume
+
+Houdini-like VDB SOPs. Output of `vdbfrompolygons` is a **Volume prim only** (no mesh passthrough).
+
+| Node | What it does |
+| --- | --- |
+| **VDB from Polygons** (`vdbfrompolygons`) | Mode: SDF / Fog Volume; Voxel Size; Exterior / Interior Band |
+| **VDB File** (`vdbfile`) | Load `.vdb` from disk into a Volume prim |
+| **SDF to Polygons (VDB)** (`sdftopolygons_vdb`) | OpenVDB `volumeToMesh` |
+| **SDF to Polygons (DCSDD)** (`sdftopolygons_dcsdd`) | Dual Contouring of Signed Distance Data (Carrera et al. 2026) |
+
+CPU path tracer renders SDF level sets by sphere tracing and Fog volumes with delta tracking.
+Assign a MaterialX graph with `surfacematerial.volumeshader` → `standard_volume` (density,
+absorption, scattering, emission, anisotropy) for volume shading; the surface shader shades SDF hits.
 
 ## Utility
 

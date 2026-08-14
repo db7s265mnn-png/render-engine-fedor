@@ -13,6 +13,11 @@
 #include "scene/types.h"
 #include "solstice_config.h"
 
+#if !defined(__CUDACC__)
+#include "render/volume_vdb.h"
+#include "scene/volume_grid.h"
+#endif
+
 #if !defined(__CUDACC__) && SOLSTICE_HAVE_OPENPGL
 #include "render/cpu/path_guiding.h"
 #endif
@@ -749,13 +754,27 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         RayHit hit;
         const bool didHit = tracer.intersect(origin, direction, kFloatMax, hit);
 
-        // Null-scattering / delta tracking through the active homogeneous medium.
+        // Null-scattering / delta tracking through the active medium (homogeneous or VDB fog).
         if (const MediumData* med = getMedium(scene, currentMedium)) {
             const float tMax = didHit ? hit.t : 1.0e6f;
-            const MediumSample ms = sampleMediumHomogeneous(*med, tMax, rng, throughput);
+            MediumSample ms;
+#if !defined(__CUDACC__)
+            if (med->type == 2 && med->volumeIndex >= 0 && med->volumeIndex < scene.volumeCount &&
+                scene.volumes && scene.volumes[med->volumeIndex]) {
+                ms = sampleMediumVdbFog(*scene.volumes[med->volumeIndex], *med, origin, direction, tMax, rng,
+                                        throughput);
+            } else {
+                ms = sampleMediumHomogeneous(*med, tMax, rng, throughput);
+            }
+#else
+            ms = sampleMediumHomogeneous(*med, tMax, rng, throughput);
+#endif
             if (ms.absorbed || isBlack(throughput)) break;
             if (ms.scattered) {
                 origin = origin + direction * ms.t;
+#if !defined(__CUDACC__)
+                if (!isBlack(med->emission)) radiance += throughput * med->emission;
+#endif
                 float phasePdf = 0.0f;
                 const Vec3 woVol = -direction;
                 direction = sampleHenyeyGreenstein(woVol, med->g, rng.nextFloat(), rng.nextFloat(),
@@ -844,6 +863,39 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         if (!buildSurfaceInteraction(scene, hit, origin, direction, si)) break;
 
         const InstanceData& inst = scene.instances[si.instanceIndex];
+
+#if !defined(__CUDACC__)
+        // Direct VDB rendering: SDF level-set surface or fog volume entry.
+        if (inst.volumeIndex >= 0 && inst.volumeIndex < scene.volumeCount && scene.volumes &&
+            scene.volumes[inst.volumeIndex]) {
+            const VolumeGrid& vol = *scene.volumes[inst.volumeIndex];
+            if (vol.kind() == VolumeGridKind::Fog) {
+                currentMedium = inst.mediumIndex;
+                origin = offsetRayOrigin(si.p, -si.ng, direction);
+                ++passThrough;
+                if (passThrough > 32) break;
+                continue;
+            }
+            if (vol.kind() == VolumeGridKind::Sdf) {
+                float tSdf = hit.t;
+                Vec3 nSdf;
+                const float diag = length(vol.worldBounds().hi - vol.worldBounds().lo);
+                if (intersectSdfVolume(vol, origin, direction, 0.0f, hit.t + diag, tSdf, nSdf)) {
+                    hit.t = tSdf;
+                    si.p = origin + direction * tSdf;
+                    si.ng = nSdf;
+                    si.ns = nSdf;
+                    si.nObject = transformVector(inst.xformInv, nSdf);
+                    si.pObject = transformPoint(inst.xformInv, si.p);
+                } else {
+                    origin = offsetRayOrigin(si.p, si.ng, direction);
+                    ++passThrough;
+                    if (passThrough > 32) break;
+                    continue;
+                }
+            }
+        }
+#endif
 
         // Lights that are hidden from the camera let primary rays pass through.
         if (si.lightIndex >= 0 && depth == 0 && !inst.visibleCamera) {

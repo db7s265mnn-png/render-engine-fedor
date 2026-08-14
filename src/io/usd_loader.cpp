@@ -152,14 +152,12 @@ void triangulateFaces(const std::vector<float>& points, const std::vector<int>& 
             cursor += size_t(std::max(count, 0));
             continue;
         }
-        const int i0 = faceVertexIndices[cursor];
-        for (int i = 1; i < count - 1; ++i) {
-            mesh->indices.push_back(uint32_t(i0));
-            mesh->indices.push_back(uint32_t(faceVertexIndices[cursor + size_t(i)]));
-            mesh->indices.push_back(uint32_t(faceVertexIndices[cursor + size_t(i + 1)]));
-        }
+        mesh->faceVertexCounts.push_back(uint32_t(count));
+        for (int i = 0; i < count; ++i)
+            mesh->faceVertexIndices.push_back(uint32_t(faceVertexIndices[cursor + size_t(i)]));
         cursor += size_t(count);
     }
+    mesh->ensureRenderTriangles();
     mesh->computeNormalsIfMissing();
 }
 

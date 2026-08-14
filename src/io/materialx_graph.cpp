@@ -670,7 +670,16 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"blend", "float", "0.1"},
          {"default", "color3", "0.2, 0.5, 0.8"}});
     add("surfacematerial", "material", "PBR / Shading",
-        {{"surfaceshader", "surfaceshader", {}}, {"displacementshader", "displacementshader", {}}});
+        {{"surfaceshader", "surfaceshader", {}},
+         {"displacementshader", "displacementshader", {}},
+         {"volumeshader", "volumeshader", {}}});
+    add("standard_volume", "volumeshader", "PBR / Shading",
+        {{"density", "float", "1"},
+         {"anisotropy", "float", "0"},
+         {"absorption", "color3", "0.5, 0.5, 0.5"},
+         {"scattering", "color3", "0.5, 0.5, 0.5"},
+         {"emission", "float", "0"},
+         {"emission_color", "color3", "1, 1, 1"}});
     // Arnold-like ray switch (surfaceshader). Incoming ray type selects the port
     // (camera / shadow / specular_transmission / …). Solstice `caustics` is only
     // for photon / MNEE / BDPT light-tracing — never for camera rays.
@@ -1173,6 +1182,23 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                     std::to_string(result.material.displacementScale) +
                     ", zero=" + std::to_string(result.material.displacementZeroValue) +
                     ", autobump=" + std::to_string(result.material.autobump) + ")");
+        }
+
+        // MaterialX surfacematerial.volumeshader → standard_volume params.
+        mx::NodePtr volNode = surface ? resolveConnectedNode(surface, "volumeshader") : nullptr;
+        if (volNode && (volNode->getCategory() == "standard_volume" || volNode->getType() == "volumeshader")) {
+            result.material.hasVolumeShader = 1;
+            result.material.volumeDensity = readNodeFloat(volNode, "density", 1.0f);
+            result.material.volumeAnisotropy = readNodeFloat(volNode, "anisotropy", 0.0f);
+            result.material.volumeEmissionStrength = readNodeFloat(volNode, "emission", 0.0f);
+            Vec3 absCol(0.5f), scaCol(0.5f), emCol(1.0f);
+            parseColor3(inputValueString(volNode, "absorption"), absCol);
+            parseColor3(inputValueString(volNode, "scattering"), scaCol);
+            parseColor3(inputValueString(volNode, "emission_color"), emCol);
+            result.material.volumeAbsorption = absCol;
+            result.material.volumeScattering = scaCol;
+            result.material.volumeEmission = emCol;
+            logInfo("MaterialX: volume shader (density=" + std::to_string(result.material.volumeDensity) + ")");
         }
 
         // Drop dangling roots if a compile failed mid-way.

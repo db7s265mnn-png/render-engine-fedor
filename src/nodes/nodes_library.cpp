@@ -22,6 +22,9 @@
 #include "render/render_device.h"
 
 namespace sol {
+
+void registerVdbNodes(NodeRegistry& registry);
+
 namespace {
 
 QString resolvePath(const CookContext& context, const QString& path) {
@@ -509,7 +512,7 @@ public:
 
             const QString pattern = stringValue("pattern", "*");
             for (StagePrim& prim : stage.prims) {
-                if (prim.type != PrimType::Mesh) continue;
+                if (prim.type != PrimType::Mesh && prim.type != PrimType::Volume) continue;
                 if (!matchesPattern(pattern, prim.path)) continue;
                 prim.material = evaluated.material;
                 prim.raySwitchBranches = evaluated.raySwitchBranches;
@@ -1345,6 +1348,8 @@ void registerBuiltinNodes() {
         makeType<CameraNode>("camera", "Camera", "Camera", "Render camera with lens controls", "#3a76b2"));
     registry.registerType(makeType<RenderSettingsNode>("rendersettings", "Render Settings", "Render",
                                                        "Resolution, sampling and backend selection", "#8a4550"));
+
+    registerVdbNodes(registry);
 }
 
 }  // namespace sol

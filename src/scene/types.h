@@ -122,6 +122,16 @@ struct Material {
     // dielectric skip Fresnel reflections (TIR still reflects — nowhere else to go).
     float internalReflections = 1.0f;
 
+    // MaterialX volumeshader (connected to surfacematerial.volumeshader).
+    // When hasVolumeShader != 0, fog/VDB path uses these coefficients.
+    int hasVolumeShader = 0;
+    float volumeDensity = 1.0f;
+    float volumeAnisotropy = 0.0f;  // HG g
+    Vec3 volumeAbsorption{0.5f, 0.5f, 0.5f};
+    Vec3 volumeScattering{0.5f, 0.5f, 0.5f};
+    Vec3 volumeEmission{0.0f, 0.0f, 0.0f};
+    float volumeEmissionStrength = 0.0f;
+
     // MaterialX ray_switch_shader → per-ray-type material indices (scene-absolute
     // after Stage::toScene). -1 = this material.
     RaySwitchTable raySwitch;
@@ -200,14 +210,14 @@ struct TextureView {
 // Participating media
 // ---------------------------------------------------------------------------
 struct MediumData {
-    int type = 0;            // 0 = none, 1 = homogeneous, 2 = OpenVDB
-    int volumeIndex = -1;    // index into scene volume / VDB path table (-1 = none)
-    Vec3 sigmaA{0.0f};       // absorption coefficient (homogeneous)
-    Vec3 sigmaS{0.0f};       // scattering coefficient (homogeneous)
+    int type = 0;            // 0 = none, 1 = homogeneous, 2 = OpenVDB fog, 3 = OpenVDB SDF surface
+    int volumeIndex = -1;    // index into Scene::volumes / volumePaths
+    Vec3 sigmaA{0.0f};       // absorption coefficient (homogeneous / volume shader)
+    Vec3 sigmaS{0.0f};       // scattering coefficient (homogeneous / volume shader)
     float g = 0.0f;          // Henyey-Greenstein asymmetry parameter [-1, 1]
-    float density = 1.0f;    // density scale (multiplies sigmaA/sigmaS)
+    float density = 1.0f;    // density scale (multiplies sigmaA/sigmaS and VDB samples)
+    Vec3 emission{0.0f};     // volume emission * strength (RGB)
     int pad0 = 0;
-    int pad1 = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -254,7 +264,8 @@ struct InstanceData {
     int motionKeyCount = 1;
     // Index into SceneView::media; -1 = no participating medium on this instance.
     int mediumIndex = -1;
-    int padInst = 0;
+    // Index into Scene::volumes (SDF / fog grid). -1 = none.
+    int volumeIndex = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -581,6 +592,8 @@ struct RenderSettingsData {
 // ---------------------------------------------------------------------------
 // The flattened scene as seen by an integrator.
 // ---------------------------------------------------------------------------
+class VolumeGrid;
+
 struct SceneView {
     const MeshView* meshes = nullptr;
     const InstanceData* instances = nullptr;
@@ -590,6 +603,8 @@ struct SceneView {
     const TextureView* textures = nullptr;
     const ProceduralNode* procedurals = nullptr;
     const MediumData* media = nullptr;
+    // Host CPU only — OpenVDB grids (indexed by InstanceData::volumeIndex).
+    const VolumeGrid* const* volumes = nullptr;
 
     int meshCount = 0;
     int instanceCount = 0;
@@ -599,6 +614,7 @@ struct SceneView {
     int textureCount = 0;
     int proceduralCount = 0;
     int mediumCount = 0;
+    int volumeCount = 0;
     int domeLightIndex = -1;  // first dome light, used for ray misses
     // Any material with dispersionAbbe > 0 — enables hero-channel sampling.
     int hasDispersion = 0;
