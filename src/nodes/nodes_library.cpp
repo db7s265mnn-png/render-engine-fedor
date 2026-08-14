@@ -902,7 +902,8 @@ public:
                                                           "GPU (OptiX) will fall back to Embree.")));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
-                                          "Ambient Occlusion", "PT Spectral", "BDPT Spectral"},
+                                          "Ambient Occlusion", "PT Spectral", "BDPT Spectral",
+                                          "Wireframe"},
                                          0)
                          .withGroup("Engine")
                          .withTooltip("Path Tracer: unidirectional (+ MNEE or Photon caustics).\n"
@@ -911,6 +912,8 @@ public:
                                       "PT Spectral: hero-wavelength path tracer (CPU / Embree).\n"
                                       "BDPT Spectral: bidirectional + spectral transport "
                                       "(LT / MNEE / Photon + Indirect Guides; CPU / Embree).\n"
+                                      "Wireframe: triangle edges with screen-space thickness "
+                                      "(see Wireframe Thickness).\n"
                                       "Pick the caustics estimator under Caustics Engine.\n"
                                       "The log reports which caustics mode is active."));
         // Hidden migration marker: legacy menu was PT / DL / AO / BDPT.
@@ -950,7 +953,14 @@ public:
                          .withTooltip("0 uses every available core"));
         addParameter(Parameter::makeFloat("aodistance", "AO Distance", 1.0, 0.01, 100.0, false)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==3"));
+                         .withVisibleWhen("integrator==3")
+                         .withTooltip("Ambient Occlusion: max occlusion ray length in scene units."));
+        addParameter(Parameter::makeFloat("wireframethickness", "Wireframe Thickness", 1.0, 0.25, 8.0,
+                                          false)
+                         .withGroup("Engine")
+                         .withVisibleWhen("integrator==6")
+                         .withTooltip("Wireframe: edge half-width in screen pixels (anti-aliased). "
+                                      "Higher = thicker mesh lines."));
         addParameter(Parameter::makeBool("caustics", "Caustics", true)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==0||integrator==1||integrator==5")
@@ -1126,7 +1136,7 @@ public:
         settings.resolutionY = intValue("resy", 540);
         settings.samplesPerPixel = intValue("samples", 128);
         settings.backend = intValue("backend", 0) == 1 ? kBackendGpuOptix : kBackendCpuEmbree;
-        settings.integrator = std::clamp(intValue("integrator", 0), 0, 5);
+        settings.integrator = std::clamp(intValue("integrator", 0), 0, 6);
         settings.maxDepth = intValue("maxdepth", 8);
         settings.rrStartDepth = intValue("rrdepth", 3);
         settings.lightSamples = std::max(1, intValue("lightsamples", 2));
@@ -1152,6 +1162,8 @@ public:
             settings.samplingEngine = std::clamp(intValue("samplingengine", 0), 0, 1);
         }
         settings.aoDistance = float(floatValue("aodistance", 1.0));
+        settings.wireframeThickness =
+            std::clamp(float(floatValue("wireframethickness", 1.0)), 0.25f, 8.0f);
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
         settings.causticsEngine = std::clamp(intValue("causticsengine", 1), 0, 2);

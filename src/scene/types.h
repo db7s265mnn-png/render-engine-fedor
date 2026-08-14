@@ -366,7 +366,8 @@ struct CameraData {
 enum ToneMapper : int { kToneNone = 0, kToneReinhard = 1, kToneAces = 2 };  // legacy (removed from UI)
 enum RenderBackendType : int { kBackendCpuEmbree = 0, kBackendGpuOptix = 1 };
 // BDPT is CPU / Embree only; OptiX falls back to the unidirectional path tracer.
-// Menu order matches these values: Path Tracer, BDPT, Direct Lighting, AO.
+// Menu order matches these values: Path Tracer, BDPT, Direct Lighting, AO,
+// PT Spectral, BDPT Spectral, Wireframe.
 enum IntegratorMode : int {
     kIntegratorPathTracer = 0,
     kIntegratorBdpt = 1,
@@ -374,6 +375,7 @@ enum IntegratorMode : int {
     kIntegratorAmbientOcclusion = 3,
     kIntegratorSpectralPath = 4,  // PT Spectral (CPU / Embree)
     kIntegratorSpectralBdpt = 5,  // BDPT Spectral (CPU / Embree)
+    kIntegratorWireframe = 6,     // Geometry edge overlay (barycentric)
 };
 
 // How refractive / reflective caustics are estimated when settings.caustics != 0.
@@ -514,6 +516,8 @@ struct RenderSettingsData {
     int threads = 0;               // 0 = hardware concurrency
 
     float aoDistance = 1.0f;
+    // Wireframe integrator: edge half-width in screen pixels (anti-aliased).
+    float wireframeThickness = 1.0f;
     int pathGuiding = 0;           // OpenPGL indirect guides (CPU / Embree); PT + BDPT
     // Enable caustic light transport (specular→diffuse). Off = dark glass shadows
     // (soften per-material with shadow_opacity / contribute_caustics).

@@ -319,6 +319,13 @@ public:
                         (useGuiding ? " + OpenPGL guiding" : ""));
             else if (pathTracer)
                 logInfo("Caustics: off (dark shadows through glass; shadow_opacity fakes)");
+            else if (settings.integrator == kIntegratorWireframe)
+                logInfo(std::string("Integrator: Wireframe (thickness=") +
+                        std::to_string(settings.wireframeThickness) + " px)");
+            else if (settings.integrator == kIntegratorAmbientOcclusion)
+                logInfo("Integrator: Ambient Occlusion");
+            else if (settings.integrator == kIntegratorDirectLighting)
+                logInfo("Integrator: Direct Lighting");
 
             const char* samplerName = "Sobol";
             if (settings.pixelSampler == kPixelSamplerBlueNoise) samplerName = "BlueNoise64";
