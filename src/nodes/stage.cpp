@@ -380,7 +380,8 @@ ScenePtr Stage::toScene() const {
                 inst.lightIndex = -1;
                 inst.visibleCamera = 1;
                 // Bounds proxy is only a primary-ray shell for SDF entry / fog enter-exit.
-                // It must NOT cast shadows or the interior SDF/fog is fully self-shadowed.
+                // Hard SDF occlusion + soft fog Tr are field-tested in the integrator —
+                // the AABB must NOT be an Embree opaque shadow occluder.
                 inst.visibilityMask = kVisPrimary;
                 inst.volumeIndex = volumeIndex;
                 MediumData medium = mediumFromMaterialVolume(material, volumeIndex, prim.volume->kind());

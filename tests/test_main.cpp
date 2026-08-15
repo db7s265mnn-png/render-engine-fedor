@@ -4730,6 +4730,197 @@ void testNgonTriangulateAndVdb() {
     check(sdfDl > 1.0, "SDF Direct Lighting renders the volume");
     check(fogPtOff > 0.5, "Fog PathTracer renders the volume");
     check(fogDl > 0.5, "Fog Direct Lighting renders the volume");
+
+    // Cast-shadow regression: volume above a ground plane, light from an angle.
+    // Lit side of the plane must be brighter than the shadowed side.
+    auto castShadowContrast = [&](VolumeGridKind kind) -> double {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = kind;
+        vs.voxelSize = 0.08f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        vs.fillDensity = 1.0f;
+        std::string e2;
+        VolumeGridPtr grid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e2);
+        check(grid && grid->valid(), std::string("cast-shadow grid: ") + e2);
+
+        ScenePtr scene = std::make_shared<Scene>();
+        const int volumeIndex = scene->addVolume(grid);
+        const Bounds3 bb = grid->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int volMesh = scene->addMesh(proxy);
+
+        // Ground plane under the volume (y = -1.2), larger than the box shadow.
+        MeshPtr ground = makeBoxMesh(Vec3(6.0f, 0.05f, 6.0f));
+        for (Vec3& p : ground->positions) p.y -= 1.2f;
+        ground->ensureRenderTriangles();
+        ground->computeBounds();
+        const int groundMesh = scene->addMesh(ground);
+
+        Material volMat;
+        volMat.baseColor = Vec3(0.85f, 0.75f, 0.65f);
+        volMat.roughness = 0.4f;
+        volMat.hasVolumeShader = 1;
+        volMat.volumeDensity = 1.0f;
+        volMat.volumeAbsorption = Vec3(0.05f);
+        volMat.volumeScattering = Vec3(1.5f);
+        const int volMatIdx = scene->addMaterial(volMat);
+        Material gMat;
+        gMat.baseColor = Vec3(0.7f);
+        gMat.roughness = 0.6f;
+        const int gMatIdx = scene->addMaterial(gMat);
+
+        InstanceData volInst;
+        volInst.meshIndex = volMesh;
+        volInst.materialIndex = volMatIdx;
+        volInst.volumeIndex = volumeIndex;
+        volInst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = (kind == VolumeGridKind::Sdf) ? 3 : 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 1.0f;
+        med.sigmaA = Vec3(0.05f);
+        med.sigmaS = Vec3(1.5f);
+        volInst.mediumIndex = scene->addMedium(med);
+        scene->instances.push_back(volInst);
+
+        InstanceData gInst;
+        gInst.meshIndex = groundMesh;
+        gInst.materialIndex = gMatIdx;
+        scene->instances.push_back(gInst);
+
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 6.0f;
+        // Light from +X/+Y so the shadow falls toward -X on the ground.
+        light.xform = lookAtMatrix(Vec3(4, 6, 0), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 64;
+        scene->settings.resolutionY = 48;
+        scene->settings.samplesPerPixel = 24;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.caustics = 0;
+        scene->settings.pathGuiding = 0;
+        scene->settings.maxDepth = 4;
+        scene->finalize();
+        // Look down at the ground / volume from above.
+        scene->camera.cameraToWorld = lookAtMatrix(Vec3(0, 5, 0.01f), Vec3(0, -1, 0), Vec3(0, 0, -1));
+        scene->camera.focalLength = 35.0f;
+        scene->cameraAuthored = true;
+
+        RenderSession session;
+        session.setScene(scene);
+        session.start();
+        session.waitForCompletion();
+        const Image image = session.linearImage();
+        // Compare left half (toward shadow) vs right half (lit).
+        double left = 0.0, right = 0.0;
+        int nL = 0, nR = 0;
+        const int mid = image.width() / 2;
+        const int y0 = image.height() / 3;
+        const int y1 = (image.height() * 2) / 3;
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                const double L = double(luminance(image.rgb(x, y)));
+                if (x < mid) {
+                    left += L;
+                    ++nL;
+                } else {
+                    right += L;
+                    ++nR;
+                }
+            }
+        }
+        const double meanL = nL ? left / nL : 0.0;
+        const double meanR = nR ? right / nR : 0.0;
+        std::printf("  cast-shadow %s: left=%.4f right=%.4f ratio=%.3f\n",
+                    kind == VolumeGridKind::Sdf ? "SDF" : "Fog", meanL, meanR,
+                    meanR > 1e-8 ? meanL / meanR : 0.0);
+        // Shadowed side must be darker. Soft fog still needs a clear ratio.
+        check(meanR > 1e-4, "cast-shadow lit side has light");
+        check(meanL < meanR * 0.92, "cast-shadow: shadowed side darker than lit");
+        return meanR > 1e-8 ? meanL / meanR : 0.0;
+    };
+    (void)castShadowContrast(VolumeGridKind::Sdf);
+    (void)castShadowContrast(VolumeGridKind::Fog);
+
+    // Field-level unit checks (no Embree): SDF occludes, fog attenuates.
+    {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = VolumeGridKind::Sdf;
+        vs.voxelSize = 0.1f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        std::string e3;
+        VolumeGridPtr sdfGrid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e3);
+        check(sdfGrid && sdfGrid->valid(), "unit sdf grid");
+        ScenePtr s = std::make_shared<Scene>();
+        const int vi = s->addVolume(sdfGrid);
+        MeshPtr proxy = makeBoxMesh(Vec3(1.2f));
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        InstanceData inst;
+        inst.meshIndex = s->addMesh(proxy);
+        inst.volumeIndex = vi;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 3;
+        med.volumeIndex = vi;
+        inst.mediumIndex = s->addMedium(med);
+        s->instances.push_back(inst);
+        s->finalize();
+        const SceneView view = s->view();
+        check(shadowOccludedBySdfVolumes(view, Vec3(-3, 0, 0), Vec3(1, 0, 0), 10.0f),
+              "SDF occludes a ray through the box");
+        check(!shadowOccludedBySdfVolumes(view, Vec3(-3, 0, 0), Vec3(0, 1, 0), 10.0f),
+              "SDF misses a ray that misses the box");
+    }
+    {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = VolumeGridKind::Fog;
+        vs.voxelSize = 0.1f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        vs.fillDensity = 1.0f;
+        std::string e3;
+        VolumeGridPtr fogGrid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e3);
+        check(fogGrid && fogGrid->valid(), "unit fog grid");
+        ScenePtr s = std::make_shared<Scene>();
+        const int vi = s->addVolume(fogGrid);
+        MeshPtr proxy = makeBoxMesh(Vec3(1.2f));
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        InstanceData inst;
+        inst.meshIndex = s->addMesh(proxy);
+        inst.volumeIndex = vi;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 2;
+        med.volumeIndex = vi;
+        med.density = 1.0f;
+        med.sigmaA = Vec3(0.2f);
+        med.sigmaS = Vec3(1.0f);
+        inst.mediumIndex = s->addMedium(med);
+        s->instances.push_back(inst);
+        s->finalize();
+        const SceneView view = s->view();
+        const Vec3 Tr =
+            shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(1, 0, 0), 10.0f);
+        check(Tr.x < 0.95f && Tr.y < 0.95f && Tr.z < 0.95f, "Fog Tr attenuates through the volume");
+        check(Tr.x > 0.0f, "Fog Tr is not fully opaque for this density");
+        const Vec3 TrMiss =
+            shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(0, 1, 0), 10.0f);
+        check(TrMiss.x > 0.99f && TrMiss.y > 0.99f && TrMiss.z > 0.99f,
+              "Fog Tr ~1 when the ray misses the AABB");
+    }
 #else
     std::printf("  (OpenVDB disabled in this build — skipping volume checks)\n");
 #endif

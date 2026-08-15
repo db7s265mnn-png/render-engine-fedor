@@ -660,9 +660,16 @@ SR_INL SR_HD float lightTraceSplatClamp(const RenderSettingsData& settings) {
 // Multi-hit shadow visibility (Embree filter-function style): opaque surfaces
 // block fully; transmissive surfaces attenuate by Material::shadowOpacity when
 // refractive caustics are enabled (MaterialX / Arnold fake-caustics control).
+// VDB: SDF level sets are hard occluders (tested against the field, not the AABB
+// proxy). Fog AABBs are skipped here — soft Tr is applied via shadowTransmittanceFogVolumes.
 template <typename Tracer>
 SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 dir,
                                     float tMax) {
+#if !defined(__CUDACC__)
+    // Field-based SDF cast / self shadow (works from inside the AABB too).
+    if (shadowOccludedBySdfVolumes(scene, origin, dir, tMax)) return 0.0f;
+#endif
+
     float visibility = 1.0f;
     Vec3 o = origin;
     float remaining = tMax;
@@ -680,6 +687,8 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
         // Volume AABB proxies exist only to enter SDF/fog on camera rays. They must
         // not occlude NEE / shadow connections (shadowVisibility uses primary-mask
         // intersect, so Embree visibilityMask alone cannot skip them).
+        // SDF occlusion is handled by shadowOccludedBySdfVolumes above; fog Tr is
+        // applied separately in NEE via shadowTransmittanceFogVolumes.
         if (si.instanceIndex >= 0 && si.instanceIndex < scene.instanceCount) {
             const InstanceData& hitInst = scene.instances[si.instanceIndex];
             if (hitInst.volumeIndex >= 0) {
@@ -736,14 +745,16 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     if (!shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) return result;
 
     float visibility = 1.0f;
+    Vec3 shadowOrigin = si.p;
+    float tMax = 1.0e8f;
     if (scene.lights[lightIndex].shadowEnable) {
-        const Vec3 shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
+        shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
         // Use a large finite tMax for distant/dome lights — Embree is more stable
         // with that than with FLT_MAX, and it still reaches any scene geometry.
-        float tMax = 1.0e8f;
         if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
         // Transparent / fake-caustic shadows: walk interfaces with shadow_opacity
         // (Embree-style multi-hit visibility instead of binary rtcOccluded).
+        // Also field-tests SDF volumes (hard) — fog Tr applied below.
         visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax);
         if (visibility <= 1e-5f) return result;
     }
@@ -767,9 +778,16 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     const float lightPdf = ls.pdf * selectPdf;
     const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
     result = ls.radiance * be.f * (fabsf(wiLocal.z) * misWeight / lightPdf) * visibility;
-    // Homogeneous medium transmittance along the shadow segment (finite lights).
+
+    // Volumetric shadow transmittance along the light segment.
+#if !defined(__CUDACC__)
+    // Fog VDBs: soft cast/self shadow via optical depth (AABB-clipped, incl. distant lights).
+    if (scene.lights[lightIndex].shadowEnable)
+        result = result * shadowTransmittanceFogVolumes(scene, shadowOrigin, ls.wi, tMax);
+#endif
+    // Homogeneous medium currently surrounding the shading point (non-VDB).
     if (const MediumData* med = getMedium(scene, mediumIndex)) {
-        if (ls.distance < 1.0e7f) result = result * mediumShadowTr(*med, ls.distance);
+        if (med->type != 2 && ls.distance < 1.0e7f) result = result * mediumShadowTr(*med, ls.distance);
     }
     return result;
 }
@@ -889,8 +907,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         if (sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) &&
                             ls.pdf > 0.0f && !isBlack(ls.radiance)) {
                             float vis = 1.0f;
+                            float tShadow = 1.0e8f;
                             if (scene.lights[li].shadowEnable) {
-                                float tShadow = 1.0e8f;
                                 if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
                                 vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
                             }
@@ -899,20 +917,17 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                                 const float p = henyeyGreenstein(cosTheta, med->g);
                                 Vec3 contrib =
                                     throughput * ls.radiance * (p * vis / (ls.pdf * selectPdf));
-                                if (ls.distance < 1.0e7f) {
+                                // Soft fog Tr through all fog volumes (includes current); SDF already
+                                // hard-tested inside shadowVisibility.
 #if !defined(__CUDACC__)
-                                    if (med->type == 2 && med->volumeIndex >= 0 &&
-                                        med->volumeIndex < scene.volumeCount && scene.volumes &&
-                                        scene.volumes[med->volumeIndex]) {
-                                        contrib = contrib * mediumShadowTrVdb(
-                                                                  *scene.volumes[med->volumeIndex], *med,
-                                                                  origin, ls.wi, ls.distance);
-                                    } else
+                                if (scene.lights[li].shadowEnable)
+                                    contrib =
+                                        contrib * shadowTransmittanceFogVolumes(scene, origin, ls.wi,
+                                                                                tShadow);
 #endif
-                                    {
-                                        contrib = contrib * mediumShadowTr(*med, ls.distance);
-                                    }
-                                }
+                                // Homogeneous (non-VDB) medium around the scatter point.
+                                if (med->type != 2 && ls.distance < 1.0e7f)
+                                    contrib = contrib * mediumShadowTr(*med, ls.distance);
                                 if (depth > 0)
                                     contrib = clampContribution(contrib, settings.clampDirect);
                                 radiance += contrib;

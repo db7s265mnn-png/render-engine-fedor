@@ -168,15 +168,63 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
 Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 origin, Vec3 direction,
                        float dist) {
     if (!grid.valid() || dist <= 0.0f) return Vec3(1.0f);
-    const int n = 8;
+    // Step count tracks voxel size so soft shadows stay stable across scale.
+    const float vs = srMax(1e-6f, grid.voxelSize());
+    const int n = int(clampf(dist / vs * 2.0f, 8.0f, 64.0f));
     Vec3 tau(0.0f);
     const float densityScale = srMax(0.0f, medium.density);
+    const float step = dist / float(n);
+    const Vec3 sigmaT = medium.sigmaA + medium.sigmaS;
     for (int i = 0; i < n; ++i) {
-        const float t = (float(i) + 0.5f) / float(n) * dist;
+        const float t = (float(i) + 0.5f) * step;
         const float dens = srMax(0.0f, grid.sampleWorld(origin + direction * t)) * densityScale;
-        tau = tau + (medium.sigmaA + medium.sigmaS) * dens * (dist / float(n));
+        tau = tau + sigmaT * dens * step;
     }
     return Vec3(expf(-tau.x), expf(-tau.y), expf(-tau.z));
+}
+
+bool shadowOccludedBySdfVolumes(const SceneView& scene, Vec3 origin, Vec3 direction, float tMax) {
+    if (!scene.volumes || scene.volumeCount <= 0 || tMax <= 0.0f) return false;
+    for (int vi = 0; vi < scene.volumeCount; ++vi) {
+        const VolumeGrid* grid = scene.volumes[vi];
+        if (!grid || !grid->valid() || grid->kind() != VolumeGridKind::Sdf) continue;
+        float tEnter = 0.0f;
+        float tExit = tMax;
+        if (!rayAabbInterval(origin, direction, grid->worldBounds(), tEnter, tExit)) continue;
+        const float tMin = srMax(srMax(0.0f, tEnter) + 1e-4f, grid->voxelSize() * 0.15f);
+        const float tHi = srMin(tMax, tExit);
+        if (tHi <= tMin) continue;
+        float tHit = 0.0f;
+        Vec3 nSdf;
+        if (intersectSdfVolume(*grid, origin, direction, tMin, tHi, tHit, nSdf)) return true;
+    }
+    return false;
+}
+
+Vec3 shadowTransmittanceFogVolumes(const SceneView& scene, Vec3 origin, Vec3 direction, float tMax) {
+    Vec3 Tr(1.0f);
+    if (!scene.volumes || !scene.instances || scene.volumeCount <= 0 || tMax <= 0.0f) return Tr;
+
+    // Pair each fog grid with its MediumData via the volume instance.
+    for (int ii = 0; ii < scene.instanceCount; ++ii) {
+        const InstanceData& inst = scene.instances[ii];
+        if (inst.volumeIndex < 0 || inst.volumeIndex >= scene.volumeCount) continue;
+        const VolumeGrid* grid = scene.volumes[inst.volumeIndex];
+        if (!grid || !grid->valid() || grid->kind() != VolumeGridKind::Fog) continue;
+        const MediumData* med = getMedium(scene, inst.mediumIndex);
+        if (!med) continue;
+
+        float tEnter = 0.0f;
+        float tExit = tMax;
+        if (!rayAabbInterval(origin, direction, grid->worldBounds(), tEnter, tExit)) continue;
+        const float a = srMax(0.0f, tEnter);
+        const float b = srMin(tMax, tExit);
+        if (b <= a + 1e-6f) continue;
+
+        Tr = Tr * mediumShadowTrVdb(*grid, *med, origin + direction * a, direction, b - a);
+        if (maxComponent(Tr) < 1e-5f) return Vec3(0.0f);
+    }
+    return Tr;
 }
 
 }  // namespace sol
