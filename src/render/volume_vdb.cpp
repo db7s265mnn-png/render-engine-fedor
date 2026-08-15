@@ -3,14 +3,59 @@
 #include <cmath>
 
 namespace sol {
+namespace {
+
+// Slab test: ray vs AABB. Returns true if the ray overlaps [tEnter, tExit] with tExit >= 0.
+bool rayAabbInterval(Vec3 origin, Vec3 direction, const Bounds3& b, float& tEnter, float& tExit) {
+    if (!b.valid()) return false;
+    float t0 = -1.0e30f;
+    float t1 = 1.0e30f;
+    const float* o = &origin.x;
+    const float* d = &direction.x;
+    const float* lo = &b.lo.x;
+    const float* hi = &b.hi.x;
+    for (int axis = 0; axis < 3; ++axis) {
+        const float od = d[axis];
+        if (fabsf(od) < 1e-20f) {
+            if (o[axis] < lo[axis] || o[axis] > hi[axis]) return false;
+            continue;
+        }
+        float inv = 1.0f / od;
+        float ta = (lo[axis] - o[axis]) * inv;
+        float tb = (hi[axis] - o[axis]) * inv;
+        if (ta > tb) {
+            const float tmp = ta;
+            ta = tb;
+            tb = tmp;
+        }
+        t0 = srMax(t0, ta);
+        t1 = srMin(t1, tb);
+        if (t0 > t1) return false;
+    }
+    tEnter = t0;
+    tExit = t1;
+    return t1 >= 0.0f;
+}
+
+}  // namespace
 
 bool intersectSdfVolume(const VolumeGrid& grid, Vec3 origin, Vec3 direction, float tMin, float tMax,
                         float& tHit, Vec3& normal) {
     if (!grid.valid() || grid.kind() != VolumeGridKind::Sdf) return false;
+
+    // Restrict sphere tracing to the analytical world AABB (proxy triangles can miss exits).
+    float aabbEnter = 0.0f;
+    float aabbExit = tMax;
+    if (rayAabbInterval(origin, direction, grid.worldBounds(), aabbEnter, aabbExit)) {
+        tMin = srMax(tMin, aabbEnter);
+        tMax = srMin(tMax, aabbExit);
+    }
+    if (tMax <= tMin) return false;
+
     const float eps = srMax(1e-4f, grid.voxelSize() * 0.25f);
     float t = srMax(0.0f, tMin);
-    // Sphere tracing / raymarch.
-    for (int i = 0; i < 256; ++i) {
+    // Sphere tracing / raymarch along the AABB segment.
+    for (int i = 0; i < 512; ++i) {
         if (t > tMax) return false;
         const Vec3 p = origin + direction * t;
         const float d = grid.sampleWorld(p);
@@ -35,6 +80,19 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
         out.t = tMax;
         return out;
     }
+
+    // Clamp the walk to the fog AABB exit so missing Embree backfaces cannot stretch tMax to 1e6.
+    float aabbEnter = 0.0f;
+    float aabbExit = tMax;
+    if (rayAabbInterval(origin, direction, grid.worldBounds(), aabbEnter, aabbExit)) {
+        // Origin is already inside after proxy entry — still clamp far bound.
+        tMax = srMin(tMax, srMax(0.0f, aabbExit));
+    }
+    if (tMax <= 0.0f) {
+        out.t = 0.0f;
+        return out;
+    }
+
     const float majGrid = srMax(grid.majorant(), 1e-4f);
     const float densityScale = srMax(0.0f, medium.density);
     // Majorant extinction ≈ max(|σa|+|σs|) * majGrid * densityScale
@@ -43,7 +101,7 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
     const float baseMaj = srMax(sigmaA0.x + sigmaS0.x, srMax(sigmaA0.y + sigmaS0.y, sigmaA0.z + sigmaS0.z));
     const float majorant = srMax(1e-6f, baseMaj * majGrid * densityScale);
     float t = 0.0f;
-    for (int iter = 0; iter < 128; ++iter) {
+    for (int iter = 0; iter < 256; ++iter) {
         const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
         t += -logf(u) / majorant;
         if (t >= tMax) {

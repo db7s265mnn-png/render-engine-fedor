@@ -48,8 +48,11 @@ public:
                          .withTooltip("Mesh prims to convert (glob). Output is VDB only."));
         addParameter(Parameter::makeMenu("mode", "Mode", {"SDF", "Fog Volume"}, 0)
                          .withTooltip("SDF = level set; Fog Volume = density fill inside closed mesh"));
+        addParameter(Parameter::makeBool("autovoxelsize", "Auto Voxel Size", true)
+                         .withTooltip("Derive voxel size from mesh bounds (~1/128 of diagonal). "
+                                      "Turn off to use Voxel Size below."));
         addParameter(Parameter::makeFloat("voxelsize", "Voxel Size", 0.05, 0.0001, 10.0, false)
-                         .withTooltip("World-space voxel size"));
+                         .withTooltip("World-space voxel size (used when Auto Voxel Size is off)"));
         addParameter(Parameter::makeFloat("exteriorband", "Exterior Band", 3.0, 1.0, 64.0, false)
                          .withTooltip("Narrow-band width outside the surface (voxels)"));
         addParameter(Parameter::makeFloat("interiorband", "Interior Band", 3.0, 1.0, 64.0, false)
@@ -63,12 +66,20 @@ public:
     bool copiesFirstInput() const override { return false; }
 
     void cook(CookContext& context, const std::vector<StagePtr>& inputs, Stage& stage) override {
+        if (!VolumeGrid::openVdbAvailable()) {
+            context.reportError(this,
+                                "OpenVDB is not linked in this build — VDB from Polygons cannot create "
+                                "volumes. Use a Windows build that ships openvdb.dll (CI after OpenVDB "
+                                "enablement), or a Linux build with libopenvdb.");
+            return;
+        }
         if (inputs.empty() || !inputs[0]) {
             context.reportWarning(this, "no input stage");
             return;
         }
         const Stage& in = *inputs[0];
         const QString pattern = stringValue("pattern");
+        const bool autoVoxel = boolValue("autovoxelsize", true);
         VolumeFromPolygonsSettings settings;
         settings.kind = intValue("mode") == 0 ? VolumeGridKind::Sdf : VolumeGridKind::Fog;
         settings.voxelSize = float(floatValue("voxelsize"));
@@ -80,12 +91,22 @@ public:
         for (const StagePrim& prim : in.prims) {
             if (!prim.active || prim.type != PrimType::Mesh || !prim.mesh) continue;
             if (!matchesPattern(pattern, prim.path)) continue;
+
+            VolumeFromPolygonsSettings local = settings;
+            if (autoVoxel) {
+                Bounds3 b;
+                for (const Vec3& p : prim.mesh->positions) b.extend(transformPoint(prim.xform, p));
+                const float diag = length(b.hi - b.lo);
+                // ~128 voxels across the longest diagonal — works for tiny and Buddha-scale meshes.
+                local.voxelSize = srMax(1e-4f, diag / 128.0f);
+            }
+
             std::string err;
-            VolumeGridPtr grid = VolumeGrid::fromPolygons(*prim.mesh, prim.xform, settings, &err);
+            VolumeGridPtr grid = VolumeGrid::fromPolygons(*prim.mesh, prim.xform, local, &err);
             if (!grid || !grid->valid()) {
-                context.reportWarning(this, QString("failed to convert %1: %2")
-                                                .arg(prim.path)
-                                                .arg(QString::fromStdString(err)));
+                context.reportError(this, QString("failed to convert %1: %2")
+                                              .arg(prim.path)
+                                              .arg(QString::fromStdString(err.empty() ? "unknown error" : err)));
                 continue;
             }
             StagePrim out;
@@ -120,6 +141,10 @@ public:
     bool copiesFirstInput() const override { return true; }
 
     void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
+        if (!VolumeGrid::openVdbAvailable()) {
+            context.reportError(this, "OpenVDB is not linked in this build — cannot load .vdb files");
+            return;
+        }
         const QString file = resolvePath(context, stringValue("file"));
         if (file.isEmpty()) {
             context.reportWarning(this, "no VDB file set");

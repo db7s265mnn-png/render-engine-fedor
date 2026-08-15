@@ -765,13 +765,49 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
         // Null-scattering / delta tracking through the active medium (homogeneous or VDB fog).
         if (const MediumData* med = getMedium(scene, currentMedium)) {
-            const float tMax = didHit ? hit.t : 1.0e6f;
+            float tMax = didHit ? hit.t : 1.0e6f;
             MediumSample ms;
 #if !defined(__CUDACC__)
             if (med->type == 2 && med->volumeIndex >= 0 && med->volumeIndex < scene.volumeCount &&
                 scene.volumes && scene.volumes[med->volumeIndex]) {
-                ms = sampleMediumVdbFog(*scene.volumes[med->volumeIndex], *med, origin, direction, tMax, rng,
-                                        throughput);
+                // Prefer analytical AABB exit over Embree proxy (exit face is easy to miss).
+                const VolumeGrid& fogVol = *scene.volumes[med->volumeIndex];
+                const Bounds3 bb = fogVol.worldBounds();
+                if (bb.valid()) {
+                    float tEnter = 0.0f;
+                    float tExit = tMax;
+                    const float* o = &origin.x;
+                    const float* d = &direction.x;
+                    const float* lo = &bb.lo.x;
+                    const float* hi = &bb.hi.x;
+                    bool hitAabb = true;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        const float od = d[axis];
+                        if (fabsf(od) < 1e-20f) {
+                            if (o[axis] < lo[axis] || o[axis] > hi[axis]) {
+                                hitAabb = false;
+                                break;
+                            }
+                            continue;
+                        }
+                        float inv = 1.0f / od;
+                        float ta = (lo[axis] - o[axis]) * inv;
+                        float tb = (hi[axis] - o[axis]) * inv;
+                        if (ta > tb) {
+                            const float tmp = ta;
+                            ta = tb;
+                            tb = tmp;
+                        }
+                        tEnter = srMax(tEnter, ta);
+                        tExit = srMin(tExit, tb);
+                        if (tEnter > tExit) {
+                            hitAabb = false;
+                            break;
+                        }
+                    }
+                    if (hitAabb && tExit >= 0.0f) tMax = srMin(tMax, tExit);
+                }
+                ms = sampleMediumVdbFog(fogVol, *med, origin, direction, tMax, rng, throughput);
             } else {
                 ms = sampleMediumHomogeneous(*med, tMax, rng, throughput);
             }
@@ -829,6 +865,16 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 }
                 continue;
             }
+#if !defined(__CUDACC__)
+            // Exited the fog AABB (analytical) before hitting any surface — leave the medium.
+            if (med->type == 2 && (!didHit || ms.t + 1e-4f < hit.t)) {
+                origin = origin + direction * ms.t;
+                currentMedium = -1;
+                ++passThrough;
+                if (passThrough > 32) break;
+                continue;
+            }
+#endif
             // Reached the surface (or infinity) with Tr already in throughput.
         }
 
@@ -874,7 +920,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         const InstanceData& inst = scene.instances[si.instanceIndex];
 
 #if !defined(__CUDACC__)
-        // Direct VDB rendering: SDF level-set surface or fog volume entry.
+        // Direct VDB rendering: SDF level-set surface or fog volume entry/exit.
         // Wireframe / AO / Direct stay on the triangle proxy — no volume walk.
         if (settings.integrator != kIntegratorWireframe &&
             settings.integrator != kIntegratorAmbientOcclusion &&
@@ -882,8 +928,14 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             inst.volumeIndex < scene.volumeCount && scene.volumes && scene.volumes[inst.volumeIndex]) {
             const VolumeGrid& vol = *scene.volumes[inst.volumeIndex];
             if (vol.kind() == VolumeGridKind::Fog) {
-                currentMedium = inst.mediumIndex;
-                origin = offsetRayOrigin(si.p, -si.ng, direction);
+                if (currentMedium == inst.mediumIndex) {
+                    // Second hit on the AABB proxy = leaving the volume.
+                    currentMedium = -1;
+                    origin = offsetRayOrigin(si.p, si.ng, direction);
+                } else {
+                    currentMedium = inst.mediumIndex;
+                    origin = offsetRayOrigin(si.p, -si.ng, direction);
+                }
                 ++passThrough;
                 if (passThrough > 32) break;
                 continue;
@@ -891,8 +943,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             if (vol.kind() == VolumeGridKind::Sdf) {
                 float tSdf = hit.t;
                 Vec3 nSdf;
-                const float diag = length(vol.worldBounds().hi - vol.worldBounds().lo);
-                if (intersectSdfVolume(vol, origin, direction, 0.0f, hit.t + diag, tSdf, nSdf)) {
+                // Sphere-trace from near the AABB entry; far bound is analytical AABB exit.
+                const float tNear = srMax(0.0f, hit.t - vol.voxelSize());
+                if (intersectSdfVolume(vol, origin, direction, tNear, hit.t + 1.0e6f, tSdf, nSdf)) {
                     hit.t = tSdf;
                     si.p = origin + direction * tSdf;
                     si.ng = nSdf;

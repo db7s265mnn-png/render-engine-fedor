@@ -38,6 +38,8 @@ struct VolumeGrid::Impl {
     openvdb::FloatGrid::Ptr grid;
 };
 
+bool VolumeGrid::openVdbAvailable() { return true; }
+
 VolumeGrid::VolumeGrid() : impl_(std::make_unique<Impl>()) {}
 VolumeGrid::~VolumeGrid() = default;
 VolumeGrid::VolumeGrid(VolumeGrid&&) noexcept = default;
@@ -223,18 +225,19 @@ VolumeGrid::VolumeGrid() : impl_(std::make_unique<Impl>()) {}
 VolumeGrid::~VolumeGrid() = default;
 VolumeGrid::VolumeGrid(VolumeGrid&&) noexcept = default;
 VolumeGrid& VolumeGrid::operator=(VolumeGrid&&) noexcept = default;
+bool VolumeGrid::openVdbAvailable() { return false; }
 bool VolumeGrid::valid() const { return false; }
 void* VolumeGrid::nativeGrid() const { return nullptr; }
 float VolumeGrid::sampleWorld(const Vec3&) const { return kind_ == VolumeGridKind::Sdf ? 1e6f : 0.0f; }
 Vec3 VolumeGrid::gradientWorld(const Vec3&) const { return Vec3(0, 1, 0); }
 bool VolumeGrid::saveVdb(const std::string&) const { return false; }
 std::shared_ptr<VolumeGrid> VolumeGrid::loadVdb(const std::string&, std::string* error) {
-    if (error) *error = "OpenVDB support not built";
+    if (error) *error = "OpenVDB support not built into this binary";
     return nullptr;
 }
 std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh&, const Mat4&, const VolumeFromPolygonsSettings&,
                                                      std::string* error) {
-    if (error) *error = "OpenVDB support not built";
+    if (error) *error = "OpenVDB support not built into this binary";
     return nullptr;
 }
 MeshPtr VolumeGrid::toPolygonsOpenVDB(float, float) const { return nullptr; }

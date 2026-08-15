@@ -218,14 +218,33 @@ endif()
 # OpenVDB — optional heterogeneous volumes (falls back to homogeneous σ when absent).
 set(SOLSTICE_HAVE_OPENVDB_01 0)
 if(SOLSTICE_ENABLE_OPENVDB)
-    list(APPEND CMAKE_MODULE_PATH "/usr/lib/x86_64-linux-gnu/cmake/OpenVDB")
-    find_package(OpenVDB QUIET)
+    # Windows CI installs OpenVDB into DEPS_PREFIX; Embree's TBB lives under embree/.
+    if(DEFINED ENV{DEPS_PREFIX} AND EXISTS "$ENV{DEPS_PREFIX}")
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{DEPS_PREFIX}" "$ENV{DEPS_PREFIX}/embree")
+    endif()
+    # Prefer Config package from CMAKE_PREFIX_PATH (Windows deps prefix / vcpkg).
+    find_package(OpenVDB CONFIG QUIET)
+    if(NOT OpenVDB_FOUND)
+        list(APPEND CMAKE_MODULE_PATH "/usr/lib/x86_64-linux-gnu/cmake/OpenVDB")
+        find_package(OpenVDB QUIET)
+    endif()
     if(OpenVDB_FOUND)
         set(SOLSTICE_HAVE_OPENVDB_01 1)
+        message(STATUS "OpenVDB found (package)")
     else()
-        # Debian/Ubuntu often ships FindOpenVDB without a Config package.
-        find_library(OPENVDB_LIBRARY openvdb)
-        find_path(OPENVDB_INCLUDE_DIR openvdb/openvdb.h)
+        # Debian/Ubuntu / manual prefix: FindOpenVDB may be missing; probe libs directly.
+        find_library(OPENVDB_LIBRARY NAMES openvdb openvdb_d
+            PATHS "$ENV{DEPS_PREFIX}/lib" "$ENV{DEPS_PREFIX}/lib64"
+            NO_DEFAULT_PATH)
+        if(NOT OPENVDB_LIBRARY)
+            find_library(OPENVDB_LIBRARY NAMES openvdb openvdb_d)
+        endif()
+        find_path(OPENVDB_INCLUDE_DIR openvdb/openvdb.h
+            PATHS "$ENV{DEPS_PREFIX}/include"
+            NO_DEFAULT_PATH)
+        if(NOT OPENVDB_INCLUDE_DIR)
+            find_path(OPENVDB_INCLUDE_DIR openvdb/openvdb.h)
+        endif()
         if(OPENVDB_LIBRARY AND OPENVDB_INCLUDE_DIR)
             set(SOLSTICE_HAVE_OPENVDB_01 1)
             if(NOT TARGET OpenVDB::openvdb)
@@ -235,6 +254,7 @@ if(SOLSTICE_ENABLE_OPENVDB)
                     INTERFACE_INCLUDE_DIRECTORIES "${OPENVDB_INCLUDE_DIR}")
             endif()
             set(OpenVDB_FOUND TRUE)
+            message(STATUS "OpenVDB found: ${OPENVDB_LIBRARY}")
         else()
             message(STATUS "OpenVDB not found — VDB media use homogeneous σa/σs fallback")
         endif()

@@ -39,6 +39,9 @@ public:
     float voxelSize() const { return voxelSize_; }
     bool valid() const;
 
+    // True when this binary was linked against OpenVDB (false → fromPolygons/loadVdb are stubs).
+    static bool openVdbAvailable();
+
     // Sample scalar field in world space (SDF distance or fog density).
     float sampleWorld(const Vec3& p) const;
     // Finite-difference gradient (world space). Useful for SDF normals.
