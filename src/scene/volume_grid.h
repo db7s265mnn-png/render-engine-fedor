@@ -15,12 +15,20 @@ enum class VolumeGridKind : int {
     Fog = 1,   // Fog / density volume
 };
 
+// OpenVDB GridSampler filter — controls fog/SDF sample smoothness.
+enum class VolumeSampleFilter : int {
+    Nearest = 0,    // PointSampler — blocky voxels
+    Linear = 1,     // BoxSampler — trilinear (default)
+    Quadratic = 2,  // QuadraticSampler — smoother
+};
+
 struct VolumeFromPolygonsSettings {
     VolumeGridKind kind = VolumeGridKind::Sdf;
     float voxelSize = 0.05f;
     float exteriorBand = 3.0f;  // voxels (Houdini-like)
     float interiorBand = 3.0f;  // voxels
     float fillDensity = 1.0f;   // fog fill value inside closed mesh
+    VolumeSampleFilter filter = VolumeSampleFilter::Linear;
 };
 
 class VolumeGrid {
@@ -33,6 +41,8 @@ public:
     VolumeGrid& operator=(const VolumeGrid&) = delete;
 
     VolumeGridKind kind() const { return kind_; }
+    VolumeSampleFilter sampleFilter() const { return sampleFilter_; }
+    void setSampleFilter(VolumeSampleFilter f) { sampleFilter_ = f; }
     const std::string& name() const { return name_; }
     void setName(std::string n) { name_ = std::move(n); }
     Bounds3 worldBounds() const { return bounds_; }
@@ -67,6 +77,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     VolumeGridKind kind_ = VolumeGridKind::Sdf;
+    VolumeSampleFilter sampleFilter_ = VolumeSampleFilter::Linear;
     std::string name_;
     Bounds3 bounds_;
     float voxelSize_ = 0.05f;

@@ -22,6 +22,16 @@ struct Mesh {
     // where `indices` is both cage and render topology.
     std::vector<uint32_t> faceVertexCounts;
     std::vector<uint32_t> faceVertexIndices;
+    // Per render-triangle edge flags (size == triangleCount). Bits 0/1/2 = edges
+    // (i0,i1)/(i1,i2)/(i2,i0) lie on an authored cage face boundary (not a diagonal).
+    // Empty ⇒ wireframe draws all three edges.
+    std::vector<uint8_t> triEdgeMask;
+    // Cage wireframe overlay (authored n-gon edges only). Resolution stays at the
+    // cage — never densified with micropolys. Indices are pairs into wirePositions.
+    std::vector<uint32_t> wireIndices;
+    std::vector<Vec3> wirePositions;
+    // Normals at wirePositions (same length when present) — used to displace the cage.
+    std::vector<Vec3> wireNormals;
     Bounds3 bounds;
     // Arnold displacement bounds_padding — reapplied by computeBounds() after validate.
     float boundsPadding = 0.0f;
@@ -51,6 +61,8 @@ struct Mesh {
     void ensureRenderTriangles();
     // If only `indices` exist, synthesize a triangle cage so n-gon tools see faces.
     void ensurePolygonCageFromTriangles();
+    // Capture authored face-boundary edges into wireIndices/wirePositions (cage-sized).
+    void captureWireCage();
     void computeBounds();
     // Area weighted vertex normals; only fills in normals when they are missing.
     void computeNormalsIfMissing();

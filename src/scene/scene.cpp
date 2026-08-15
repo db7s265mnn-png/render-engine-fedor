@@ -15,7 +15,7 @@ namespace sol {
 void Mesh::ensureRenderTriangles() {
     if (!indices.empty()) return;
     if (!hasPolygonCage()) return;
-    triangulateMeshFaces(positions, faceVertexCounts, faceVertexIndices, indices);
+    triangulateMeshFaces(positions, faceVertexCounts, faceVertexIndices, indices, &triEdgeMask);
 }
 
 void Mesh::ensurePolygonCageFromTriangles() {
@@ -30,6 +30,74 @@ void Mesh::ensurePolygonCageFromTriangles() {
         faceVertexIndices.push_back(indices[t + 0]);
         faceVertexIndices.push_back(indices[t + 1]);
         faceVertexIndices.push_back(indices[t + 2]);
+    }
+    // Every edge of a triangle face is a boundary edge.
+    triEdgeMask.assign(indices.size() / 3, uint8_t(7));
+}
+
+void Mesh::captureWireCage() {
+    wireIndices.clear();
+    wirePositions.clear();
+    wireNormals.clear();
+    if (positions.empty()) return;
+
+    // Compact unique undirected edges from the authored polygon cage (preferred)
+    // or from render triangles when no cage exists.
+    std::vector<std::pair<uint32_t, uint32_t>> edges;
+    if (hasPolygonCage()) {
+        size_t cursor = 0;
+        for (uint32_t count : faceVertexCounts) {
+            if (count < 2 || cursor + size_t(count) > faceVertexIndices.size()) {
+                cursor += size_t(count);
+                continue;
+            }
+            for (uint32_t i = 0; i < count; ++i) {
+                uint32_t a = faceVertexIndices[cursor + i];
+                uint32_t b = faceVertexIndices[cursor + ((i + 1) % count)];
+                if (a > b) std::swap(a, b);
+                if (a != b) edges.emplace_back(a, b);
+            }
+            cursor += size_t(count);
+        }
+    } else if (indices.size() >= 3) {
+        for (size_t t = 0; t + 2 < indices.size(); t += 3) {
+            const uint32_t v[3] = {indices[t], indices[t + 1], indices[t + 2]};
+            for (int e = 0; e < 3; ++e) {
+                uint32_t a = v[e];
+                uint32_t b = v[(e + 1) % 3];
+                if (a > b) std::swap(a, b);
+                if (a != b) edges.emplace_back(a, b);
+            }
+        }
+    }
+    if (edges.empty()) return;
+    std::sort(edges.begin(), edges.end());
+    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+
+    if (normals.size() != positions.size()) computeNormalsIfMissing();
+
+    // Remap referenced verts into a compact wirePositions buffer (cage-sized).
+    std::unordered_map<uint32_t, uint32_t> remap;
+    remap.reserve(edges.size() * 2);
+    auto mapVert = [&](uint32_t old) -> uint32_t {
+        auto it = remap.find(old);
+        if (it != remap.end()) return it->second;
+        const uint32_t neu = uint32_t(wirePositions.size());
+        if (old < positions.size()) {
+            wirePositions.push_back(positions[old]);
+            if (old < normals.size()) wireNormals.push_back(normals[old]);
+            else wireNormals.push_back(Vec3(0.0f, 1.0f, 0.0f));
+        } else {
+            wirePositions.push_back(Vec3(0.0f));
+            wireNormals.push_back(Vec3(0.0f, 1.0f, 0.0f));
+        }
+        remap.emplace(old, neu);
+        return neu;
+    };
+    wireIndices.reserve(edges.size() * 2);
+    for (const auto& e : edges) {
+        wireIndices.push_back(mapVert(e.first));
+        wireIndices.push_back(mapVert(e.second));
     }
 }
 
@@ -89,14 +157,18 @@ void Mesh::computeNormalsIfMissing() {
 }
 
 void Mesh::validate() {
-    // Prefer densifying from the polygon cage when present.
-    if (hasPolygonCage()) {
-        triangulateMeshFaces(positions, faceVertexCounts, faceVertexIndices, indices);
+    // Densify from the polygon cage only when render triangles are missing.
+    // Never rebuild over an existing triangulation (subdiv / dicing would be wiped).
+    if (indices.empty() && hasPolygonCage()) {
+        triangulateMeshFaces(positions, faceVertexCounts, faceVertexIndices, indices, &triEdgeMask);
     }
     // Drop degenerate or out of range triangles so the BVH builders stay happy.
     std::vector<uint32_t> cleaned;
     cleaned.reserve(indices.size());
     const uint32_t vertexCount = static_cast<uint32_t>(positions.size());
+    std::vector<uint8_t> cleanedMask;
+    const bool keepMask = triEdgeMask.size() == indices.size() / 3 && !triEdgeMask.empty();
+    if (keepMask) cleanedMask.reserve(triEdgeMask.size());
     for (size_t t = 0; t + 2 < indices.size(); t += 3) {
         const uint32_t i0 = indices[t + 0], i1 = indices[t + 1], i2 = indices[t + 2];
         if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) continue;
@@ -106,10 +178,16 @@ void Mesh::validate() {
         cleaned.push_back(i0);
         cleaned.push_back(i1);
         cleaned.push_back(i2);
+        if (keepMask) cleanedMask.push_back(triEdgeMask[t / 3]);
     }
-    if (cleaned.size() != indices.size()) indices.swap(cleaned);
+    if (cleaned.size() != indices.size()) {
+        indices.swap(cleaned);
+        if (keepMask && cleanedMask.size() == indices.size() / 3) triEdgeMask.swap(cleanedMask);
+        else triEdgeMask.clear();
+    }
     if (!uvs.empty() && uvs.size() != positions.size()) uvs.clear();
     computeNormalsIfMissing();
+    if (wireIndices.empty()) captureWireCage();
     computeBounds();
 }
 
@@ -129,6 +207,16 @@ MeshView Mesh::view() const {
         (restPositions.size() == positions.size() && !restPositions.empty()) ? restPositions.data() : nullptr;
     v.restNormals =
         (restNormals.size() == positions.size() && !restNormals.empty()) ? restNormals.data() : nullptr;
+    v.triEdgeMask =
+        (triEdgeMask.size() == indices.size() / 3 && !triEdgeMask.empty()) ? triEdgeMask.data() : nullptr;
+    if (!wireIndices.empty() && !wirePositions.empty() && (wireIndices.size() % 2) == 0) {
+        v.wireIndices = wireIndices.data();
+        v.wirePositions = wirePositions.data();
+        v.wireNormals =
+            (wireNormals.size() == wirePositions.size()) ? wireNormals.data() : nullptr;
+        v.wireEdgeCount = uint32_t(wireIndices.size() / 2);
+        v.wireVertexCount = uint32_t(wirePositions.size());
+    }
     v.motionKeyCount = 1;
     v.motionPositions = nullptr;
     if (!motionPositions.empty() && !positions.empty()) {

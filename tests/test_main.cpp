@@ -4563,6 +4563,58 @@ void testNgonTriangulateAndVdb() {
     }
     check(area > 1.0f, "concave triangulation area is sane");
 
+    // Quad fan → 2 tris; diagonal must NOT be marked as a cage boundary.
+    Mesh quad;
+    quad.positions = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 1, 0), Vec3(0, 1, 0)};
+    quad.faceVertexCounts = {4};
+    quad.faceVertexIndices = {0, 1, 2, 3};
+    quad.ensureRenderTriangles();
+    check(quad.indices.size() == 6, "quad → 2 triangles");
+    check(quad.triEdgeMask.size() == 2, "quad edge mask per triangle");
+    if (quad.triEdgeMask.size() == 2) {
+        // Each tri has one diagonal edge unmarked; total boundary bits across both = 4 (quad sides).
+        int boundaryBits = 0;
+        for (uint8_t m : quad.triEdgeMask) {
+            boundaryBits += (m & 1) ? 1 : 0;
+            boundaryBits += (m & 2) ? 1 : 0;
+            boundaryBits += (m & 4) ? 1 : 0;
+            check(m != 7, "quad triangulation hides the diagonal (mask != 7)");
+        }
+        check(boundaryBits == 4, "quad has exactly 4 authored boundary edges");
+    }
+    quad.captureWireCage();
+    check(quad.wireIndices.size() == 8, "wire cage: 4 edges × 2 indices");
+    check(quad.wirePositions.size() == 4, "wire cage verts stay cage-sized");
+
+    // MaterialX volumeshader → standard_volume coefficients for Fog routing.
+    {
+        const QString volXml =
+            QStringLiteral(
+                "<materialx version=\"1.38\">"
+                "  <standard_surface name=\"ss\" type=\"surfaceshader\">"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.2, 0.1\" />"
+                "  </standard_surface>"
+                "  <standard_volume name=\"sv\" type=\"volumeshader\">"
+                "    <input name=\"density\" type=\"float\" value=\"2.5\" />"
+                "    <input name=\"anisotropy\" type=\"float\" value=\"0.3\" />"
+                "    <input name=\"absorption\" type=\"color3\" value=\"0.1, 0.2, 0.3\" />"
+                "    <input name=\"scattering\" type=\"color3\" value=\"0.7, 0.6, 0.5\" />"
+                "    <input name=\"emission\" type=\"float\" value=\"0.0\" />"
+                "  </standard_volume>"
+                "  <surfacematerial name=\"surface\" type=\"material\">"
+                "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\" />"
+                "    <input name=\"volumeshader\" type=\"volumeshader\" nodename=\"sv\" />"
+                "  </surfacematerial>"
+                "</materialx>");
+        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXml, QString());
+        check(volEval.ok, "MaterialX volume document evaluates");
+        check(volEval.material.hasVolumeShader == 1, "volumeshader sets hasVolumeShader");
+        check(std::fabs(volEval.material.volumeDensity - 2.5f) < 1e-4f, "volume density from MTLX");
+        check(std::fabs(volEval.material.volumeAnisotropy - 0.3f) < 1e-4f, "volume anisotropy from MTLX");
+        check(std::fabs(volEval.material.volumeAbsorption.x - 0.1f) < 1e-3f, "volume absorption R");
+        check(std::fabs(volEval.material.volumeScattering.x - 0.7f) < 1e-3f, "volume scattering R");
+    }
+
 #if SOLSTICE_HAVE_OPENVDB
     MeshPtr box = makeBoxMesh(Vec3(1, 1, 1));
     check(box && !box->indices.empty(), "box mesh for VDB");
@@ -4571,6 +4623,7 @@ void testNgonTriangulateAndVdb() {
     settings.voxelSize = 0.1f;
     settings.exteriorBand = 3.0f;
     settings.interiorBand = 3.0f;
+    settings.filter = VolumeSampleFilter::Linear;
     std::string err;
     VolumeGridPtr sdf = VolumeGrid::fromPolygons(*box, Mat4::identity(), settings, &err);
     check(sdf && sdf->valid(), std::string("vdbfrompolygons SDF: ") + err);
@@ -4588,6 +4641,11 @@ void testNgonTriangulateAndVdb() {
             intersectSdfVolume(*sdf, Vec3(-3, 0, 0), Vec3(1, 0, 0), 0.0f, 10.0f, tHit, nSdf);
         check(hitSdf, "SDF sphere-trace hits the box");
         check(std::fabs(tHit - 2.5f) < 0.35f, "SDF hit near the box face at x=-0.5");
+        check(sdf->sampleFilter() == VolumeSampleFilter::Linear, "SDF keeps Linear filter");
+        sdf->setSampleFilter(VolumeSampleFilter::Quadratic);
+        check(sdf->sampleWorld(Vec3(0, 0, 0)) < 0.0f, "Quadratic filter still inside-negative");
+        sdf->setSampleFilter(VolumeSampleFilter::Nearest);
+        check(sdf->sampleWorld(Vec3(0, 0, 0)) < 0.0f, "Nearest filter still inside-negative");
     }
 
     // End-to-end: Volume prim through Embree must produce light for SDF and Fog,

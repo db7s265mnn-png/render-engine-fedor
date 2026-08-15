@@ -242,6 +242,14 @@ struct MeshView {
     // Key 0 usually aliases `positions`. Null / count 1 = static mesh.
     const Vec3* motionPositions = nullptr;
     int motionKeyCount = 1;
+    // Optional per-triangle edge mask (see Mesh::triEdgeMask). Null = draw all edges.
+    const uint8_t* triEdgeMask = nullptr;
+    // Optional cage wire overlay (authored n-gon edges). Null = unused.
+    const uint32_t* wireIndices = nullptr;
+    const Vec3* wirePositions = nullptr;
+    const Vec3* wireNormals = nullptr;
+    uint32_t wireEdgeCount = 0;     // number of edges (== wireIndices pairs)
+    uint32_t wireVertexCount = 0;
 };
 
 // Visibility bits for primary vs shadow rays (Embree mask / OptiX visibilityMask).

@@ -216,7 +216,8 @@ SR_INL SR_HD float distancePointToSegment(Vec3 p, Vec3 a, Vec3 b) {
     return length(p - (a + ab * t));
 }
 
-// Screen-space wireframe from triangle edges. Thickness is half-width in pixels.
+// Screen-space wireframe. Prefers the authored cage overlay (n-gon boundaries only);
+// otherwise uses the hit triangle's edges, honoring triEdgeMask to hide diagonals.
 SR_INL SR_HD Vec3 shadeWireframe(const SceneView& scene, const RayHit& hit, const SurfaceInteraction& si,
                                  Vec3 direction) {
     const float thicknessPx = srMax(0.25f, scene.settings.wireframeThickness);
@@ -232,22 +233,6 @@ SR_INL SR_HD Vec3 shadeWireframe(const SceneView& scene, const RayHit& hit, cons
     Mat4 xform, xformInv;
     instanceXformAtTime(scene, inst, hit.time, xform, xformInv);
 
-    const uint32_t i0 = mesh.indices[hit.primIndex * 3 + 0];
-    const uint32_t i1 = mesh.indices[hit.primIndex * 3 + 1];
-    const uint32_t i2 = mesh.indices[hit.primIndex * 3 + 2];
-    if (i0 >= mesh.vertexCount || i1 >= mesh.vertexCount || i2 >= mesh.vertexCount)
-        return Vec3(0.05f);
-    const Vec3 p0 =
-        transformPoint(xform, meshPositionAtTime(mesh, i0, hit.time));
-    const Vec3 p1 =
-        transformPoint(xform, meshPositionAtTime(mesh, i1, hit.time));
-    const Vec3 p2 =
-        transformPoint(xform, meshPositionAtTime(mesh, i2, hit.time));
-
-    const float dEdge = srMin(distancePointToSegment(si.p, p0, p1),
-                              srMin(distancePointToSegment(si.p, p1, p2),
-                                    distancePointToSegment(si.p, p2, p0)));
-
     const float resX = float(srMax(1, scene.settings.resolutionX));
     const float resY = float(srMax(1, scene.settings.resolutionY));
     const float sensorH = scene.camera.sensorWidth * (resY / resX);
@@ -255,9 +240,66 @@ SR_INL SR_HD Vec3 shadeWireframe(const SceneView& scene, const RayHit& hit, cons
     const float pixelWorld = srMax(1e-8f, hit.t) * pixelAngle;
     const float halfW = thicknessPx * pixelWorld;
     const float aa = 0.5f * pixelWorld;
+    const float searchR = halfW + aa + pixelWorld;
+
+    float dEdge = 1.0e30f;
+    bool haveEdge = false;
+
+    // Cage overlay: authored face boundaries only (never triangulation diagonals /
+    // micropolygon edges). Cage-sized — safe to scan near the hit.
+    if (mesh.wireEdgeCount > 0 && mesh.wireIndices && mesh.wirePositions && mesh.wireVertexCount > 0) {
+        for (uint32_t e = 0; e < mesh.wireEdgeCount; ++e) {
+            const uint32_t a = mesh.wireIndices[e * 2 + 0];
+            const uint32_t b = mesh.wireIndices[e * 2 + 1];
+            if (a >= mesh.wireVertexCount || b >= mesh.wireVertexCount) continue;
+            const Vec3 wa = transformPoint(xform, mesh.wirePositions[a]);
+            const Vec3 wb = transformPoint(xform, mesh.wirePositions[b]);
+            // Cheap reject: skip edges whose endpoints are both far from the hit.
+            const float da = lengthSquared(si.p - wa);
+            const float db = lengthSquared(si.p - wb);
+            const float r2 = searchR * searchR;
+            if (da > r2 && db > r2) {
+                // Still check if the segment passes near the hit (midpoint / projection).
+                const float dSeg = distancePointToSegment(si.p, wa, wb);
+                if (dSeg > searchR) continue;
+                dEdge = srMin(dEdge, dSeg);
+                haveEdge = true;
+                continue;
+            }
+            dEdge = srMin(dEdge, distancePointToSegment(si.p, wa, wb));
+            haveEdge = true;
+        }
+    }
+
+    if (!haveEdge) {
+        // Fallback: edges of the hit triangle, filtered by authored-boundary mask.
+        const uint32_t i0 = mesh.indices[hit.primIndex * 3 + 0];
+        const uint32_t i1 = mesh.indices[hit.primIndex * 3 + 1];
+        const uint32_t i2 = mesh.indices[hit.primIndex * 3 + 2];
+        if (i0 >= mesh.vertexCount || i1 >= mesh.vertexCount || i2 >= mesh.vertexCount)
+            return Vec3(0.05f);
+        const Vec3 p0 = transformPoint(xform, meshPositionAtTime(mesh, i0, hit.time));
+        const Vec3 p1 = transformPoint(xform, meshPositionAtTime(mesh, i1, hit.time));
+        const Vec3 p2 = transformPoint(xform, meshPositionAtTime(mesh, i2, hit.time));
+        uint8_t mask = 7u;
+        if (mesh.triEdgeMask) mask = mesh.triEdgeMask[hit.primIndex];
+        if (mask & 1u) {
+            dEdge = srMin(dEdge, distancePointToSegment(si.p, p0, p1));
+            haveEdge = true;
+        }
+        if (mask & 2u) {
+            dEdge = srMin(dEdge, distancePointToSegment(si.p, p1, p2));
+            haveEdge = true;
+        }
+        if (mask & 4u) {
+            dEdge = srMin(dEdge, distancePointToSegment(si.p, p2, p0));
+            haveEdge = true;
+        }
+    }
+
     // 1 on the edge centerline → 0 outside the stroke (+AA).
     float edge = 0.0f;
-    {
+    if (haveEdge) {
         const float lo = srMax(0.0f, halfW - aa);
         const float hi = halfW + aa;
         if (dEdge <= lo) {

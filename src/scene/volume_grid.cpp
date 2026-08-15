@@ -51,8 +51,25 @@ void* VolumeGrid::nativeGrid() const { return impl_ ? static_cast<void*>(impl_->
 
 float VolumeGrid::sampleWorld(const Vec3& p) const {
     if (!valid()) return (kind_ == VolumeGridKind::Sdf) ? 1e6f : 0.0f;
-    openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> sampler(*impl_->grid);
-    return float(sampler.wsSample(openvdb::Vec3d(p.x, p.y, p.z)));
+    const openvdb::Vec3d wp(p.x, p.y, p.z);
+    switch (sampleFilter_) {
+        case VolumeSampleFilter::Nearest: {
+            openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::PointSampler> sampler(
+                *impl_->grid);
+            return float(sampler.wsSample(wp));
+        }
+        case VolumeSampleFilter::Quadratic: {
+            openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::QuadraticSampler> sampler(
+                *impl_->grid);
+            return float(sampler.wsSample(wp));
+        }
+        case VolumeSampleFilter::Linear:
+        default: {
+            openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> sampler(
+                *impl_->grid);
+            return float(sampler.wsSample(wp));
+        }
+    }
 }
 
 Vec3 VolumeGrid::gradientWorld(const Vec3& p) const {
@@ -155,9 +172,21 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh& mesh, const Mat
             grid->setTransform(sdf->transform().copy());
             grid->setGridClass(openvdb::GRID_FOG_VOLUME);
             grid->setName("density");
+            // Soft fill from the SDF band so Linear/Quadratic filters do not stair-step:
+            // density ramps from 0 at the exterior band to fillDensity at the surface/inside.
+            const float bandWorld =
+                srMax(settings.voxelSize, settings.voxelSize * srMax(1.0f, settings.exteriorBand));
             auto accessor = grid->getAccessor();
             for (auto it = sdf->cbeginValueOn(); it; ++it) {
-                if (float(*it) <= 0.0f) accessor.setValue(it.getCoord(), settings.fillDensity);
+                const float d = float(*it);
+                if (d > 0.0f) continue;  // outside
+                float dens = settings.fillDensity;
+                if (bandWorld > 1e-8f && d > -bandWorld) {
+                    // Smoothstep from shell toward interior.
+                    const float t = clampf(-d / bandWorld, 0.0f, 1.0f);
+                    dens = settings.fillDensity * (t * t * (3.0f - 2.0f * t));
+                }
+                if (dens > 1e-8f) accessor.setValue(it.getCoord(), dens);
             }
             grid->pruneGrid();
         }
@@ -169,6 +198,7 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh& mesh, const Mat
     auto out = std::make_shared<VolumeGrid>();
     out->impl_->grid = grid;
     out->kind_ = settings.kind;
+    out->sampleFilter_ = settings.filter;
     out->voxelSize_ = settings.voxelSize;
     out->name_ = (settings.kind == VolumeGridKind::Sdf) ? "sdf" : "density";
     const openvdb::CoordBBox bbox = grid->evalActiveVoxelBoundingBox();

@@ -59,6 +59,10 @@ public:
                          .withTooltip("Narrow-band width inside the surface (voxels)"));
         addParameter(Parameter::makeFloat("filldensity", "Fill Density", 1.0, 0.0, 100.0, false)
                          .withTooltip("Fog Volume: density value inside the mesh"));
+        addParameter(Parameter::makeMenu("filter", "Sample Filter",
+                                         {"Nearest", "Linear", "Quadratic"}, 1)
+                         .withTooltip("Voxel reconstruction filter when sampling the VDB.\n"
+                                      "Nearest = blocky; Linear = trilinear; Quadratic = smoothest."));
         addParameter(Parameter::makeString("primname", "Prim Name", "vdb")
                          .withTooltip("Leaf name for the output VDB prim"));
     }
@@ -86,6 +90,10 @@ public:
         settings.exteriorBand = float(floatValue("exteriorband"));
         settings.interiorBand = float(floatValue("interiorband"));
         settings.fillDensity = float(floatValue("filldensity"));
+        const int filterIdx = intValue("filter", 1);
+        settings.filter = filterIdx <= 0   ? VolumeSampleFilter::Nearest
+                          : filterIdx >= 2 ? VolumeSampleFilter::Quadratic
+                                           : VolumeSampleFilter::Linear;
 
         int created = 0;
         for (const StagePrim& prim : in.prims) {
@@ -134,6 +142,10 @@ public:
         setInputLabels({"Input"});
         addParameter(Parameter::makeFile("file", "VDB File", "", "OpenVDB (*.vdb)")
                          .withTooltip("Load a .vdb from disk into a Volume prim"));
+        addParameter(Parameter::makeMenu("filter", "Sample Filter",
+                                         {"Nearest", "Linear", "Quadratic"}, 1)
+                         .withTooltip("Voxel reconstruction filter when sampling the VDB.\n"
+                                      "Nearest = blocky; Linear = trilinear; Quadratic = smoothest."));
         addParameter(Parameter::makeString("primname", "Prim Name", "vdb"));
         addTransformParameters(*this);
     }
@@ -160,6 +172,10 @@ public:
             context.reportError(this, QString::fromStdString(err.empty() ? "failed to load VDB" : err));
             return;
         }
+        const int filterIdx = intValue("filter", 1);
+        grid->setSampleFilter(filterIdx <= 0   ? VolumeSampleFilter::Nearest
+                              : filterIdx >= 2 ? VolumeSampleFilter::Quadratic
+                                               : VolumeSampleFilter::Linear);
         StagePrim prim;
         prim.type = PrimType::Volume;
         prim.sourceNode = this->name();

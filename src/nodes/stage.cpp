@@ -28,23 +28,28 @@ MeshPtr volumeBoundsProxy(const VolumeGrid& grid) {
 MediumData mediumFromMaterialVolume(const Material& material, int volumeIndex, VolumeGridKind kind) {
     MediumData m;
     if (kind == VolumeGridKind::Sdf) {
+        // SDF is shaded as a surface after sphere-trace; medium type is for bookkeeping.
         m.type = 3;
     } else {
+        // Fog / density volume — delta-tracked with volume (or fallback) coefficients.
         m.type = 2;
     }
     m.volumeIndex = volumeIndex;
     if (material.hasVolumeShader) {
+        // MaterialX surfacematerial.volumeshader → standard_volume.
         m.density = material.volumeDensity;
         m.sigmaA = material.volumeAbsorption;
         m.sigmaS = material.volumeScattering;
         m.g = material.volumeAnisotropy;
         m.emission = material.volumeEmission * material.volumeEmissionStrength;
     } else {
+        // No volumeshader: tint fog from the surface baseColor so Mesh materials still affect Fog.
         m.density = 1.0f;
-        m.sigmaA = Vec3(0.1f);
-        m.sigmaS = Vec3(0.4f);
+        const Vec3 albedo = material.baseColor;
+        m.sigmaS = albedo * 0.5f;
+        m.sigmaA = Vec3(0.05f) + (Vec3(1.0f) - albedo) * 0.15f;
         m.g = 0.0f;
-        m.emission = Vec3(0.0f);
+        m.emission = material.emissionColor * material.emissionStrength;
     }
     return m;
 }
@@ -359,7 +364,8 @@ ScenePtr Stage::toScene() const {
             case PrimType::Volume: {
                 if (!prim.volume || !prim.volume->valid()) break;
                 Material material = prim.material;
-                // Volumes use surface + volume shader params from MaterialX.
+                // Fog uses MaterialX volumeshader (or surface fallback). SDF hits use the
+                // surface shader after sphere-trace — same material struct, different path.
                 const int volumeIndex = scene->addVolume(prim.volume);
                 MeshPtr proxy = volumeBoundsProxy(*prim.volume);
                 if (!proxy) break;
