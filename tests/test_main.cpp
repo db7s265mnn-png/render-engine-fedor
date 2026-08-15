@@ -543,6 +543,8 @@ void testRender() {
     smokeIntegrator(kIntegratorSpectralPath, 1, "PT Spectral");
     smokeIntegrator(kIntegratorSpectralBdpt, 1, "BDPT Spectral");
     smokeIntegrator(kIntegratorWireframe, 0, "Wireframe");
+    // UI default leaves Caustics on — must not route Wireframe into Photon/MNEE.
+    smokeIntegrator(kIntegratorWireframe, 1, "Wireframe + caustics on");
     // Path guiding smoke: same scene with OpenPGL training enabled (no-op when
     // the build lacks OpenPGL).
     scene->settings.pathGuiding = 1;
@@ -4506,6 +4508,40 @@ void testBdptShadersAndSss() {
     }
 }
 
+void testWireframeCausticsOn() {
+    std::printf("wireframe-caustics-on\n");
+    registerBuiltinNodes();
+    NodeGraph graph;
+    buildDefaultGraph(graph);
+    CookContext context;
+    StagePtr stage = graph.cookDisplay(context);
+    ScenePtr scene = stage->toScene();
+    scene->settings.resolutionX = 48;
+    scene->settings.resolutionY = 32;
+    scene->settings.samplesPerPixel = 2;
+    scene->settings.backend = kBackendCpuEmbree;
+    scene->settings.integrator = kIntegratorWireframe;
+    scene->settings.caustics = 1;
+    scene->settings.causticsEngine = kCausticsEngineAuto;
+    scene->settings.pathGuiding = 0;
+    RenderSession session;
+    session.setScene(scene);
+    session.start();
+    session.waitForCompletion();
+    const Image image = session.linearImage();
+    bool finite = true;
+    double sum = 0.0;
+    for (int y = 0; y < image.height(); ++y) {
+        for (int x = 0; x < image.width(); ++x) {
+            const Vec3 c = image.rgb(x, y);
+            if (!isFinite(c)) finite = false;
+            sum += double(luminance(c));
+        }
+    }
+    check(finite, "Wireframe+caustics output is finite");
+    check(sum > 0.0, "Wireframe+caustics produces visible edges");
+}
+
 void testNgonTriangulateAndVdb() {
     std::printf("n-gon triangulate + OpenVDB\n");
     // Concave quad (arrowhead) — fan would flip; earcut should keep area positive.
@@ -4605,6 +4641,12 @@ void testBinaryUsdLoad() {
 
 int main() {
     std::printf("Solstice tests\n");
+    if (getenv("SOL_ONLY_WF")) {
+        registerBuiltinNodes();
+        testWireframeCausticsOn();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (getenv("SOL_ONLY_VDB")) {
         registerBuiltinNodes();
         testNgonTriangulateAndVdb();

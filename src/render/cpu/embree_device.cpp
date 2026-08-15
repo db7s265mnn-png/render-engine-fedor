@@ -254,9 +254,17 @@ public:
         const bool useBdpt = settings.integrator == kIntegratorBdpt || useSpectralBdpt;
         const bool useSpectralPt = settings.integrator == kIntegratorSpectralPath;
         const bool useSpectral = useSpectralPt || useSpectralBdpt;
+        // Diagnostic integrators (AO / Direct / Wireframe) must stay on the plain
+        // PathIntegrator path — never Photon/MNEE/BDPT — otherwise Wireframe never
+        // hits shadeWireframe and can crash/misbehave under default caustics-on.
+        const bool diagnosticIntegrator =
+            settings.integrator == kIntegratorAmbientOcclusion ||
+            settings.integrator == kIntegratorDirectLighting ||
+            settings.integrator == kIntegratorWireframe;
         // MNEE+Photon routes rough refractive casters to Photon, delta-only to MNEE.
         // PT Spectral has no MNEE/photon; BDPT Spectral keeps BDPT caustic estimators.
-        const bool usePhoton = !useSpectralPt && causticsUsePhotonMap(settings, &scene);
+        const bool usePhoton =
+            !diagnosticIntegrator && !useSpectralPt && causticsUsePhotonMap(settings, &scene);
         const bool useMnee = pathTracer && causticsUseMnee(settings, &scene);
 #if SOLSTICE_HAVE_OPENPGL
         // OpenPGL guides eye-path diffuse sampling on PT and BDPT (RGB + Spectral).

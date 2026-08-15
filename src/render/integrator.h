@@ -220,14 +220,23 @@ SR_INL SR_HD float distancePointToSegment(Vec3 p, Vec3 a, Vec3 b) {
 SR_INL SR_HD Vec3 shadeWireframe(const SceneView& scene, const RayHit& hit, const SurfaceInteraction& si,
                                  Vec3 direction) {
     const float thicknessPx = srMax(0.25f, scene.settings.wireframeThickness);
+    if (hit.instanceIndex < 0 || hit.instanceIndex >= scene.instanceCount || !scene.instances)
+        return Vec3(0.05f);
     const InstanceData& inst = scene.instances[hit.instanceIndex];
+    if (inst.meshIndex < 0 || inst.meshIndex >= scene.meshCount || !scene.meshes)
+        return Vec3(0.05f);
     const MeshView& mesh = scene.meshes[inst.meshIndex];
+    if (!mesh.indices || !mesh.positions || hit.primIndex >= mesh.triangleCount)
+        return Vec3(0.05f);
+
     Mat4 xform, xformInv;
     instanceXformAtTime(scene, inst, hit.time, xform, xformInv);
 
     const uint32_t i0 = mesh.indices[hit.primIndex * 3 + 0];
     const uint32_t i1 = mesh.indices[hit.primIndex * 3 + 1];
     const uint32_t i2 = mesh.indices[hit.primIndex * 3 + 2];
+    if (i0 >= mesh.vertexCount || i1 >= mesh.vertexCount || i2 >= mesh.vertexCount)
+        return Vec3(0.05f);
     const Vec3 p0 =
         transformPoint(xform, meshPositionAtTime(mesh, i0, hit.time));
     const Vec3 p1 =
@@ -866,8 +875,11 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
 #if !defined(__CUDACC__)
         // Direct VDB rendering: SDF level-set surface or fog volume entry.
-        if (inst.volumeIndex >= 0 && inst.volumeIndex < scene.volumeCount && scene.volumes &&
-            scene.volumes[inst.volumeIndex]) {
+        // Wireframe / AO / Direct stay on the triangle proxy — no volume walk.
+        if (settings.integrator != kIntegratorWireframe &&
+            settings.integrator != kIntegratorAmbientOcclusion &&
+            settings.integrator != kIntegratorDirectLighting && inst.volumeIndex >= 0 &&
+            inst.volumeIndex < scene.volumeCount && scene.volumes && scene.volumes[inst.volumeIndex]) {
             const VolumeGrid& vol = *scene.volumes[inst.volumeIndex];
             if (vol.kind() == VolumeGridKind::Fog) {
                 currentMedium = inst.mediumIndex;
