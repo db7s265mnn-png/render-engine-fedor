@@ -84,7 +84,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_PREFIX }}
-          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}-ocio${{ env.OCIO_VERSION }}-oiio${{ env.OIIO_VERSION }}-openvdb${{ env.OPENVDB_VERSION }}-mtlx1.39.4
+          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}-ocio${{ env.OCIO_VERSION }}-oiio${{ env.OIIO_VERSION }}-onetbb2021.12-openvdb${{ env.OPENVDB_VERSION }}-mtlx1.39.4
 
       - name: Fetch Embree
         if: steps.deps-cache.outputs.cache-hit != 'true'
@@ -188,22 +188,36 @@ jobs:
           Write-Host "Installed oiiotool: $env:DEPS_PREFIX/bin/oiiotool.exe"
           Get-ChildItem "$env:DEPS_PREFIX/bin" -Filter "OpenImageIO*" | ForEach-Object { Write-Host $_.Name }
 
-      # OpenVDB core (SDF / fog volumes). TBB comes from the Embree package; Blosc off
-      # keeps the dep graph small. Boost iostreams is optional on OpenVDB 12.
+      # oneTBB headers+libs for OpenVDB (Embree ships only tbb*.dll/.lib, no headers).
+      - name: Build oneTBB
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v2021.12.0 https://github.com/oneapi-src/oneTBB.git onetbb-src
+          cmake -S onetbb-src -B onetbb-src/build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:DEPS_PREFIX" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DTBB_TEST=OFF `
+            -DTBB_STRICT=OFF `
+            -DBUILD_SHARED_LIBS=ON
+          if ($LASTEXITCODE -ne 0) { throw "oneTBB cmake configure failed" }
+          cmake --build onetbb-src/build --config Release --target install --parallel
+          if ($LASTEXITCODE -ne 0) { throw "oneTBB build/install failed" }
+          if (-not (Test-Path "$env:DEPS_PREFIX/include/tbb/tbb.h") -and
+              -not (Test-Path "$env:DEPS_PREFIX/include/oneapi/tbb.h")) {
+            throw "oneTBB headers missing after install"
+          }
+          Write-Host "Installed oneTBB under $env:DEPS_PREFIX"
+
+      # OpenVDB core (SDF / fog volumes). oneTBB is installed above; Blosc/zlib off
+      # keeps the dep graph small. Delayed loading off removes the Boost requirement.
       - name: Build OpenVDB
         if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 --branch $env:OPENVDB_VERSION https://github.com/AcademySoftwareFoundation/openvdb.git openvdb-src
-          $tbbRoot = "$env:DEPS_PREFIX/embree"
-          if (-not (Test-Path "$tbbRoot/include/tbb/tbb.h") -and -not (Test-Path "$tbbRoot/include/oneapi/tbb.h")) {
-            # Embree layout sometimes nests headers under include/
-            Get-ChildItem -Path $tbbRoot -Recurse -Filter "tbb.h" -ErrorAction SilentlyContinue |
-              Select-Object -First 3 | ForEach-Object { Write-Host "Found TBB header: $($_.FullName)" }
-          }
           cmake -S openvdb-src -B openvdb-src/build -G "Visual Studio 17 2022" -A x64 `
             -DCMAKE_INSTALL_PREFIX="$env:DEPS_PREFIX" `
-            -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX;$tbbRoot" `
-            -DTBB_ROOT="$tbbRoot" `
+            -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX" `
+            -DTBB_ROOT="$env:DEPS_PREFIX" `
             -DCMAKE_BUILD_TYPE=Release `
             -DOPENVDB_BUILD_CORE=ON `
             -DOPENVDB_BUILD_BINARIES=OFF `
