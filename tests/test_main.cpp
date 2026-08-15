@@ -4648,6 +4648,25 @@ void testNgonTriangulateAndVdb() {
         check(sdf->sampleWorld(Vec3(0, 0, 0)) < 0.0f, "Nearest filter still inside-negative");
     }
 
+    // Fill Density is a runtime multiplier — voxel bake stays normalized (~1 majorant).
+    {
+        VolumeFromPolygonsSettings a = settings;
+        a.kind = VolumeGridKind::Fog;
+        a.fillDensity = 1.0f;
+        VolumeFromPolygonsSettings b = settings;
+        b.kind = VolumeGridKind::Fog;
+        b.fillDensity = 25.0f;  // must NOT bake into voxels anymore
+        std::string eA, eB;
+        VolumeGridPtr fogA = VolumeGrid::fromPolygons(*box, Mat4::identity(), a, &eA);
+        VolumeGridPtr fogB = VolumeGrid::fromPolygons(*box, Mat4::identity(), b, &eB);
+        check(fogA && fogA->valid() && fogB && fogB->valid(), "fog unit-bake grids");
+        if (fogA && fogB) {
+            check(std::fabs(fogA->majorant() - fogB->majorant()) < 0.25f,
+                  "fillDensity does not change baked fog majorant");
+            check(fogA->majorant() < 1.5f, "baked fog occupancy majorant is ~1");
+        }
+    }
+
     // End-to-end: Volume prim through Embree must produce light for SDF and Fog,
     // including the default caustics-on path (MNEE) and Direct Lighting.
     auto renderVolumeSum = [&](VolumeGridKind kind, int integrator, int caustics) -> double {

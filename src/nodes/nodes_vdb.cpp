@@ -4,6 +4,9 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QHash>
+
+#include <cmath>
 
 #include "core/log.h"
 #include "io/alembic_loader.h"
@@ -57,12 +60,15 @@ public:
                          .withTooltip("Narrow-band width outside the surface (voxels)"));
         addParameter(Parameter::makeFloat("interiorband", "Interior Band", 3.0, 1.0, 64.0, false)
                          .withTooltip("Narrow-band width inside the surface (voxels)"));
-        addParameter(Parameter::makeFloat("filldensity", "Fill Density", 1.0, 0.0, 100.0, false)
-                         .withTooltip("Fog Volume: density value inside the mesh"));
+        addParameter(Parameter::makeFloat("filldensity", "Density", 1.0, 0.0, 100.0, false)
+                         .withTooltip("Runtime density multiplier for Fog (MediumData::density).\n"
+                                      "Does NOT rebuild the VDB — only scales sampling / shadows.\n"
+                                      "Multiplies MaterialX standard_volume.density when assigned."));
         addParameter(Parameter::makeMenu("filter", "Sample Filter",
                                          {"Nearest", "Linear", "Quadratic"}, 1)
                          .withTooltip("Voxel reconstruction filter when sampling the VDB.\n"
-                                      "Nearest = blocky; Linear = trilinear; Quadratic = smoothest."));
+                                      "Nearest = blocky; Linear = trilinear; Quadratic = smoothest.\n"
+                                      "Changing filter does not rebuild the grid."));
         addParameter(Parameter::makeString("primname", "Prim Name", "vdb")
                          .withTooltip("Leaf name for the output VDB prim"));
     }
@@ -84,39 +90,84 @@ public:
         const Stage& in = *inputs[0];
         const QString pattern = stringValue("pattern");
         const bool autoVoxel = boolValue("autovoxelsize", true);
-        VolumeFromPolygonsSettings settings;
-        settings.kind = intValue("mode") == 0 ? VolumeGridKind::Sdf : VolumeGridKind::Fog;
-        settings.voxelSize = float(floatValue("voxelsize"));
-        settings.exteriorBand = float(floatValue("exteriorband"));
-        settings.interiorBand = float(floatValue("interiorband"));
-        settings.fillDensity = float(floatValue("filldensity"));
+        const VolumeGridKind kind = intValue("mode") == 0 ? VolumeGridKind::Sdf : VolumeGridKind::Fog;
+        const float authoredVoxel = float(floatValue("voxelsize"));
+        const float exteriorBand = float(floatValue("exteriorband"));
+        const float interiorBand = float(floatValue("interiorband"));
+        const float densityScale = float(floatValue("filldensity", 1.0));
         const int filterIdx = intValue("filter", 1);
-        settings.filter = filterIdx <= 0   ? VolumeSampleFilter::Nearest
-                          : filterIdx >= 2 ? VolumeSampleFilter::Quadratic
-                                           : VolumeSampleFilter::Linear;
+        const VolumeSampleFilter filter = filterIdx <= 0   ? VolumeSampleFilter::Nearest
+                                          : filterIdx >= 2 ? VolumeSampleFilter::Quadratic
+                                                           : VolumeSampleFilter::Linear;
+
+        // Drop cache entries whose source mesh is no longer in the input.
+        {
+            std::vector<QString> keep;
+            for (const StagePrim& prim : in.prims) {
+                if (prim.active && prim.type == PrimType::Mesh && prim.mesh &&
+                    matchesPattern(pattern, prim.path))
+                    keep.push_back(prim.path);
+            }
+            for (auto it = gridCache_.begin(); it != gridCache_.end();) {
+                bool found = false;
+                for (const QString& p : keep) {
+                    if (p == it.key()) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) it = gridCache_.erase(it);
+                else ++it;
+            }
+        }
 
         int created = 0;
         for (const StagePrim& prim : in.prims) {
             if (!prim.active || prim.type != PrimType::Mesh || !prim.mesh) continue;
             if (!matchesPattern(pattern, prim.path)) continue;
 
-            VolumeFromPolygonsSettings local = settings;
+            float voxelSize = authoredVoxel;
             if (autoVoxel) {
                 Bounds3 b;
                 for (const Vec3& p : prim.mesh->positions) b.extend(transformPoint(prim.xform, p));
                 const float diag = length(b.hi - b.lo);
-                // ~128 voxels across the longest diagonal — works for tiny and Buddha-scale meshes.
-                local.voxelSize = srMax(1e-4f, diag / 128.0f);
+                voxelSize = srMax(1e-4f, diag / 128.0f);
             }
 
-            std::string err;
-            VolumeGridPtr grid = VolumeGrid::fromPolygons(*prim.mesh, prim.xform, local, &err);
-            if (!grid || !grid->valid()) {
-                context.reportError(this, QString("failed to convert %1: %2")
-                                              .arg(prim.path)
-                                              .arg(QString::fromStdString(err.empty() ? "unknown error" : err)));
-                continue;
+            // Rebuild key excludes Density + Sample Filter (runtime / cheap).
+            const GridCacheKey key{kind, voxelSize, exteriorBand, interiorBand,
+                                   uintptr_t(prim.mesh.get()), prim.mesh->positions.size(),
+                                   prim.mesh->indices.size(), prim.mesh->faceVertexIndices.size()};
+
+            VolumeGridPtr grid;
+            auto cacheIt = gridCache_.find(prim.path);
+            if (cacheIt != gridCache_.end() && cacheIt.value().key == key && cacheIt.value().grid &&
+                cacheIt.value().grid->valid()) {
+                grid = cacheIt.value().grid;
+            } else {
+                VolumeFromPolygonsSettings local;
+                local.kind = kind;
+                local.voxelSize = voxelSize;
+                local.exteriorBand = exteriorBand;
+                local.interiorBand = interiorBand;
+                local.fillDensity = 1.0f;  // occupancy only; density is a medium multiplier
+                local.filter = filter;
+                std::string err;
+                grid = VolumeGrid::fromPolygons(*prim.mesh, prim.xform, local, &err);
+                if (!grid || !grid->valid()) {
+                    context.reportError(this, QString("failed to convert %1: %2")
+                                                  .arg(prim.path)
+                                                  .arg(QString::fromStdString(
+                                                      err.empty() ? "unknown error" : err)));
+                    continue;
+                }
+                CachedGrid entry;
+                entry.key = key;
+                entry.grid = grid;
+                gridCache_.insert(prim.path, entry);
             }
+            grid->setSampleFilter(filter);
+
             StagePrim out;
             out.type = PrimType::Volume;
             out.sourceNode = this->name();
@@ -124,6 +175,10 @@ public:
             out.xform = Mat4::identity();  // grid already in world space
             out.material = prim.material;
             out.materialAssigned = prim.materialAssigned;
+            // Runtime density scale — toScene multiplies into MediumData::density.
+            out.mediumAssigned = true;
+            out.medium.type = (kind == VolumeGridKind::Fog) ? 2 : 3;
+            out.medium.density = densityScale;
             out.path = primPathFor(*this, "volume", stringValue("primname"));
             if (created > 0) out.path = out.path + QString::number(created);
             stage.addPrim(std::move(out));
@@ -131,6 +186,31 @@ public:
         }
         if (created == 0) context.reportWarning(this, "no mesh prims matched pattern");
     }
+
+private:
+    struct GridCacheKey {
+        VolumeGridKind kind = VolumeGridKind::Sdf;
+        float voxelSize = 0.0f;
+        float exteriorBand = 0.0f;
+        float interiorBand = 0.0f;
+        uintptr_t meshPtr = 0;
+        size_t positionCount = 0;
+        size_t indexCount = 0;
+        size_t faceIndexCount = 0;
+
+        bool operator==(const GridCacheKey& o) const {
+            return kind == o.kind && meshPtr == o.meshPtr && positionCount == o.positionCount &&
+                   indexCount == o.indexCount && faceIndexCount == o.faceIndexCount &&
+                   std::fabs(voxelSize - o.voxelSize) < 1e-8f &&
+                   std::fabs(exteriorBand - o.exteriorBand) < 1e-5f &&
+                   std::fabs(interiorBand - o.interiorBand) < 1e-5f;
+        }
+    };
+    struct CachedGrid {
+        GridCacheKey key;
+        VolumeGridPtr grid;
+    };
+    QHash<QString, CachedGrid> gridCache_;
 };
 
 // ---------------------------------------------------------------------------

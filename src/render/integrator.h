@@ -1014,6 +1014,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     currentMedium = -1;
                     origin = offsetRayOrigin(si.p, si.ng, direction);
                 } else {
+                    // Enter the medium. Empty AABB corners are OK (dens≈0 → null collisions);
+                    // container silhouettes are softened by boundary feather in fromPolygons.
                     currentMedium = inst.mediumIndex;
                     origin = offsetRayOrigin(si.p, -si.ng, direction);
                 }

@@ -27,7 +27,7 @@ struct VolumeFromPolygonsSettings {
     float voxelSize = 0.05f;
     float exteriorBand = 3.0f;  // voxels (Houdini-like)
     float interiorBand = 3.0f;  // voxels
-    float fillDensity = 1.0f;   // fog fill value inside closed mesh
+    float fillDensity = 1.0f;   // unused for voxel bake — runtime MediumData::density scale
     VolumeSampleFilter filter = VolumeSampleFilter::Linear;
 };
 

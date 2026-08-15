@@ -25,7 +25,8 @@ MeshPtr volumeBoundsProxy(const VolumeGrid& grid) {
     return box;
 }
 
-MediumData mediumFromMaterialVolume(const Material& material, int volumeIndex, VolumeGridKind kind) {
+MediumData mediumFromMaterialVolume(const Material& material, int volumeIndex, VolumeGridKind kind,
+                                    float densityScale = 1.0f) {
     MediumData m;
     if (kind == VolumeGridKind::Sdf) {
         // SDF is shaded as a surface after sphere-trace; medium type is for bookkeeping.
@@ -35,16 +36,18 @@ MediumData mediumFromMaterialVolume(const Material& material, int volumeIndex, V
         m.type = 2;
     }
     m.volumeIndex = volumeIndex;
+    const float scale = srMax(0.0f, densityScale);
     if (material.hasVolumeShader) {
         // MaterialX surfacematerial.volumeshader → standard_volume.
-        m.density = material.volumeDensity;
+        // densityScale = SOP Fill Density (runtime multiply, no grid rebuild).
+        m.density = material.volumeDensity * scale;
         m.sigmaA = material.volumeAbsorption;
         m.sigmaS = material.volumeScattering;
         m.g = material.volumeAnisotropy;
         m.emission = material.volumeEmission * material.volumeEmissionStrength;
     } else {
-        // No volumeshader: tint fog from the surface baseColor so Mesh materials still affect Fog.
-        m.density = 1.0f;
+        // No volumeshader: SOP/fill density is the medium density; tint from surface baseColor.
+        m.density = scale;
         const Vec3 albedo = material.baseColor;
         m.sigmaS = albedo * 0.5f;
         m.sigmaA = Vec3(0.05f) + (Vec3(1.0f) - albedo) * 0.15f;
@@ -384,7 +387,9 @@ ScenePtr Stage::toScene() const {
                 // the AABB must NOT be an Embree opaque shadow occluder.
                 inst.visibilityMask = kVisPrimary;
                 inst.volumeIndex = volumeIndex;
-                MediumData medium = mediumFromMaterialVolume(material, volumeIndex, prim.volume->kind());
+                MediumData medium = mediumFromMaterialVolume(
+                    material, volumeIndex, prim.volume->kind(),
+                    prim.mediumAssigned ? prim.medium.density : 1.0f);
                 inst.mediumIndex = scene->addMedium(medium, prim.vdbPath.toStdString());
                 scene->instances.push_back(inst);
 

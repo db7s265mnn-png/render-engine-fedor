@@ -172,21 +172,40 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh& mesh, const Mat
             grid->setTransform(sdf->transform().copy());
             grid->setGridClass(openvdb::GRID_FOG_VOLUME);
             grid->setName("density");
-            // Soft fill from the SDF band so Linear/Quadratic filters do not stair-step:
-            // density ramps from 0 at the exterior band to fillDensity at the surface/inside.
+            // Normalized occupancy in [0,1]. Runtime density scale lives on MediumData::density
+            // (SOP Fill Density / MaterialX volumeDensity) — changing it must NOT rebuild the grid.
             const float bandWorld =
                 srMax(settings.voxelSize, settings.voxelSize * srMax(1.0f, settings.exteriorBand));
             auto accessor = grid->getAccessor();
             for (auto it = sdf->cbeginValueOn(); it; ++it) {
                 const float d = float(*it);
                 if (d > 0.0f) continue;  // outside
-                float dens = settings.fillDensity;
+                float dens = 1.0f;
                 if (bandWorld > 1e-8f && d > -bandWorld) {
-                    // Smoothstep from shell toward interior.
+                    // Smoothstep from shell toward interior (anti-boxy surface).
                     const float t = clampf(-d / bandWorld, 0.0f, 1.0f);
-                    dens = settings.fillDensity * (t * t * (3.0f - 2.0f * t));
+                    dens = t * t * (3.0f - 2.0f * t);
                 }
                 if (dens > 1e-8f) accessor.setValue(it.getCoord(), dens);
+            }
+            // Feather density to 0 near the active AABB faces so the container wall
+            // does not read as a hard planar density cut (common VDB viewport artifact).
+            const openvdb::CoordBBox densBox = grid->evalActiveVoxelBoundingBox();
+            if (!densBox.empty()) {
+                const int featherVox = std::max(2, int(std::ceil(srMax(1.0f, settings.exteriorBand))));
+                for (auto it = grid->beginValueOn(); it; ++it) {
+                    const openvdb::Coord c = it.getCoord();
+                    const int dx = std::min(c.x() - densBox.min().x(), densBox.max().x() - c.x());
+                    const int dy = std::min(c.y() - densBox.min().y(), densBox.max().y() - c.y());
+                    const int dz = std::min(c.z() - densBox.min().z(), densBox.max().z() - c.z());
+                    const int distEdge = std::min(dx, std::min(dy, dz));
+                    if (distEdge >= featherVox) continue;
+                    const float u = clampf(float(distEdge) / float(featherVox), 0.0f, 1.0f);
+                    const float fade = u * u * (3.0f - 2.0f * u);
+                    const float v = float(*it) * fade;
+                    if (v > 1e-8f) it.setValue(v);
+                    else it.setValueOff();
+                }
             }
             grid->pruneGrid();
         }
@@ -212,7 +231,8 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh& mesh, const Mat
     }
     float maj = 0.0f;
     for (auto it = grid->cbeginValueOn(); it; ++it) maj = srMax(maj, fabsf(float(*it)));
-    out->majorant_ = srMax(maj, settings.fillDensity);
+    // Occupancy is normalized to ~1; runtime density multiplies in the integrator.
+    out->majorant_ = srMax(maj, 1.0f);
     return out;
 }
 
