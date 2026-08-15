@@ -661,7 +661,8 @@ SR_INL SR_HD float lightTraceSplatClamp(const RenderSettingsData& settings) {
 // block fully; transmissive surfaces attenuate by Material::shadowOpacity when
 // refractive caustics are enabled (MaterialX / Arnold fake-caustics control).
 // VDB: SDF level sets are hard occluders (tested against the field, not the AABB
-// proxy). Fog AABBs are skipped here — soft Tr is applied via shadowTransmittanceFogVolumes.
+// proxy). Fog AABBs are skipped here — soft Tr is applied via ratio tracking
+// (shadowTransmittanceFogVolumes, PBRT §11.2.1 / VolPath §14.2.2).
 template <typename Tracer>
 SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 dir,
                                     float tMax) {
@@ -781,11 +782,11 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
 
     // Volumetric shadow transmittance along the light segment.
 #if !defined(__CUDACC__)
-    // Fog VDBs: soft cast/self shadow via optical depth (AABB-clipped, incl. distant lights).
+    // Fog VDBs: ratio tracking Tr (PBRT §11.2.1 / VolPath §14.2.2), AABB-clipped.
     if (scene.lights[lightIndex].shadowEnable)
-        result = result * shadowTransmittanceFogVolumes(scene, shadowOrigin, ls.wi, tMax);
+        result = result * shadowTransmittanceFogVolumes(scene, shadowOrigin, ls.wi, tMax, rng);
 #endif
-    // Homogeneous medium currently surrounding the shading point (non-VDB).
+    // Homogeneous medium currently surrounding the shading point (non-VDB) — Beer’s law.
     if (const MediumData* med = getMedium(scene, mediumIndex)) {
         if (med->type != 2 && ls.distance < 1.0e7f) result = result * mediumShadowTr(*med, ls.distance);
     }
@@ -917,13 +918,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                                 const float p = henyeyGreenstein(cosTheta, med->g);
                                 Vec3 contrib =
                                     throughput * ls.radiance * (p * vis / (ls.pdf * selectPdf));
-                                // Soft fog Tr through all fog volumes (includes current); SDF already
-                                // hard-tested inside shadowVisibility.
+                                // Soft fog Tr via ratio tracking through all fog volumes (includes
+                                // current); SDF already hard-tested inside shadowVisibility.
 #if !defined(__CUDACC__)
                                 if (scene.lights[li].shadowEnable)
-                                    contrib =
-                                        contrib * shadowTransmittanceFogVolumes(scene, origin, ls.wi,
-                                                                                tShadow);
+                                    contrib = contrib * shadowTransmittanceFogVolumes(
+                                                            scene, origin, ls.wi, tShadow, rng);
 #endif
                                 // Homogeneous (non-VDB) medium around the scatter point.
                                 if (med->type != 2 && ls.distance < 1.0e7f)

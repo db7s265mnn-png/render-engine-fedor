@@ -4912,12 +4912,21 @@ void testNgonTriangulateAndVdb() {
         s->instances.push_back(inst);
         s->finalize();
         const SceneView view = s->view();
-        const Vec3 Tr =
-            shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(1, 0, 0), 10.0f);
-        check(Tr.x < 0.95f && Tr.y < 0.95f && Tr.z < 0.95f, "Fog Tr attenuates through the volume");
-        check(Tr.x > 0.0f, "Fog Tr is not fully opaque for this density");
-        const Vec3 TrMiss =
-            shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(0, 1, 0), 10.0f);
+        Rng rngTr(42u, 7u);
+        Vec3 TrAcc(0.0f);
+        constexpr int kTrSamples = 256;
+        for (int i = 0; i < kTrSamples; ++i)
+            TrAcc = TrAcc + shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(1, 0, 0), 10.0f, rngTr);
+        const Vec3 Tr = TrAcc * (1.0f / float(kTrSamples));
+        check(Tr.x < 0.95f && Tr.y < 0.95f && Tr.z < 0.95f,
+              "Fog ratio-tracking Tr attenuates through the volume");
+        check(Tr.x > 0.0f, "Fog Tr mean is not fully opaque for this density");
+        Rng rngMiss(99u, 3u);
+        Vec3 missAcc(0.0f);
+        for (int i = 0; i < 64; ++i)
+            missAcc =
+                missAcc + shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(0, 1, 0), 10.0f, rngMiss);
+        const Vec3 TrMiss = missAcc * (1.0f / 64.0f);
         check(TrMiss.x > 0.99f && TrMiss.y > 0.99f && TrMiss.z > 0.99f,
               "Fog Tr ~1 when the ray misses the AABB");
     }

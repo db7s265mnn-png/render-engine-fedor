@@ -1,5 +1,6 @@
-// Homogeneous / null-scattering volume helpers (PBRT Ch.11 style).
+// Homogeneous / null-scattering volume helpers (PBRT 4ed Ch.11).
 // Media are authored on geometry (InstanceData::mediumIndex).
+// Heterogeneous VDB fog free-flight + ratio-tracking shadow Tr: see volume_vdb.h.
 #pragma once
 
 #include "core/math.h"

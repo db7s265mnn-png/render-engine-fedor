@@ -70,7 +70,9 @@ bool intersectSdfVolume(const VolumeGrid& grid, Vec3 origin, Vec3 direction, flo
             normal = Vec3(float(worldNml.x()), float(worldNml.y()), float(worldNml.z()));
             const float len = length(normal);
             if (len > 1e-12f) normal = normal / len;
-            else normal = grid.gradientWorld(Vec3(float(worldPos.x()), float(worldPos.y()), float(worldPos.z())));
+            else
+                normal = grid.gradientWorld(
+                    Vec3(float(worldPos.x()), float(worldPos.y()), float(worldPos.z())));
             if (dot(normal, direction) > 0.0f) normal = normal * -1.0f;
             return true;
         }
@@ -126,17 +128,21 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
         return out;
     }
 
+    // PBRT §11.2.1: majorant Λ ≥ σ_t everywhere → homogeneous null-scattering rate.
     const float majGrid = srMax(grid.majorant(), 1e-4f);
     const float densityScale = srMax(0.0f, medium.density);
     const Vec3 sigmaA0 = medium.sigmaA;
     const Vec3 sigmaS0 = medium.sigmaS;
-    const float baseMaj = srMax(sigmaA0.x + sigmaS0.x, srMax(sigmaA0.y + sigmaS0.y, sigmaA0.z + sigmaS0.z));
+    const float baseMaj =
+        srMax(sigmaA0.x + sigmaS0.x, srMax(sigmaA0.y + sigmaS0.y, sigmaA0.z + sigmaS0.z));
     const float majorant = srMax(1e-6f, baseMaj * majGrid * densityScale);
     float t = 0.0f;
     for (int iter = 0; iter < 256; ++iter) {
+        // Free-flight candidate ~ Exp(Λ).
         const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
         t += -logf(u) / majorant;
         if (t >= tMax) {
+            // No real collision before the surface / AABB exit (delta-tracking transmit).
             out.t = tMax;
             return out;
         }
@@ -146,8 +152,10 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
         const Vec3 sigmaS = sigmaS0 * dens;
         const Vec3 sigmaT = sigmaA + sigmaS;
         const float stAvg = (sigmaT.x + sigmaT.y + sigmaT.z) * (1.0f / 3.0f);
-        const float xi = rng.nextFloat();
-        if (xi >= stAvg / majorant) continue;
+        // Null collision if ξ ≥ σ_t / Λ (fictitious particle — continue).
+        if (rng.nextFloat() >= stAvg / majorant) continue;
+
+        // Real collision: absorb vs scatter by σa : σs (channel-averaged PDF; weight via albedo).
         const float saAvg = (sigmaA.x + sigmaA.y + sigmaA.z) * (1.0f / 3.0f);
         const float ssAvg = (sigmaS.x + sigmaS.y + sigmaS.z) * (1.0f / 3.0f);
         const float stSum = srMax(1e-8f, saAvg + ssAvg);
@@ -157,6 +165,11 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
             out.absorbed = true;
             return out;
         }
+        // Scatter: β *= σs/σt (PBRT path throughput for a real-scattering event).
+        const Vec3 albedo(sigmaT.x > 1e-8f ? sigmaS.x / sigmaT.x : 0.0f,
+                          sigmaT.y > 1e-8f ? sigmaS.y / sigmaT.y : 0.0f,
+                          sigmaT.z > 1e-8f ? sigmaS.z / sigmaT.z : 0.0f);
+        throughput = throughput * albedo;
         out.t = t;
         out.scattered = true;
         return out;
@@ -165,22 +178,45 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
     return out;
 }
 
+// PBRT 4ed §11.2.1 Eq. 11.17 — ratio tracking transmittance.
+// T ← ∏ σ_n(p_i)/Λ  for free-flight samples p_i ~ Exp(Λ) until past the endpoint.
 Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 origin, Vec3 direction,
-                       float dist) {
+                       float dist, Rng& rng) {
     if (!grid.valid() || dist <= 0.0f) return Vec3(1.0f);
-    // Step count tracks voxel size so soft shadows stay stable across scale.
-    const float vs = srMax(1e-6f, grid.voxelSize());
-    const int n = int(clampf(dist / vs * 2.0f, 8.0f, 64.0f));
-    Vec3 tau(0.0f);
+
+    const float majGrid = srMax(grid.majorant(), 1e-4f);
     const float densityScale = srMax(0.0f, medium.density);
-    const float step = dist / float(n);
-    const Vec3 sigmaT = medium.sigmaA + medium.sigmaS;
-    for (int i = 0; i < n; ++i) {
-        const float t = (float(i) + 0.5f) * step;
+    const Vec3 sigmaA0 = medium.sigmaA;
+    const Vec3 sigmaS0 = medium.sigmaS;
+    const float baseMaj =
+        srMax(sigmaA0.x + sigmaS0.x, srMax(sigmaA0.y + sigmaS0.y, sigmaA0.z + sigmaS0.z));
+    const float majorant = srMax(1e-6f, baseMaj * majGrid * densityScale);
+
+    Vec3 Tr(1.0f);
+    float t = 0.0f;
+    for (int iter = 0; iter < 512; ++iter) {
+        const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
+        t += -logf(u) / majorant;
+        if (t >= dist) return Tr;
+
         const float dens = srMax(0.0f, grid.sampleWorld(origin + direction * t)) * densityScale;
-        tau = tau + sigmaT * dens * step;
+        const Vec3 sigmaT = (sigmaA0 + sigmaS0) * dens;
+        // σ_n = Λ − σ_t  (null-scattering coefficient). Clamp for majorant underestimates.
+        const float nx = srMax(0.0f, majorant - sigmaT.x);
+        const float ny = srMax(0.0f, majorant - sigmaT.y);
+        const float nz = srMax(0.0f, majorant - sigmaT.z);
+        Tr = Vec3(Tr.x * (nx / majorant), Tr.y * (ny / majorant), Tr.z * (nz / majorant));
+
+        // Russian roulette when transmittance is tiny (PBRT §11.2.1 RR / track-length motivation).
+        const float lum = luminance(Tr);
+        if (lum < 1e-3f) {
+            const float q = clampf(lum * 16.0f, 0.05f, 0.95f);
+            if (rng.nextFloat() > q) return Vec3(0.0f);
+            Tr = Tr / q;
+        }
+        if (maxComponent(Tr) < 1e-6f) return Vec3(0.0f);
     }
-    return Vec3(expf(-tau.x), expf(-tau.y), expf(-tau.z));
+    return Tr;
 }
 
 bool shadowOccludedBySdfVolumes(const SceneView& scene, Vec3 origin, Vec3 direction, float tMax) {
@@ -201,11 +237,12 @@ bool shadowOccludedBySdfVolumes(const SceneView& scene, Vec3 origin, Vec3 direct
     return false;
 }
 
-Vec3 shadowTransmittanceFogVolumes(const SceneView& scene, Vec3 origin, Vec3 direction, float tMax) {
+Vec3 shadowTransmittanceFogVolumes(const SceneView& scene, Vec3 origin, Vec3 direction, float tMax,
+                                   Rng& rng) {
     Vec3 Tr(1.0f);
     if (!scene.volumes || !scene.instances || scene.volumeCount <= 0 || tMax <= 0.0f) return Tr;
 
-    // Pair each fog grid with its MediumData via the volume instance.
+    // Pair each fog grid with its MediumData via the volume instance (Tr multiplicative — §11.2).
     for (int ii = 0; ii < scene.instanceCount; ++ii) {
         const InstanceData& inst = scene.instances[ii];
         if (inst.volumeIndex < 0 || inst.volumeIndex >= scene.volumeCount) continue;
@@ -221,7 +258,7 @@ Vec3 shadowTransmittanceFogVolumes(const SceneView& scene, Vec3 origin, Vec3 dir
         const float b = srMin(tMax, tExit);
         if (b <= a + 1e-6f) continue;
 
-        Tr = Tr * mediumShadowTrVdb(*grid, *med, origin + direction * a, direction, b - a);
+        Tr = Tr * mediumShadowTrVdb(*grid, *med, origin + direction * a, direction, b - a, rng);
         if (maxComponent(Tr) < 1e-5f) return Vec3(0.0f);
     }
     return Tr;
