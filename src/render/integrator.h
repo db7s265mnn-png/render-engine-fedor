@@ -635,6 +635,20 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
         // Reached light proxy geometry along the shadow segment — connection ok.
         if (si.lightIndex >= 0) return visibility;
 
+        // Volume AABB proxies exist only to enter SDF/fog on camera rays. They must
+        // not occlude NEE / shadow connections (shadowVisibility uses primary-mask
+        // intersect, so Embree visibilityMask alone cannot skip them).
+        if (si.instanceIndex >= 0 && si.instanceIndex < scene.instanceCount) {
+            const InstanceData& hitInst = scene.instances[si.instanceIndex];
+            if (hitInst.volumeIndex >= 0) {
+                const Vec3 p = o + dir * hit.t;
+                o = offsetRayOrigin(p, si.ng, dir);
+                remaining -= hit.t;
+                if (remaining <= 1e-4f) return visibility;
+                continue;
+            }
+        }
+
         Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Shadow);
         // Opaque-glass when caustics estimators own transport (caustics / specular_transmission slot).
         const Material matCau = materialForCausticTransport(scene, si.materialIndex);
@@ -843,8 +857,20 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                                 const float p = henyeyGreenstein(cosTheta, med->g);
                                 Vec3 contrib =
                                     throughput * ls.radiance * (p * vis / (ls.pdf * selectPdf));
-                                if (ls.distance < 1.0e7f)
-                                    contrib = contrib * mediumShadowTr(*med, ls.distance);
+                                if (ls.distance < 1.0e7f) {
+#if !defined(__CUDACC__)
+                                    if (med->type == 2 && med->volumeIndex >= 0 &&
+                                        med->volumeIndex < scene.volumeCount && scene.volumes &&
+                                        scene.volumes[med->volumeIndex]) {
+                                        contrib = contrib * mediumShadowTrVdb(
+                                                                  *scene.volumes[med->volumeIndex], *med,
+                                                                  origin, ls.wi, ls.distance);
+                                    } else
+#endif
+                                    {
+                                        contrib = contrib * mediumShadowTr(*med, ls.distance);
+                                    }
+                                }
                                 if (depth > 0)
                                     contrib = clampContribution(contrib, settings.clampDirect);
                                 radiance += contrib;
@@ -921,10 +947,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
 #if !defined(__CUDACC__)
         // Direct VDB rendering: SDF level-set surface or fog volume entry/exit.
-        // Wireframe / AO / Direct stay on the triangle proxy — no volume walk.
-        if (settings.integrator != kIntegratorWireframe &&
-            settings.integrator != kIntegratorAmbientOcclusion &&
-            settings.integrator != kIntegratorDirectLighting && inst.volumeIndex >= 0 &&
+        // Wireframe stays on the triangle proxy (bounds silhouette).
+        if (settings.integrator != kIntegratorWireframe && inst.volumeIndex >= 0 &&
             inst.volumeIndex < scene.volumeCount && scene.volumes && scene.volumes[inst.volumeIndex]) {
             const VolumeGrid& vol = *scene.volumes[inst.volumeIndex];
             if (vol.kind() == VolumeGridKind::Fog) {

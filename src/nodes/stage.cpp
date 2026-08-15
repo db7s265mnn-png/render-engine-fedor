@@ -373,6 +373,9 @@ ScenePtr Stage::toScene() const {
                 inst.materialIndex = materialIndex;
                 inst.lightIndex = -1;
                 inst.visibleCamera = 1;
+                // Bounds proxy is only a primary-ray shell for SDF entry / fog enter-exit.
+                // It must NOT cast shadows or the interior SDF/fog is fully self-shadowed.
+                inst.visibilityMask = kVisPrimary;
                 inst.volumeIndex = volumeIndex;
                 MediumData medium = mediumFromMaterialVolume(material, volumeIndex, prim.volume->kind());
                 inst.mediumIndex = scene->addMedium(medium, prim.vdbPath.toStdString());

@@ -37,6 +37,7 @@
 #include "render/rsequence.h"
 #include "render/render_session.h"
 #include "render/shading.h"
+#include "render/volume_vdb.h"
 #include "render/spectrum.h"
 #include "render/spectrum_rgb.h"
 #include "render/spectrum_types.h"
@@ -4580,7 +4581,97 @@ void testNgonTriangulateAndVdb() {
         check(meshed && meshed->triangleCount() > 0, "sdftopolygons_vdb produces mesh");
         MeshPtr dcsdd = dcsddContourVolume(*sdf, 0.15f, {}, &err);
         check(dcsdd && dcsdd->triangleCount() > 0, std::string("sdftopolygons_dcsdd: ") + err);
+
+        float tHit = 0.0f;
+        Vec3 nSdf;
+        const bool hitSdf =
+            intersectSdfVolume(*sdf, Vec3(-3, 0, 0), Vec3(1, 0, 0), 0.0f, 10.0f, tHit, nSdf);
+        check(hitSdf, "SDF sphere-trace hits the box");
+        check(std::fabs(tHit - 2.5f) < 0.35f, "SDF hit near the box face at x=-0.5");
     }
+
+    // End-to-end: Volume prim through Embree must produce light for SDF and Fog,
+    // including the default caustics-on path (MNEE) and Direct Lighting.
+    auto renderVolumeSum = [&](VolumeGridKind kind, int integrator, int caustics) -> double {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = kind;
+        vs.voxelSize = 0.08f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        vs.fillDensity = 1.0f;
+        std::string e2;
+        VolumeGridPtr grid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e2);
+        check(grid && grid->valid(), std::string("volume grid: ") + e2);
+
+        ScenePtr scene = std::make_shared<Scene>();
+        const int volumeIndex = scene->addVolume(grid);
+        const Bounds3 bb = grid->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int meshIndex = scene->addMesh(proxy);
+        Material mat;
+        mat.baseColor = Vec3(0.85f, 0.75f, 0.65f);
+        mat.roughness = 0.45f;
+        const int materialIndex = scene->addMaterial(mat);
+        InstanceData inst;
+        inst.meshIndex = meshIndex;
+        inst.materialIndex = materialIndex;
+        inst.volumeIndex = volumeIndex;
+        inst.visibilityMask = kVisPrimary;  // proxy must not cast shadows onto the SDF/fog
+        MediumData med;
+        med.type = (kind == VolumeGridKind::Sdf) ? 3 : 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 1.0f;
+        med.sigmaA = Vec3(0.05f);
+        med.sigmaS = Vec3(1.2f);
+        inst.mediumIndex = scene->addMedium(med);
+        scene->instances.push_back(inst);
+
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 4.0f;
+        light.xform = lookAtMatrix(Vec3(3, 5, 4), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 48;
+        scene->settings.resolutionY = 36;
+        scene->settings.samplesPerPixel = 12;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.integrator = integrator;
+        scene->settings.caustics = caustics;
+        scene->settings.pathGuiding = 0;
+        scene->settings.maxDepth = 6;
+        scene->finalize();
+        scene->frameCameraOnContents();
+
+        RenderSession session;
+        session.setScene(scene);
+        session.start();
+        session.waitForCompletion();
+        const Image image = session.linearImage();
+        double sum = 0.0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x) sum += double(luminance(image.rgb(x, y)));
+        return sum;
+    };
+
+    const double sdfPtOff = renderVolumeSum(VolumeGridKind::Sdf, kIntegratorPathTracer, 0);
+    const double sdfPtOn = renderVolumeSum(VolumeGridKind::Sdf, kIntegratorPathTracer, 1);
+    const double sdfDl = renderVolumeSum(VolumeGridKind::Sdf, kIntegratorDirectLighting, 0);
+    const double fogPtOff = renderVolumeSum(VolumeGridKind::Fog, kIntegratorPathTracer, 0);
+    const double fogDl = renderVolumeSum(VolumeGridKind::Fog, kIntegratorDirectLighting, 0);
+    std::printf("  VDB render sums: SDF PT-off=%.3f PT-on=%.3f DL=%.3f | Fog PT-off=%.3f DL=%.3f\n",
+                sdfPtOff, sdfPtOn, sdfDl, fogPtOff, fogDl);
+    check(sdfPtOff > 1.0, "SDF PathTracer (caustics off) renders the volume");
+    check(sdfPtOn > 1.0, "SDF PathTracer (caustics on / MNEE) renders the volume");
+    check(sdfDl > 1.0, "SDF Direct Lighting renders the volume");
+    check(fogPtOff > 0.5, "Fog PathTracer renders the volume");
+    check(fogDl > 0.5, "Fog Direct Lighting renders the volume");
 #else
     std::printf("  (OpenVDB disabled in this build — skipping volume checks)\n");
 #endif

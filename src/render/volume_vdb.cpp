@@ -1,6 +1,14 @@
 #include "render/volume_vdb.h"
 
+#include "solstice_config.h"
+
 #include <cmath>
+
+#if SOLSTICE_HAVE_OPENVDB
+#include <openvdb/openvdb.h>
+#include <openvdb/math/Ray.h>
+#include <openvdb/tools/RayIntersector.h>
+#endif
 
 namespace sol {
 namespace {
@@ -43,7 +51,36 @@ bool intersectSdfVolume(const VolumeGrid& grid, Vec3 origin, Vec3 direction, flo
                         float& tHit, Vec3& normal) {
     if (!grid.valid() || grid.kind() != VolumeGridKind::Sdf) return false;
 
-    // Restrict sphere tracing to the analytical world AABB (proxy triangles can miss exits).
+#if SOLSTICE_HAVE_OPENVDB
+    auto* vdb = static_cast<openvdb::FloatGrid*>(grid.nativeGrid());
+    if (!vdb) return false;
+
+    // Prefer OpenVDB's HDDA level-set intersector (robust for narrow bands).
+    try {
+        openvdb::tools::LevelSetRayIntersector<openvdb::FloatGrid> intersector(*vdb);
+        using RayT = openvdb::math::Ray<double>;
+        const double t0 = double(srMax(0.0f, tMin));
+        const double t1 = double(srMax(t0 + 1e-6, tMax));
+        RayT ray(openvdb::Vec3d(origin.x, origin.y, origin.z),
+                 openvdb::Vec3d(direction.x, direction.y, direction.z), t0, t1);
+        openvdb::Vec3d worldPos, worldNml;
+        double wTime = 0.0;
+        if (intersector.intersectsWS(ray, worldPos, worldNml, wTime)) {
+            tHit = float(wTime);
+            normal = Vec3(float(worldNml.x()), float(worldNml.y()), float(worldNml.z()));
+            const float len = length(normal);
+            if (len > 1e-12f) normal = normal / len;
+            else normal = grid.gradientWorld(Vec3(float(worldPos.x()), float(worldPos.y()), float(worldPos.z())));
+            if (dot(normal, direction) > 0.0f) normal = normal * -1.0f;
+            return true;
+        }
+        return false;
+    } catch (...) {
+        // Fall through to sphere tracing.
+    }
+#endif
+
+    // Fallback sphere tracing (also used when OpenVDB is unavailable).
     float aabbEnter = 0.0f;
     float aabbExit = tMax;
     if (rayAabbInterval(origin, direction, grid.worldBounds(), aabbEnter, aabbExit)) {
@@ -54,7 +91,6 @@ bool intersectSdfVolume(const VolumeGrid& grid, Vec3 origin, Vec3 direction, flo
 
     const float eps = srMax(1e-4f, grid.voxelSize() * 0.25f);
     float t = srMax(0.0f, tMin);
-    // Sphere tracing / raymarch along the AABB segment.
     for (int i = 0; i < 512; ++i) {
         if (t > tMax) return false;
         const Vec3 p = origin + direction * t;
@@ -62,11 +98,9 @@ bool intersectSdfVolume(const VolumeGrid& grid, Vec3 origin, Vec3 direction, flo
         if (fabsf(d) < eps) {
             tHit = t;
             normal = grid.gradientWorld(p);
-            // Ensure normal faces the ray.
             if (dot(normal, direction) > 0.0f) normal = normal * -1.0f;
             return true;
         }
-        // Outside: step by distance; inside: step cautiously toward surface.
         const float step = (d > 0.0f) ? srMax(d * 0.9f, eps) : srMax(eps, -d * 0.5f);
         t += step;
     }
@@ -85,7 +119,6 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
     float aabbEnter = 0.0f;
     float aabbExit = tMax;
     if (rayAabbInterval(origin, direction, grid.worldBounds(), aabbEnter, aabbExit)) {
-        // Origin is already inside after proxy entry — still clamp far bound.
         tMax = srMin(tMax, srMax(0.0f, aabbExit));
     }
     if (tMax <= 0.0f) {
@@ -95,7 +128,6 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
 
     const float majGrid = srMax(grid.majorant(), 1e-4f);
     const float densityScale = srMax(0.0f, medium.density);
-    // Majorant extinction ≈ max(|σa|+|σs|) * majGrid * densityScale
     const Vec3 sigmaA0 = medium.sigmaA;
     const Vec3 sigmaS0 = medium.sigmaS;
     const float baseMaj = srMax(sigmaA0.x + sigmaS0.x, srMax(sigmaA0.y + sigmaS0.y, sigmaA0.z + sigmaS0.z));
@@ -115,14 +147,7 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
         const Vec3 sigmaT = sigmaA + sigmaS;
         const float stAvg = (sigmaT.x + sigmaT.y + sigmaT.z) * (1.0f / 3.0f);
         const float xi = rng.nextFloat();
-        if (xi >= stAvg / majorant) {
-            // Null collision.
-            continue;
-        }
-        // Real collision — optional emission in-scatter at event.
-        if (!isBlack(medium.emission)) {
-            // Tracked as additive contribution by caller if needed; keep throughput path.
-        }
+        if (xi >= stAvg / majorant) continue;
         const float saAvg = (sigmaA.x + sigmaA.y + sigmaA.z) * (1.0f / 3.0f);
         const float ssAvg = (sigmaS.x + sigmaS.y + sigmaS.z) * (1.0f / 3.0f);
         const float stSum = srMax(1e-8f, saAvg + ssAvg);
@@ -132,7 +157,6 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
             out.absorbed = true;
             return out;
         }
-        // Ratio tracking weight σs/σt ≈ 1 for RGB average path; keep throughput.
         out.t = t;
         out.scattered = true;
         return out;
@@ -144,7 +168,6 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
 Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 origin, Vec3 direction,
                        float dist) {
     if (!grid.valid() || dist <= 0.0f) return Vec3(1.0f);
-    // Cheap optical-depth estimate: stratified samples along the segment.
     const int n = 8;
     Vec3 tau(0.0f);
     const float densityScale = srMax(0.0f, medium.density);
