@@ -895,46 +895,63 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #if !defined(__CUDACC__)
                 if (!isBlack(med->emission)) radiance += throughput * med->emission;
 #endif
-                float phasePdf = 0.0f;
+                // Incident direction toward the previous vertex (phase frame).
                 const Vec3 woVol = -direction;
+
+                // Volume next-event estimation with MIS vs phase sampling (PBRT VolPath).
+                // Unbiased: light strategy weight = powerHeuristic(pdf_light, pdf_phase);
+                // the phase→light strategy is the continuing path (MIS on light hits below).
+                // No extra firefly clamp beyond the user-authored clampDirect (0 = off).
+                if (scene.lightCount > 0 && depth < maxDepth) {
+                    const int nLight = srMax(1, settings.lightSamples);
+                    Vec3 volDirect(0.0f);
+                    for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
+                        float selectPdf = 0.0f;
+                        const int li = sampleLightIndex(scene, origin, rng.nextFloat(), selectPdf);
+                        if (li < 0 || selectPdf <= 0.0f) continue;
+                        LightSample ls;
+                        if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) ||
+                            ls.pdf <= 0.0f || isBlack(ls.radiance))
+                            continue;
+
+                        float vis = 1.0f;
+                        float tShadow = 1.0e8f;
+                        if (scene.lights[li].shadowEnable) {
+                            if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
+                            vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
+                        }
+                        if (vis <= 1e-5f) continue;
+
+                        const float cosTheta = clampf(dot(woVol, ls.wi), -1.0f, 1.0f);
+                        // HG: phase value == sampling pdf toward ls.wi.
+                        const float phasePdfL = henyeyGreenstein(cosTheta, med->g);
+                        if (phasePdfL <= 0.0f) continue;
+
+                        const float lightPdf = ls.pdf * selectPdf;
+                        // Delta lights are unreachable by phase sampling → MIS weight 1.
+                        const float misW =
+                            ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phasePdfL);
+
+                        Vec3 contrib = throughput * ls.radiance *
+                                       (phasePdfL * vis * misW / lightPdf);
+#if !defined(__CUDACC__)
+                        if (scene.lights[li].shadowEnable)
+                            contrib = contrib * shadowTransmittanceFogVolumes(scene, origin, ls.wi,
+                                                                              tShadow, rng);
+#endif
+                        if (med->type != 2 && ls.distance < 1.0e7f)
+                            contrib = contrib * mediumShadowTr(*med, ls.distance);
+                        // Optional user clamp only (clampDirect==0 → identity, stays unbiased).
+                        if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
+                        volDirect += contrib;
+                    }
+                    radiance += volDirect * (1.0f / float(nLight));
+                }
+
+                // Continue the path by sampling the phase function (unidirectional strategy).
+                float phasePdf = 0.0f;
                 direction = sampleHenyeyGreenstein(woVol, med->g, rng.nextFloat(), rng.nextFloat(),
                                                    phasePdf);
-                // Volume next-event: sample a light and apply phase * Tr * MIS-free estimate.
-                if (scene.lightCount > 0 && depth < maxDepth) {
-                    float selectPdf = 0.0f;
-                    const int li = sampleLightIndex(scene, origin, rng.nextFloat(), selectPdf);
-                    if (li >= 0 && selectPdf > 0.0f) {
-                        LightSample ls;
-                        if (sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) &&
-                            ls.pdf > 0.0f && !isBlack(ls.radiance)) {
-                            float vis = 1.0f;
-                            float tShadow = 1.0e8f;
-                            if (scene.lights[li].shadowEnable) {
-                                if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
-                                vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
-                            }
-                            if (vis > 1e-5f) {
-                                const float cosTheta = clampf(dot(woVol, ls.wi), -1.0f, 1.0f);
-                                const float p = henyeyGreenstein(cosTheta, med->g);
-                                Vec3 contrib =
-                                    throughput * ls.radiance * (p * vis / (ls.pdf * selectPdf));
-                                // Soft fog Tr via ratio tracking through all fog volumes (includes
-                                // current); SDF already hard-tested inside shadowVisibility.
-#if !defined(__CUDACC__)
-                                if (scene.lights[li].shadowEnable)
-                                    contrib = contrib * shadowTransmittanceFogVolumes(
-                                                            scene, origin, ls.wi, tShadow, rng);
-#endif
-                                // Homogeneous (non-VDB) medium around the scatter point.
-                                if (med->type != 2 && ls.distance < 1.0e7f)
-                                    contrib = contrib * mediumShadowTr(*med, ls.distance);
-                                if (depth > 0)
-                                    contrib = clampContribution(contrib, settings.clampDirect);
-                                radiance += contrib;
-                            }
-                        }
-                    }
-                }
                 bsdfPdf = phasePdf;
                 specularBounce = false;
                 sawNonSpecular = true;
