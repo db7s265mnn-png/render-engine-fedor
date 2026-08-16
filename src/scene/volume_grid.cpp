@@ -14,7 +14,6 @@
 #endif
 
 #include <cmath>
-#include <limits>
 
 namespace sol {
 
