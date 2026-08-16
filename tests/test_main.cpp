@@ -4306,7 +4306,7 @@ void testMaterialXUdimCubeAsset() {
     }
     std::string error;
     auto atlas = loadImageOrUdim(root + "/grid.<UDIM>.png", QString(), error,
-                                 {1001, 1002, 1003, 1011, 1012, 1013});
+                                 {1001, 1002, 1003, 1011, 1012, 1013}, true, "Utility - Raw");
     check(atlas != nullptr, "MaterialX grid_udim tiles load");
     check(atlas && atlas->udimGridU() == 3 && atlas->udimGridV() == 2, "MaterialX set is 3x2 atlas");
     if (!atlas) return;
