@@ -335,8 +335,8 @@ struct LightData {
     // participate in caustic transport (MNEE / BDPT light-tracing delta chains /
     // BSDF specular→light after a diffuse bounce).
     int contributeCaustics = 1;
-    // Physical Sky sun: draw the solar disc on camera / reflection misses.
-    // Regular distant lights stay invisible (NEE only).
+    // Physical Sky distant sun: draw the solar disc on camera / reflection misses.
+    // Regular distant lights stay invisible (NEE only). The sky env map has no disc.
     int cameraSunDisc = 0;
 
     SR_HD Vec3 emittedRadiance() const { return color * (intensity * exp2f(exposure)); }

@@ -24,10 +24,11 @@ struct HosekEval {
     PhysicalSkyParams params;
     Vec3 groundColor{0.0f};
     float sunIrradianceValue = 0.0f;
-    Vec3 sunDiscRgb{1.0f};
     Vec3 sunChroma{1.0f};
 
-    explicit HosekEval(const PhysicalSkyParams& p) : params(p) {
+    // `needSunDisc` loads the 2013 spectral solar model (chromaticity + irradiance).
+    // Sky bake does not: the disc is a distant light, not texels on the map.
+    explicit HosekEval(const PhysicalSkyParams& p, bool needSunDisc) : params(p) {
         turbidity = clampf(p.turbidity, 1.0f, 10.0f);
         const float elevDeg = clampf(p.elevationDeg, 0.0f, 90.0f);
         elevationRad = radians(elevDeg);
@@ -38,11 +39,11 @@ struct HosekEval {
             rgb[c] = arhosek_rgb_skymodelstate_alloc_init(double(turbidity), double(alb[c]),
                                                           double(elevationRad));
         }
-        if (p.enableSun) {
+        if (needSunDisc && p.enableSun) {
             const float albY = clampf(luminance(alb), 0.0f, 1.0f);
             spec = arhosekskymodelstate_alloc_init(double(elevationRad), double(turbidity), double(albY));
         }
-        cacheConstants();
+        cacheConstants(needSunDisc && p.enableSun);
     }
 
     HosekEval(const HosekEval&) = delete;
@@ -128,7 +129,7 @@ struct HosekEval {
         return rgbOut;
     }
 
-    void cacheConstants() {
+    void cacheConstants(bool needSunDisc) {
         const Vec3 avgSky = sampleAverageSky();
         if (!params.computeGroundColor) {
             // Authored ground colour is working-space ACEScg like other light colours.
@@ -136,9 +137,8 @@ struct HosekEval {
         } else {
             groundColor = vmax(Vec3(0.0f), params.groundAlbedo) * avgSky;
         }
-        if (!params.enableSun) {
+        if (!needSunDisc) {
             sunIrradianceValue = 0.0f;
-            sunDiscRgb = Vec3(1.0f);
             sunChroma = Vec3(1.0f);
             return;
         }
@@ -146,15 +146,13 @@ struct HosekEval {
         const float t = clampf((turbidity - 1.0f) / 9.0f, 0.0f, 1.0f);
         const float k = lerpf(8.0f, 2.0f, t);
         sunIrradianceValue = k * kPi * Lsky * srMax(0.0f, params.sunIntensity);
-        sunDiscRgb = sampleSunDiscLinearSrgb();
+        const Vec3 sunDiscRgb = sampleSunDiscLinearSrgb();
         const float lum = luminance(sunDiscRgb);
         sunChroma = lum > 1e-8f ? sunDiscRgb / lum : Vec3(1.0f);
     }
 
     Vec3 visibleGroundLinearSrgb() const { return groundColor; }
-    float sunHalfAngle() const { return 0.5f * radians(srMax(0.01f, params.sunSizeDeg)); }
     float sunIrradiance() const { return sunIrradianceValue; }
-    Vec3 sunDiscLinearSrgb() const { return sunDiscRgb; }
     Vec3 sunDiscChromaLinearSrgb() const { return sunChroma; }
 };
 
@@ -184,19 +182,6 @@ Vec3 shadeSkyOnly(const HosekEval& eval, Vec3 dir) {
     return sky * vmax(Vec3(0.0f), eval.params.skyTint) * srMax(0.0f, eval.params.skyIntensity);
 }
 
-Vec3 shadeDirection(const HosekEval& eval, Vec3 dir, float minSunHalf = 0.0f) {
-    dir = normalize(dir);
-    const Vec3 sky = shadeSkyOnly(eval, dir);
-    if (!eval.params.enableSun) return sky;
-    const float gamma = std::acos(clampf(dot(dir, eval.sunDir), -1.0f, 1.0f));
-    const float half = srMax(eval.sunHalfAngle(), minSunHalf);
-    if (gamma > half) return sky;
-    const float omega = kTwoPi * (1.0f - std::cos(half));
-    const float L = eval.sunIrradiance() / srMax(omega, 1e-12f);
-    const Vec3 disc = eval.sunDiscChromaLinearSrgb() * L * vmax(Vec3(0.0f), eval.params.sunTint);
-    return vmax(sky, disc);
-}
-
 }  // namespace
 
 Vec3 physicalSkySunDirection(const PhysicalSkyParams& p) {
@@ -211,24 +196,26 @@ Vec3 physicalSkySunDirection(const PhysicalSkyParams& p) {
 Mat4 physicalSkySunLookAt(const PhysicalSkyParams& p) {
     const Vec3 sun = physicalSkySunDirection(p);
     const Vec3 up = std::fabs(sun.y) > 0.99f ? Vec3(0.0f, 0.0f, 1.0f) : Vec3(0.0f, 1.0f, 0.0f);
-    return lookAtMatrix(sun, Vec3(0.0f), up);
+    Mat4 m = lookAtMatrix(sun, Vec3(0.0f), up);
+    m.at(0, 3) = 0.0f;
+    m.at(1, 3) = 0.0f;
+    m.at(2, 3) = 0.0f;
+    return m;
 }
 
 Vec3 physicalSkyRadianceAceScg(const PhysicalSkyParams& p, Vec3 dirLocal) {
-    HosekEval eval(p);
-    return linearSrgbToAcescg(vmax(Vec3(0.0f), shadeDirection(eval, dirLocal)));
+    HosekEval eval(p, /*needSunDisc=*/false);
+    return linearSrgbToAcescg(vmax(Vec3(0.0f), shadeSkyOnly(eval, dirLocal)));
 }
 
 Vec3 physicalSkySunColorAceScg(const PhysicalSkyParams& p) {
-    HosekEval eval(p);
-    const Vec3 rgb = eval.sunDiscLinearSrgb();
-    const float lum = luminance(rgb);
-    const Vec3 chroma = lum > 1e-8f ? rgb / lum : Vec3(1.0f);
-    return linearSrgbToAcescg(chroma) * vmax(Vec3(0.0f), p.sunTint);
+    HosekEval eval(p, /*needSunDisc=*/true);
+    return linearSrgbToAcescg(eval.sunDiscChromaLinearSrgb()) * vmax(Vec3(0.0f), p.sunTint);
 }
 
 float physicalSkySunIntensity(const PhysicalSkyParams& p) {
-    HosekEval eval(p);
+    if (!p.enableSun) return 0.0f;
+    HosekEval eval(p, /*needSunDisc=*/true);
     return srMax(0.0f, p.intensity * eval.sunIrradiance());
 }
 
@@ -236,16 +223,13 @@ void bakePhysicalSkyEnv(Image& image, const PhysicalSkyParams& p, int width, int
     width = srMax(32, width);
     height = srMax(16, height);
     image.resize(width, height);
-    HosekEval eval(p);
-    // Guarantee the solar disc covers at least one texel (0.53° is ~1 px at 1024²).
-    const float pixelHalf =
-        0.5f * std::sqrt(sqr(kTwoPi / float(width)) + sqr(kPi / float(height)));
+    HosekEval eval(p, /*needSunDisc=*/false);
     auto writeRow = [&](int y) {
         const float v = (float(y) + 0.5f) / float(height);
         for (int x = 0; x < width; ++x) {
             const float u = (float(x) + 0.5f) / float(width);
             const Vec3 dir = equirectToDirection(u, v);
-            const Vec3 c = linearSrgbToAcescg(vmax(Vec3(0.0f), shadeDirection(eval, dir, pixelHalf)));
+            const Vec3 c = linearSrgbToAcescg(vmax(Vec3(0.0f), shadeSkyOnly(eval, dir)));
             image.setRgb(x, y, vmax(Vec3(0.0f), c));
         }
     };

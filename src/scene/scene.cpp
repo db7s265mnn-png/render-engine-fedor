@@ -442,7 +442,7 @@ static float lightPowerForBvh(const LightData& l,
         }
         case kLightDistant: {
             const float halfAngle = (l.angle * kPi / 180.0f) * 0.5f;
-            if (halfAngle < 1e-4f) return intens;
+            if (halfAngle < 1e-8f) return intens;
             // Keep in sync with lightFluxWeight in lights.h.
             if (l.normalize) return intens;
             return intens * std::max(1e-6f, kTwoPi * (1.0f - std::cos(halfAngle)));

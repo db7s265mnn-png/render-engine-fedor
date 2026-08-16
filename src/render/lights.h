@@ -11,6 +11,10 @@
 
 namespace sol {
 
+// Half-angle (radians) below this is a Dirac distant light: pdf 1, Le = irradiance.
+// Physical Sky Angular Size 0.01° is 8.7e-5 rad and must stay a finite cone.
+constexpr float kDistantDeltaHalfRad = 1e-8f;
+
 struct LightSample {
     Vec3 wi{0.0f, 1.0f, 0.0f};       // direction from the shading point to the light
     Vec3 radiance{0.0f, 0.0f, 0.0f}; // incident radiance
@@ -234,7 +238,7 @@ SR_INL SR_HD bool sampleLight(const SceneView& scene, int lightIndex, Vec3 refP,
             const Vec3 axis = normalize(lightAxisZ(l));
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
             out.distance = kFloatMax;
-            if (halfAngle < 1e-4f) {
+            if (halfAngle < kDistantDeltaHalfRad) {
                 out.wi = axis;
                 out.pdf = 1.0f;
                 out.delta = true;
@@ -397,7 +401,7 @@ SR_INL SR_HD float lightPdfDirection(const SceneView& scene, int lightIndex, Vec
         }
         case kLightDistant: {
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
-            if (halfAngle < 1e-4f) return 0.0f;
+            if (halfAngle < kDistantDeltaHalfRad) return 0.0f;
             const float cosThetaMax = cosf(halfAngle);
             if (dot(normalize(lightAxisZ(l)), wi) < cosThetaMax) return 0.0f;
             return 1.0f / (kTwoPi * (1.0f - cosThetaMax));
@@ -433,7 +437,7 @@ SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
         }
         case kLightDistant: {
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
-            if (halfAngle < 1e-4f) return intens;
+            if (halfAngle < kDistantDeltaHalfRad) return intens;
             // normalize=1: intensity is irradiance (Karma / Physical Sky). Multiplying
             // by the disc solid angle underweights the sun vs a dome by ~1/ω (~15000×).
             if (l.normalize) return intens;
@@ -656,7 +660,7 @@ SR_INL SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec
         if (primary && l.visibleCamera == 0) continue;
         if (skipNonCausticLights && !lightContributesCaustics(l)) continue;
         const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
-        if (halfAngle < 1e-4f) continue;
+        if (halfAngle < kDistantDeltaHalfRad) continue;
         const Vec3 axis = normalize(lightAxisZ(l));
         const float cosThetaMax = cosf(halfAngle);
         if (dot(axis, wi) < cosThetaMax) continue;
