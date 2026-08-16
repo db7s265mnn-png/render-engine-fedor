@@ -952,8 +952,10 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #endif
                         if (med->type != 2 && ls.distance < 1.0e7f)
                             contrib = contrib * mediumShadowTr(*med, ls.distance);
-                        // Optional user clamp only (clampDirect==0 → identity, stays unbiased).
-                        if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
+                        // First camera-ray scatter is the sun-facing side of the volume —
+                        // that is where HDRI NEE fireflies show. clampDirect==0 is still a
+                        // no-op (unbiased).
+                        contrib = clampContribution(contrib, settings.clampDirect);
                         volDirect += contrib;
                     }
                     radiance += volDirect * (1.0f / (float(nLight) * pNee));

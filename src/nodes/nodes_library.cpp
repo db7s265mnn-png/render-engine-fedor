@@ -898,9 +898,10 @@ public:
         addParameter(Parameter::makeFloat("clampdirect", "Direct Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Sampling")
                          .withTooltip("Caps eye-path sample contributions in linear pixel radiance "
-                                      "(Arnold Direct Clamp). Applies to PT/BDPT eye paths, NEE, "
+                                      "(Arnold Direct Clamp). Applies to PT/BDPT eye paths, NEE "
+                                      "(including the first volume scatter on the lit side of fog), "
                                       "MNEE, and photon gather.\n"
-                                      "Default 10; ~100 is a soft look. 0 disables."));
+                                      "Default 10; ~100 is a soft look. 0 disables (unbiased)."));
         addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Sampling")
                          .withTooltip("Caps BDPT light-tracing splat contributions in linear pixel "

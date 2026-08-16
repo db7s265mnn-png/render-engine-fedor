@@ -33,6 +33,14 @@ SR_INL SR_HD Vec3 envTexel(const EnvMapView& env, int x, int y) {
     return Vec3(p[0], p[1], p[2]);
 }
 
+SR_INL SR_HD void envDirectionToTexel(const EnvMapView& env, Vec3 dirLocal, int& x, int& y) {
+    const Vec2 uv = directionToEquirect(normalize(dirLocal));
+    x = int(uv.x * float(env.width));
+    y = int(uv.y * float(env.height));
+    x = x < 0 ? 0 : (x >= env.width ? env.width - 1 : x);
+    y = y < 0 ? 0 : (y >= env.height ? env.height - 1 : y);
+}
+
 SR_INL SR_HD Vec3 envLookup(const EnvMapView& env, Vec3 dirLocal) {
     if (!env.valid()) return Vec3(0.0f);
     const Vec2 uv = directionToEquirect(normalize(dirLocal));
@@ -51,6 +59,15 @@ SR_INL SR_HD Vec3 envLookup(const EnvMapView& env, Vec3 dirLocal) {
     const Vec3 c01 = envTexel(env, xa, y0 + 1);
     const Vec3 c11 = envTexel(env, xb, y0 + 1);
     return lerp(lerp(c00, c10, tx), lerp(c01, c11, tx), ty);
+}
+
+// Discrete texel that owns `envPdf` — NEE must use this, not bilinear. Mixing a
+// dark sampled texel with a neighbouring sun texel is the classic HDRI firefly.
+SR_INL SR_HD Vec3 envLookupNearest(const EnvMapView& env, Vec3 dirLocal) {
+    if (!env.valid()) return Vec3(0.0f);
+    int x = 0, y = 0;
+    envDirectionToTexel(env, dirLocal, x, y);
+    return envTexel(env, x, y);
 }
 
 SR_INL SR_HD int cdfFindInterval(const float* cdf, int size, float u) {
@@ -78,10 +95,8 @@ SR_INL SR_HD float envPdf(const EnvMapView& env, Vec3 dirLocal) {
     const Vec2 uv = directionToEquirect(normalize(dirLocal));
     const float sinTheta = sinf(clampf(uv.y, 0.0f, 1.0f) * kPi);
     if (sinTheta <= 0.0f) return 0.0f;
-    int x = int(uv.x * float(env.width));
-    int y = int(uv.y * float(env.height));
-    x = x < 0 ? 0 : (x >= env.width ? env.width - 1 : x);
-    y = y < 0 ? 0 : (y >= env.height ? env.height - 1 : y);
+    int x = 0, y = 0;
+    envDirectionToTexel(env, dirLocal, x, y);
     const float funcValue = env.func[size_t(y) * size_t(env.width) + size_t(x)];
     const float pdfUv = funcValue / env.integral;
     return pdfUv / (kTwoPi * kPi * sinTheta);
@@ -328,7 +343,14 @@ SR_INL SR_HD bool sampleLight(const SceneView& scene, int lightIndex, Vec3 refP,
             out.distance = kFloatMax;
             out.pdf = pdf;
             out.delta = false;
-            out.radiance = domeRadiance(scene, l, dirWorld);
+            // Camera rays keep bilinear domeRadiance; NEE uses the discrete PDF texel.
+            Vec3 tint = l.emittedRadiance();
+            if (l.envIndex >= 0 && l.envIndex < scene.envMapCount &&
+                scene.envMaps[l.envIndex].valid()) {
+                out.radiance = tint * envLookupNearest(scene.envMaps[l.envIndex], dirLocal);
+            } else {
+                out.radiance = tint;
+            }
             return true;
         }
         default: return false;

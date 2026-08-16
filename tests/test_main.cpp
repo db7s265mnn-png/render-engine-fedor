@@ -594,6 +594,22 @@ void testEnvironment() {
         checkNear(envPdf(view, dir), pdf, std::max(1e-3f, pdf * 0.02f), "envPdf matches envSample");
     }
     check(nearBrightTexel > 3000, "environment sampling concentrates on the bright texel");
+
+    // Dark texel next to the sun: bilinear mixes in 2000 nit, nearest stays dark
+    // (the PDF texel). That mismatch is the volume lit-side HDRI firefly.
+    {
+        const Vec3 darkDir = equirectToDirection((10.0f - 0.05f) / float(w), (4.5f) / float(h));
+        const Vec3 nearest = envLookupNearest(view, darkDir);
+        const Vec3 bilinear = envLookup(view, darkDir);
+        check(luminance(nearest) < 2.0f, "nearest lookup of a dark neighbour stays dark");
+        check(luminance(bilinear) > luminance(nearest) * 10.0f,
+              "bilinear lookup bleeds the neighbouring sun texel");
+        const float pdfDark = envPdf(view, darkDir);
+        if (pdfDark > 1e-12f) {
+            check(luminance(nearest) / pdfDark < luminance(bilinear) / pdfDark,
+                  "NEE Le/pdf is smaller with nearest than with bilinear bleed");
+        }
+    }
 }
 
 void testDomeHdrLoad() {
