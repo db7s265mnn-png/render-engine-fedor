@@ -5231,12 +5231,18 @@ void testNgonTriangulateAndVdb() {
             std::printf("  fog fill: center=%.3f outside=%.3f lattice=%d/%d\n", densCenter,
                         densOutside, interiorHits, interiorCount);
             check(fogA->hasMajorantGrid(), "fog builds supervoxel majorant grid");
+            check(fogA->hasMajorantBricks(), "fog builds empty-skip bricks");
+            check(fogA->majorantDimX() > 0 && fogA->majorantDimX() <= 48 &&
+                      fogA->majorantDimY() <= 48 && fogA->majorantDimZ() <= 48,
+                  "supervoxel grid stays bounded in world space");
             float majMin = 0.0f, majMax = 0.0f;
             fogA->majorantOccupancy(Vec3(0, 0, 0), majMin, majMax);
             check(majMin > 0.85f, "interior supervoxel min occupancy ~1");
             check(majMax > 0.85f && majMax < 1.6f, "interior supervoxel max occupancy ~1");
             fogA->majorantOccupancy(Vec3(3, 0, 0), majMin, majMax);
             check(majMax < 0.05f, "outside supervoxel is empty");
+            check(fogA->majorantBrickEmpty(Vec3(3, 0, 0)), "outside brick is empty");
+            check(!fogA->majorantBrickEmpty(Vec3(0, 0, 0)), "interior brick is occupied");
             {
                 MediumData trackMed;
                 trackMed.type = 2;

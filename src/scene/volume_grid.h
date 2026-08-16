@@ -1,6 +1,7 @@
 // Host-side OpenVDB grid wrapper (SDF level set or fog/density volume).
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,11 +65,20 @@ public:
     float majorant() const { return majorant_; }
 
     // Piecewise min/max occupancy (supervoxels). Empty / constant cells skip
-    // voxel sampling during Woodcock walks. Fog only.
+    // voxel sampling during Woodcock walks. Fog only. Cell size is world-space
+    // (floored so a dense VDB does not get 8-voxel micro-cells).
     bool hasMajorantGrid() const { return majNx_ > 0 && int(majMax_.size()) == majNx_ * majNy_ * majNz_; }
+    float majorantCellSize() const { return majCell_; }
+    int majorantDimX() const { return majNx_; }
+    int majorantDimY() const { return majNy_; }
+    int majorantDimZ() const { return majNz_; }
     void majorantOccupancy(const Vec3& p, float& minD, float& maxD) const;
     // Ray parameter of the current coarse-cell far face, clamped to tMax.
     float majorantCellExitT(Vec3 origin, Vec3 direction, float t, float tMax) const;
+    // 4³ bricks of supervoxels: skip empty AABB regions without visiting every cell.
+    bool hasMajorantBricks() const { return !brOcc_.empty(); }
+    bool majorantBrickEmpty(const Vec3& p) const;
+    float majorantBrickExitT(Vec3 origin, Vec3 direction, float t, float tMax) const;
 
     // Serialize helpers
     bool saveVdb(const std::string& path) const;
@@ -102,6 +112,11 @@ private:
     Vec3 majOrigin_{};
     std::vector<float> majMin_;
     std::vector<float> majMax_;
+    static constexpr int kMajBrick = 4;
+    int brNx_ = 0;
+    int brNy_ = 0;
+    int brNz_ = 0;
+    std::vector<uint8_t> brOcc_;
 };
 
 using VolumeGridPtr = std::shared_ptr<VolumeGrid>;

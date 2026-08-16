@@ -35,6 +35,36 @@ openvdb::math::Transform::Ptr makeXform(float voxelSize) {
     return openvdb::math::Transform::createLinearTransform(double(srMax(1e-6f, voxelSize)));
 }
 
+float ddaGridExitT(Vec3 origin, Vec3 direction, float t, float tMax, Vec3 org, float cell, int nx,
+                   int ny, int nz) {
+    if (tMax <= t || cell <= 1e-12f || nx <= 0 || ny <= 0 || nz <= 0) return tMax;
+    const float lookT = t + 1e-5f;
+    const Vec3 p = origin + direction * lookT;
+    const Vec3 hi(org.x + float(nx) * cell, org.y + float(ny) * cell, org.z + float(nz) * cell);
+    if (p.x < org.x || p.y < org.y || p.z < org.z || p.x >= hi.x || p.y >= hi.y || p.z >= hi.z)
+        return tMax;
+    auto binClamp = [&](float w, float o, int dim) -> int {
+        int i = int(std::floor(double((w - o) / cell)));
+        if (i < 0) i = 0;
+        if (i >= dim) i = dim - 1;
+        return i;
+    };
+    const int ix = binClamp(p.x, org.x, nx);
+    const int iy = binClamp(p.y, org.y, ny);
+    const int iz = binClamp(p.z, org.z, nz);
+    auto axisExit = [&](float o, float d, float orig, int i) {
+        if (fabsf(d) < 1e-20f) return tMax;
+        const float next = (d > 0.0f) ? (orig + float(i + 1) * cell) : (orig + float(i) * cell);
+        return (next - o) / d;
+    };
+    float tExit = tMax;
+    tExit = srMin(tExit, axisExit(origin.x, direction.x, org.x, ix));
+    tExit = srMin(tExit, axisExit(origin.y, direction.y, org.y, iy));
+    tExit = srMin(tExit, axisExit(origin.z, direction.z, org.z, iz));
+    if (!(tExit > t)) tExit = t + 1e-4f;
+    return srMin(tExit, tMax);
+}
+
 }  // namespace
 
 struct VolumeGrid::Impl {
@@ -90,20 +120,40 @@ void VolumeGrid::rebuildMajorantGrid() {
     majCell_ = 0.0f;
     majMin_.clear();
     majMax_.clear();
+    brNx_ = brNy_ = brNz_ = 0;
+    brOcc_.clear();
     if (kind_ != VolumeGridKind::Fog || !valid() || !bounds_.valid()) return;
 
     constexpr int kHaloVox = 2;
+    constexpr int kTargetCellsLong = 32;
+    constexpr int kMaxCellsAxis = 48;
     const Vec3 ext = bounds_.hi - bounds_.lo;
     const float longAxis = srMax(ext.x, srMax(ext.y, ext.z));
     const int voxelsLong = srMax(1, int(std::lround(double(longAxis / srMax(voxelSize_, 1e-8f)))));
     int sv = 8;
     if (voxelsLong < 64) sv = 4;
     if (voxelsLong < 24) sv = 2;
-    majCell_ = srMax(voxelSize_ * float(sv), srMax(voxelSize_, 1e-6f));
+    // Never finer than 8 voxels (tight on coarse grids), never smaller in world
+    // space than longAxis/32 (high-res VDBs would otherwise DDA hundreds of cells).
+    const float cellVox = srMax(voxelSize_ * float(sv), srMax(voxelSize_, 1e-6f));
+    const float cellWorld = longAxis / float(kTargetCellsLong);
+    majCell_ = srMax(cellVox, cellWorld);
     majOrigin_ = bounds_.lo;
     majNx_ = srMax(1, int(std::ceil(double(ext.x / majCell_))));
     majNy_ = srMax(1, int(std::ceil(double(ext.y / majCell_))));
     majNz_ = srMax(1, int(std::ceil(double(ext.z / majCell_))));
+    if (majNx_ > kMaxCellsAxis || majNy_ > kMaxCellsAxis || majNz_ > kMaxCellsAxis) {
+        majNx_ = srMin(majNx_, kMaxCellsAxis);
+        majNy_ = srMin(majNy_, kMaxCellsAxis);
+        majNz_ = srMin(majNz_, kMaxCellsAxis);
+        majCell_ = srMax(ext.x / float(majNx_), srMax(ext.y / float(majNy_), ext.z / float(majNz_)));
+        majNx_ = srMax(1, int(std::ceil(double(ext.x / majCell_))));
+        majNy_ = srMax(1, int(std::ceil(double(ext.y / majCell_))));
+        majNz_ = srMax(1, int(std::ceil(double(ext.z / majCell_))));
+        majNx_ = srMin(majNx_, kMaxCellsAxis);
+        majNy_ = srMin(majNy_, kMaxCellsAxis);
+        majNz_ = srMin(majNz_, kMaxCellsAxis);
+    }
     const int n = majNx_ * majNy_ * majNz_;
     majMin_.assign(size_t(n), 1.0e30f);
     majMax_.assign(size_t(n), 0.0f);
@@ -175,6 +225,23 @@ void VolumeGrid::rebuildMajorantGrid() {
         globalMaj = srMax(globalMaj, majMax_[size_t(i)]);
     }
     if (globalMaj > 0.0f) majorant_ = srMax(majorant_, globalMaj);
+
+    brNx_ = (majNx_ + kMajBrick - 1) / kMajBrick;
+    brNy_ = (majNy_ + kMajBrick - 1) / kMajBrick;
+    brNz_ = (majNz_ + kMajBrick - 1) / kMajBrick;
+    brOcc_.assign(size_t(brNx_ * brNy_ * brNz_), 0);
+    for (int z = 0; z < majNz_; ++z) {
+        for (int y = 0; y < majNy_; ++y) {
+            for (int x = 0; x < majNx_; ++x) {
+                const int i = idx(x, y, z);
+                if (majMax_[size_t(i)] <= 1e-8f) continue;
+                const int bx = x / kMajBrick;
+                const int by = y / kMajBrick;
+                const int bz = z / kMajBrick;
+                brOcc_[size_t(bx + brNx_ * (by + brNy_ * bz))] = 1;
+            }
+        }
+    }
 }
 
 void VolumeGrid::majorantOccupancy(const Vec3& p, float& minD, float& maxD) const {
@@ -197,35 +264,29 @@ void VolumeGrid::majorantOccupancy(const Vec3& p, float& minD, float& maxD) cons
 }
 
 float VolumeGrid::majorantCellExitT(Vec3 origin, Vec3 direction, float t, float tMax) const {
-    if (!hasMajorantGrid() || tMax <= t) return tMax;
-    const float lookT = t + 1e-5f;
-    const Vec3 p = origin + direction * lookT;
-    auto binClamp = [&](float w, float o, int dim) -> int {
-        int i = int(std::floor(double((w - o) / majCell_)));
-        if (i < 0) i = 0;
-        if (i >= dim) i = dim - 1;
+    if (!hasMajorantGrid()) return tMax;
+    return ddaGridExitT(origin, direction, t, tMax, majOrigin_, majCell_, majNx_, majNy_, majNz_);
+}
+
+bool VolumeGrid::majorantBrickEmpty(const Vec3& p) const {
+    if (brOcc_.empty() || majCell_ <= 1e-12f) return false;
+    const float cell = majCell_ * float(kMajBrick);
+    auto bin = [&](float w, float o, int dim) -> int {
+        const int i = int(std::floor(double((w - o) / cell)));
+        if (i < 0 || i >= dim) return -1;
         return i;
     };
-    const Vec3 hi(majOrigin_.x + float(majNx_) * majCell_, majOrigin_.y + float(majNy_) * majCell_,
-                  majOrigin_.z + float(majNz_) * majCell_);
-    if (p.x < majOrigin_.x || p.y < majOrigin_.y || p.z < majOrigin_.z || p.x >= hi.x || p.y >= hi.y ||
-        p.z >= hi.z) {
-        return tMax;
-    }
-    const int ix = binClamp(p.x, majOrigin_.x, majNx_);
-    const int iy = binClamp(p.y, majOrigin_.y, majNy_);
-    const int iz = binClamp(p.z, majOrigin_.z, majNz_);
-    float tExit = tMax;
-    auto axisExit = [&](float o, float d, float orig, int i) {
-        if (fabsf(d) < 1e-20f) return tMax;
-        const float next = (d > 0.0f) ? (orig + float(i + 1) * majCell_) : (orig + float(i) * majCell_);
-        return (next - o) / d;
-    };
-    tExit = srMin(tExit, axisExit(origin.x, direction.x, majOrigin_.x, ix));
-    tExit = srMin(tExit, axisExit(origin.y, direction.y, majOrigin_.y, iy));
-    tExit = srMin(tExit, axisExit(origin.z, direction.z, majOrigin_.z, iz));
-    if (!(tExit > t)) tExit = t + 1e-4f;
-    return srMin(tExit, tMax);
+    const int bx = bin(p.x, majOrigin_.x, brNx_);
+    const int by = bin(p.y, majOrigin_.y, brNy_);
+    const int bz = bin(p.z, majOrigin_.z, brNz_);
+    if (bx < 0 || by < 0 || bz < 0) return true;
+    return brOcc_[size_t(bx + brNx_ * (by + brNy_ * bz))] == 0;
+}
+
+float VolumeGrid::majorantBrickExitT(Vec3 origin, Vec3 direction, float t, float tMax) const {
+    if (brOcc_.empty()) return tMax;
+    return ddaGridExitT(origin, direction, t, tMax, majOrigin_, majCell_ * float(kMajBrick), brNx_,
+                        brNy_, brNz_);
 }
 
 Vec3 VolumeGrid::gradientWorld(const Vec3& p) const {
@@ -433,12 +494,16 @@ void VolumeGrid::rebuildMajorantGrid() {
     majNx_ = majNy_ = majNz_ = 0;
     majMin_.clear();
     majMax_.clear();
+    brNx_ = brNy_ = brNz_ = 0;
+    brOcc_.clear();
 }
 void VolumeGrid::majorantOccupancy(const Vec3&, float& minD, float& maxD) const {
     minD = 0.0f;
     maxD = majorant_;
 }
 float VolumeGrid::majorantCellExitT(Vec3, Vec3, float, float tMax) const { return tMax; }
+bool VolumeGrid::majorantBrickEmpty(const Vec3&) const { return false; }
+float VolumeGrid::majorantBrickExitT(Vec3, Vec3, float, float tMax) const { return tMax; }
 bool VolumeGrid::saveVdb(const std::string&) const { return false; }
 std::shared_ptr<VolumeGrid> VolumeGrid::loadVdb(const std::string&, std::string* error) {
     if (error) *error = "OpenVDB support not built into this binary";

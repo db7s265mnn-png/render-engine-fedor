@@ -71,9 +71,9 @@ public:
                          .withTooltip("Voxel reconstruction filter when sampling the VDB.\n"
                                       "Nearest = 1 tap (blocky); Linear = 8-tap trilinear;\n"
                                       "Quadratic = 27-tap triquadratic (smoothest; SDF gradients).\n"
-                                      "Fog tracking always uses Linear — local majorants skip empty "
-                                      "and constant-density cells, so deep multiple scattering is "
-                                      "not 27 taps per null collision.\n"
+                                      "Fog tracking always uses Linear — world-space majorants skip empty "
+                                      "bricks and constant-density cells; mixed cells keep a cached OpenVDB "
+                                      "accessor so dense VDBs do not walk the tree from the root every tap.\n"
                                       "Changing filter does not rebuild the grid."));
         addParameter(Parameter::makeString("primname", "Prim Name", "vdb")
                          .withTooltip("Leaf name for the output VDB prim"));

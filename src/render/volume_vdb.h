@@ -15,7 +15,8 @@ bool intersectSdfVolume(const VolumeGrid& grid, Vec3 origin, Vec3 direction, flo
                         float& tHit, Vec3& normal);
 
 // Heterogeneous free-flight via piecewise-majorant delta tracking (PBRT §11.2.1).
-// Supervoxels: empty cells skip, constant-density cells are analytical (no voxel samples).
+// Supervoxels are world-sized (not 8 voxels): empty bricks skip, constant cells
+// are analytical, mixed cells use decomposition tracking + a cached OpenVDB accessor.
 MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium, Vec3 origin,
                                 Vec3 direction, float tMax, Rng& rng, Vec3& throughput);
 

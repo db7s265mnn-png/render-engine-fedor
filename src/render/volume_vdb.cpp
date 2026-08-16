@@ -7,6 +7,7 @@
 #if SOLSTICE_HAVE_OPENVDB
 #include <openvdb/openvdb.h>
 #include <openvdb/math/Ray.h>
+#include <openvdb/tools/Interpolation.h>
 #include <openvdb/tools/RayIntersector.h>
 #endif
 
@@ -44,6 +45,25 @@ bool rayAabbInterval(Vec3 origin, Vec3 direction, const Bounds3& b, float& tEnte
     tExit = t1;
     return t1 >= 0.0f;
 }
+
+#if SOLSTICE_HAVE_OPENVDB
+// Cached OpenVDB accessor for a single ray walk. GridSampler<FloatGrid> is uncached
+// (tree root every tap); ConstAccessor keeps leaf nodes hot along the ray.
+struct FogTrackSampler {
+    const openvdb::FloatGrid* vdb = nullptr;
+    openvdb::FloatGrid::ConstAccessor acc;
+    bool nearest = false;
+
+    FogTrackSampler(openvdb::FloatGrid& grid, bool nearestFilter)
+        : vdb(&grid), acc(grid.getConstAccessor()), nearest(nearestFilter) {}
+
+    float sample(Vec3 p) {
+        const openvdb::Vec3d is = vdb->worldToIndex(openvdb::Vec3d(p.x, p.y, p.z));
+        if (nearest) return float(openvdb::tools::PointSampler::sample(acc, is));
+        return float(openvdb::tools::BoxSampler::sample(acc, is));
+    }
+};
+#endif
 
 }  // namespace
 
@@ -146,13 +166,23 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
         return out;
     }
 
-    auto collide = [&](float occupancy, float majorant, float tHit) -> bool {
+#if SOLSTICE_HAVE_OPENVDB
+    auto* vdb = static_cast<openvdb::FloatGrid*>(grid.nativeGrid());
+    if (!vdb) {
+        out.t = tMax;
+        return out;
+    }
+    FogTrackSampler track(*vdb, grid.sampleFilter() == VolumeSampleFilter::Nearest);
+    auto sampleOcc = [&](Vec3 p) { return srMax(0.0f, track.sample(p)); };
+#else
+    auto sampleOcc = [&](Vec3 p) { return srMax(0.0f, grid.sampleWorldTracking(p)); };
+#endif
+
+    auto interact = [&](float occupancy, float tHit) -> bool {
         const float dens = srMax(0.0f, occupancy) * densityScale;
         const Vec3 sigmaA = sigmaA0 * dens;
         const Vec3 sigmaS = sigmaS0 * dens;
         const Vec3 sigmaT = sigmaA + sigmaS;
-        const float stAvg = (sigmaT.x + sigmaT.y + sigmaT.z) * (1.0f / 3.0f);
-        if (rng.nextFloat() >= stAvg / srMax(majorant, 1e-12f)) return false;
         const float saAvg = (sigmaA.x + sigmaA.y + sigmaA.z) * (1.0f / 3.0f);
         const float ssAvg = (sigmaS.x + sigmaS.y + sigmaS.z) * (1.0f / 3.0f);
         const float stSum = srMax(1e-8f, saAvg + ssAvg);
@@ -171,11 +201,27 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
         return true;
     };
 
+    auto collide = [&](float occupancy, float majorant, float tHit) -> bool {
+        const float dens = srMax(0.0f, occupancy) * densityScale;
+        const Vec3 sigmaT = (sigmaA0 + sigmaS0) * dens;
+        const float stAvg = (sigmaT.x + sigmaT.y + sigmaT.z) * (1.0f / 3.0f);
+        if (rng.nextFloat() >= stAvg / srMax(majorant, 1e-12f)) return false;
+        return interact(occupancy, tHit);
+    };
+
+    const float st0 = (sigmaT0.x + sigmaT0.y + sigmaT0.z) * (1.0f / 3.0f) * densityScale;
+
     constexpr int kNullCollisionMaxIters = 1 << 20;
     for (int iter = 0; iter < kNullCollisionMaxIters && t < tMax; ++iter) {
+        const Vec3 pLook = origin + direction * (t + 1e-5f);
+        if (grid.hasMajorantBricks() && grid.majorantBrickEmpty(pLook)) {
+            const float tBr = grid.majorantBrickExitT(origin, direction, t, tMax);
+            t = (tBr > t) ? tBr : t + 1e-4f;
+            continue;
+        }
         float minD = 0.0f;
         float maxD = grid.majorant();
-        grid.majorantOccupancy(origin + direction * (t + 1e-5f), minD, maxD);
+        grid.majorantOccupancy(pLook, minD, maxD);
         const float tExit = grid.hasMajorantGrid()
                                 ? grid.majorantCellExitT(origin, direction, t, tMax)
                                 : tMax;
@@ -193,8 +239,7 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
             (maxD - minD) <= (1e-3f * srMax(maxD, 1e-6f) + 1e-4f);
 
         if (homog) {
-            // Constant occupancy: analytical Woodcock (0 voxel samples). Greyscale
-            // σt ⇒ one exponential draw is a real collision or a cell exit.
+            // Constant occupancy: analytical Woodcock (0 voxel samples).
             const float occ = 0.5f * (minD + maxD);
             const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
             const float tHit = t + (-logf(u) / majorant);
@@ -207,20 +252,37 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
             continue;
         }
 
-        // Heterogeneous supervoxel: local-Λ delta tracking (Linear density samples).
+        // Decomposition tracking (Kutz et al.): control μ_c = σt(min) is a real
+        // collision; residual uses local Λ − μ_c. min=0 reduces to Woodcock.
+        const float muC = st0 * srMax(0.0f, minD);
+        const float residualMaj = srMax(0.0f, majorant - muC);
         float tLocal = t;
+        const float tCtrl = (muC > 1e-8f)
+                                ? t + (-logf(srMax(1e-6f, 1.0f - rng.nextFloat())) / muC)
+                                : tExit + 1.0f;
         bool leftCell = false;
         while (iter < kNullCollisionMaxIters) {
-            const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
-            tLocal += -logf(u) / majorant;
-            if (tLocal >= tExit) {
+            float tRes = tExit + 1.0f;
+            if (residualMaj > 1e-8f) {
+                tLocal += -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) / residualMaj;
+                tRes = tLocal;
+            }
+            const float tEvent = srMin(tCtrl, tRes);
+            if (tEvent >= tExit) {
                 t = tExit;
                 leftCell = true;
                 break;
             }
-            const float occ = srMax(0.0f, grid.sampleWorldTracking(origin + direction * tLocal));
-            if (collide(occ, majorant, tLocal)) return out;
+            if (tCtrl <= tRes) {
+                interact(minD, tCtrl);
+                return out;
+            }
+            const float occ = sampleOcc(origin + direction * tRes);
+            const float pReal = (st0 * occ - muC) / srMax(residualMaj, 1e-12f);
             ++iter;
+            if (rng.nextFloat() >= pReal) continue;
+            interact(occ, tRes);
+            return out;
         }
         if (leftCell) continue;
         break;
@@ -248,13 +310,28 @@ Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 or
     float t = srMax(0.0f, aabbEnter);
     if (tEnd <= t) return Vec3(1.0f);
 
+#if SOLSTICE_HAVE_OPENVDB
+    auto* vdb = static_cast<openvdb::FloatGrid*>(grid.nativeGrid());
+    if (!vdb) return Vec3(1.0f);
+    FogTrackSampler track(*vdb, grid.sampleFilter() == VolumeSampleFilter::Nearest);
+    auto sampleOcc = [&](Vec3 p) { return srMax(0.0f, track.sample(p)); };
+#else
+    auto sampleOcc = [&](Vec3 p) { return srMax(0.0f, grid.sampleWorldTracking(p)); };
+#endif
+
     Vec3 Tr(1.0f);
     constexpr int kNullCollisionMaxIters = 1 << 20;
     int iter = 0;
     while (t < tEnd && iter < kNullCollisionMaxIters) {
+        const Vec3 pLook = origin + direction * (t + 1e-5f);
+        if (grid.hasMajorantBricks() && grid.majorantBrickEmpty(pLook)) {
+            const float tBr = grid.majorantBrickExitT(origin, direction, t, tEnd);
+            t = (tBr > t) ? tBr : t + 1e-4f;
+            continue;
+        }
         float minD = 0.0f;
         float maxD = grid.majorant();
-        grid.majorantOccupancy(origin + direction * (t + 1e-5f), minD, maxD);
+        grid.majorantOccupancy(pLook, minD, maxD);
         const float tExit =
             grid.hasMajorantGrid() ? grid.majorantCellExitT(origin, direction, t, tEnd) : tEnd;
         const float L = tExit - t;
@@ -299,7 +376,7 @@ Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 or
                 const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
                 tRes += -logf(u) / residualMaj;
                 if (tRes >= tExit) break;
-                const float occ = srMax(0.0f, grid.sampleWorldTracking(origin + direction * tRes));
+                const float occ = sampleOcc(origin + direction * tRes);
                 const Vec3 sigmaT = sigmaT0 * (occ * densityScale);
                 const float nx = srMax(0.0f, residualMaj - (sigmaT.x - muC.x));
                 const float ny = srMax(0.0f, residualMaj - (sigmaT.y - muC.y));
