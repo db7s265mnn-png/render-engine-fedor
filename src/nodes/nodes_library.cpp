@@ -838,7 +838,9 @@ public:
         const bool needEnv = params.enableSky || params.enableSun;
         if (needEnv && !skyCacheValid(params)) {
             auto env = std::make_shared<EnvironmentMap>();
-            bakePhysicalSkyEnv(env->image, params, 2048, 1024);
+            // 1024×512 is enough: minSunHalf grows the 0.53° disc to ≥1 texel.
+            // 2048×1024 was 4× slower and used to recompute sky-average per ground texel.
+            bakePhysicalSkyEnv(env->image, params, 1024, 512);
             env->path = "physical_sky";
             env->buildSamplingTables();
             environment_ = std::move(env);

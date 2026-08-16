@@ -845,6 +845,21 @@ void testPhysicalSkyLight() {
         for (int x = 0; x < baked.width(); ++x)
             bakeMax = std::max(bakeMax, luminance(baked.rgb(x, y)));
     check(bakeMax > luminance(zenith) * 5.0f, "env map solar disc is much brighter than zenith");
+    {
+        Image cookSize;
+        const auto t0 = std::chrono::steady_clock::now();
+        bakePhysicalSkyEnv(cookSize, params, 1024, 512);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+        check(cookSize.width() == 1024 && cookSize.height() == 512, "cook-size bake writes 1024x512");
+        check(ms < 15000, "1024x512 physical sky bake stays interactive");
+        float cookMax = 0.0f;
+        for (int y = 0; y < cookSize.height(); ++y)
+            for (int x = 0; x < cookSize.width(); ++x)
+                cookMax = std::max(cookMax, luminance(cookSize.rgb(x, y)));
+        check(cookMax > luminance(zenith) * 5.0f, "cook-size bake still has a solar disc");
+    }
     const Vec3 sunDirRad = physicalSkyRadianceAceScg(params, physicalSkySunDirection(params));
     check(luminance(sunDirRad) > luminance(zenith) * 10.0f, "Hosek solar disc sits on the sky");
     {

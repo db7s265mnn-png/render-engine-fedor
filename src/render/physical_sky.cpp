@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "core/thread_pool.h"
 #include "render/color_space.h"
 #include "render/spectrum.h"
 
@@ -21,6 +22,10 @@ struct HosekEval {
     float turbidity = 3.0f;
     float elevationRad = 0.0f;
     PhysicalSkyParams params;
+    Vec3 groundColor{0.0f};
+    float sunIrradianceValue = 0.0f;
+    Vec3 sunDiscRgb{1.0f};
+    Vec3 sunChroma{1.0f};
 
     explicit HosekEval(const PhysicalSkyParams& p) : params(p) {
         turbidity = clampf(p.turbidity, 1.0f, 10.0f);
@@ -33,8 +38,11 @@ struct HosekEval {
             rgb[c] = arhosek_rgb_skymodelstate_alloc_init(double(turbidity), double(alb[c]),
                                                           double(elevationRad));
         }
-        const float albY = clampf(luminance(alb), 0.0f, 1.0f);
-        spec = arhosekskymodelstate_alloc_init(double(elevationRad), double(turbidity), double(albY));
+        if (p.enableSun) {
+            const float albY = clampf(luminance(alb), 0.0f, 1.0f);
+            spec = arhosekskymodelstate_alloc_init(double(elevationRad), double(turbidity), double(albY));
+        }
+        cacheConstants();
     }
 
     HosekEval(const HosekEval&) = delete;
@@ -62,7 +70,7 @@ struct HosekEval {
         return rgbOut;
     }
 
-    Vec3 averageSkyLinearSrgb() const {
+    Vec3 sampleAverageSky() const {
         Vec3 acc(0.0f);
         int n = 0;
         for (int y = 0; y < 8; ++y) {
@@ -78,34 +86,8 @@ struct HosekEval {
         return n > 0 ? acc / float(n) : Vec3(0.05f);
     }
 
-    Vec3 visibleGroundLinearSrgb() const {
-        if (!params.computeGroundColor) {
-            // Authored ground colour is working-space ACEScg like other light colours.
-            return acescgToLinearSrgb(vmax(Vec3(0.0f), params.groundColor));
-        }
-        return vmax(Vec3(0.0f), params.groundAlbedo) * averageSkyLinearSrgb();
-    }
-
-    float sunHalfAngle() const { return 0.5f * radians(srMax(0.01f, params.sunSizeDeg)); }
-
-    // Direct sun irradiance in the same RGB-Hosek units as the baked sky.
-    float sunIrradiance() const {
-        if (!params.enableSun) return 0.0f;
-        const Vec3 skyAvg = vmax(Vec3(0.0f), averageSkyLinearSrgb());
-        const float Lsky = srMax(1e-4f, luminance(skyAvg));
-        const float t = clampf((turbidity - 1.0f) / 9.0f, 0.0f, 1.0f);
-        const float k = lerpf(8.0f, 2.0f, t);
-        return k * kPi * Lsky * srMax(0.0f, params.sunIntensity);
-    }
-
-    Vec3 sunDiscChromaLinearSrgb() const {
-        const Vec3 rgb = sunDiscLinearSrgb();
-        const float lum = luminance(rgb);
-        return lum > 1e-8f ? rgb / lum : Vec3(1.0f);
-    }
-
     // Disc-only radiance (Hosek solar minus sky in-scatter) → linear sRGB.
-    Vec3 sunDiscLinearSrgb() const {
+    Vec3 sampleSunDiscLinearSrgb() const {
         if (!spec) return Vec3(1.0f);
         const float thetaSun = std::acos(clampf(sunDir.y, 0.0f, 1.0f));
         const float solarRadius = float(spec->solar_radius);
@@ -145,6 +127,35 @@ struct HosekEval {
         if (!isFinite(rgbOut) || luminance(rgbOut) < 1e-12f) return Vec3(1.0f);
         return rgbOut;
     }
+
+    void cacheConstants() {
+        const Vec3 avgSky = sampleAverageSky();
+        if (!params.computeGroundColor) {
+            // Authored ground colour is working-space ACEScg like other light colours.
+            groundColor = acescgToLinearSrgb(vmax(Vec3(0.0f), params.groundColor));
+        } else {
+            groundColor = vmax(Vec3(0.0f), params.groundAlbedo) * avgSky;
+        }
+        if (!params.enableSun) {
+            sunIrradianceValue = 0.0f;
+            sunDiscRgb = Vec3(1.0f);
+            sunChroma = Vec3(1.0f);
+            return;
+        }
+        const float Lsky = srMax(1e-4f, luminance(vmax(Vec3(0.0f), avgSky)));
+        const float t = clampf((turbidity - 1.0f) / 9.0f, 0.0f, 1.0f);
+        const float k = lerpf(8.0f, 2.0f, t);
+        sunIrradianceValue = k * kPi * Lsky * srMax(0.0f, params.sunIntensity);
+        sunDiscRgb = sampleSunDiscLinearSrgb();
+        const float lum = luminance(sunDiscRgb);
+        sunChroma = lum > 1e-8f ? sunDiscRgb / lum : Vec3(1.0f);
+    }
+
+    Vec3 visibleGroundLinearSrgb() const { return groundColor; }
+    float sunHalfAngle() const { return 0.5f * radians(srMax(0.01f, params.sunSizeDeg)); }
+    float sunIrradiance() const { return sunIrradianceValue; }
+    Vec3 sunDiscLinearSrgb() const { return sunDiscRgb; }
+    Vec3 sunDiscChromaLinearSrgb() const { return sunChroma; }
 };
 
 Vec3 shadeSkyOnly(const HosekEval& eval, Vec3 dir) {
@@ -229,7 +240,7 @@ void bakePhysicalSkyEnv(Image& image, const PhysicalSkyParams& p, int width, int
     // Guarantee the solar disc covers at least one texel (0.53° is ~1 px at 1024²).
     const float pixelHalf =
         0.5f * std::sqrt(sqr(kTwoPi / float(width)) + sqr(kPi / float(height)));
-    for (int y = 0; y < height; ++y) {
+    auto writeRow = [&](int y) {
         const float v = (float(y) + 0.5f) / float(height);
         for (int x = 0; x < width; ++x) {
             const float u = (float(x) + 0.5f) / float(width);
@@ -237,6 +248,12 @@ void bakePhysicalSkyEnv(Image& image, const PhysicalSkyParams& p, int width, int
             const Vec3 c = linearSrgbToAcescg(vmax(Vec3(0.0f), shadeDirection(eval, dir, pixelHalf)));
             image.setRgb(x, y, vmax(Vec3(0.0f), c));
         }
+    };
+    if (width * height >= 256 * 128) {
+        ThreadPool pool;
+        pool.parallelFor(height, [&](int y, int) { writeRow(y); });
+    } else {
+        for (int y = 0; y < height; ++y) writeRow(y);
     }
 }
 
