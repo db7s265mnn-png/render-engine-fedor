@@ -59,7 +59,9 @@ public:
         addParameter(Parameter::makeFloat("exteriorband", "Exterior Band", 3.0, 1.0, 64.0, false)
                          .withTooltip("Narrow-band width outside the surface (voxels)"));
         addParameter(Parameter::makeFloat("interiorband", "Interior Band", 3.0, 1.0, 64.0, false)
-                         .withTooltip("Narrow-band width inside the surface (voxels)"));
+                         .withTooltip("SDF: interior narrow-band width (voxels).\n"
+                                      "Fog: soft density ramp width from the surface into the "
+                                      "filled interior (voxels). Fog always fills the closed mesh."));
         addParameter(Parameter::makeFloat("filldensity", "Density", 1.0, 0.0, 100.0, false)
                          .withTooltip("Runtime density multiplier for Fog (MediumData::density).\n"
                                       "Does NOT rebuild the VDB — only scales sampling / shadows.\n"
