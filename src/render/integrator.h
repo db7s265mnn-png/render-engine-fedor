@@ -952,10 +952,10 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #endif
                         if (med->type != 2 && ls.distance < 1.0e7f)
                             contrib = contrib * mediumShadowTr(*med, ls.distance);
-                        // First camera-ray scatter is the sun-facing side of the volume —
-                        // that is where HDRI NEE fireflies show. clampDirect==0 is still a
-                        // no-op (unbiased).
-                        contrib = clampContribution(contrib, settings.clampDirect);
+                        // Do not clamp HDRI / physical-sky / distant sun NEE — Direct Clamp
+                        // on those samples systematically underexposes the sun (biased dark).
+                        if (!lightIsInfinite(scene.lights[li]))
+                            contrib = clampContribution(contrib, settings.clampDirect);
                         volDirect += contrib;
                     }
                     radiance += volDirect * (1.0f / (float(nLight) * pNee));
@@ -1011,8 +1011,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         Vec3 contrib = throughput * envL * weight;
-                        if (depth > 0 && !specularBounce)
-                            contrib = clampContribution(contrib, settings.clampDirect);
+                        // HDRI / physical-sky sun lives in the env map — do not
+                        // Direct-Clamp it (that is the "weak HDR sun" bias).
                         radiance += contrib;
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active())
@@ -1032,8 +1032,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                                                             specularBounce, primarySun, causticSuffix);
                     if (!isBlack(sunL)) {
                         Vec3 contrib = throughput * sunL;
-                        if (depth > 0 && !specularBounce)
-                            contrib = clampContribution(contrib, settings.clampDirect);
                         radiance += contrib;
                     }
                 }

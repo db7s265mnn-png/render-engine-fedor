@@ -714,9 +714,9 @@ private:
     double defaultIntensity() const {
         switch (type_) {
             case kLightDistant: return 3.0;
-            // A white dome without a texture acts as a soft ambient fill, so it
-            // is dialled back to keep the default lighting readable.
-            case kLightDome: return 0.35;
+            // Textured HDRI needs intensity 1 so the sun in the map is not dimmed.
+            // An untextured white dome is also 1 (user can lower it).
+            case kLightDome: return 1.0;
             case kLightRect: return 40.0;
             case kLightDisk: return 30.0;
             case kLightSphere: return 40.0;
@@ -730,8 +730,7 @@ private:
     std::shared_ptr<EnvironmentMap> environment_;
 };
 
-// Hosek–Wilkie Physical Sky (Karma-style dome + distant sun).
-// The env map has no solar disc (the sun light owns sharp shadows / the disc).
+// Hosek–Wilkie Physical Sky: RGB-data sky + solar disc on the dome (one env light).
 class PhysicalSkyLightNode : public Node {
 public:
     explicit PhysicalSkyLightNode(const QString& name) : Node("physicalskylight", name) {
@@ -775,7 +774,7 @@ public:
                          .withTooltip("Degrees below the horizon over which sky blends into ground"));
         addParameter(Parameter::makeColor("skytint", "Sky Tint", Vec3(1.0f, 1.0f, 1.0f))
                          .withGroup("Sky")
-                         .withTooltip("Karma Sky Color — tints the dome"));
+                         .withTooltip("Karma Sky Color — tints the dome (not the sun disc)"));
         addParameter(Parameter::makeFloat("elevation", "Solar Altitude", 45.0, 0.0, 90.0)
                          .withGroup("Sky")
                          .withTooltip("Vertical angle of the sun from the horizon (90 = zenith)"));
@@ -792,8 +791,8 @@ public:
 
         addParameter(Parameter::makeBool("enablesun", "Enable Sun Light", true)
                          .withGroup("Sun")
-                         .withTooltip("Distant sun for sharp shadows. Off keeps sky colour "
-                                      "from the sun position but emits no sun light"));
+                         .withTooltip("Solar disc on the sky (Hosek RGB data + 2013 solar radiance).\n"
+                                      "Off keeps the sky colour from the sun position but no disc"));
         addParameter(Parameter::makeFloat("sunintensity", "Sun Intensity", 1.0, 0.0, 100.0, false)
                          .withGroup("Sun")
                          .withVisibleWhen("enablesun")
@@ -804,8 +803,8 @@ public:
         addParameter(Parameter::makeFloat("sunsize", "Angular Size", 0.53, 0.01, 10.0)
                          .withGroup("Sun")
                          .withVisibleWhen("enablesun")
-                         .withTooltip("Visual size of the sun in degrees. Does not change "
-                                      "scene brightness (irradiance is normalized)"));
+                         .withTooltip("Visual size of the sun disc on the sky, in degrees.\n"
+                                      "Scene brightness stays the same (irradiance is normalized)"));
 
         addTransformParameters(*this);
     }
@@ -836,9 +835,10 @@ public:
         const int caustics = boolValue("caustics", true) ? 1 : 0;
         const int visible = boolValue("visiblecamera", true) ? 1 : 0;
 
-        if (params.enableSky && !skyCacheValid(params)) {
+        const bool needEnv = params.enableSky || params.enableSun;
+        if (needEnv && !skyCacheValid(params)) {
             auto env = std::make_shared<EnvironmentMap>();
-            bakePhysicalSkyEnv(env->image, params, 1024, 512);
+            bakePhysicalSkyEnv(env->image, params, 2048, 1024);
             env->path = "physical_sky";
             env->buildSamplingTables();
             environment_ = std::move(env);
@@ -847,57 +847,42 @@ public:
             cacheAzimuth_ = params.azimuthDeg;
             cacheAlbedo_ = params.groundAlbedo;
             cacheGroundColor_ = params.groundColor;
+            cacheSkyTint_ = params.skyTint;
+            cacheSunTint_ = params.sunTint;
             cacheComputeGround_ = params.computeGroundColor;
             cacheHorizonBlur_ = params.horizonBlurDeg;
+            cacheSkyIntensity_ = params.skyIntensity;
+            cacheSunIntensity_ = params.sunIntensity;
+            cacheSunSize_ = params.sunSizeDeg;
+            cacheEnableSky_ = params.enableSky;
+            cacheEnableSun_ = params.enableSun;
             logInfo("Physical Sky (Hosek–Wilkie) baked " + std::to_string(environment_->image.width()) + "x" +
                     std::to_string(environment_->image.height()) + " (turbidity " +
                     std::to_string(params.turbidity) + ")");
         }
-        if (params.enableSky && !environment_) {
+        if (needEnv && !environment_) {
             context.reportError(this, "Physical Sky bake failed");
             return;
         }
 
-        if (params.enableSky) {
-        StagePrim domePrim;
-        domePrim.type = PrimType::Light;
-        domePrim.sourceNode = name();
-        domePrim.path = primPathFor(*this, "lights", stringValue("primname"));
-        domePrim.xform = nodeXform;
-        domePrim.environment = environment_;
+        if (needEnv) {
+            StagePrim domePrim;
+            domePrim.type = PrimType::Light;
+            domePrim.sourceNode = name();
+            domePrim.path = primPathFor(*this, "lights", stringValue("primname"));
+            domePrim.xform = nodeXform;
+            domePrim.environment = environment_;
 
-        LightData dome;
-        dome.type = kLightDome;
-        dome.color = params.skyTint;
-        dome.intensity = params.intensity * params.skyIntensity;
-        dome.exposure = params.exposure;
-        dome.shadowEnable = shadows;
-        dome.contributeCaustics = caustics;
-        dome.visibleCamera = visible;
-        domePrim.light = dome;
-        stage.addPrim(std::move(domePrim));
-        }
-
-        if (params.enableSun) {
-            StagePrim sunPrim;
-            sunPrim.type = PrimType::Light;
-            sunPrim.sourceNode = name();
-            sunPrim.path = primPathFor(*this, "lights", stringValue("primname") + "_sun");
-            sunPrim.xform = nodeXform * physicalSkySunLookAt(params);
-
-            LightData sun;
-            sun.type = kLightDistant;
-            sun.color = physicalSkySunColorAceScg(params);
-            sun.intensity = physicalSkySunIntensity(params);
-            sun.exposure = params.exposure;
-            sun.angle = srMax(0.01f, params.sunSizeDeg);
-            sun.normalize = 1;
-            sun.cameraSunDisc = 1;
-            sun.shadowEnable = shadows;
-            sun.contributeCaustics = caustics;
-            sun.visibleCamera = visible;
-            sunPrim.light = sun;
-            stage.addPrim(std::move(sunPrim));
+            LightData dome;
+            dome.type = kLightDome;
+            dome.color = Vec3(1.0f);
+            dome.intensity = params.intensity;
+            dome.exposure = params.exposure;
+            dome.shadowEnable = shadows;
+            dome.contributeCaustics = caustics;
+            dome.visibleCamera = visible;
+            domePrim.light = dome;
+            stage.addPrim(std::move(domePrim));
         }
     }
 
@@ -909,8 +894,14 @@ private:
                std::fabs(cacheAzimuth_ - p.azimuthDeg) < 1e-4f &&
                lengthSquared(cacheAlbedo_ - p.groundAlbedo) < 1e-8f &&
                lengthSquared(cacheGroundColor_ - p.groundColor) < 1e-8f &&
+               lengthSquared(cacheSkyTint_ - p.skyTint) < 1e-8f &&
+               lengthSquared(cacheSunTint_ - p.sunTint) < 1e-8f &&
                cacheComputeGround_ == p.computeGroundColor &&
-               std::fabs(cacheHorizonBlur_ - p.horizonBlurDeg) < 1e-4f;
+               std::fabs(cacheHorizonBlur_ - p.horizonBlurDeg) < 1e-4f &&
+               std::fabs(cacheSkyIntensity_ - p.skyIntensity) < 1e-4f &&
+               std::fabs(cacheSunIntensity_ - p.sunIntensity) < 1e-4f &&
+               std::fabs(cacheSunSize_ - p.sunSizeDeg) < 1e-4f &&
+               cacheEnableSky_ == p.enableSky && cacheEnableSun_ == p.enableSun;
     }
 
     std::shared_ptr<EnvironmentMap> environment_;
@@ -919,8 +910,15 @@ private:
     float cacheAzimuth_ = -1.0f;
     Vec3 cacheAlbedo_{};
     Vec3 cacheGroundColor_{};
+    Vec3 cacheSkyTint_{};
+    Vec3 cacheSunTint_{};
     bool cacheComputeGround_ = true;
     float cacheHorizonBlur_ = -1.0f;
+    float cacheSkyIntensity_ = -1.0f;
+    float cacheSunIntensity_ = -1.0f;
+    float cacheSunSize_ = -1.0f;
+    bool cacheEnableSky_ = true;
+    bool cacheEnableSun_ = true;
 };
 
 // ---------------------------------------------------------------------------
@@ -1583,7 +1581,7 @@ void registerBuiltinNodes() {
 
         info.typeName = "physicalskylight";
         info.label = "Physical Sky";
-        info.description = "Hosek–Wilkie sky dome + sun (Karma Physical Sky)";
+        info.description = "Hosek–Wilkie sky with solar disc on the dome";
         info.factory = [](const QString& name) -> NodePtr {
             return std::make_unique<PhysicalSkyLightNode>(name);
         };

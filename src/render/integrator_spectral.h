@@ -71,8 +71,6 @@ public:
                                            srMax(1e-6f, length(dome.emittedRadiance())))
                                     : upsampleEmission(envL, waves);
                             SampledSpectrum contrib = throughput * envS * weight;
-                            if (depth > 0 && !specularBounce)
-                                contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                             radiance += contrib;
                         }
                     }
@@ -85,8 +83,6 @@ public:
                                                   primarySun, false);
                         if (!isBlack(sunL)) {
                             SampledSpectrum contrib = throughput * upsampleEmission(sunL, waves);
-                            if (depth > 0 && !specularBounce)
-                                contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                             radiance += contrib;
                         }
                     }

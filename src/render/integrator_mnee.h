@@ -573,8 +573,6 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         Vec3 contrib = throughput * envL * weight;
-                        if (depth > 0 && !specularBounce)
-                            contrib = clampContribution(contrib, settings.clampDirect);
                         radiance += contrib;
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active())
@@ -592,8 +590,6 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                                               primarySun, mneeFamily);
                     if (!isBlack(sunL)) {
                         Vec3 contrib = throughput * sunL;
-                        if (depth > 0 && !specularBounce)
-                            contrib = clampContribution(contrib, settings.clampDirect);
                         radiance += contrib;
                     }
                 }

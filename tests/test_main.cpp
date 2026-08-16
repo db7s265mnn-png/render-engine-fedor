@@ -647,6 +647,27 @@ void testDomeHdrLoad() {
     if (!err.empty() && direct.empty()) std::printf("  load error: %s\n", err.c_str());
     check(direct.width() == 1024 && direct.height() == 512, "sky.hdr is 1024x512");
     check(maxLum(direct) > 1.0f, "native HDR has values above 1");
+    {
+        QTemporaryDir dir;
+        check(dir.isValid(), "temp dir for exposure hdr");
+        const QString expHdr = dir.path() + "/exp.hdr";
+        std::FILE* f = std::fopen(expHdr.toUtf8().constData(), "wb");
+        check(f != nullptr, "write EXPOSURE hdr");
+        if (f) {
+            std::fputs("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\nEXPOSURE=16.0\n\n-Y 1 +X 1\n", f);
+            const unsigned char rgbe[4] = {128, 128, 128, 128};  // linear ~0.5
+            std::fwrite(rgbe, 1, 4, f);
+            std::fclose(f);
+            Image img;
+            std::string e;
+            check(loadImage(expHdr.toStdString(), img, e, true, "Utility - Raw"), "load EXPOSURE hdr");
+            check(!img.empty(), "EXPOSURE hdr has a pixel");
+            if (!img.empty()) {
+                const float y = luminance(img.rgb(0, 0));
+                check(y > 0.2f && y < 2.0f, "EXPOSURE=16 does not crush RGBE values");
+            }
+        }
+    }
 
     {
         QTemporaryDir dir;
@@ -823,7 +844,20 @@ void testPhysicalSkyLight() {
     for (int y = 0; y < baked.height(); ++y)
         for (int x = 0; x < baked.width(); ++x)
             bakeMax = std::max(bakeMax, luminance(baked.rgb(x, y)));
-    check(bakeMax < luminance(zenith) * 5000.0f, "env map has no Dirac sun disc");
+    check(bakeMax > luminance(zenith) * 5.0f, "env map solar disc is much brighter than zenith");
+    const Vec3 sunDirRad = physicalSkyRadianceAceScg(params, physicalSkySunDirection(params));
+    check(luminance(sunDirRad) > luminance(zenith) * 10.0f, "Hosek solar disc sits on the sky");
+    {
+        PhysicalSkyParams noSun = params;
+        noSun.enableSun = false;
+        const Vec3 noDisc = physicalSkyRadianceAceScg(noSun, physicalSkySunDirection(noSun));
+        check(luminance(sunDirRad) > luminance(noDisc) * 5.0f, "enable sun off removes the disc");
+        PhysicalSkyParams skyBoost = params;
+        skyBoost.skyIntensity = 4.0f;
+        const Vec3 zBoost = physicalSkyRadianceAceScg(skyBoost, Vec3(0.0f, 1.0f, 0.0f));
+        checkNear(luminance(zBoost), luminance(zenith) * 4.0f, 0.15f * luminance(zenith) * 4.0f,
+                  "sky intensity scales the sky not the disc formula");
+    }
 
     {
         PhysicalSkyParams sunset;
@@ -860,30 +894,24 @@ void testPhysicalSkyLight() {
         check(stage != nullptr, "physical sky cooks");
         check(context.errors.isEmpty(), "physical sky cook has no errors");
         for (const QString& e : context.errors) std::printf("  cook error: %s\n", qPrintable(e));
-        check(stage && stage->countOfType(PrimType::Light) == 2, "sky + sun prims");
+        check(stage && stage->countOfType(PrimType::Light) == 1, "sky + sun disc are one dome");
 
         ScenePtr scene = stage ? stage->toScene() : nullptr;
         check(scene != nullptr, "physical sky toScene");
         if (scene) {
-            check(scene->lights.size() == 2, "scene has dome and sun");
-            check(scene->lights.size() >= 1 && scene->lights[0].type == kLightDome, "first light is the sky dome");
-            check(scene->lights.size() >= 2 && scene->lights[1].type == kLightDistant, "second light is the sun");
-            if (scene->lights.size() >= 2) {
-                check(scene->lights[1].cameraSunDisc == 1, "sun is visible as a camera disc");
-                check(scene->lights[1].normalize == 1, "sun intensity is irradiance-like");
-                checkNear(scene->lights[0].intensity, 1.0f, 1e-4f, "default sky intensity is 1");
-                checkNear(scene->lights[1].intensity, physicalSkySunIntensity(PhysicalSkyParams{}), 1e-3f,
-                          "cooked sun uses overall × sun intensity");
-                const Vec3 z = normalize(transformVector(scene->lights[1].xform, Vec3(0.0f, 0.0f, 1.0f)));
-                const Vec3 expect = physicalSkySunDirection(PhysicalSkyParams{});
-                checkNear(dot(z, expect), 1.0f, 0.02f, "cooked sun +Z matches elevation/azimuth");
-                const SceneView view = scene->view();
-                const float domeW = lightFluxWeight(view, 0);
-                const float sunW = lightFluxWeight(view, 1);
-                check(sunW > domeW * 0.05f, "sun NEE weight is not crushed by the disc solid angle");
-            }
+            check(scene->lights.size() == 1, "scene has one physical sky dome");
+            check(scene->lights[0].type == kLightDome, "physical sky is a dome light");
+            checkNear(scene->lights[0].intensity, 1.0f, 1e-4f, "overall intensity is on the dome");
             check(!scene->envMaps.empty() && scene->envMaps[0] && !scene->envMaps[0]->image.empty(),
                   "dome has a baked sky map");
+            if (!scene->envMaps.empty() && scene->envMaps[0]) {
+                float envMax = 0.0f;
+                const Image& img = scene->envMaps[0]->image;
+                for (int y = 0; y < img.height(); ++y)
+                    for (int x = 0; x < img.width(); ++x)
+                        envMax = std::max(envMax, luminance(img.rgb(x, y)));
+                check(envMax > 10.0f, "cooked env contains a bright solar disc");
+            }
         }
     }
     {
@@ -911,9 +939,8 @@ void testPhysicalSkyLight() {
         StagePtr stage = graph.cookDisplay(context);
         check(stage && stage->countOfType(PrimType::Light) == 1, "enable sky off → sun only");
         ScenePtr scene = stage ? stage->toScene() : nullptr;
-        check(scene && scene->lights.size() == 1 && scene->lights[0].type == kLightDistant &&
-                  scene->lights[0].cameraSunDisc == 1,
-              "sky disabled leaves only the sun");
+        check(scene && scene->lights.size() == 1 && scene->lights[0].type == kLightDome,
+              "sky disabled leaves a sun-disc dome");
     }
     {
         NodeGraph graph;
@@ -929,20 +956,18 @@ void testPhysicalSkyLight() {
         CookContext context;
         StagePtr stage = graph.cookDisplay(context);
         ScenePtr scene = stage ? stage->toScene() : nullptr;
-        check(scene && scene->lights.size() == 2, "overall/sky/sun intensity cooks both lights");
-        if (scene && scene->lights.size() >= 2) {
-            checkNear(scene->lights[0].intensity, 6.0f, 1e-4f, "dome intensity = overall × sky intensity");
+        check(scene && scene->lights.size() == 1, "overall/sky/sun intensity cooks one dome");
+        if (scene && !scene->lights.empty()) {
+            checkNear(scene->lights[0].intensity, 2.0f, 1e-4f, "dome intensity is the overall scale");
             PhysicalSkyParams expect;
             expect.intensity = 2.0f;
             expect.sunIntensity = 4.0f;
-            checkNear(scene->lights[1].intensity, physicalSkySunIntensity(expect), 1e-3f,
-                      "sun intensity = overall × sun intensity × physical scale");
             PhysicalSkyParams skyOnly;
             skyOnly.intensity = 2.0f;
             skyOnly.skyIntensity = 3.0f;
             skyOnly.sunIntensity = 4.0f;
             checkNear(physicalSkySunIntensity(skyOnly), physicalSkySunIntensity(expect), 1e-4f,
-                      "sky intensity is not folded into the sun");
+                      "sky intensity is not folded into the sun irradiance");
         }
     }
     {

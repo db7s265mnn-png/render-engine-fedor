@@ -1,5 +1,6 @@
-// Hosek–Wilkie Physical Sky (SIGGRAPH 2012) with Karma Physical Sky controls.
-// Baked dome is sky only — the solar disc is a distant light (sharp shadows, no HDRI spike).
+// Hosek–Wilkie Physical Sky (SIGGRAPH 2012 RGB data + 2013 solar disc on the dome).
+// One env map: sky from the tabulated RGB model, sun disc from the matching solar
+// radiance function (chromaticity) with irradiance in the same RGB units.
 #pragma once
 
 #include "core/image.h"
@@ -32,16 +33,14 @@ Vec3 physicalSkySunDirection(const PhysicalSkyParams& p);
 // Light-to-world rotation whose +Z axis equals the sun direction (distant NEE).
 Mat4 physicalSkySunLookAt(const PhysicalSkyParams& p);
 
-// Sky radiance in ACEScg for a local-space direction.
-// Does not include intensity / exposure / sky tint (those live on LightData).
+// Sky radiance in ACEScg for a local-space direction, including Sky/Sun Intensity
+// and tints. Overall intensity / exposure stay on LightData.
 Vec3 physicalSkyRadianceAceScg(const PhysicalSkyParams& p, Vec3 dirLocal);
 
 // Sun disc chromaticity in ACEScg (Hosek solar radiance × sun tint).
 Vec3 physicalSkySunColorAceScg(const PhysicalSkyParams& p);
 
-// Distant-light intensity (irradiance-like when normalize=1). Includes the
-// overall intensity and sunIntensity; skyIntensity does not apply. Exposure
-// stays on LightData. Magnitude is in the same RGB-Hosek units as the dome.
+// Direct sun irradiance in RGB-Hosek units (overall intensity × sunIntensity).
 float physicalSkySunIntensity(const PhysicalSkyParams& p);
 
 void bakePhysicalSkyEnv(Image& image, const PhysicalSkyParams& p, int width, int height);

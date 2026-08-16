@@ -86,6 +86,24 @@ struct HosekEval {
         return vmax(Vec3(0.0f), params.groundAlbedo) * averageSkyLinearSrgb();
     }
 
+    float sunHalfAngle() const { return 0.5f * radians(srMax(0.01f, params.sunSizeDeg)); }
+
+    // Direct sun irradiance in the same RGB-Hosek units as the baked sky.
+    float sunIrradiance() const {
+        if (!params.enableSun) return 0.0f;
+        const Vec3 skyAvg = vmax(Vec3(0.0f), averageSkyLinearSrgb());
+        const float Lsky = srMax(1e-4f, luminance(skyAvg));
+        const float t = clampf((turbidity - 1.0f) / 9.0f, 0.0f, 1.0f);
+        const float k = lerpf(8.0f, 2.0f, t);
+        return k * kPi * Lsky * srMax(0.0f, params.sunIntensity);
+    }
+
+    Vec3 sunDiscChromaLinearSrgb() const {
+        const Vec3 rgb = sunDiscLinearSrgb();
+        const float lum = luminance(rgb);
+        return lum > 1e-8f ? rgb / lum : Vec3(1.0f);
+    }
+
     // Disc-only radiance (Hosek solar minus sky in-scatter) → linear sRGB.
     Vec3 sunDiscLinearSrgb() const {
         if (!spec) return Vec3(1.0f);
@@ -129,22 +147,43 @@ struct HosekEval {
     }
 };
 
-Vec3 shadeDirection(const HosekEval& eval, Vec3 dir) {
+Vec3 shadeSkyOnly(const HosekEval& eval, Vec3 dir) {
+    if (!eval.params.enableSky) return Vec3(0.0f);
     dir = normalize(dir);
     const float elevDeg = degrees(std::asin(clampf(dir.y, -1.0f, 1.0f)));
     const float blur = srMax(0.05f, eval.params.horizonBlurDeg);
-    if (elevDeg >= 0.0f) return eval.skyLinearSrgb(dir);
+    Vec3 sky;
+    if (elevDeg >= 0.0f) {
+        sky = eval.skyLinearSrgb(dir);
+    } else {
+        const Vec3 ground = eval.visibleGroundLinearSrgb();
+        const float t = clampf(1.0f + elevDeg / blur, 0.0f, 1.0f);
+        if (t <= 0.0f) {
+            sky = ground;
+        } else {
+            Vec3 horizonDir = dir;
+            horizonDir.y = 0.0f;
+            if (lengthSquared(horizonDir) < 1e-8f) horizonDir = Vec3(0.0f, 0.0f, -1.0f);
+            horizonDir = normalize(horizonDir);
+            // Tiny lift so Hosek theta stays just above the horizon singularity.
+            horizonDir = normalize(horizonDir + Vec3(0.0f, 1e-3f, 0.0f));
+            sky = lerp(ground, eval.skyLinearSrgb(horizonDir), t);
+        }
+    }
+    return sky * vmax(Vec3(0.0f), eval.params.skyTint) * srMax(0.0f, eval.params.skyIntensity);
+}
 
-    const Vec3 ground = eval.visibleGroundLinearSrgb();
-    const float t = clampf(1.0f + elevDeg / blur, 0.0f, 1.0f);
-    if (t <= 0.0f) return ground;
-    Vec3 horizonDir = dir;
-    horizonDir.y = 0.0f;
-    if (lengthSquared(horizonDir) < 1e-8f) horizonDir = Vec3(0.0f, 0.0f, -1.0f);
-    horizonDir = normalize(horizonDir);
-    // Tiny lift so Hosek theta stays just above the horizon singularity.
-    horizonDir = normalize(horizonDir + Vec3(0.0f, 1e-3f, 0.0f));
-    return lerp(ground, eval.skyLinearSrgb(horizonDir), t);
+Vec3 shadeDirection(const HosekEval& eval, Vec3 dir, float minSunHalf = 0.0f) {
+    dir = normalize(dir);
+    const Vec3 sky = shadeSkyOnly(eval, dir);
+    if (!eval.params.enableSun) return sky;
+    const float gamma = std::acos(clampf(dot(dir, eval.sunDir), -1.0f, 1.0f));
+    const float half = srMax(eval.sunHalfAngle(), minSunHalf);
+    if (gamma > half) return sky;
+    const float omega = kTwoPi * (1.0f - std::cos(half));
+    const float L = eval.sunIrradiance() / srMax(omega, 1e-12f);
+    const Vec3 disc = eval.sunDiscChromaLinearSrgb() * L * vmax(Vec3(0.0f), eval.params.sunTint);
+    return vmax(sky, disc);
 }
 
 }  // namespace
@@ -179,17 +218,7 @@ Vec3 physicalSkySunColorAceScg(const PhysicalSkyParams& p) {
 
 float physicalSkySunIntensity(const PhysicalSkyParams& p) {
     HosekEval eval(p);
-    // Hosek RGB sky and the spectral solar function are different unit systems.
-    // Mixing SI solar irradiance into the RGB dome made the sun a dim fill.
-    // Keep solar only for chromaticity; match sun irradiance to the RGB sky so
-    // intensity=1 / sunIntensity=1 is a clear-day sun that dominates the dome.
-    const Vec3 skyAvg = linearSrgbToAcescg(vmax(Vec3(0.0f), eval.averageSkyLinearSrgb()));
-    const float Lsky = srMax(1e-4f, luminance(skyAvg));
-    const float t = clampf((clampf(p.turbidity, 1.0f, 10.0f) - 1.0f) / 9.0f, 0.0f, 1.0f);
-    // Direct/global illuminance: ~8× at turbidity 1 (arctic), ~2× at 10 (hazy).
-    const float k = lerpf(8.0f, 2.0f, t);
-    const float irr = k * kPi * Lsky;
-    return srMax(0.0f, p.intensity * p.sunIntensity * irr);
+    return srMax(0.0f, p.intensity * eval.sunIrradiance());
 }
 
 void bakePhysicalSkyEnv(Image& image, const PhysicalSkyParams& p, int width, int height) {
@@ -197,12 +226,15 @@ void bakePhysicalSkyEnv(Image& image, const PhysicalSkyParams& p, int width, int
     height = srMax(16, height);
     image.resize(width, height);
     HosekEval eval(p);
+    // Guarantee the solar disc covers at least one texel (0.53° is ~1 px at 1024²).
+    const float pixelHalf =
+        0.5f * std::sqrt(sqr(kTwoPi / float(width)) + sqr(kPi / float(height)));
     for (int y = 0; y < height; ++y) {
         const float v = (float(y) + 0.5f) / float(height);
         for (int x = 0; x < width; ++x) {
             const float u = (float(x) + 0.5f) / float(width);
             const Vec3 dir = equirectToDirection(u, v);
-            const Vec3 c = linearSrgbToAcescg(vmax(Vec3(0.0f), shadeDirection(eval, dir)));
+            const Vec3 c = linearSrgbToAcescg(vmax(Vec3(0.0f), shadeDirection(eval, dir, pixelHalf)));
             image.setRgb(x, y, vmax(Vec3(0.0f), c));
         }
     }

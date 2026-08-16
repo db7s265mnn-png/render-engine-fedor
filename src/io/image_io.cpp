@@ -147,7 +147,6 @@ bool loadHdr(const std::string& path, Image& out, std::string& error) {
     }
     char line[512];
     bool isRadiance = false;
-    float exposure = 1.0f;
     while (std::fgets(line, sizeof(line), file)) {
         std::string text(line);
         while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
@@ -156,7 +155,8 @@ bool loadHdr(const std::string& path, Image& out, std::string& error) {
             continue;
         }
         if (text.empty()) break;  // end of header
-        if (text.rfind("EXPOSURE=", 0) == 0) exposure = std::strtof(text.c_str() + 9, nullptr);
+        // RGBE pixel values are used as-is (stb_image / Blender / Arnold).
+        // Applying EXPOSURE= from the header crushes HDR suns.
     }
     if (!isRadiance) {
         std::fclose(file);
@@ -179,7 +179,6 @@ bool loadHdr(const std::string& path, Image& out, std::string& error) {
 
     out.resize(width, height);
     std::vector<unsigned char> scanline(size_t(nFast) * 4);
-    const float invExposure = exposure > 0.0f ? 1.0f / exposure : 1.0f;
     for (int s = 0; s < nSlow; ++s) {
         if (!readHdrScanline(file, scanline, nFast)) {
             std::fclose(file);
@@ -193,7 +192,7 @@ bool loadHdr(const std::string& path, Image& out, std::string& error) {
                                             : radianceAxisIndex('Y', signFast, f, nFast);
             unsigned char rgbe[4] = {scanline[size_t(f) * 4 + 0], scanline[size_t(f) * 4 + 1],
                                      scanline[size_t(f) * 4 + 2], scanline[size_t(f) * 4 + 3]};
-            out.setRgb(x, y, rgbeToLinear(rgbe) * invExposure, 1.0f);
+            out.setRgb(x, y, rgbeToLinear(rgbe), 1.0f);
         }
     }
     std::fclose(file);
