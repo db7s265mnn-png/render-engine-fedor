@@ -8,11 +8,13 @@
 #include <openvdb/openvdb.h>
 #include <openvdb/tools/MeshToVolume.h>
 #include <openvdb/tools/VolumeToMesh.h>
+#include <openvdb/tools/LevelSetUtil.h>
 #include <openvdb/tools/Interpolation.h>
 #include <openvdb/io/File.h>
 #endif
 
 #include <cmath>
+#include <limits>
 
 namespace sol {
 
@@ -158,7 +160,10 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh& mesh, const Mat
     }
 
     openvdb::math::Transform::Ptr xformVdb = makeXform(settings.voxelSize);
-    const float halfWidth = srMax(settings.exteriorBand, settings.interiorBand);
+    // Level-set half-width must cover both exterior and interior bands so the
+    // surface ramp has enough active voxels before Fog conversion.
+    const float halfWidth =
+        srMax(1.0f, srMax(settings.exteriorBand, settings.interiorBand));
     openvdb::FloatGrid::Ptr grid;
     try {
         openvdb::FloatGrid::Ptr sdf =
@@ -168,39 +173,29 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh& mesh, const Mat
             grid->setGridClass(openvdb::GRID_LEVEL_SET);
             grid->setName("sdf");
         } else {
-            grid = openvdb::FloatGrid::create(0.0f);
-            grid->setTransform(sdf->transform().copy());
+            // Fog = filled density, not a hollow narrow-band shell.
+            // OpenVDB sdfToFogVolume: inactive interior → active dens=1; interior
+            // band ramps 0→1; exterior cleared. Fixes see-through "holes" through
+            // closed meshes (Buddha etc.) when using standard_volume.
+            grid = sdf->deepCopy();
+            const float cutoffWorld =
+                settings.voxelSize * srMax(1.0f, settings.interiorBand);
+            openvdb::tools::sdfToFogVolume(*grid, cutoffWorld);
             grid->setGridClass(openvdb::GRID_FOG_VOLUME);
             grid->setName("density");
-            // Normalized occupancy in [0,1]. Runtime density scale lives on MediumData::density
-            // (SOP Fill Density / MaterialX volumeDensity) — changing it must NOT rebuild the grid.
-            const float bandWorld =
-                srMax(settings.voxelSize, settings.voxelSize * srMax(1.0f, settings.exteriorBand));
-            auto accessor = grid->getAccessor();
-            for (auto it = sdf->cbeginValueOn(); it; ++it) {
-                const float d = float(*it);
-                if (d > 0.0f) continue;  // outside
-                float dens = 1.0f;
-                if (bandWorld > 1e-8f && d > -bandWorld) {
-                    // Smoothstep from shell toward interior (anti-boxy surface).
-                    const float t = clampf(-d / bandWorld, 0.0f, 1.0f);
-                    dens = t * t * (3.0f - 2.0f * t);
-                }
-                if (dens > 1e-8f) accessor.setValue(it.getCoord(), dens);
-            }
-            // Feather density to 0 near the active AABB faces so the container wall
-            // does not read as a hard planar density cut (common VDB viewport artifact).
+            // Mild AABB-edge fade only (1–2 voxels) — softens hard container cuts
+            // without carving planar holes into a filled interior.
             const openvdb::CoordBBox densBox = grid->evalActiveVoxelBoundingBox();
             if (!densBox.empty()) {
-                const int featherVox = std::max(2, int(std::ceil(srMax(1.0f, settings.exteriorBand))));
+                constexpr int kFeatherVox = 2;
                 for (auto it = grid->beginValueOn(); it; ++it) {
                     const openvdb::Coord c = it.getCoord();
                     const int dx = std::min(c.x() - densBox.min().x(), densBox.max().x() - c.x());
                     const int dy = std::min(c.y() - densBox.min().y(), densBox.max().y() - c.y());
                     const int dz = std::min(c.z() - densBox.min().z(), densBox.max().z() - c.z());
                     const int distEdge = std::min(dx, std::min(dy, dz));
-                    if (distEdge >= featherVox) continue;
-                    const float u = clampf(float(distEdge) / float(featherVox), 0.0f, 1.0f);
+                    if (distEdge >= kFeatherVox) continue;
+                    const float u = clampf(float(distEdge) / float(kFeatherVox), 0.0f, 1.0f);
                     const float fade = u * u * (3.0f - 2.0f * u);
                     const float v = float(*it) * fade;
                     if (v > 1e-8f) it.setValue(v);

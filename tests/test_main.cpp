@@ -4690,8 +4690,14 @@ void testNgonTriangulateAndVdb() {
         check(fogA && fogA->valid() && fogB && fogB->valid(), "fog unit-bake grids");
         if (fogA && fogB) {
             check(std::fabs(fogA->majorant() - fogB->majorant()) < 0.25f,
-                  "fillDensity does not change baked fog majorant");
+                  "Fill Density does not change baked fog majorant");
+            // Fog must fill the closed mesh interior (not a hollow narrow-band shell).
+            const float densCenter = fogA->sampleWorld(Vec3(0, 0, 0));
+            const float densOutside = fogA->sampleWorld(Vec3(3, 0, 0));
+            check(densCenter > 0.85f, "fog interior at center is filled (~1)");
+            check(densOutside < 0.05f, "fog exterior outside the box is empty");
             check(fogA->majorant() < 1.5f, "baked fog occupancy majorant is ~1");
+            std::printf("  fog fill: center=%.3f outside=%.3f\n", densCenter, densOutside);
         }
     }
 
