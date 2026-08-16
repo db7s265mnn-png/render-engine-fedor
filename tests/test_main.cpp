@@ -23,6 +23,7 @@
 #include "io/alembic_loader.h"
 #include "io/image_io.h"
 #include "io/materialx_graph.h"
+#include "io/tx_cache.h"
 #include "io/usd_loader.h"
 #include "nodes/node_graph.h"
 #include "nodes/node_registry.h"
@@ -592,6 +593,131 @@ void testEnvironment() {
         checkNear(envPdf(view, dir), pdf, std::max(1e-3f, pdf * 0.02f), "envPdf matches envSample");
     }
     check(nearBrightTexel > 3000, "environment sampling concentrates on the bright texel");
+}
+
+void testDomeHdrLoad() {
+    std::printf("dome-hdr\n");
+    registerBuiltinNodes();
+
+    QString hdrPath;
+    const QStringList candidates = {
+        QStringLiteral("/workspace/examples/sky.hdr"),
+        QDir::currentPath() + "/examples/sky.hdr",
+        QDir::currentPath() + "/../examples/sky.hdr",
+    };
+    for (const QString& candidate : candidates) {
+        if (QFileInfo::exists(candidate)) {
+            hdrPath = QFileInfo(candidate).absoluteFilePath();
+            break;
+        }
+    }
+    check(!hdrPath.isEmpty(), "bundled sky.hdr is present");
+    if (hdrPath.isEmpty()) return;
+
+    auto maxLum = [](const Image& img) {
+        float m = 0.0f;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) m = std::max(m, luminance(img.rgb(x, y)));
+        }
+        return m;
+    };
+
+    Image direct;
+    std::string err;
+    check(loadImage(hdrPath.toStdString(), direct, err, /*srgbColor=*/false), "load sky.hdr natively");
+    if (!err.empty() && direct.empty()) std::printf("  load error: %s\n", err.c_str());
+    check(direct.width() == 1024 && direct.height() == 512, "sky.hdr is 1024x512");
+    check(maxLum(direct) > 1.0f, "native HDR has values above 1");
+
+    // +Y orientation used to be rejected ("unsupported HDR resolution line").
+    {
+        QTemporaryDir dir;
+        check(dir.isValid(), "temp dir for +Y hdr");
+        const QString plusY = dir.path() + "/plusy.hdr";
+        std::FILE* f = std::fopen(plusY.toUtf8().constData(), "wb");
+        check(f != nullptr, "write +Y hdr");
+        if (f) {
+            std::fputs("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n+Y 2 +X 1\n", f);
+            const unsigned char blue[4] = {0, 0, 128, 129};
+            const unsigned char red[4] = {128, 0, 0, 129};
+            std::fwrite(blue, 1, 4, f);
+            std::fwrite(red, 1, 4, f);
+            std::fclose(f);
+            Image img;
+            std::string e;
+            check(loadImage(plusY.toStdString(), img, e, false), "load +Y hdr");
+            check(img.width() == 1 && img.height() == 2, "+Y hdr is 1x2");
+            if (!img.empty()) {
+                check(img.rgb(0, 0).x > 0.5f && img.rgb(0, 0).z < 0.25f,
+                      "+Y: top row is the second scanline (red)");
+                check(img.rgb(0, 1).z > 0.5f && img.rgb(0, 1).x < 0.25f,
+                      "+Y: bottom row is the first scanline (blue)");
+            }
+        }
+    }
+
+    QTemporaryDir cacheDir;
+    check(cacheDir.isValid(), "temp dir for tx cache");
+    RenderSettingsData arm{};
+    arm.enableTxCache = 1;
+    const QByteArray cachePath = cacheDir.path().toUtf8();
+    std::snprintf(arm.txCacheDir, sizeof(arm.txCacheDir), "%s", cachePath.constData());
+
+    const std::string prevCs = txDefaultInputColorSpace();
+    setTxDefaultInputColorSpace("Utility - sRGB - Texture");
+    setActiveTxCacheSettings(&arm);
+    Image viaCache;
+    std::string err2;
+    const bool loaded = loadImage(hdrPath.toStdString(), viaCache, err2, /*srgbColor=*/true);
+    setActiveTxCacheSettings(nullptr);
+    setTxDefaultInputColorSpace(prevCs);
+    check(loaded, "load sky.hdr with TX cache armed and sticky sRGB CS");
+    if (!err2.empty() && viaCache.empty()) std::printf("  tx-armed load error: %s\n", err2.c_str());
+    check(maxLum(viaCache) > 1.0f, "TX-armed HDR load keeps values above 1");
+    check(viaCache.width() == direct.width() && viaCache.height() == direct.height(),
+          "TX-armed HDR keeps resolution");
+
+    NodeGraph graph;
+    Node* dome = graph.createNode("domelight", "domelight1");
+    check(dome != nullptr, "create domelight");
+    if (dome) {
+        dome->setParameterValue("texture", hdrPath);
+        dome->setParameterValue("intensity", 1.0);
+    }
+    Node* settings = graph.createNode("rendersettings", "rendersettings1");
+    check(settings != nullptr, "create rendersettings");
+    if (settings) {
+        settings->setParameterValue("enabletxcache", true);
+        settings->setParameterValue("txcachedir", cacheDir.path());
+    }
+    if (dome && settings) graph.connectNodes(dome, settings, 0);
+    graph.setDisplayNode(settings);
+
+    setTxDefaultInputColorSpace("Utility - sRGB - Texture");
+    setActiveTxCacheSettings(&arm);
+    CookContext context;
+    StagePtr stage = graph.cookDisplay(context);
+    setActiveTxCacheSettings(nullptr);
+    setTxDefaultInputColorSpace(prevCs);
+
+    check(stage != nullptr, "dome graph cooks");
+    check(context.errors.isEmpty(), "dome HDR cook has no errors");
+    for (const QString& e : context.errors) std::printf("  cook error: %s\n", qPrintable(e));
+
+    ScenePtr scene = stage ? stage->toScene() : nullptr;
+    check(scene != nullptr, "dome toScene");
+    if (!scene) return;
+    check(!scene->lights.empty() && scene->lights[0].type == kLightDome, "scene has a dome light");
+    check(!scene->lights.empty() && scene->lights[0].envIndex >= 0, "dome has an env map index");
+    bool foundEnv = false;
+    float envMax = 0.0f;
+    for (const auto& env : scene->envMaps) {
+        if (!env || env->image.empty()) continue;
+        foundEnv = true;
+        envMax = std::max(envMax, maxLum(env->image));
+    }
+    check(foundEnv, "dome attached an environment map");
+    check(envMax > 1.0f, "cooked dome HDR keeps values above 1");
 }
 
 // Glass sphere over a floor lit by a small rect light: PT+MNEE and BDPT are
@@ -5138,6 +5264,12 @@ int main() {
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
+    if (getenv("SOL_ONLY_DOME")) {
+        registerBuiltinNodes();
+        testDomeHdrLoad();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (getenv("SOL_ONLY_VDB")) {
         registerBuiltinNodes();
         testNgonTriangulateAndVdb();
@@ -5182,6 +5314,7 @@ int main() {
     testPolyOpticsApertureSpread();
     testPolynomialOpticsCamera();
     testEnvironment();
+    testDomeHdrLoad();
     testRender();
     testCausticsGlassSphere();
     testBdptCausticThroughRefraction();

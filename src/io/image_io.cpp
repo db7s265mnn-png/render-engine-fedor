@@ -109,6 +109,34 @@ bool readHdrScanline(std::FILE* file, std::vector<unsigned char>& scanline, int 
     return true;
 }
 
+bool parseRadianceResolution(const char* line, int& width, int& height, int& nSlow, int& nFast,
+                             char& axisSlow, char& signSlow, char& axisFast, char& signFast) {
+    char s0 = 0, a0 = 0, s1 = 0, a1 = 0;
+    int n0 = 0, n1 = 0;
+    if (std::sscanf(line, " %c%c %d %c%c %d", &s0, &a0, &n0, &s1, &a1, &n1) != 6) return false;
+    a0 = static_cast<char>(std::toupper(static_cast<unsigned char>(a0)));
+    a1 = static_cast<char>(std::toupper(static_cast<unsigned char>(a1)));
+    if ((a0 != 'X' && a0 != 'Y') || (a1 != 'X' && a1 != 'Y') || a0 == a1) return false;
+    if (n0 <= 0 || n1 <= 0) return false;
+    signSlow = s0;
+    axisSlow = a0;
+    nSlow = n0;
+    signFast = s1;
+    axisFast = a1;
+    nFast = n1;
+    width = (a0 == 'X' || a1 == 'X') ? ((a0 == 'X') ? n0 : n1) : 0;
+    height = (a0 == 'Y' || a1 == 'Y') ? ((a0 == 'Y') ? n0 : n1) : 0;
+    return width > 0 && height > 0;
+}
+
+int radianceAxisIndex(char axis, char sign, int i, int n) {
+    // Image y=0 is the top row; x=0 is the left column.
+    // Radiance -Y: first scanline is the top. +Y: first scanline is the bottom.
+    // Radiance +X: first pixel is the left. -X: first pixel is the right.
+    if (axis == 'Y') return (sign == '-') ? i : (n - 1 - i);
+    return (sign == '+') ? i : (n - 1 - i);
+}
+
 bool loadHdr(const std::string& path, Image& out, std::string& error) {
     std::FILE* file = std::fopen(path.c_str(), "rb");
     if (!file) {
@@ -138,30 +166,31 @@ bool loadHdr(const std::string& path, Image& out, std::string& error) {
         error = "truncated HDR header";
         return false;
     }
-    int width = 0, height = 0;
-    if (std::sscanf(line, "-Y %d +X %d", &height, &width) != 2) {
+    int width = 0, height = 0, nSlow = 0, nFast = 0;
+    char axisSlow = 0, signSlow = 0, axisFast = 0, signFast = 0;
+    if (!parseRadianceResolution(line, width, height, nSlow, nFast, axisSlow, signSlow, axisFast,
+                                 signFast)) {
         std::fclose(file);
         error = "unsupported HDR resolution line";
         return false;
     }
-    if (width <= 0 || height <= 0) {
-        std::fclose(file);
-        error = "invalid HDR resolution";
-        return false;
-    }
 
     out.resize(width, height);
-    std::vector<unsigned char> scanline(size_t(width) * 4);
+    std::vector<unsigned char> scanline(size_t(nFast) * 4);
     const float invExposure = exposure > 0.0f ? 1.0f / exposure : 1.0f;
-    for (int y = 0; y < height; ++y) {
-        if (!readHdrScanline(file, scanline, width)) {
+    for (int s = 0; s < nSlow; ++s) {
+        if (!readHdrScanline(file, scanline, nFast)) {
             std::fclose(file);
             error = "truncated HDR scanline data";
             return false;
         }
-        for (int x = 0; x < width; ++x) {
-            unsigned char rgbe[4] = {scanline[size_t(x) * 4 + 0], scanline[size_t(x) * 4 + 1],
-                                     scanline[size_t(x) * 4 + 2], scanline[size_t(x) * 4 + 3]};
+        for (int f = 0; f < nFast; ++f) {
+            const int x = (axisSlow == 'X') ? radianceAxisIndex('X', signSlow, s, nSlow)
+                                            : radianceAxisIndex('X', signFast, f, nFast);
+            const int y = (axisSlow == 'Y') ? radianceAxisIndex('Y', signSlow, s, nSlow)
+                                            : radianceAxisIndex('Y', signFast, f, nFast);
+            unsigned char rgbe[4] = {scanline[size_t(f) * 4 + 0], scanline[size_t(f) * 4 + 1],
+                                     scanline[size_t(f) * 4 + 2], scanline[size_t(f) * 4 + 3]};
             out.setRgb(x, y, rgbeToLinear(rgbe) * invExposure, 1.0f);
         }
     }
@@ -413,7 +442,10 @@ void writeDecodedPixel(std::vector<float>& rgba, uint32_t w, uint32_t imgX, uint
                        int colInRow, uint16_t samples, uint16_t bits, uint16_t sampleFormat,
                        uint16_t photometric, bool linearize, const void* rowBase) {
     float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
-    if (photometric == PHOTOMETRIC_MINISBLACK || samples == 1) {
+    // OIIO/maketx sometimes tags RGB(A) TX as MINISBLACK. Only treat true
+    // greyscale (1 sample) or grey+alpha (2 samples) as luminance.
+    const bool grey = samples == 1 || (photometric == PHOTOMETRIC_MINISBLACK && samples <= 2);
+    if (grey) {
         r = g = b =
             decodeTiffChannel(rowBase, colInRow, 0, samples, bits, sampleFormat, linearize);
         if (samples > 1)
@@ -643,11 +675,9 @@ bool imageFormatIsHdr(const std::string& path) {
     return ext == "hdr" || ext == "exr" || ext == "rgbe" || ext == "pic";
 }
 
-bool loadImage(const std::string& path, Image& out, std::string& error, bool srgbColor) {
-    // When the TX cache is active, try to convert the source to a .tx mipmap
-    // before loading.  If conversion fails the original path is used as-is.
-    const std::string resolved = txCacheResolve(path);
-    const std::string& loadPath = resolved;
+namespace {
+
+bool loadImageDirect(const std::string& loadPath, Image& out, std::string& error, bool srgbColor) {
     const std::string ext = toLowerExtension(loadPath);
     if (ext == "hdr" || ext == "rgbe" || ext == "pic") return loadHdr(loadPath, out, error);
     if (ext == "exr") {
@@ -676,6 +706,26 @@ bool loadImage(const std::string& path, Image& out, std::string& error, bool srg
 #endif
     }
     return loadLdr(loadPath, out, error, srgbColor);
+}
+
+}  // namespace
+
+bool loadImage(const std::string& path, Image& out, std::string& error, bool srgbColor) {
+    // Linear HDR/EXR must not inherit a leftover MaterialX sRGB colourspace —
+    // that used to maketx --colorconvert the dome HDRI as if it were an 8-bit
+    // texture and the resulting .tx either failed to load or lost the HDR range.
+    const bool srcHdr = imageFormatIsHdr(path);
+    const std::string resolved =
+        srcHdr ? txCacheResolve(path, "Utility - Raw") : txCacheResolve(path);
+    const bool decodeSrgb = srgbColor && !srcHdr;
+    if (loadImageDirect(resolved, out, error, decodeSrgb)) return true;
+    if (resolved != path) {
+        logWarning("tx_cache: failed to load converted texture '" + resolved + "': " + error +
+                   " — falling back to " + path);
+        error.clear();
+        return loadImageDirect(path, out, error, decodeSrgb);
+    }
+    return false;
 }
 
 bool pathHasUdimToken(const QString& path) {

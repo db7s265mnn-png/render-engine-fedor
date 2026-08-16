@@ -674,7 +674,10 @@ public:
                 if (texture != envPath_ || !environment_) {
                     auto env = std::make_shared<EnvironmentMap>();
                     std::string error;
-                    if (!loadImage(texture.toStdString(), env->image, error)) {
+                    const std::string texPath = texture.toStdString();
+                    // HDRI is scene-referred linear. sRGB decode would crush a .tx
+                    // fallback, and TX conversion of .hdr is skipped in txCacheResolve.
+                    if (!loadImage(texPath, env->image, error, /*srgbColor=*/!imageFormatIsHdr(texPath))) {
                         context.reportError(this, QString::fromStdString(error));
                     } else {
                         env->path = texture.toStdString();

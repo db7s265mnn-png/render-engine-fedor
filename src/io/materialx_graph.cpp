@@ -221,7 +221,12 @@ std::shared_ptr<Image> loadTextureFromImageNode(const mx::NodePtr& imageNode, co
     // Arnold-style: colourspace drives TX maketx --colorconvert → ACEScg.
     std::string cs = inputValueString(imageNode, "colorspace");
     if (cs.empty()) cs = "ACES - ACEScg";
+    const std::string previousCs = txDefaultInputColorSpace();
     setTxDefaultInputColorSpace(cs);
+    struct CsRestore {
+        std::string prev;
+        ~CsRestore() { setTxDefaultInputColorSpace(prev); }
+    } restore{previousCs};
     // TX already baked to ACEScg / linear — do not apply LDR sRGB decode on top.
     // ACEScg / Raw authored spaces are also treated as linear.
     const bool skipSrgbDecode = txSkipColorConvert(cs) || txCacheActive();
