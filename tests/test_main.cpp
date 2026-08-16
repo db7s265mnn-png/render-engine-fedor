@@ -792,6 +792,24 @@ void testPhysicalSkyLight() {
     checkNear(dot(axis, horizon), 1.0f, 0.02f, "distant +Z points at the sun");
 
     params = PhysicalSkyParams{};
+    {
+        const float e0 = physicalSkySunIntensity(params);
+        check(std::isfinite(e0) && e0 > 1e-3f, "default sun irradiance is finite and usable");
+        const float Lz = luminance(physicalSkyRadianceAceScg(params, Vec3(0.0f, 1.0f, 0.0f)));
+        check(e0 > kPi * Lz * 0.25f, "default sun irradiance dominates the zenith sky");
+        PhysicalSkyParams skyOnly = params;
+        skyOnly.skyIntensity = 4.0f;
+        checkNear(physicalSkySunIntensity(skyOnly), e0, 1e-4f * (1.0f + e0),
+                  "sky intensity does not scale the sun");
+        PhysicalSkyParams scaled = params;
+        scaled.intensity = 2.0f;
+        scaled.sunIntensity = 3.0f;
+        checkNear(physicalSkySunIntensity(scaled), e0 * 6.0f, 1e-3f * (1.0f + e0 * 6.0f),
+                  "overall intensity and sun intensity scale the sun");
+        PhysicalSkyParams off = params;
+        off.sunIntensity = 0.0f;
+        checkNear(physicalSkySunIntensity(off), 0.0f, 1e-6f, "sun intensity 0 → no sun energy");
+    }
     Image baked;
     bakePhysicalSkyEnv(baked, params, 64, 32);
     check(baked.width() == 64 && baked.height() == 32, "bake writes the requested size");
@@ -853,9 +871,16 @@ void testPhysicalSkyLight() {
             if (scene->lights.size() >= 2) {
                 check(scene->lights[1].cameraSunDisc == 1, "sun is visible as a camera disc");
                 check(scene->lights[1].normalize == 1, "sun intensity is irradiance-like");
+                checkNear(scene->lights[0].intensity, 1.0f, 1e-4f, "default sky intensity is 1");
+                checkNear(scene->lights[1].intensity, physicalSkySunIntensity(PhysicalSkyParams{}), 1e-3f,
+                          "cooked sun uses overall × sun intensity");
                 const Vec3 z = normalize(transformVector(scene->lights[1].xform, Vec3(0.0f, 0.0f, 1.0f)));
                 const Vec3 expect = physicalSkySunDirection(PhysicalSkyParams{});
                 checkNear(dot(z, expect), 1.0f, 0.02f, "cooked sun +Z matches elevation/azimuth");
+                const SceneView view = scene->view();
+                const float domeW = lightFluxWeight(view, 0);
+                const float sunW = lightFluxWeight(view, 1);
+                check(sunW > domeW * 0.05f, "sun NEE weight is not crushed by the disc solid angle");
             }
             check(!scene->envMaps.empty() && scene->envMaps[0] && !scene->envMaps[0]->image.empty(),
                   "dome has a baked sky map");
@@ -889,6 +914,36 @@ void testPhysicalSkyLight() {
         check(scene && scene->lights.size() == 1 && scene->lights[0].type == kLightDistant &&
                   scene->lights[0].cameraSunDisc == 1,
               "sky disabled leaves only the sun");
+    }
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (sky) {
+            sky->setParameterValue("intensity", 2.0);
+            sky->setParameterValue("skyintensity", 3.0);
+            sky->setParameterValue("sunintensity", 4.0);
+        }
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene && scene->lights.size() == 2, "overall/sky/sun intensity cooks both lights");
+        if (scene && scene->lights.size() >= 2) {
+            checkNear(scene->lights[0].intensity, 6.0f, 1e-4f, "dome intensity = overall × sky intensity");
+            PhysicalSkyParams expect;
+            expect.intensity = 2.0f;
+            expect.sunIntensity = 4.0f;
+            checkNear(scene->lights[1].intensity, physicalSkySunIntensity(expect), 1e-3f,
+                      "sun intensity = overall × sun intensity × physical scale");
+            PhysicalSkyParams skyOnly;
+            skyOnly.intensity = 2.0f;
+            skyOnly.skyIntensity = 3.0f;
+            skyOnly.sunIntensity = 4.0f;
+            checkNear(physicalSkySunIntensity(skyOnly), physicalSkySunIntensity(expect), 1e-4f,
+                      "sky intensity is not folded into the sun");
+        }
     }
     {
         NodeGraph graph;

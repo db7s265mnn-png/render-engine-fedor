@@ -179,14 +179,17 @@ Vec3 physicalSkySunColorAceScg(const PhysicalSkyParams& p) {
 
 float physicalSkySunIntensity(const PhysicalSkyParams& p) {
     HosekEval eval(p);
-    const Vec3 rgb = eval.sunDiscLinearSrgb();
-    const float halfAngle = 0.5f * radians(0.53f);
-    const float omega = kTwoPi * (1.0f - std::cos(halfAngle));
-    const float irr = srMax(0.0f, luminance(rgb) * omega);
-    // Distant lights with normalize=1 treat intensity as irradiance. Hosek's
-    // solar function is in SI-ish units; this keeps intensity=1 in a useful range
-    // next to the RGB sky dataset (tweak with sunIntensity).
-    return srMax(0.0f, p.intensity * p.sunIntensity * irr * (1.0f / 80.0f));
+    // Hosek RGB sky and the spectral solar function are different unit systems.
+    // Mixing SI solar irradiance into the RGB dome made the sun a dim fill.
+    // Keep solar only for chromaticity; match sun irradiance to the RGB sky so
+    // intensity=1 / sunIntensity=1 is a clear-day sun that dominates the dome.
+    const Vec3 skyAvg = linearSrgbToAcescg(vmax(Vec3(0.0f), eval.averageSkyLinearSrgb()));
+    const float Lsky = srMax(1e-4f, luminance(skyAvg));
+    const float t = clampf((clampf(p.turbidity, 1.0f, 10.0f) - 1.0f) / 9.0f, 0.0f, 1.0f);
+    // Direct/global illuminance: ~8× at turbidity 1 (arctic), ~2× at 10 (hazy).
+    const float k = lerpf(8.0f, 2.0f, t);
+    const float irr = k * kPi * Lsky;
+    return srMax(0.0f, p.intensity * p.sunIntensity * irr);
 }
 
 void bakePhysicalSkyEnv(Image& image, const PhysicalSkyParams& p, int width, int height) {

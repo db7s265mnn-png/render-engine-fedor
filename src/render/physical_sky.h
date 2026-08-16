@@ -13,11 +13,12 @@ struct PhysicalSkyParams {
     Vec3 skyTint{1.0f, 1.0f, 1.0f};
     float elevationDeg = 45.0f;  // Solar altitude: 0 = horizon, 90 = zenith
     float azimuthDeg = 90.0f;    // 0 = −Z, 90 = +X (Y-up, Karma/Solaris)
-    float intensity = 1.0f;
+    float intensity = 1.0f;      // overall scale for sky and sun
+    float skyIntensity = 1.0f;   // extra sky-dome multiplier
     float exposure = 0.0f;
     bool enableSky = true;
     bool enableSun = true;
-    float sunIntensity = 1.0f;
+    float sunIntensity = 1.0f;   // extra sun multiplier
     Vec3 sunTint{1.0f, 1.0f, 1.0f};
     float sunSizeDeg = 0.53f;  // Karma Angular Size; brightness independent (normalize)
     bool computeGroundColor = true;
@@ -39,7 +40,8 @@ Vec3 physicalSkyRadianceAceScg(const PhysicalSkyParams& p, Vec3 dirLocal);
 Vec3 physicalSkySunColorAceScg(const PhysicalSkyParams& p);
 
 // Distant-light intensity (irradiance-like when normalize=1). Includes the
-// shared intensity and sunIntensity; exposure stays on LightData.
+// overall intensity and sunIntensity; skyIntensity does not apply. Exposure
+// stays on LightData. Magnitude is in the same RGB-Hosek units as the dome.
 float physicalSkySunIntensity(const PhysicalSkyParams& p);
 
 void bakePhysicalSkyEnv(Image& image, const PhysicalSkyParams& p, int width, int height);

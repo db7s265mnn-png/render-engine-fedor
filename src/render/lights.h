@@ -427,6 +427,9 @@ SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
         case kLightDistant: {
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
             if (halfAngle < 1e-4f) return intens;
+            // normalize=1: intensity is irradiance (Karma / Physical Sky). Multiplying
+            // by the disc solid angle underweights the sun vs a dome by ~1/ω (~15000×).
+            if (l.normalize) return intens;
             return intens * srMax(1e-6f, kTwoPi * (1.0f - cosf(halfAngle)));
         }
         case kLightPoint:

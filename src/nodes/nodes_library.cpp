@@ -741,7 +741,8 @@ public:
                          .withTooltip("Uncheck to turn this light off without deleting the node"));
         addParameter(Parameter::makeFloat("intensity", "Intensity", 1.0, 0.0, 100.0, false)
                          .withGroup("Light")
-                         .withTooltip("Scales both the sky dome and the sun"));
+                         .withTooltip("Overall scale for both the sky dome and the sun.\n"
+                                      "Sky Intensity and Sun Intensity are extra multipliers"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -10.0, 10.0)
                          .withGroup("Light")
                          .withTooltip("2^exposure multiplier on sky and sun"));
@@ -784,6 +785,10 @@ public:
         addParameter(Parameter::makeBool("enablesky", "Enable Sky Light", true)
                          .withGroup("Sky")
                          .withTooltip("Creates the sky dome. Off keeps the sun only"));
+        addParameter(Parameter::makeFloat("skyintensity", "Sky Intensity", 1.0, 0.0, 100.0, false)
+                         .withGroup("Sky")
+                         .withVisibleWhen("enablesky")
+                         .withTooltip("Extra multiplier on the sky dome only"));
 
         addParameter(Parameter::makeBool("enablesun", "Enable Sun Light", true)
                          .withGroup("Sun")
@@ -815,6 +820,7 @@ public:
         params.elevationDeg = float(floatValue("elevation", 45.0));
         params.azimuthDeg = float(floatValue("azimuth", 90.0));
         params.intensity = float(floatValue("intensity", 1.0));
+        params.skyIntensity = float(floatValue("skyintensity", 1.0));
         params.exposure = float(floatValue("exposure", 0.0));
         params.enableSky = boolValue("enablesky", true);
         params.enableSun = boolValue("enablesun", true);
@@ -863,7 +869,7 @@ public:
         LightData dome;
         dome.type = kLightDome;
         dome.color = params.skyTint;
-        dome.intensity = params.intensity;
+        dome.intensity = params.intensity * params.skyIntensity;
         dome.exposure = params.exposure;
         dome.shadowEnable = shadows;
         dome.contributeCaustics = caustics;
