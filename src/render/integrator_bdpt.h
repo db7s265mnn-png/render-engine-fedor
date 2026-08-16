@@ -866,7 +866,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             const bool primary = t == 2;
             if (primary && (!settings.envVisibleCamera || !l.visibleCamera)) break;
             const Vec3 dirW = -v.wo;
-            Vec3 Le = domeRadiance(scene, l, dirW);
+            Vec3 Le = domeRadiance(scene, l, dirW, /*nearestTexel=*/t > 2);
             if (!isBlack(Le)) {
                 float w = 1.0f;
                 const Vert& prev = eye[t - 2];

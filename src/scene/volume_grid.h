@@ -65,8 +65,8 @@ public:
     float majorant() const { return majorant_; }
 
     // Piecewise min/max occupancy (supervoxels). Empty / constant cells skip
-    // voxel sampling during Woodcock walks. Fog only. Cell size is world-space
-    // (floored so a dense VDB does not get 8-voxel micro-cells).
+    // voxel sampling during Woodcock walks. Fog only. Cell size tracks OpenVDB
+    // leaves (~8 voxels) so Λ stays tight.
     bool hasMajorantGrid() const { return majNx_ > 0 && int(majMax_.size()) == majNx_ * majNy_ * majNz_; }
     float majorantCellSize() const { return majCell_; }
     int majorantDimX() const { return majNx_; }

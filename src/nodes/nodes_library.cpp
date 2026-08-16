@@ -1094,8 +1094,9 @@ public:
                          .withGroup("Sampling")
                          .withTooltip("Caps eye-path sample contributions in linear pixel radiance "
                                       "(Arnold Direct Clamp). Applies to PT/BDPT eye paths, NEE "
-                                      "(including the first volume scatter on the lit side of fog), "
+                                      "(including volume scatter from area lights and HDRI / Physical Sky), "
                                       "MNEE, and photon gather.\n"
+                                      "The camera-facing sun/sky (primary env miss) is not clamped.\n"
                                       "Default 10; ~100 is a soft look. 0 disables (unbiased)."));
         addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Sampling")

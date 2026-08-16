@@ -509,7 +509,7 @@ inline Vec3 traceRadianceBdptSpectral(
             const bool primary = t == 2;
             if (primary && (!settings.envVisibleCamera || !l.visibleCamera)) break;
             const Vec3 dirW = -v.wo;
-            const Vec3 Le = domeRadiance(scene, l, dirW);
+            const Vec3 Le = domeRadiance(scene, l, dirW, /*nearestTexel=*/t > 2);
             if (!isBlack(Le)) {
                 float w = 1.0f;
                 const Vert& prev = eye[t - 2];

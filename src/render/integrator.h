@@ -952,10 +952,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #endif
                         if (med->type != 2 && ls.distance < 1.0e7f)
                             contrib = contrib * mediumShadowTr(*med, ls.distance);
-                        // Do not clamp HDRI / physical-sky / distant sun NEE — Direct Clamp
-                        // on those samples systematically underexposes the sun (biased dark).
-                        if (!lightIsInfinite(scene.lights[li]))
-                            contrib = clampContribution(contrib, settings.clampDirect);
+                        contrib = clampContribution(contrib, settings.clampDirect);
                         volDirect += contrib;
                     }
                     radiance += volDirect * (1.0f / (float(nLight) * pNee));
@@ -1001,7 +998,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 if (!(causticSuffix && !lightContributesCaustics(dome))) {
                 const bool primary = depth == 0 && passThrough == 0;
                 if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
-                    Vec3 envL = domeRadiance(scene, dome, direction);
+                    Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
                         if (!isBlack(envL)) {
                         float weight = 1.0f;
                         if (!specularBounce) {
@@ -1011,8 +1008,10 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         Vec3 contrib = throughput * envL * weight;
-                        // HDRI / physical-sky sun lives in the env map — do not
-                        // Direct-Clamp it (that is the "weak HDR sun" bias).
+                        // Primary miss keeps the full sun. After a bounce (including
+                        // volume phase→sky) bilinear-vs-PDF mismatch is a firefly —
+                        // nearest Le + Direct Clamp, same as surface NEE.
+                        if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
                         radiance += contrib;
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active())

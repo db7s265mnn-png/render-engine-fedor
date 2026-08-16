@@ -200,13 +200,16 @@ SR_INL SR_HD Vec3 areaLightNormal(const LightData& l) {
 }
 
 // Radiance of the dome light for a world space direction.
-SR_INL SR_HD Vec3 domeRadiance(const SceneView& scene, const LightData& l, Vec3 dirWorld) {
+// `nearestTexel`: must match `envPdf` (NEE / MIS after a bounce). Camera rays
+// keep bilinear so a 1-pixel sun disc does not look like a stair.
+SR_INL SR_HD Vec3 domeRadiance(const SceneView& scene, const LightData& l, Vec3 dirWorld,
+                               bool nearestTexel = false) {
     Vec3 tint = l.emittedRadiance();
     if (l.envIndex >= 0 && l.envIndex < scene.envMapCount) {
         const EnvMapView& env = scene.envMaps[l.envIndex];
         if (env.valid()) {
             const Vec3 dirLocal = normalize(transformVector(l.xformInv, dirWorld));
-            return tint * envLookup(env, dirLocal);
+            return tint * (nearestTexel ? envLookupNearest(env, dirLocal) : envLookup(env, dirLocal));
         }
     }
     return tint;

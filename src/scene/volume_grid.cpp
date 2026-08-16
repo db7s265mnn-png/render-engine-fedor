@@ -125,35 +125,18 @@ void VolumeGrid::rebuildMajorantGrid() {
     if (kind_ != VolumeGridKind::Fog || !valid() || !bounds_.valid()) return;
 
     constexpr int kHaloVox = 2;
-    constexpr int kTargetCellsLong = 32;
-    constexpr int kMaxCellsAxis = 48;
     const Vec3 ext = bounds_.hi - bounds_.lo;
     const float longAxis = srMax(ext.x, srMax(ext.y, ext.z));
     const int voxelsLong = srMax(1, int(std::lround(double(longAxis / srMax(voxelSize_, 1e-8f)))));
     int sv = 8;
     if (voxelsLong < 64) sv = 4;
     if (voxelsLong < 24) sv = 2;
-    // Never finer than 8 voxels (tight on coarse grids), never smaller in world
-    // space than longAxis/32 (high-res VDBs would otherwise DDA hundreds of cells).
-    const float cellVox = srMax(voxelSize_ * float(sv), srMax(voxelSize_, 1e-6f));
-    const float cellWorld = longAxis / float(kTargetCellsLong);
-    majCell_ = srMax(cellVox, cellWorld);
+    // OpenVDB leaves are 8³ — keep majorants that tight (PBRT: smaller Λ is faster).
+    majCell_ = srMax(voxelSize_ * float(sv), srMax(voxelSize_, 1e-6f));
     majOrigin_ = bounds_.lo;
     majNx_ = srMax(1, int(std::ceil(double(ext.x / majCell_))));
     majNy_ = srMax(1, int(std::ceil(double(ext.y / majCell_))));
     majNz_ = srMax(1, int(std::ceil(double(ext.z / majCell_))));
-    if (majNx_ > kMaxCellsAxis || majNy_ > kMaxCellsAxis || majNz_ > kMaxCellsAxis) {
-        majNx_ = srMin(majNx_, kMaxCellsAxis);
-        majNy_ = srMin(majNy_, kMaxCellsAxis);
-        majNz_ = srMin(majNz_, kMaxCellsAxis);
-        majCell_ = srMax(ext.x / float(majNx_), srMax(ext.y / float(majNy_), ext.z / float(majNz_)));
-        majNx_ = srMax(1, int(std::ceil(double(ext.x / majCell_))));
-        majNy_ = srMax(1, int(std::ceil(double(ext.y / majCell_))));
-        majNz_ = srMax(1, int(std::ceil(double(ext.z / majCell_))));
-        majNx_ = srMin(majNx_, kMaxCellsAxis);
-        majNy_ = srMin(majNy_, kMaxCellsAxis);
-        majNz_ = srMin(majNz_, kMaxCellsAxis);
-    }
     const int n = majNx_ * majNy_ * majNz_;
     majMin_.assign(size_t(n), 1.0e30f);
     majMax_.assign(size_t(n), 0.0f);
