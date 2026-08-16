@@ -127,8 +127,8 @@ struct Material {
     int hasVolumeShader = 0;
     float volumeDensity = 1.0f;
     float volumeAnisotropy = 0.0f;  // HG g
-    Vec3 volumeAbsorption{0.5f, 0.5f, 0.5f};
-    Vec3 volumeScattering{0.5f, 0.5f, 0.5f};
+    Vec3 volumeAbsorption{0.0f, 0.0f, 0.0f};
+    Vec3 volumeScattering{1.0f, 1.0f, 1.0f};
     Vec3 volumeEmission{0.0f, 0.0f, 0.0f};
     float volumeEmissionStrength = 0.0f;
 

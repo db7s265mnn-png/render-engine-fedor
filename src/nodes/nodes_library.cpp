@@ -446,15 +446,25 @@ public:
                 if (!xml.isEmpty()) setParameterValue("mtlx", xml);
             }
 
-            MaterialXEvalResult evaluated = evaluateMaterialXDocument(xml, context.sceneDirectory);
-            if (!evaluated.ok) {
-                if (!evaluated.error.isEmpty()) context.reportError(this, evaluated.error);
-                // Fallback constant material so the scene still renders.
-                evaluated.material = Material{};
-                evaluated.material.baseColor = Vec3(0.8f);
-                evaluated.material.roughness = 0.35f;
-                evaluated.procedurals.clear();
-                evaluated.proceduralImages.clear();
+            // Density / filter tweaks on an upstream VDB dirty this node even when
+            // the MaterialX document is unchanged. Reuse the last eval so we do not
+            // re-parse XML (or reload textures) on every slider tick.
+            MaterialXEvalResult evaluated;
+            const bool cacheHit = evalCacheValid_ && cachedXml_ == xml &&
+                                  cachedSearchDir_ == context.sceneDirectory;
+            if (cacheHit) {
+                evaluated = cachedEval_;
+            } else {
+                evaluated = evaluateMaterialXDocument(xml, context.sceneDirectory);
+                if (!evaluated.ok) {
+                    if (!evaluated.error.isEmpty()) context.reportError(this, evaluated.error);
+                    // Fallback constant material so the scene still renders.
+                    evaluated.material = Material{};
+                    evaluated.material.baseColor = Vec3(0.8f);
+                    evaluated.material.roughness = 0.35f;
+                    evaluated.procedurals.clear();
+                    evaluated.proceduralImages.clear();
+                }
             }
             // Legacy spectralMetalPreset → conductor_eta / conductor_k in MaterialX.
             const int legacyPreset = intValue("spectralmetalpreset", 0);
@@ -532,12 +542,25 @@ public:
                 prim.procedurals = evaluated.procedurals;
                 prim.proceduralImages = evaluated.proceduralImages;
             }
+
+            cachedXml_ = xml;
+            cachedSearchDir_ = context.sceneDirectory;
+            cachedEval_ = std::move(evaluated);
+            evalCacheValid_ = true;
         } catch (const std::exception& e) {
+            evalCacheValid_ = false;
             context.reportError(this, QString("MaterialX cook failed: %1").arg(e.what()));
         } catch (...) {
+            evalCacheValid_ = false;
             context.reportError(this, "MaterialX cook failed: unknown error");
         }
     }
+
+private:
+    QString cachedXml_;
+    QString cachedSearchDir_;
+    MaterialXEvalResult cachedEval_;
+    bool evalCacheValid_ = false;
 };
 
 // ---------------------------------------------------------------------------

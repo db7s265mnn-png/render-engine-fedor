@@ -961,8 +961,8 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         QVector<MtlxInput> out = {
             {"density", "float", "1", {}},
             {"anisotropy", "float", "0", {}},
-            {"absorption", "color3", "0.5, 0.5, 0.5", {}},
-            {"scattering", "color3", "0.5, 0.5, 0.5", {}},
+            {"absorption", "color3", "0, 0, 0", {}},
+            {"scattering", "color3", "1, 1, 1", {}},
             {"emission", "float", "0", {}},
             {"emission_color", "color3", "1, 1, 1", {}},
         };
@@ -1047,8 +1047,8 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
     } else if (category == "standard_volume") {
         inputs.push_back({"density", "float", "1", {}});
         inputs.push_back({"anisotropy", "float", "0", {}});
-        inputs.push_back({"absorption", "color3", "0.5, 0.5, 0.5", {}});
-        inputs.push_back({"scattering", "color3", "0.5, 0.5, 0.5", {}});
+        inputs.push_back({"absorption", "color3", "0, 0, 0", {}});
+        inputs.push_back({"scattering", "color3", "1, 1, 1", {}});
         inputs.push_back({"emission", "float", "0", {}});
         inputs.push_back({"emission_color", "color3", "1, 1, 1", {}});
     }

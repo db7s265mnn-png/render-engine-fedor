@@ -4641,6 +4641,38 @@ void testNgonTriangulateAndVdb() {
         check(volEval.material.hasVolumeShader == 1, "volumeshader alias sets hasVolumeShader");
         check(std::fabs(volEval.material.volumeDensity - 4.0f) < 1e-4f, "long-port volume density");
         check(std::fabs(volEval.material.volumeAnisotropy + 0.2f) < 1e-4f, "long-port volume anisotropy");
+        check(std::fabs(volEval.material.volumeAbsorption.x) < 1e-4f,
+              "omitted absorption defaults to 0 (not 0.5)");
+        check(std::fabs(volEval.material.volumeScattering.x - 0.9f) < 1e-3f, "authored scattering kept");
+    }
+    {
+        // Default standard_volume (no absorption/scattering) must not be darker than
+        // the implicit fog fallback: absorption 0, scattering 1 (white, no extra σa).
+        const QString volXmlDefaults =
+            QStringLiteral(
+                "<materialx version=\"1.38\">"
+                "  <standard_surface name=\"ss\" type=\"surfaceshader\">"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />"
+                "  </standard_surface>"
+                "  <standard_volume name=\"sv\" type=\"volumeshader\">"
+                "    <input name=\"density\" type=\"float\" value=\"1\" />"
+                "  </standard_volume>"
+                "  <surfacematerial name=\"surface\" type=\"material\">"
+                "    <input name=\"surface\" type=\"surfaceshader\" nodename=\"ss\" />"
+                "    <input name=\"volume\" type=\"volumeshader\" nodename=\"sv\" />"
+                "  </surfacematerial>"
+                "</materialx>");
+        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXmlDefaults, QString());
+        check(volEval.ok, "MaterialX volume (default abs/scatter) evaluates");
+        check(volEval.material.hasVolumeShader == 1, "default volume still sets hasVolumeShader");
+        check(std::fabs(volEval.material.volumeAbsorption.x) < 1e-4f &&
+                  std::fabs(volEval.material.volumeAbsorption.y) < 1e-4f &&
+                  std::fabs(volEval.material.volumeAbsorption.z) < 1e-4f,
+              "default standard_volume absorption is 0");
+        check(std::fabs(volEval.material.volumeScattering.x - 1.0f) < 1e-4f &&
+                  std::fabs(volEval.material.volumeScattering.y - 1.0f) < 1e-4f &&
+                  std::fabs(volEval.material.volumeScattering.z - 1.0f) < 1e-4f,
+              "default standard_volume scattering is 1");
     }
 
 #if SOLSTICE_HAVE_OPENVDB

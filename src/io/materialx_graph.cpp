@@ -95,8 +95,11 @@ mx::DocumentPtr makeLibraryDocument(std::string& error) {
 }
 
 mx::DocumentPtr loadUserDocument(const QString& xml, std::string& error) {
-    auto doc = makeLibraryDocument(error);
-    if (!doc) return nullptr;
+    // Parse authored XML only — do NOT import stdlib/pbrlib on every cook.
+    // importLibrary copies the whole MaterialX library and is the dominant cost when
+    // dragging volume density / standard_volume sliders. Evaluation only reads
+    // authored inputs (standard_surface / standard_volume values and wires).
+    auto doc = mx::createDocument();
     try {
         mx::readFromXmlString(doc, xml.toStdString());
     } catch (const std::exception& e) {
@@ -683,8 +686,8 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
     add("standard_volume", "volumeshader", "PBR / Shading",
         {{"density", "float", "1"},
          {"anisotropy", "float", "0"},
-         {"absorption", "color3", "0.5, 0.5, 0.5"},
-         {"scattering", "color3", "0.5, 0.5, 0.5"},
+         {"absorption", "color3", "0, 0, 0"},
+         {"scattering", "color3", "1, 1, 1"},
          {"emission", "float", "0"},
          {"emission_color", "color3", "1, 1, 1"}});
     // Arnold-like ray switch (surfaceshader). Incoming ray type selects the port
@@ -1204,7 +1207,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
             result.material.volumeDensity = readNodeFloat(volNode, "density", 1.0f);
             result.material.volumeAnisotropy = readNodeFloat(volNode, "anisotropy", 0.0f);
             result.material.volumeEmissionStrength = readNodeFloat(volNode, "emission", 0.0f);
-            Vec3 absCol(0.5f), scaCol(0.5f), emCol(1.0f);
+            Vec3 absCol(0.0f), scaCol(1.0f), emCol(1.0f);
             parseColor3(inputValueString(volNode, "absorption"), absCol);
             parseColor3(inputValueString(volNode, "scattering"), scaCol);
             parseColor3(inputValueString(volNode, "emission_color"), emCol);
