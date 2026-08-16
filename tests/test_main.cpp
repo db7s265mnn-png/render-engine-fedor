@@ -4586,9 +4586,10 @@ void testNgonTriangulateAndVdb() {
     check(quad.wireIndices.size() == 8, "wire cage: 4 edges × 2 indices");
     check(quad.wirePositions.size() == 4, "wire cage verts stay cage-sized");
 
-    // MaterialX volumeshader → standard_volume coefficients for Fog routing.
+    // MaterialX volume → standard_volume coefficients for Fog routing.
+    // Accepts Solstice short ports (surface/volume) and MaterialX long names.
     {
-        const QString volXml =
+        const QString volXmlShort =
             QStringLiteral(
                 "<materialx version=\"1.38\">"
                 "  <standard_surface name=\"ss\" type=\"surfaceshader\">"
@@ -4599,20 +4600,47 @@ void testNgonTriangulateAndVdb() {
                 "    <input name=\"anisotropy\" type=\"float\" value=\"0.3\" />"
                 "    <input name=\"absorption\" type=\"color3\" value=\"0.1, 0.2, 0.3\" />"
                 "    <input name=\"scattering\" type=\"color3\" value=\"0.7, 0.6, 0.5\" />"
-                "    <input name=\"emission\" type=\"float\" value=\"0.0\" />"
+                "    <input name=\"emission\" type=\"float\" value=\"1.5\" />"
+                "    <input name=\"emission_color\" type=\"color3\" value=\"0.2, 0.4, 0.8\" />"
+                "  </standard_volume>"
+                "  <surfacematerial name=\"surface\" type=\"material\">"
+                "    <input name=\"surface\" type=\"surfaceshader\" nodename=\"ss\" />"
+                "    <input name=\"displacement\" type=\"displacementshader\" />"
+                "    <input name=\"volume\" type=\"volumeshader\" nodename=\"sv\" />"
+                "  </surfacematerial>"
+                "</materialx>");
+        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXmlShort, QString());
+        check(volEval.ok, "MaterialX volume (short ports) evaluates");
+        check(volEval.material.hasVolumeShader == 1, "volume port sets hasVolumeShader");
+        check(std::fabs(volEval.material.volumeDensity - 2.5f) < 1e-4f, "volume density from MTLX");
+        check(std::fabs(volEval.material.volumeAnisotropy - 0.3f) < 1e-4f, "volume anisotropy from MTLX");
+        check(std::fabs(volEval.material.volumeAbsorption.x - 0.1f) < 1e-3f, "volume absorption R");
+        check(std::fabs(volEval.material.volumeScattering.x - 0.7f) < 1e-3f, "volume scattering R");
+        check(std::fabs(volEval.material.volumeEmissionStrength - 1.5f) < 1e-4f, "volume emission strength");
+        check(std::fabs(volEval.material.volumeEmission.z - 0.8f) < 1e-3f, "volume emission_color B");
+    }
+    {
+        const QString volXmlLong =
+            QStringLiteral(
+                "<materialx version=\"1.38\">"
+                "  <standard_surface name=\"ss\" type=\"surfaceshader\">"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.1, 0.1, 0.1\" />"
+                "  </standard_surface>"
+                "  <standard_volume name=\"sv\" type=\"volumeshader\">"
+                "    <input name=\"density\" type=\"float\" value=\"4.0\" />"
+                "    <input name=\"anisotropy\" type=\"float\" value=\"-0.2\" />"
+                "    <input name=\"scattering\" type=\"color3\" value=\"0.9, 0.8, 0.7\" />"
                 "  </standard_volume>"
                 "  <surfacematerial name=\"surface\" type=\"material\">"
                 "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\" />"
                 "    <input name=\"volumeshader\" type=\"volumeshader\" nodename=\"sv\" />"
                 "  </surfacematerial>"
                 "</materialx>");
-        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXml, QString());
-        check(volEval.ok, "MaterialX volume document evaluates");
-        check(volEval.material.hasVolumeShader == 1, "volumeshader sets hasVolumeShader");
-        check(std::fabs(volEval.material.volumeDensity - 2.5f) < 1e-4f, "volume density from MTLX");
-        check(std::fabs(volEval.material.volumeAnisotropy - 0.3f) < 1e-4f, "volume anisotropy from MTLX");
-        check(std::fabs(volEval.material.volumeAbsorption.x - 0.1f) < 1e-3f, "volume absorption R");
-        check(std::fabs(volEval.material.volumeScattering.x - 0.7f) < 1e-3f, "volume scattering R");
+        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXmlLong, QString());
+        check(volEval.ok, "MaterialX volume (long ports) evaluates");
+        check(volEval.material.hasVolumeShader == 1, "volumeshader alias sets hasVolumeShader");
+        check(std::fabs(volEval.material.volumeDensity - 4.0f) < 1e-4f, "long-port volume density");
+        check(std::fabs(volEval.material.volumeAnisotropy + 0.2f) < 1e-4f, "long-port volume anisotropy");
     }
 
 #if SOLSTICE_HAVE_OPENVDB

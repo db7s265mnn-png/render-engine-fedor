@@ -45,8 +45,10 @@ Houdini-like VDB SOPs. Output of `vdbfrompolygons` is a **Volume prim only** (no
 | **SDF to Polygons (DCSDD)** (`sdftopolygons_dcsdd`) | Dual Contouring of Signed Distance Data (Carrera et al. 2026) |
 
 CPU path tracer renders SDF level sets by sphere tracing and Fog volumes with delta tracking.
-Assign a MaterialX graph with `surfacematerial.volumeshader` → `standard_volume` (density,
-absorption, scattering, emission, anisotropy) for volume shading; the surface shader shades SDF hits.
+Assign a MaterialX graph with `surfacematerial.volume` → `standard_volume` (density, anisotropy,
+absorption, scattering, emission, emission_color) for volume shading; the surface shader shades SDF
+hits. Material container ports are short names (`surface`, `displacement`, `volume`); MaterialX
+long names (`surfaceshader`, `displacementshader`, `volumeshader`) still resolve when loading XML.
 
 ## Utility
 

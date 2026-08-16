@@ -67,7 +67,9 @@ public:
         addParameter(Parameter::makeMenu("filter", "Sample Filter",
                                          {"Nearest", "Linear", "Quadratic"}, 1)
                          .withTooltip("Voxel reconstruction filter when sampling the VDB.\n"
-                                      "Nearest = blocky; Linear = trilinear; Quadratic = smoothest.\n"
+                                      "Nearest = 1 tap (blocky); Linear = 8-tap trilinear;\n"
+                                      "Quadratic = 27-tap triquadratic (smoothest, ~3–4× slower per\n"
+                                      "sample — costly under fog delta tracking / SDF gradients).\n"
                                       "Changing filter does not rebuild the grid."));
         addParameter(Parameter::makeString("primname", "Prim Name", "vdb")
                          .withTooltip("Leaf name for the output VDB prim"));

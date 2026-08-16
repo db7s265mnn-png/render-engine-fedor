@@ -188,6 +188,13 @@ mx::NodePtr resolveConnectedNode(const mx::NodePtr& node, const std::string& inp
     return input->getConnectedNode();
 }
 
+// Solstice UI short names (surface / displacement / volume) plus MaterialX long names.
+mx::NodePtr resolveMaterialPort(const mx::NodePtr& surface, const std::string& shortName,
+                                const std::string& mtlxName) {
+    if (mx::NodePtr n = resolveConnectedNode(surface, shortName)) return n;
+    return resolveConnectedNode(surface, mtlxName);
+}
+
 std::string inputValueString(const mx::NodePtr& node, const std::string& inputName) {
     if (!node) return {};
     mx::InputPtr input = node->getInput(inputName);
@@ -670,9 +677,9 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"blend", "float", "0.1"},
          {"default", "color3", "0.2, 0.5, 0.8"}});
     add("surfacematerial", "material", "PBR / Shading",
-        {{"surfaceshader", "surfaceshader", {}},
-         {"displacementshader", "displacementshader", {}},
-         {"volumeshader", "volumeshader", {}}});
+        {{"surface", "surfaceshader", {}},
+         {"displacement", "displacementshader", {}},
+         {"volume", "volumeshader", {}}});
     add("standard_volume", "volumeshader", "PBR / Shading",
         {{"density", "float", "1"},
          {"anisotropy", "float", "0"},
@@ -770,18 +777,23 @@ QVector<MaterialXNodeCatalogEntry> listMaterialXNodeCatalog() {
         entries.push_back(entry);
     }
 
-    // Solstice / Arnold extensions that are not in the stock MaterialX libs:
-    // merge so they still appear in Add Node when libraries load successfully.
+    // Solstice / Arnold extensions that are not in the stock MaterialX libs
+    // (or need Solstice short port names): merge/replace so Add Node stays complete.
     {
         const QVector<MaterialXNodeCatalogEntry> extras = fallbackMaterialXCatalog();
-        QSet<QString> have;
-        for (const MaterialXNodeCatalogEntry& e : entries) have.insert(e.category);
+        QHash<QString, int> indexByCategory;
+        for (int i = 0; i < entries.size(); ++i) indexByCategory.insert(entries[i].category, i);
         for (const MaterialXNodeCatalogEntry& e : extras) {
             if (e.category == QStringLiteral("ray_switch_shader") ||
-                e.category == QStringLiteral("ray_switch")) {
-                if (!have.contains(e.category)) {
+                e.category == QStringLiteral("ray_switch") ||
+                e.category == QStringLiteral("surfacematerial") ||
+                e.category == QStringLiteral("standard_volume")) {
+                const auto it = indexByCategory.constFind(e.category);
+                if (it == indexByCategory.constEnd()) {
+                    indexByCategory.insert(e.category, entries.size());
                     entries.push_back(e);
-                    have.insert(e.category);
+                } else {
+                    entries[*it] = e; // prefer Solstice port/param layout
                 }
             }
         }
@@ -912,7 +924,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         }
 
         mx::NodePtr ss;
-        if (surface) ss = resolveConnectedNode(surface, "surfaceshader");
+        if (surface) ss = resolveMaterialPort(surface, "surface", "surfaceshader");
         if (!ss) {
             for (const mx::NodePtr& node : doc->getNodes()) {
                 if (node->getCategory() == "standard_surface") {
@@ -1121,8 +1133,9 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         bindSlot("normal", result.normalTexture, result.material.normalProc, true);
         bindSlot("subsurface_color", result.subsurfaceTexture, result.material.subsurfaceProc);
 
-        // MaterialX surfacematerial.displacementshader → height/scale/zero/autobump.
-        mx::NodePtr dispNode = surface ? resolveConnectedNode(surface, "displacementshader") : nullptr;
+        // surfacematerial.displacement / displacementshader → height/scale/zero/autobump.
+        mx::NodePtr dispNode =
+            surface ? resolveMaterialPort(surface, "displacement", "displacementshader") : nullptr;
         if (dispNode && dispNode->getCategory() == "displacement") {
             result.material.displacementScale = readNodeFloat(dispNode, "scale", 1.0f);
             result.material.displacementZeroValue = readNodeFloat(dispNode, "zero_value", 0.5f);
@@ -1184,8 +1197,8 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                     ", autobump=" + std::to_string(result.material.autobump) + ")");
         }
 
-        // MaterialX surfacematerial.volumeshader → standard_volume params.
-        mx::NodePtr volNode = surface ? resolveConnectedNode(surface, "volumeshader") : nullptr;
+        // surfacematerial.volume / volumeshader → standard_volume params.
+        mx::NodePtr volNode = surface ? resolveMaterialPort(surface, "volume", "volumeshader") : nullptr;
         if (volNode && (volNode->getCategory() == "standard_volume" || volNode->getType() == "volumeshader")) {
             result.material.hasVolumeShader = 1;
             result.material.volumeDensity = readNodeFloat(volNode, "density", 1.0f);
@@ -1198,7 +1211,8 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
             result.material.volumeAbsorption = absCol;
             result.material.volumeScattering = scaCol;
             result.material.volumeEmission = emCol;
-            logInfo("MaterialX: volume shader (density=" + std::to_string(result.material.volumeDensity) + ")");
+            logInfo("MaterialX: volume shader (density=" + std::to_string(result.material.volumeDensity) +
+                    ", anisotropy=" + std::to_string(result.material.volumeAnisotropy) + ")");
         }
 
         // Drop dangling roots if a compile failed mid-way.

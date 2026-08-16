@@ -207,7 +207,7 @@ bool isKnownMaterialXCategory(const QString& category) {
     if (findCatalogEntry(category)) return true;
     // Keep previously hardcoded essentials even if libraries failed to load.
     return category == "standard_surface" || category == "ray_switch_shader" || category == "ray_switch" ||
-           category == "surfacematerial" || category == "image" ||
+           category == "surfacematerial" || category == "standard_volume" || category == "image" ||
            category == "constant" || category == "multiply" || category == "mix" || category == "normalmap" ||
            category == "bump" || category == "displacement" || category == "tiledimage" || category == "add" ||
            category == "texcoord" || category == "triplanarprojection";
@@ -216,6 +216,7 @@ bool isKnownMaterialXCategory(const QString& category) {
 QColor colorForCategory(const QString& category) {
     if (category == "image" || category == "tiledimage") return QColor(42, 132, 132);
     if (category == "standard_surface") return QColor(189, 116, 45);
+    if (category == "standard_volume") return QColor(72, 140, 180);
     if (category == "ray_switch_shader" || category == "ray_switch") return QColor(72, 140, 160);
     if (category == "surfacematerial") return QColor(126, 82, 170);
     if (category == "normalmap" || category == "bump") return QColor(96, 101, 108);
@@ -254,6 +255,7 @@ bool materialXTypesConnectable(const QString& sourceType, const QString& destTyp
     if (isFloatish(s) && (isFloatish(d) || isColorish(d) || isVectorish(d))) return true;
     if ((isColorish(s) || isVectorish(s)) && (isFloatish(d) || isColorish(d) || isVectorish(d))) return true;
     if (s == "surfaceshader" && d == "surfaceshader") return true;
+    if (s == "volumeshader" && d == "volumeshader") return true;
     if (s == "material" && d == "material") return true;
     if (d == "displacementshader" &&
         (s == "displacementshader" || s == "float" || s == "vector3" || s == "color3"))
@@ -281,9 +283,10 @@ int connectionScore(const QString& sourceType, const QString& destName, const QS
     }
     if (s == "float" && (d.startsWith("color") || d.startsWith("vector"))) score -= 10;
     if ((s.startsWith("vector") || s.startsWith("color")) && n == "normal") score += 40;
-    if (n == "displacementshader" &&
-        (s == "float" || s == "vector3" || s == "color3" || s == "displacementshader"))
-        score += 80;
+    if (n == "displacement" || n == "displacementshader") {
+        if (s == "float" || s == "vector3" || s == "color3" || s == "displacementshader") score += 80;
+    }
+    if ((n == "volume" || n == "volumeshader") && s == "volumeshader") score += 80;
     if (!occupied) score += 5;
     return score;
 }
@@ -307,7 +310,9 @@ QString fallbackDefaultDocument() {
         "    <input name=\"opacity\" type=\"color3\" value=\"1, 1, 1\"/>\n"
         "  </standard_surface>\n"
         "  <surfacematerial name=\"surface\" type=\"material\" xpos=\"4\" ypos=\"0\">\n"
-        "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
+        "    <input name=\"surface\" type=\"surfaceshader\" nodename=\"standard_surface1\"/>\n"
+        "    <input name=\"displacement\" type=\"displacementshader\"/>\n"
+        "    <input name=\"volume\" type=\"volumeshader\"/>\n"
         "  </surfacematerial>\n"
         "</materialx>\n");
 }
@@ -771,6 +776,17 @@ QStringList MaterialNetworkGraphView::canonicalInputOrder(const QString& categor
                 QStringLiteral("sss"),
                 QStringLiteral("caustics")};
     }
+    if (category == "surfacematerial") {
+        return {QStringLiteral("surface"), QStringLiteral("displacement"), QStringLiteral("volume")};
+    }
+    if (category == "standard_volume") {
+        return {QStringLiteral("density"),
+                QStringLiteral("anisotropy"),
+                QStringLiteral("absorption"),
+                QStringLiteral("scattering"),
+                QStringLiteral("emission"),
+                QStringLiteral("emission_color")};
+    }
     if (category == "triplanarprojection") {
         // Arnold Triplanar: Input → Input Per Axis → axis files → Transform → Blend.
         return {QStringLiteral("file"),
@@ -807,6 +823,7 @@ void MaterialNetworkGraphView::normalizeInputOrder(QVector<MtlxInput>& inputs, c
 QString MaterialNetworkGraphView::defaultTypeForCategory(const QString& category) {
     if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) return entry->type;
     if (category == "standard_surface") return "surfaceshader";
+    if (category == "standard_volume") return "volumeshader";
     if (category == "surfacematerial") return "material";
     if (category == "normalmap") return "vector3";
     if (category == "bump") return "vector3";
@@ -923,8 +940,9 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
 
     if (category == "surfacematerial") {
         QVector<MtlxInput> out = {
-            {"surfaceshader", "surfaceshader", {}, {}},
-            {"displacementshader", "displacementshader", {}, {}},
+            {"surface", "surfaceshader", {}, {}},
+            {"displacement", "displacementshader", {}, {}},
+            {"volume", "volumeshader", {}, {}},
         };
         if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
             const QString signature = type.isEmpty() ? entry->type : type;
@@ -934,6 +952,29 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
                 const auto it = byName.constFind(input.name);
                 if (it == byName.constEnd()) continue;
                 input.type = it->type.isEmpty() ? input.type : it->type;
+            }
+        }
+        return out;
+    }
+
+    if (category == "standard_volume") {
+        QVector<MtlxInput> out = {
+            {"density", "float", "1", {}},
+            {"anisotropy", "float", "0", {}},
+            {"absorption", "color3", "0.5, 0.5, 0.5", {}},
+            {"scattering", "color3", "0.5, 0.5, 0.5", {}},
+            {"emission", "float", "0", {}},
+            {"emission_color", "color3", "1, 1, 1", {}},
+        };
+        if (const MaterialXNodeCatalogEntry* entry = findCatalogEntry(category)) {
+            const QString signature = type.isEmpty() ? entry->type : type;
+            QHash<QString, MaterialXNodeInputDef> byName;
+            for (const MaterialXNodeInputDef& def : entry->inputsFor(signature)) byName.insert(def.name, def);
+            for (MtlxInput& input : out) {
+                const auto it = byName.constFind(input.name);
+                if (it == byName.constEnd()) continue;
+                input.type = it->type.isEmpty() ? input.type : it->type;
+                if (input.value.isEmpty() && !it->value.isEmpty()) input.value = it->value;
             }
         }
         return out;
@@ -1000,8 +1041,16 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
         inputs.push_back({"autobump", "boolean", "true", {}});
         inputs.push_back({"zero_value", "float", "0.5", {}});
     } else if (category == "surfacematerial") {
-        inputs.push_back({"surfaceshader", "surfaceshader", {}, {}});
-        inputs.push_back({"displacementshader", "displacementshader", {}, {}});
+        inputs.push_back({"surface", "surfaceshader", {}, {}});
+        inputs.push_back({"displacement", "displacementshader", {}, {}});
+        inputs.push_back({"volume", "volumeshader", {}, {}});
+    } else if (category == "standard_volume") {
+        inputs.push_back({"density", "float", "1", {}});
+        inputs.push_back({"anisotropy", "float", "0", {}});
+        inputs.push_back({"absorption", "color3", "0.5, 0.5, 0.5", {}});
+        inputs.push_back({"scattering", "color3", "0.5, 0.5, 0.5", {}});
+        inputs.push_back({"emission", "float", "0", {}});
+        inputs.push_back({"emission_color", "color3", "1, 1, 1", {}});
     }
     return inputs;
 }
@@ -1052,6 +1101,19 @@ void MaterialNetworkGraphView::rebuildFromXml(const QString& xml, bool rewriteRe
                     }
                 }
                 node.inputs.push_back(input);
+            }
+            // Migrate MaterialX long port names → Solstice short UI names.
+            if (node.category == QLatin1String("surfacematerial")) {
+                auto renamePort = [&](const QString& from, const QString& to) {
+                    for (MtlxInput& input : node.inputs) {
+                        if (input.name != from) continue;
+                        input.name = to;
+                        repaired = true;
+                    }
+                };
+                renamePort(QStringLiteral("surfaceshader"), QStringLiteral("surface"));
+                renamePort(QStringLiteral("displacementshader"), QStringLiteral("displacement"));
+                renamePort(QStringLiteral("volumeshader"), QStringLiteral("volume"));
             }
             for (const MtlxInput& input : defaultInputsForCategory(node.category, node.type))
                 ensureInput(node.inputs, input.name, input.type, input.value);
@@ -1115,10 +1177,12 @@ void MaterialNetworkGraphView::rebuildFromXml(const QString& xml, bool rewriteRe
         surface = &graphNodes_.back();
         repaired = true;
     }
-    ensureInput(surface->inputs, "surfaceshader", "surfaceshader");
+    ensureInput(surface->inputs, "surface", "surfaceshader");
+    ensureInput(surface->inputs, "displacement", "displacementshader");
+    ensureInput(surface->inputs, "volume", "volumeshader");
     MtlxInput* surfaceShaderInput = nullptr;
     for (MtlxInput& input : surface->inputs) {
-        if (input.name == "surfaceshader") {
+        if (input.name == "surface" || input.name == "surfaceshader") {
             surfaceShaderInput = &input;
             break;
         }
