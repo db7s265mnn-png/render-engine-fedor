@@ -634,4 +634,32 @@ SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int
     return travPdf;
 }
 
+// Solar disc for Physical Sky distant lights. The baked sky map has no disc
+// (avoids double lighting / HDRI fireflies); camera and glossy rays see this.
+SR_INL SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec3 dirWorld, float bsdfPdf,
+                                        bool specularBounce, bool primary, bool skipNonCausticLights) {
+    Vec3 sum(0.0f);
+    const Vec3 wi = normalize(dirWorld);
+    for (int i = 0; i < scene.lightCount; ++i) {
+        const LightData& l = scene.lights[i];
+        if (l.type != kLightDistant || l.cameraSunDisc == 0) continue;
+        if (primary && l.visibleCamera == 0) continue;
+        if (skipNonCausticLights && !lightContributesCaustics(l)) continue;
+        const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
+        if (halfAngle < 1e-4f) continue;
+        const Vec3 axis = normalize(lightAxisZ(l));
+        const float cosThetaMax = cosf(halfAngle);
+        if (dot(axis, wi) < cosThetaMax) continue;
+        const Vec3 Le = lightRadiance(l);
+        float weight = 1.0f;
+        if (!specularBounce) {
+            const float lp = lightPdfDirection(scene, i, origin, wi, origin, wi) *
+                             lightSelectionPdfIndex(scene, origin, i);
+            weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
+        }
+        sum += Le * weight;
+    }
+    return sum;
+}
+
 }  // namespace sol

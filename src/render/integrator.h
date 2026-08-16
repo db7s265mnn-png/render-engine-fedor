@@ -1025,6 +1025,19 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 }
                 }
             }
+            if (!suppressCausticLight) {
+                const bool primarySun = depth == 0 && passThrough == 0;
+                if (!(primarySun && !settings.envVisibleCamera)) {
+                    const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, bsdfPdf,
+                                                            specularBounce, primarySun, causticSuffix);
+                    if (!isBlack(sunL)) {
+                        Vec3 contrib = throughput * sunL;
+                        if (depth > 0 && !specularBounce)
+                            contrib = clampContribution(contrib, settings.clampDirect);
+                        radiance += contrib;
+                    }
+                }
+            }
             break;
         }
 

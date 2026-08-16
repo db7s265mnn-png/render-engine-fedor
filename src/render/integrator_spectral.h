@@ -77,6 +77,20 @@ public:
                         }
                     }
                 }
+                {
+                    const bool primarySun = depth == 0 && passThrough == 0;
+                    if (!(primarySun && !settings.envVisibleCamera)) {
+                        const Vec3 sunL =
+                            cameraSunDiscRadiance(scene, origin, direction, bsdfPdf, specularBounce,
+                                                  primarySun, false);
+                        if (!isBlack(sunL)) {
+                            SampledSpectrum contrib = throughput * upsampleEmission(sunL, waves);
+                            if (depth > 0 && !specularBounce)
+                                contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                            radiance += contrib;
+                        }
+                    }
+                }
                 break;
             }
 

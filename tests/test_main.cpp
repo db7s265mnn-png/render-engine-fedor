@@ -36,6 +36,7 @@
 #include "render/pixel_filter.h"
 #include "render/metal_spectra.h"
 #include "render/photon_map.h"
+#include "render/physical_sky.h"
 #include "render/rsequence.h"
 #include "render/render_session.h"
 #include "render/shading.h"
@@ -761,6 +762,184 @@ void testDomeHdrLoad() {
     }
     check(foundEnv, "dome attached an environment map");
     check(envMax > 1.0f, "cooked dome HDR keeps values above 1");
+}
+
+void testPhysicalSkyLight() {
+    std::printf("physical-sky\n");
+
+    PhysicalSkyParams params;
+    Vec3 zenithSun = physicalSkySunDirection(params);
+    checkNear(zenithSun.x, 0.7071f, 0.02f, "default azimuth 90 elevation 45 → +X");
+    checkNear(zenithSun.y, 0.7071f, 0.02f, "default elevation 45");
+    checkNear(zenithSun.z, 0.0f, 0.02f, "default azimuth 90 has no Z");
+
+    params.elevationDeg = 90.0f;
+    params.azimuthDeg = 0.0f;
+    const Vec3 up = physicalSkySunDirection(params);
+    checkNear(up.x, 0.0f, 0.02f, "zenith sun X");
+    checkNear(up.y, 1.0f, 0.02f, "zenith sun +Y");
+    checkNear(up.z, 0.0f, 0.02f, "zenith sun Z");
+
+    params.elevationDeg = 0.0f;
+    params.azimuthDeg = 0.0f;
+    const Vec3 horizon = physicalSkySunDirection(params);
+    checkNear(horizon.x, 0.0f, 0.02f, "azimuth 0 horizon X");
+    checkNear(horizon.y, 0.0f, 0.02f, "azimuth 0 horizon Y");
+    checkNear(horizon.z, -1.0f, 0.02f, "azimuth 0 is −Z");
+
+    const Mat4 sunXform = physicalSkySunLookAt(params);
+    const Vec3 axis = normalize(transformVector(sunXform, Vec3(0.0f, 0.0f, 1.0f)));
+    checkNear(dot(axis, horizon), 1.0f, 0.02f, "distant +Z points at the sun");
+
+    params = PhysicalSkyParams{};
+    Image baked;
+    bakePhysicalSkyEnv(baked, params, 64, 32);
+    check(baked.width() == 64 && baked.height() == 32, "bake writes the requested size");
+    const Vec3 zenith = physicalSkyRadianceAceScg(params, Vec3(0.0f, 1.0f, 0.0f));
+    const Vec3 ground = physicalSkyRadianceAceScg(params, Vec3(0.0f, -1.0f, 0.0f));
+    check(luminance(zenith) > luminance(ground), "zenith is brighter than the ground");
+    check(isFinite(zenith) && isFinite(ground), "sky samples are finite");
+    const Vec3 zenithSrgb = acescgToLinearSrgb(zenith);
+    check(zenithSrgb.z > zenithSrgb.x * 0.9f, "clear zenith is bluish in Rec.709");
+    float bakeMax = 0.0f;
+    for (int y = 0; y < baked.height(); ++y)
+        for (int x = 0; x < baked.width(); ++x)
+            bakeMax = std::max(bakeMax, luminance(baked.rgb(x, y)));
+    check(bakeMax < luminance(zenith) * 5000.0f, "env map has no Dirac sun disc");
+
+    {
+        PhysicalSkyParams sunset;
+        sunset.elevationDeg = 4.0f;
+        sunset.azimuthDeg = 0.0f;
+        const Vec3 towardSun =
+            acescgToLinearSrgb(physicalSkyRadianceAceScg(sunset, normalize(Vec3(0.0f, 0.08f, -1.0f))));
+        const Vec3 sunsetZenith = acescgToLinearSrgb(physicalSkyRadianceAceScg(sunset, Vec3(0.0f, 1.0f, 0.0f)));
+        const float sunRB = towardSun.x / srMax(1e-6f, towardSun.z);
+        const float zenRB = sunsetZenith.x / srMax(1e-6f, sunsetZenith.z);
+        check(sunRB > zenRB * 1.05f, "Hosek sunset toward the sun is redder than zenith");
+    }
+    {
+        PhysicalSkyParams groundP;
+        groundP.computeGroundColor = false;
+        groundP.groundColor = Vec3(0.05f, 0.8f, 0.05f);
+        groundP.horizonBlurDeg = 0.1f;
+        const Vec3 nadir = acescgToLinearSrgb(physicalSkyRadianceAceScg(groundP, Vec3(0.0f, -1.0f, 0.0f)));
+        check(nadir.y > nadir.x * 2.0f && nadir.y > nadir.z * 2.0f, "authored ground colour shows below the horizon");
+    }
+
+    registerBuiltinNodes();
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        check(sky != nullptr, "create physicalskylight");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        check(settings != nullptr, "create rendersettings for sky");
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage != nullptr, "physical sky cooks");
+        check(context.errors.isEmpty(), "physical sky cook has no errors");
+        for (const QString& e : context.errors) std::printf("  cook error: %s\n", qPrintable(e));
+        check(stage && stage->countOfType(PrimType::Light) == 2, "sky + sun prims");
+
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene != nullptr, "physical sky toScene");
+        if (scene) {
+            check(scene->lights.size() == 2, "scene has dome and sun");
+            check(scene->lights.size() >= 1 && scene->lights[0].type == kLightDome, "first light is the sky dome");
+            check(scene->lights.size() >= 2 && scene->lights[1].type == kLightDistant, "second light is the sun");
+            if (scene->lights.size() >= 2) {
+                check(scene->lights[1].cameraSunDisc == 1, "sun is visible as a camera disc");
+                check(scene->lights[1].normalize == 1, "sun intensity is irradiance-like");
+                const Vec3 z = normalize(transformVector(scene->lights[1].xform, Vec3(0.0f, 0.0f, 1.0f)));
+                const Vec3 expect = physicalSkySunDirection(PhysicalSkyParams{});
+                checkNear(dot(z, expect), 1.0f, 0.02f, "cooked sun +Z matches elevation/azimuth");
+            }
+            check(!scene->envMaps.empty() && scene->envMaps[0] && !scene->envMaps[0]->image.empty(),
+                  "dome has a baked sky map");
+        }
+    }
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (sky) sky->setParameterValue("enablesun", false);
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage && stage->countOfType(PrimType::Light) == 1, "enable sun off → dome only");
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene && scene->lights.size() == 1 && scene->lights[0].type == kLightDome,
+              "sun disabled leaves only the sky");
+    }
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (sky) sky->setParameterValue("enablesky", false);
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage && stage->countOfType(PrimType::Light) == 1, "enable sky off → sun only");
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene && scene->lights.size() == 1 && scene->lights[0].type == kLightDistant &&
+                  scene->lights[0].cameraSunDisc == 1,
+              "sky disabled leaves only the sun");
+    }
+    {
+        NodeGraph graph;
+        Node* grid = graph.createNode("grid", "grid1");
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* cam = graph.createNode("camera", "camera1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (grid) {
+            grid->setParameterValue("sizex", 8.0);
+            grid->setParameterValue("sizez", 8.0);
+            grid->setParameterValue("subdivtype", 0);
+        }
+        if (cam) {
+            cam->setParameterValue("eye", QVariant::fromValue(QVector3D(0.0f, 6.0f, 0.2f)));
+            cam->setParameterValue("target", QVariant::fromValue(QVector3D(0.0f, 0.0f, 0.0f)));
+        }
+        if (grid && sky) graph.connectNodes(grid, sky, 0);
+        if (sky && cam) graph.connectNodes(sky, cam, 0);
+        if (cam && settings) graph.connectNodes(cam, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene != nullptr, "physical sky render scene");
+        if (scene) {
+            scene->settings.resolutionX = 32;
+            scene->settings.resolutionY = 24;
+            scene->settings.samplesPerPixel = 4;
+            scene->settings.backend = kBackendCpuEmbree;
+            RenderSession session;
+            session.setScene(scene);
+            session.start();
+            session.waitForCompletion();
+            const Image image = session.linearImage();
+            double sum = 0.0;
+            int nonBlack = 0;
+            bool finite = true;
+            for (int y = 0; y < image.height(); ++y) {
+                for (int x = 0; x < image.width(); ++x) {
+                    const Vec3 c = image.rgb(x, y);
+                    if (!isFinite(c)) finite = false;
+                    const double l = double(luminance(c));
+                    sum += l;
+                    if (l > 1e-4) ++nonBlack;
+                }
+            }
+            check(finite, "physical sky render is finite");
+            check(nonBlack > image.width() * image.height() / 4, "physical sky lights the ground");
+            check(sum > 0.0, "physical sky render has energy");
+        }
+    }
 }
 
 void testAcesTextureConvert() {
@@ -5403,6 +5582,7 @@ int main() {
     testPolynomialOpticsCamera();
     testEnvironment();
     testDomeHdrLoad();
+    testPhysicalSkyLight();
     testAcesTextureConvert();
     testRender();
     testCausticsGlassSphere();

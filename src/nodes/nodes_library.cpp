@@ -6,6 +6,7 @@
 #include <QString>
 #include <QRegularExpression>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <map>
 
@@ -19,6 +20,7 @@
 #include "io/usd_loader.h"
 #include "nodes/node_registry.h"
 #include "render/cpu/polynomial_optics.h"
+#include "render/physical_sky.h"
 #include "render/render_device.h"
 
 namespace sol {
@@ -728,6 +730,193 @@ private:
     std::shared_ptr<EnvironmentMap> environment_;
 };
 
+// Hosek–Wilkie Physical Sky (Karma-style dome + distant sun).
+// The env map has no solar disc (the sun light owns sharp shadows / the disc).
+class PhysicalSkyLightNode : public Node {
+public:
+    explicit PhysicalSkyLightNode(const QString& name) : Node("physicalskylight", name) {
+        addParameter(Parameter::makeString("primname", "Prim Name", name));
+        addParameter(Parameter::makeBool("enabled", "Enabled", true)
+                         .withGroup("Light")
+                         .withTooltip("Uncheck to turn this light off without deleting the node"));
+        addParameter(Parameter::makeFloat("intensity", "Intensity", 1.0, 0.0, 100.0, false)
+                         .withGroup("Light")
+                         .withTooltip("Scales both the sky dome and the sun"));
+        addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -10.0, 10.0)
+                         .withGroup("Light")
+                         .withTooltip("2^exposure multiplier on sky and sun"));
+        addParameter(Parameter::makeBool("shadows", "Cast Shadows", true).withGroup("Light"));
+        addParameter(Parameter::makeBool("caustics", "Contribute to Caustics", true)
+                         .withGroup("Light")
+                         .withTooltip("When off, sky and sun still light surfaces directly but "
+                                      "do not cast caustics through glass"));
+        addParameter(Parameter::makeBool("visiblecamera", "Visible To Camera", true)
+                         .withGroup("Light")
+                         .withTooltip("Karma Render Light Geometry: show the sky and sun disc "
+                                      "in the camera"));
+
+        addParameter(Parameter::makeFloat("turbidity", "Turbidity", 3.0, 1.0, 10.0)
+                         .withGroup("Sky")
+                         .withTooltip("Hosek–Wilkie aerosol content (Karma Physical Sky).\n"
+                                      "2 = arctic, 3 = clear temperate, 6 = warm/moist, 10 = hazy"));
+        addParameter(Parameter::makeColor("groundalbedo", "Ground Albedo", Vec3(0.1f, 0.1f, 0.1f))
+                         .withGroup("Sky")
+                         .withTooltip("Ground reflectivity that affects sky colour"));
+        addParameter(Parameter::makeBool("computegroundcolor", "Compute Ground Color", true)
+                         .withGroup("Sky")
+                         .withTooltip("On: ground from albedo × sky. Off: use Ground Color"));
+        addParameter(Parameter::makeColor("groundcolor", "Ground Color", Vec3(0.1f, 0.1f, 0.1f))
+                         .withGroup("Sky")
+                         .withVisibleWhen("computegroundcolor==0")
+                         .withTooltip("Visual ground colour when Compute Ground Color is off"));
+        addParameter(Parameter::makeFloat("horizonblur", "Horizon Blur Falloff", 5.0, 0.0, 30.0)
+                         .withGroup("Sky")
+                         .withTooltip("Degrees below the horizon over which sky blends into ground"));
+        addParameter(Parameter::makeColor("skytint", "Sky Tint", Vec3(1.0f, 1.0f, 1.0f))
+                         .withGroup("Sky")
+                         .withTooltip("Karma Sky Color — tints the dome"));
+        addParameter(Parameter::makeFloat("elevation", "Solar Altitude", 45.0, 0.0, 90.0)
+                         .withGroup("Sky")
+                         .withTooltip("Vertical angle of the sun from the horizon (90 = zenith)"));
+        addParameter(Parameter::makeFloat("azimuth", "Solar Azimuth", 90.0, 0.0, 360.0)
+                         .withGroup("Sky")
+                         .withTooltip("Horizontal angle along the horizon. 0 = −Z, 90 = +X"));
+        addParameter(Parameter::makeBool("enablesky", "Enable Sky Light", true)
+                         .withGroup("Sky")
+                         .withTooltip("Creates the sky dome. Off keeps the sun only"));
+
+        addParameter(Parameter::makeBool("enablesun", "Enable Sun Light", true)
+                         .withGroup("Sun")
+                         .withTooltip("Distant sun for sharp shadows. Off keeps sky colour "
+                                      "from the sun position but emits no sun light"));
+        addParameter(Parameter::makeFloat("sunintensity", "Sun Intensity", 1.0, 0.0, 100.0, false)
+                         .withGroup("Sun")
+                         .withVisibleWhen("enablesun")
+                         .withTooltip("Extra multiplier on the sun only"));
+        addParameter(Parameter::makeColor("suntint", "Sun Color", Vec3(1.0f, 1.0f, 1.0f))
+                         .withGroup("Sun")
+                         .withVisibleWhen("enablesun"));
+        addParameter(Parameter::makeFloat("sunsize", "Angular Size", 0.53, 0.01, 10.0)
+                         .withGroup("Sun")
+                         .withVisibleWhen("enablesun")
+                         .withTooltip("Visual size of the sun in degrees. Does not change "
+                                      "scene brightness (irradiance is normalized)"));
+
+        addTransformParameters(*this);
+    }
+
+    void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
+        if (!boolValue("enabled", true)) return;
+
+        PhysicalSkyParams params;
+        params.turbidity = float(floatValue("turbidity", 3.0));
+        params.groundAlbedo = vec3Value("groundalbedo", Vec3(0.1f));
+        params.skyTint = vmax(Vec3(0.0f), vec3Value("skytint", Vec3(1.0f)));
+        params.elevationDeg = float(floatValue("elevation", 45.0));
+        params.azimuthDeg = float(floatValue("azimuth", 90.0));
+        params.intensity = float(floatValue("intensity", 1.0));
+        params.exposure = float(floatValue("exposure", 0.0));
+        params.enableSky = boolValue("enablesky", true);
+        params.enableSun = boolValue("enablesun", true);
+        params.sunIntensity = float(floatValue("sunintensity", 1.0));
+        params.sunTint = vmax(Vec3(0.0f), vec3Value("suntint", Vec3(1.0f)));
+        params.sunSizeDeg = float(floatValue("sunsize", 0.53));
+        params.computeGroundColor = boolValue("computegroundcolor", true);
+        params.groundColor = vec3Value("groundcolor", Vec3(0.1f));
+        params.horizonBlurDeg = float(floatValue("horizonblur", 5.0));
+
+        const Mat4 nodeXform = transformFromParameters(*this);
+        const int shadows = boolValue("shadows", true) ? 1 : 0;
+        const int caustics = boolValue("caustics", true) ? 1 : 0;
+        const int visible = boolValue("visiblecamera", true) ? 1 : 0;
+
+        if (params.enableSky && !skyCacheValid(params)) {
+            auto env = std::make_shared<EnvironmentMap>();
+            bakePhysicalSkyEnv(env->image, params, 1024, 512);
+            env->path = "physical_sky";
+            env->buildSamplingTables();
+            environment_ = std::move(env);
+            cacheTurbidity_ = params.turbidity;
+            cacheElevation_ = params.elevationDeg;
+            cacheAzimuth_ = params.azimuthDeg;
+            cacheAlbedo_ = params.groundAlbedo;
+            cacheGroundColor_ = params.groundColor;
+            cacheComputeGround_ = params.computeGroundColor;
+            cacheHorizonBlur_ = params.horizonBlurDeg;
+            logInfo("Physical Sky (Hosek–Wilkie) baked " + std::to_string(environment_->image.width()) + "x" +
+                    std::to_string(environment_->image.height()) + " (turbidity " +
+                    std::to_string(params.turbidity) + ")");
+        }
+        if (params.enableSky && !environment_) {
+            context.reportError(this, "Physical Sky bake failed");
+            return;
+        }
+
+        if (params.enableSky) {
+        StagePrim domePrim;
+        domePrim.type = PrimType::Light;
+        domePrim.sourceNode = name();
+        domePrim.path = primPathFor(*this, "lights", stringValue("primname"));
+        domePrim.xform = nodeXform;
+        domePrim.environment = environment_;
+
+        LightData dome;
+        dome.type = kLightDome;
+        dome.color = params.skyTint;
+        dome.intensity = params.intensity;
+        dome.exposure = params.exposure;
+        dome.shadowEnable = shadows;
+        dome.contributeCaustics = caustics;
+        dome.visibleCamera = visible;
+        domePrim.light = dome;
+        stage.addPrim(std::move(domePrim));
+        }
+
+        if (params.enableSun) {
+            StagePrim sunPrim;
+            sunPrim.type = PrimType::Light;
+            sunPrim.sourceNode = name();
+            sunPrim.path = primPathFor(*this, "lights", stringValue("primname") + "_sun");
+            sunPrim.xform = nodeXform * physicalSkySunLookAt(params);
+
+            LightData sun;
+            sun.type = kLightDistant;
+            sun.color = physicalSkySunColorAceScg(params);
+            sun.intensity = physicalSkySunIntensity(params);
+            sun.exposure = params.exposure;
+            sun.angle = srMax(0.01f, params.sunSizeDeg);
+            sun.normalize = 1;
+            sun.cameraSunDisc = 1;
+            sun.shadowEnable = shadows;
+            sun.contributeCaustics = caustics;
+            sun.visibleCamera = visible;
+            sunPrim.light = sun;
+            stage.addPrim(std::move(sunPrim));
+        }
+    }
+
+private:
+    bool skyCacheValid(const PhysicalSkyParams& p) const {
+        if (!environment_ || environment_->image.empty()) return false;
+        return std::fabs(cacheTurbidity_ - p.turbidity) < 1e-4f &&
+               std::fabs(cacheElevation_ - p.elevationDeg) < 1e-4f &&
+               std::fabs(cacheAzimuth_ - p.azimuthDeg) < 1e-4f &&
+               lengthSquared(cacheAlbedo_ - p.groundAlbedo) < 1e-8f &&
+               lengthSquared(cacheGroundColor_ - p.groundColor) < 1e-8f &&
+               cacheComputeGround_ == p.computeGroundColor &&
+               std::fabs(cacheHorizonBlur_ - p.horizonBlurDeg) < 1e-4f;
+    }
+
+    std::shared_ptr<EnvironmentMap> environment_;
+    float cacheTurbidity_ = -1.0f;
+    float cacheElevation_ = -1.0f;
+    float cacheAzimuth_ = -1.0f;
+    Vec3 cacheAlbedo_{};
+    Vec3 cacheGroundColor_{};
+    bool cacheComputeGround_ = true;
+    float cacheHorizonBlur_ = -1.0f;
+};
+
 // ---------------------------------------------------------------------------
 // Camera and render settings
 // ---------------------------------------------------------------------------
@@ -1383,6 +1572,14 @@ void registerBuiltinNodes() {
         info.description = "Spherical area light";
         info.factory = [](const QString& name) -> NodePtr {
             return std::make_unique<LightNode>("spherelight", name, kLightSphere);
+        };
+        registry.registerType(info);
+
+        info.typeName = "physicalskylight";
+        info.label = "Physical Sky";
+        info.description = "Hosek–Wilkie sky dome + sun (Karma Physical Sky)";
+        info.factory = [](const QString& name) -> NodePtr {
+            return std::make_unique<PhysicalSkyLightNode>(name);
         };
         registry.registerType(info);
     }

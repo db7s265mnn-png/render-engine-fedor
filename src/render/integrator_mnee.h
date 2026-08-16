@@ -584,6 +584,20 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 }
                 }
             }
+            {
+                const bool primarySun = depth == 0 && passThrough == 0;
+                if (!(primarySun && !settings.envVisibleCamera)) {
+                    const Vec3 sunL =
+                        cameraSunDiscRadiance(scene, origin, direction, bsdfPdf, specularBounce,
+                                              primarySun, mneeFamily);
+                    if (!isBlack(sunL)) {
+                        Vec3 contrib = throughput * sunL;
+                        if (depth > 0 && !specularBounce)
+                            contrib = clampContribution(contrib, settings.clampDirect);
+                        radiance += contrib;
+                    }
+                }
+            }
             break;
         }
 

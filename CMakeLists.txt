@@ -503,6 +503,8 @@ set(SOLSTICE_LIB_SOURCES
     src/render/scene_picker.cpp
     src/render/motion_blur.cpp
     src/render/volume_vdb.cpp
+    src/render/physical_sky.cpp
+    third_party/hosek_wilkie/ArHosekSkyModel.cc
     src/render/cpu/embree_device.cpp
     src/render/cpu/polynomial_optics.cpp
     src/render/cpu/path_guiding.cpp
@@ -546,6 +548,7 @@ set(SOLSTICE_LIB_HEADERS
     src/render/procedural.h
     src/render/shading.h
     src/render/lights.h
+    src/render/physical_sky.h
     src/render/integrator.h
     src/render/photon_map.h
     src/render/framebuffer.h
@@ -566,6 +569,7 @@ add_library(solstice_lib STATIC ${SOLSTICE_LIB_SOURCES} ${SOLSTICE_LIB_HEADERS})
 target_include_directories(solstice_lib PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/generated)
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lentil)
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/earcut)
+target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/hosek_wilkie)
 target_link_libraries(solstice_lib PUBLIC Qt6::Core Qt6::Gui embree)
 
 if(SOLSTICE_HAVE_ALEMBIC_01)
