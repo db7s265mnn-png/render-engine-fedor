@@ -16,7 +16,6 @@
 #include "io/image_io.h"
 #include "io/materialx_compile.h"
 #include "io/tx_cache.h"
-#include "io/tx_convert.h"
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_MATERIALX
@@ -220,17 +219,14 @@ std::shared_ptr<Image> loadTextureFromImageNode(const mx::NodePtr& imageNode, co
 
     // Arnold-style: colourspace drives TX maketx --colorconvert → ACEScg.
     std::string cs = inputValueString(imageNode, "colorspace");
-    if (cs.empty()) cs = "ACES - ACEScg";
+    if (cs.empty()) cs = srgbColor ? "auto" : "Utility - Raw";
     const std::string previousCs = txDefaultInputColorSpace();
     setTxDefaultInputColorSpace(cs);
     struct CsRestore {
         std::string prev;
         ~CsRestore() { setTxDefaultInputColorSpace(prev); }
     } restore{previousCs};
-    // TX already baked to ACEScg / linear — do not apply LDR sRGB decode on top.
-    // ACEScg / Raw authored spaces are also treated as linear.
-    const bool skipSrgbDecode = txSkipColorConvert(cs) || txCacheActive();
-    const bool linearize = srgbColor && !skipSrgbDecode;
+    // TX / OCIO bake to ACEScg — do not apply a second LDR sRGB decode.
 
     QString pattern;
     std::vector<int> discovered;
@@ -245,10 +241,10 @@ std::shared_ptr<Image> loadTextureFromImageNode(const mx::NodePtr& imageNode, co
         }
         logInfo("MaterialX image file='" + file + "' colorspace='" + cs + "' → pattern='" +
                 pattern.toStdString() + "' tiles=[" + ids + "]");
-        return loadImageOrUdim(pattern, searchDirectory, error, tiles, linearize);
+        return loadImageOrUdim(pattern, searchDirectory, error, tiles, srgbColor, cs);
     }
     logInfo("MaterialX image file='" + file + "' colorspace='" + cs + "'");
-    return loadImageOrUdim(fileQ, searchDirectory, error, udimSet, linearize);
+    return loadImageOrUdim(fileQ, searchDirectory, error, udimSet, srgbColor, cs);
 }
 
 // Walk through multiply/mix/normalmap/bump wrappers to find an image node.
@@ -530,63 +526,63 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
 
     add("image", "color3", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "auto"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "color3", "0, 0, 0"}});
     add("image", "color4", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "auto"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "color4", "0, 0, 0, 1"}});
     add("image", "float", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "float", "0"}});
     add("image", "vector2", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "vector2", "0, 0"}});
     add("image", "vector3", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "vector3", "0, 0, 0"}});
     add("image", "vector4", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "vector4", "0, 0, 0, 1"}});
     add("tiledimage", "color3", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "auto"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "color3", "0, 0, 0"}});
     add("tiledimage", "float", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "float", "0"}});
     add("tiledimage", "vector3", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
@@ -675,6 +671,7 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"opacity", "color3", "1, 1, 1"}});
     add("triplanarprojection", "color3", "Texture",
         {{"file", "filename", {}},
+         {"colorspace", "string", "auto"},
          {"input_per_axis", "boolean", "false"},
          {"filex", "filename", {}},
          {"filey", "filename", {}},

@@ -624,6 +624,12 @@ public:
                 addParameter(Parameter::makeFile("texture", "HDRI Texture", "",
                                                  "Environment maps (*.hdr *.exr *.png *.jpg *.jpeg)")
                                  .withGroup("Environment"));
+                addParameter(Parameter::makeString("colorspace", "Color Space", "auto")
+                                 .withGroup("Environment")
+                                 .withTooltip("Arnold-style input colour space. Cook converts to ACEScg.\n"
+                                              "auto: HDR/EXR → Utility - Linear - sRGB, 8-bit → sRGB Texture.\n"
+                                              "ACES - ACEScg / Utility - Raw: no convert.\n"
+                                              "Utility - Linear - sRGB: Rec.709 primaries → ACEScg (typical HDRI)."));
                 addParameter(Parameter::makeBool("visiblecamera", "Visible To Camera", true)
                                  .withGroup("Environment")
                                  .withTooltip("Show the HDRI as the background"));
@@ -670,21 +676,22 @@ public:
 
         if (type_ == kLightDome) {
             const QString texture = resolvePath(context, stringValue("texture"));
+            const QString cs = stringValue("colorspace", "auto");
             if (!texture.isEmpty()) {
-                if (texture != envPath_ || !environment_) {
+                if (texture != envPath_ || cs != envCs_ || !environment_) {
                     auto env = std::make_shared<EnvironmentMap>();
                     std::string error;
                     const std::string texPath = texture.toStdString();
-                    // HDRI is scene-referred linear. sRGB decode would crush a .tx
-                    // fallback, and TX conversion of .hdr is skipped in txCacheResolve.
-                    if (!loadImage(texPath, env->image, error, /*srgbColor=*/!imageFormatIsHdr(texPath))) {
+                    if (!loadImage(texPath, env->image, error, /*srgbColor=*/true, cs.toStdString())) {
                         context.reportError(this, QString::fromStdString(error));
                     } else {
                         env->path = texture.toStdString();
                         env->buildSamplingTables();
                         environment_ = std::move(env);
                         envPath_ = texture;
-                        logInfo("Dome light loaded " + texture.toStdString() + " (" +
+                        envCs_ = cs;
+                        logInfo("Dome light loaded " + texture.toStdString() + " colorspace='" +
+                                cs.toStdString() + "' (" +
                                 std::to_string(environment_->image.width()) + "x" +
                                 std::to_string(environment_->image.height()) + ")");
                     }
@@ -693,6 +700,7 @@ public:
             } else {
                 environment_.reset();
                 envPath_.clear();
+                envCs_.clear();
             }
         }
 
@@ -716,6 +724,7 @@ private:
 
     LightType type_;
     QString envPath_;
+    QString envCs_;
     std::shared_ptr<EnvironmentMap> environment_;
 };
 

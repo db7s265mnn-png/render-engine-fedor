@@ -41,4 +41,9 @@ Vec3 ocioApplyViewPrepared(Vec3 linearWorking);  // no lock; requires prepare
 // True when this build was linked with OpenColorIO.
 bool ocioLibraryAvailable();
 
+// Convert scene-referred RGB from `inputColorSpace` into ACEScg.
+// Uses the loaded OCIO config when available; otherwise a classic ACES 1.2
+// matrix / sRGB EOTF fallback for the curated Utility / ACES names.
+Vec3 ocioConvertToAcescg(Vec3 rgb, const std::string& inputColorSpace);
+
 }  // namespace sol

@@ -23,19 +23,6 @@ std::string resolveCacheDir(const char* txCacheDir) {
     return "tx_cache";
 }
 
-std::string lowerExtension(const std::string& path) {
-    const size_t dot = path.rfind('.');
-    if (dot == std::string::npos) return {};
-    std::string ext = path.substr(dot + 1);
-    for (char& c : ext) c = char(std::tolower(static_cast<unsigned char>(c)));
-    return ext;
-}
-
-bool isRadianceHdrPath(const std::string& path) {
-    const std::string ext = lowerExtension(path);
-    return ext == "hdr" || ext == "rgbe" || ext == "pic";
-}
-
 }  // namespace
 
 void setTxDefaultInputColorSpace(const std::string& colorSpace) {
@@ -116,6 +103,10 @@ static bool getActiveTxSettings(RenderSettingsData& out) {
     return true;
 }
 
+bool txCacheGetActiveSettings(RenderSettingsData& out) {
+    return getActiveTxSettings(out);
+}
+
 std::string txCacheResolve(const std::string& sourcePath) {
     return txCacheResolve(sourcePath, txDefaultInputColorSpace());
 }
@@ -124,15 +115,12 @@ std::string txCacheResolve(const std::string& sourcePath, const std::string& inp
     RenderSettingsData settings{};
     if (!getActiveTxSettings(settings)) return sourcePath;
 
-    // Dome / env maps are Radiance RGBE. Automatic maketx preprocess (`--ch R,G,B`
-    // plus a leftover MaterialX sRGB colourspace) produced black or LDR .tx files
-    // and there was no fallback to the original .hdr.
-    if (isRadianceHdrPath(sourcePath)) return sourcePath;
+    const std::string cs = txResolveInputColorSpace(inputColorSpace, sourcePath, true);
 
     // Single concrete path (including one UDIM tile). Convert in place.
     std::string outPath;
     std::string error;
-    if (!ensureTxTexture(sourcePath, settings, inputColorSpace, outPath, error)) {
+    if (!ensureTxTexture(sourcePath, settings, cs, outPath, error)) {
         if (!error.empty()) logWarning("tx_cache: " + error);
         return sourcePath;
     }
@@ -143,8 +131,9 @@ std::string txCacheResolve(const std::string& sourcePath, const std::string& inp
     // Fallback: allocate and convert one.
     TxConvertRequest req;
     req.sourcePath = sourcePath;
-    req.outputPath = txAllocateOutputPath(sourcePath, resolveCacheDir(settings.txCacheDir));
-    req.inputColorSpace = inputColorSpace;
+    req.outputPath =
+        txAllocateOutputPath(sourcePath, resolveCacheDir(settings.txCacheDir), TxOutputFormat::Tx, cs);
+    req.inputColorSpace = cs;
     req.ocioConfigPath = txResolveOcioConfig(settings.ocioUseEnv != 0, settings.ocioConfigPath);
     const TxConvertResult r = txConvertOne(req);
     return r.ok ? r.outputPath : sourcePath;

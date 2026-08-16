@@ -14,9 +14,14 @@
 
 namespace sol {
 
-// Loads an image as float RGBA. When srgbColor is true (default), LDR colour maps
-// are sRGB-decoded to linear. Pass false for data maps (normal / bump / masks).
-bool loadImage(const std::string& path, Image& out, std::string& error, bool srgbColor = true);
+// Loads an image as float RGBA. When srgbColor is true (default), the file is a
+// colour map (Arnold `auto` → sRGB Texture / Linear sRGB). Pass false for data
+// maps (normal / bump / masks → Raw).
+// `inputColorSpace` is the Arnold-style OCIO name (`auto`, `ACES - ACEScg`,
+// `Utility - sRGB - Texture`, …). Empty = auto. Output is ACEScg when conversion
+// runs (TX cache and/or in-process OCIO / classic matrix).
+bool loadImage(const std::string& path, Image& out, std::string& error, bool srgbColor = true,
+               const std::string& inputColorSpace = {});
 
 // Houdini/MaterialX UDIM helpers (<UDIM> / %(UDIM)d, Mari index 1001+U+V*10).
 bool pathHasUdimToken(const QString& path);
@@ -31,7 +36,8 @@ std::vector<int> discoverUdimTiles(const QString& pattern, const QString& search
 // Loads a single image, or bakes a UDIM atlas (MaterialX hwNormalizeUdim-style).
 // Optional explicitUdims come from MaterialX geominfo udimset; empty → discover on disk.
 std::shared_ptr<Image> loadImageOrUdim(const QString& path, const QString& searchDirectory, std::string& error,
-                                       const std::vector<int>& explicitUdims = {}, bool srgbColor = true);
+                                       const std::vector<int>& explicitUdims = {}, bool srgbColor = true,
+                                       const std::string& inputColorSpace = {});
 
 bool saveImagePng(const std::string& path, const Image& displayImage, std::string& error);
 bool saveImageHdr(const std::string& path, const Image& linearImage, std::string& error);

@@ -24,6 +24,7 @@
 #include "io/image_io.h"
 #include "io/materialx_graph.h"
 #include "io/tx_cache.h"
+#include "io/tx_convert.h"
 #include "io/usd_loader.h"
 #include "nodes/node_graph.h"
 #include "nodes/node_registry.h"
@@ -624,10 +625,35 @@ void testDomeHdrLoad() {
 
     Image direct;
     std::string err;
-    check(loadImage(hdrPath.toStdString(), direct, err, /*srgbColor=*/false), "load sky.hdr natively");
+    check(loadImage(hdrPath.toStdString(), direct, err, true, "Utility - Raw"),
+          "load sky.hdr as Raw");
     if (!err.empty() && direct.empty()) std::printf("  load error: %s\n", err.c_str());
     check(direct.width() == 1024 && direct.height() == 512, "sky.hdr is 1024x512");
     check(maxLum(direct) > 1.0f, "native HDR has values above 1");
+
+    {
+        QTemporaryDir dir;
+        check(dir.isValid(), "temp dir for red hdr");
+        const QString redHdr = dir.path() + "/red.hdr";
+        Image src(1, 1);
+        src.setRgb(0, 0, Vec3(1.0f, 0.0f, 0.0f));
+        std::string we;
+        check(saveImageHdr(redHdr.toStdString(), src, we), "write 1x1 red HDR");
+        Image raw;
+        Image lin;
+        std::string e1;
+        std::string e2;
+        check(loadImage(redHdr.toStdString(), raw, e1, true, "Utility - Raw"), "load red HDR Raw");
+        check(loadImage(redHdr.toStdString(), lin, e2, true, "Utility - Linear - sRGB"),
+              "load red HDR Linear sRGB → ACEScg");
+        checkNear(raw.rgb(0, 0).x, 1.0f, 0.08f, "Raw red stays ~1");
+        checkNear(raw.rgb(0, 0).y, 0.0f, 0.08f, "Raw red G stays ~0");
+        const Vec3 expect = linearSrgbToAcescg(Vec3(1.0f, 0.0f, 0.0f));
+        checkNear(lin.rgb(0, 0).x, expect.x, 0.06f, "Linear sRGB red → ACEScg R");
+        checkNear(lin.rgb(0, 0).y, expect.y, 0.06f, "Linear sRGB red → ACEScg G");
+        checkNear(lin.rgb(0, 0).z, expect.z, 0.06f, "Linear sRGB red → ACEScg B");
+        check(std::fabs(lin.rgb(0, 0).x - raw.rgb(0, 0).x) > 0.05f, "ACEScg convert changes Rec.709 red");
+    }
 
     // +Y orientation used to be rejected ("unsupported HDR resolution line").
     {
@@ -645,7 +671,7 @@ void testDomeHdrLoad() {
             std::fclose(f);
             Image img;
             std::string e;
-            check(loadImage(plusY.toStdString(), img, e, false), "load +Y hdr");
+            check(loadImage(plusY.toStdString(), img, e, true, "Utility - Raw"), "load +Y hdr");
             check(img.width() == 1 && img.height() == 2, "+Y hdr is 1x2");
             if (!img.empty()) {
                 check(img.rgb(0, 0).x > 0.5f && img.rgb(0, 0).z < 0.25f,
@@ -682,6 +708,7 @@ void testDomeHdrLoad() {
     check(dome != nullptr, "create domelight");
     if (dome) {
         dome->setParameterValue("texture", hdrPath);
+        dome->setParameterValue("colorspace", QStringLiteral("auto"));
         dome->setParameterValue("intensity", 1.0);
     }
     Node* settings = graph.createNode("rendersettings", "rendersettings1");
@@ -718,6 +745,49 @@ void testDomeHdrLoad() {
     }
     check(foundEnv, "dome attached an environment map");
     check(envMax > 1.0f, "cooked dome HDR keeps values above 1");
+}
+
+void testAcesTextureConvert() {
+    std::printf("aces-texture-convert\n");
+    check(txResolveInputColorSpace("auto", "foo.png", true) == "Utility - sRGB - Texture",
+          "auto 8-bit colour → sRGB Texture");
+    check(txResolveInputColorSpace("auto", "foo.hdr", true) == "Utility - Linear - sRGB",
+          "auto HDR colour → Linear sRGB");
+    check(txResolveInputColorSpace("auto", "foo.exr", true) == "Utility - Linear - sRGB",
+          "auto EXR colour → Linear sRGB");
+    check(txResolveInputColorSpace({}, "disp.exr", false) == "Utility - Raw",
+          "data maps → Raw");
+    check(txResolveInputColorSpace("ACES - ACEScg", "foo.png", true) == "ACES - ACEScg",
+          "authored ACEScg is kept");
+    check(txSkipColorConvert("ACES - ACEScg"), "ACEScg skips convert");
+    check(txSkipColorConvert("Utility - Raw"), "Raw skips convert");
+    check(!txSkipColorConvert("Utility - Linear - sRGB"), "Linear sRGB converts");
+    check(!txSkipColorConvert("Utility - sRGB - Texture"), "sRGB Texture converts");
+
+    QTemporaryDir dir;
+    check(dir.isValid(), "temp dir for aces png");
+    const QString pngPath = dir.path() + "/red.png";
+    {
+        QImage img(1, 1, QImage::Format_RGB888);
+        img.fill(QColor(255, 0, 0));
+        check(img.save(pngPath), "write 1x1 sRGB red PNG");
+    }
+
+    Image raw;
+    Image aces;
+    Image taggedAces;
+    std::string e1, e2, e3;
+    check(loadImage(pngPath.toStdString(), raw, e1, true, "Utility - Raw"), "load PNG Raw");
+    check(loadImage(pngPath.toStdString(), aces, e2, true, "auto"), "load PNG auto → ACEScg");
+    check(loadImage(pngPath.toStdString(), taggedAces, e3, true, "ACES - ACEScg"), "load PNG as ACEScg");
+    checkNear(raw.rgb(0, 0).x, 1.0f, 0.02f, "Raw red R ~1");
+    checkNear(raw.rgb(0, 0).y, 0.0f, 0.02f, "Raw red G ~0");
+    const Vec3 expect = linearSrgbToAcescg(Vec3(1.0f, 0.0f, 0.0f));
+    checkNear(aces.rgb(0, 0).x, expect.x, 0.05f, "auto PNG red → ACEScg R");
+    checkNear(aces.rgb(0, 0).y, expect.y, 0.05f, "auto PNG red → ACEScg G");
+    checkNear(aces.rgb(0, 0).z, expect.z, 0.05f, "auto PNG red → ACEScg B");
+    checkNear(taggedAces.rgb(0, 0).x, 1.0f, 0.02f, "tagged ACEScg skips matrix");
+    check(std::fabs(aces.rgb(0, 0).x - raw.rgb(0, 0).x) > 0.05f, "ACEScg convert changes Rec.709 red");
 }
 
 // Glass sphere over a floor lit by a small rect light: PT+MNEE and BDPT are
@@ -1641,7 +1711,7 @@ void testUdimMaterialX() {
     check(tiles.size() == 3, "discovers three UDIM tiles on disk");
 
     std::string error;
-    auto atlas = loadImageOrUdim(root + "/grid.1001.png", QString(), error, {});
+    auto atlas = loadImageOrUdim(root + "/grid.1001.png", QString(), error, {}, true, "Utility - Raw");
     check(atlas != nullptr, "loads udim atlas from concrete tile path");
     check(atlas && atlas->isUdimAtlas(), "atlas marked as UDIM");
     check(atlas && atlas->udimGridU() == 2 && atlas->udimGridV() == 2, "atlas grid covers U0..1 V0..1");
@@ -4459,7 +4529,8 @@ void testTxMipmaps() {
 
     Image image;
     std::string error;
-    check(loadImage(txPath.toStdString(), image, error), "load .tx with mips");
+    check(loadImage(txPath.toStdString(), image, error, /*srgbColor=*/true, "Utility - Raw"),
+          "load .tx with mips");
     if (!error.empty() && image.empty()) std::printf("  load error: %s\n", error.c_str());
     check(image.mipCount() >= 4, "loaded or rebuilt mip pyramid");
     check(image.width() == 8 && image.height() == 8, "level 0 is 8x8");
@@ -5267,6 +5338,7 @@ int main() {
     if (getenv("SOL_ONLY_DOME")) {
         registerBuiltinNodes();
         testDomeHdrLoad();
+        testAcesTextureConvert();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -5315,6 +5387,7 @@ int main() {
     testPolynomialOpticsCamera();
     testEnvironment();
     testDomeHdrLoad();
+    testAcesTextureConvert();
     testRender();
     testCausticsGlassSphere();
     testBdptCausticThroughRefraction();

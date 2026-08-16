@@ -309,6 +309,10 @@ std::shared_ptr<Image> loadImageCached(BakeState& state, const mx::NodePtr& imag
     if (cat != "image" && cat != "tiledimage") return nullptr;
     std::string file = inputValueString(imageNode, "file");
     if (file.empty()) return nullptr;
+    const std::string type = imageNode->getType();
+    const bool colorMap = (type == "color3" || type == "color4");
+    std::string cs = inputValueString(imageNode, "colorspace");
+    if (cs.empty()) cs = colorMap ? "auto" : "Utility - Raw";
     std::string error;
     std::shared_ptr<Image> image;
     QString pattern;
@@ -316,9 +320,9 @@ std::shared_ptr<Image> loadImageCached(BakeState& state, const mx::NodePtr& imag
     const QString fileQ = QString::fromStdString(file);
     if (resolveUdimPattern(fileQ, state.searchDirectory, pattern, discovered)) {
         std::vector<int> tiles = state.udimSet.empty() ? discovered : state.udimSet;
-        image = loadImageOrUdim(pattern, state.searchDirectory, error, tiles);
+        image = loadImageOrUdim(pattern, state.searchDirectory, error, tiles, colorMap, cs);
     } else {
-        image = loadImageOrUdim(fileQ, state.searchDirectory, error, state.udimSet);
+        image = loadImageOrUdim(fileQ, state.searchDirectory, error, state.udimSet, colorMap, cs);
     }
     if (!image && !error.empty()) logWarning("MaterialX bake: " + error);
     state.imageCache[imageNode.get()] = image;
@@ -592,7 +596,8 @@ Vec4 evalNode(const mx::NodePtr& node, float u, float v, BakeState& state) {
             const std::string file = resolveAxis(fileInput);
             if (file.empty()) return evalInput(node, "default", u, v, state, splat4(0.0f));
             std::string error;
-            auto image = loadImageOrUdim(QString::fromStdString(file), state.searchDirectory, error, state.udimSet);
+            auto image = loadImageOrUdim(QString::fromStdString(file), state.searchDirectory, error,
+                                         state.udimSet, true, "auto");
             if (!image) return evalInput(node, "default", u, v, state, splat4(0.0f));
             // Bake path has no object P — approximate tiling with UV / scale (wrap both axes).
             float scale = 1.0f;

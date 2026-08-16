@@ -17,7 +17,9 @@
 
 #include "core/log.h"
 #include "core/math.h"
+#include "io/ocio_util.h"
 #include "io/tx_cache.h"
+#include "io/tx_convert.h"
 #include "render/framebuffer.h"
 #include "solstice_config.h"
 
@@ -708,22 +710,45 @@ bool loadImageDirect(const std::string& loadPath, Image& out, std::string& error
     return loadLdr(loadPath, out, error, srgbColor);
 }
 
+void convertImageToAcescg(Image& image, const std::string& cs) {
+    if (image.empty() || txSkipColorConvert(cs)) return;
+    const int levels = std::max(1, image.mipCount());
+    for (int level = 0; level < levels; ++level) {
+        const int w = image.mipWidth(level);
+        const int h = image.mipHeight(level);
+        float* p = image.mipData(level);
+        if (!p || w <= 0 || h <= 0) continue;
+        const size_t n = size_t(w) * size_t(h);
+        for (size_t i = 0; i < n; ++i, p += 4) {
+            const Vec3 c = ocioConvertToAcescg(Vec3(p[0], p[1], p[2]), cs);
+            p[0] = c.x;
+            p[1] = c.y;
+            p[2] = c.z;
+        }
+    }
+}
+
 }  // namespace
 
-bool loadImage(const std::string& path, Image& out, std::string& error, bool srgbColor) {
-    // Linear HDR/EXR must not inherit a leftover MaterialX sRGB colourspace —
-    // that used to maketx --colorconvert the dome HDRI as if it were an 8-bit
-    // texture and the resulting .tx either failed to load or lost the HDR range.
-    const bool srcHdr = imageFormatIsHdr(path);
-    const std::string resolved =
-        srcHdr ? txCacheResolve(path, "Utility - Raw") : txCacheResolve(path);
-    const bool decodeSrgb = srgbColor && !srcHdr;
-    if (loadImageDirect(resolved, out, error, decodeSrgb)) return true;
-    if (resolved != path) {
+bool loadImage(const std::string& path, Image& out, std::string& error, bool srgbColor,
+               const std::string& inputColorSpace) {
+    const std::string cs = txResolveInputColorSpace(inputColorSpace, path, srgbColor);
+    const bool skipConvert = txSkipColorConvert(cs);
+    // TX (and OCIO) own the colour transform — load files as stored, do not
+    // apply a second sRGB EOTF on 8-bit maps that will be converted to ACEScg.
+    const std::string resolved = txCacheResolve(path, cs);
+    const bool loadedTx = resolved != path;
+    if (loadImageDirect(resolved, out, error, /*srgbColor=*/false)) {
+        if (!loadedTx && !skipConvert) convertImageToAcescg(out, cs);
+        return true;
+    }
+    if (loadedTx) {
         logWarning("tx_cache: failed to load converted texture '" + resolved + "': " + error +
                    " — falling back to " + path);
         error.clear();
-        return loadImageDirect(path, out, error, decodeSrgb);
+        if (!loadImageDirect(path, out, error, /*srgbColor=*/false)) return false;
+        if (!skipConvert) convertImageToAcescg(out, cs);
+        return true;
     }
     return false;
 }
@@ -815,7 +840,8 @@ bool resolveUdimPattern(const QString& pathIn, const QString& searchDirectory, Q
 }
 
 std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& searchDirectory, std::string& error,
-                                       const std::vector<int>& explicitUdims, bool srgbColor) {
+                                       const std::vector<int>& explicitUdims, bool srgbColor,
+                                       const std::string& inputColorSpace) {
     QString path = makeAbsoluteTexturePath(pathIn, searchDirectory);
 
     // MaterialX: unresolved <UDIM> in file + tile list from udimset / disk.
@@ -840,7 +866,7 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
             if (!QFileInfo::exists(tilePath)) continue;
             auto tile = std::make_shared<Image>();
             std::string loadError;
-            if (!loadImage(tilePath.toStdString(), *tile, loadError, srgbColor)) {
+            if (!loadImage(tilePath.toStdString(), *tile, loadError, srgbColor, inputColorSpace)) {
                 logWarning("UDIM tile failed (" + tilePath.toStdString() + "): " + loadError);
                 continue;
             }
@@ -902,7 +928,7 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
         return nullptr;
     }
     auto image = std::make_shared<Image>();
-    if (!loadImage(path.toStdString(), *image, error, srgbColor)) return nullptr;
+    if (!loadImage(path.toStdString(), *image, error, srgbColor, inputColorSpace)) return nullptr;
     return image;
 }
 

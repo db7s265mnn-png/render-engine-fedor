@@ -22,6 +22,7 @@ bool ensureTxTexture(const std::string& sourcePath, const RenderSettingsData& se
 
 void setActiveTxCacheSettings(const RenderSettingsData* settings);
 bool txCacheActive();
+bool txCacheGetActiveSettings(RenderSettingsData& out);
 std::string txCacheResolve(const std::string& sourcePath);
 // Same as txCacheResolve, but uses `inputColorSpace` instead of the sticky MaterialX default.
 std::string txCacheResolve(const std::string& sourcePath, const std::string& inputColorSpace);
