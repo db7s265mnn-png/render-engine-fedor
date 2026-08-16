@@ -949,8 +949,15 @@ public:
                          .withVisibleWhen("integrator==4||integrator==5")
                          .withTooltip("Visible: pbrt-style PDF peaked near 538 nm (less colour noise).\n"
                                       "Uniform: stratified across 360–830 nm."));
-        addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
-        addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
+        addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 4096)
+                         .withGroup("Engine")
+                         .withTooltip("Max path bounces after the camera (surfaces + volume scatters).\n"
+                                      "Dense fog / clouds with deep multiple scattering need 1000+.\n"
+                                      "Also raise Russian Roulette Depth, or RR will kill deep paths early."));
+        addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 4096)
+                         .withGroup("Engine")
+                         .withTooltip("Start Russian roulette after this depth.\n"
+                                      "For deep volume multiple scattering, set near Max Ray Depth."));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
@@ -1140,8 +1147,8 @@ public:
         settings.samplesPerPixel = intValue("samples", 128);
         settings.backend = intValue("backend", 0) == 1 ? kBackendGpuOptix : kBackendCpuEmbree;
         settings.integrator = std::clamp(intValue("integrator", 0), 0, 6);
-        settings.maxDepth = intValue("maxdepth", 8);
-        settings.rrStartDepth = intValue("rrdepth", 3);
+        settings.maxDepth = std::clamp(intValue("maxdepth", 8), 1, 4096);
+        settings.rrStartDepth = std::clamp(intValue("rrdepth", 3), 1, 4096);
         settings.lightSamples = std::max(1, intValue("lightsamples", 2));
         settings.clampDirect = float(floatValue("clampdirect", 10.0));
         settings.clampIndirect = float(floatValue("clamp", 10.0));

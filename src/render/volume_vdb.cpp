@@ -137,7 +137,12 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
         srMax(sigmaA0.x + sigmaS0.x, srMax(sigmaA0.y + sigmaS0.y, sigmaA0.z + sigmaS0.z));
     const float majorant = srMax(1e-6f, baseMaj * majGrid * densityScale);
     float t = 0.0f;
-    for (int iter = 0; iter < 256; ++iter) {
+    // Null-collision candidates per free-flight segment (not path depth).
+    // E[iters] ≈ Λ·L; keep the cap >> dense optical depth so we never force an
+    // early exit (which would bias transmittance / kill deep multiple scattering).
+    // Path bounce count is settings.maxDepth (volume scatter increments it).
+    constexpr int kNullCollisionMaxIters = 1 << 20; // 1,048,576
+    for (int iter = 0; iter < kNullCollisionMaxIters; ++iter) {
         // Free-flight candidate ~ Exp(Λ).
         const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
         t += -logf(u) / majorant;
@@ -194,7 +199,8 @@ Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 or
 
     Vec3 Tr(1.0f);
     float t = 0.0f;
-    for (int iter = 0; iter < 512; ++iter) {
+    constexpr int kNullCollisionMaxIters = 1 << 20; // match free-flight safety bound
+    for (int iter = 0; iter < kNullCollisionMaxIters; ++iter) {
         const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
         t += -logf(u) / majorant;
         if (t >= dist) return Tr;

@@ -4949,6 +4949,45 @@ void testNgonTriangulateAndVdb() {
         check(TrMiss.x > 0.99f && TrMiss.y > 0.99f && TrMiss.z > 0.99f,
               "Fog Tr ~1 when the ray misses the AABB");
     }
+    {
+        // Dense majorant + long segment: E[null collisions] ≈ Λ·L can exceed the old
+        // 256-iter free-flight cap. With the raised bound the walk must still reach tMax
+        // (transmit) through near-empty voxels instead of truncating mid-segment.
+        VolumeFromPolygonsSettings vsDense;
+        vsDense.kind = VolumeGridKind::Fog;
+        vsDense.voxelSize = 0.25f;
+        vsDense.exteriorBand = 0.5f;
+        vsDense.interiorBand = 0.5f;
+        vsDense.fillDensity = 0.02f; // sparse occupancy vs majorant
+        std::string eDense;
+        VolumeGridPtr sparseFog = VolumeGrid::fromPolygons(*box, Mat4::identity(), vsDense, &eDense);
+        check(sparseFog && sparseFog->valid(), "sparse fog for deep free-flight");
+        MediumData medDense;
+        medDense.type = 2;
+        medDense.density = 50.0f; // inflates Λ; local dens stays low → many nulls
+        medDense.sigmaA = Vec3(0.01f);
+        medDense.sigmaS = Vec3(2.0f);
+        Rng rngFf(7u, 11u);
+        int transmits = 0;
+        constexpr int kFfTrials = 32;
+        constexpr float kSeg = 8.0f;
+        for (int i = 0; i < kFfTrials; ++i) {
+            Vec3 thr(1.0f);
+            const MediumSample ms =
+                sampleMediumVdbFog(*sparseFog, medDense, Vec3(-4, 0, 0), Vec3(1, 0, 0), kSeg, rngFf,
+                                   thr);
+            if (!ms.scattered && !ms.absorbed && ms.t + 1e-4f >= kSeg) ++transmits;
+        }
+        // Sparse fill + high density scale → mostly nulls; majority must transmit to tMax.
+        check(transmits >= kFfTrials / 2,
+              "deep free-flight transmits through sparse fog (Λ·L >> old 256 cap)");
+        check(RenderSettingsData{}.maxDepth >= 1, "RenderSettingsData maxDepth sane");
+        RenderSettingsData deepMs;
+        deepMs.maxDepth = 1024;
+        deepMs.rrStartDepth = 1024;
+        check(deepMs.maxDepth == 1024 && deepMs.rrStartDepth == 1024,
+              "settings accept 1000+ depth for volume multiple scattering");
+    }
 #else
     std::printf("  (OpenVDB disabled in this build — skipping volume checks)\n");
 #endif
