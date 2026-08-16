@@ -13,7 +13,9 @@
 #include <openvdb/io/File.h>
 #endif
 
+#include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace sol {
 
@@ -73,6 +75,159 @@ float VolumeGrid::sampleWorld(const Vec3& p) const {
     }
 }
 
+float VolumeGrid::sampleWorldTracking(const Vec3& p) const {
+    if (!valid()) return 0.0f;
+    if (sampleFilter_ == VolumeSampleFilter::Nearest) return sampleWorld(p);
+    // Linear (8-tap) even when the authored filter is Quadratic — deep MS walks
+    // would otherwise pay 27 taps per null collision.
+    const openvdb::Vec3d wp(p.x, p.y, p.z);
+    openvdb::tools::GridSampler<openvdb::FloatGrid, openvdb::tools::BoxSampler> sampler(*impl_->grid);
+    return float(sampler.wsSample(wp));
+}
+
+void VolumeGrid::rebuildMajorantGrid() {
+    majNx_ = majNy_ = majNz_ = 0;
+    majCell_ = 0.0f;
+    majMin_.clear();
+    majMax_.clear();
+    if (kind_ != VolumeGridKind::Fog || !valid() || !bounds_.valid()) return;
+
+    constexpr int kHaloVox = 2;
+    const Vec3 ext = bounds_.hi - bounds_.lo;
+    const float longAxis = srMax(ext.x, srMax(ext.y, ext.z));
+    const int voxelsLong = srMax(1, int(std::lround(double(longAxis / srMax(voxelSize_, 1e-8f)))));
+    int sv = 8;
+    if (voxelsLong < 64) sv = 4;
+    if (voxelsLong < 24) sv = 2;
+    majCell_ = srMax(voxelSize_ * float(sv), srMax(voxelSize_, 1e-6f));
+    majOrigin_ = bounds_.lo;
+    majNx_ = srMax(1, int(std::ceil(double(ext.x / majCell_))));
+    majNy_ = srMax(1, int(std::ceil(double(ext.y / majCell_))));
+    majNz_ = srMax(1, int(std::ceil(double(ext.z / majCell_))));
+    const int n = majNx_ * majNy_ * majNz_;
+    majMin_.assign(size_t(n), 1.0e30f);
+    majMax_.assign(size_t(n), 0.0f);
+    std::vector<int> counts(size_t(n), 0);
+
+    auto idx = [&](int x, int y, int z) -> int { return x + majNx_ * (y + majNy_ * z); };
+    auto inRange = [&](int x, int y, int z) {
+        return x >= 0 && y >= 0 && z >= 0 && x < majNx_ && y < majNy_ && z < majNz_;
+    };
+    auto bin = [&](float w, float o) -> int {
+        return int(std::floor(double((w - o) / majCell_)));
+    };
+
+    const openvdb::FloatGrid& grid = *impl_->grid;
+    const float halo = voxelSize_ * float(kHaloVox);
+    for (auto it = grid.cbeginValueOn(); it; ++it) {
+        const float v = fabsf(float(*it));
+        const openvdb::Coord c = it.getCoord();
+        const openvdb::Vec3d w = grid.indexToWorld(c.asVec3d() + openvdb::Vec3d(0.5));
+        const int ix = bin(float(w.x()), majOrigin_.x);
+        const int iy = bin(float(w.y()), majOrigin_.y);
+        const int iz = bin(float(w.z()), majOrigin_.z);
+        if (inRange(ix, iy, iz)) {
+            const int i = idx(ix, iy, iz);
+            majMin_[size_t(i)] = std::min(majMin_[size_t(i)], v);
+            majMax_[size_t(i)] = std::max(majMax_[size_t(i)], v);
+            counts[size_t(i)] += 1;
+        }
+        // Halo raises max only (filter support / quadratic overshoot).
+        const float xLo = float(w.x()) - halo;
+        const float xHi = float(w.x()) + halo;
+        const float yLo = float(w.y()) - halo;
+        const float yHi = float(w.y()) + halo;
+        const float zLo = float(w.z()) - halo;
+        const float zHi = float(w.z()) + halo;
+        const int hx0 = bin(xLo, majOrigin_.x);
+        const int hx1 = bin(xHi, majOrigin_.x);
+        const int hy0 = bin(yLo, majOrigin_.y);
+        const int hy1 = bin(yHi, majOrigin_.y);
+        const int hz0 = bin(zLo, majOrigin_.z);
+        const int hz1 = bin(zHi, majOrigin_.z);
+        for (int z = hz0; z <= hz1; ++z) {
+            for (int y = hy0; y <= hy1; ++y) {
+                for (int x = hx0; x <= hx1; ++x) {
+                    if (!inRange(x, y, z)) continue;
+                    const int i = idx(x, y, z);
+                    majMax_[size_t(i)] = std::max(majMax_[size_t(i)], v);
+                }
+            }
+        }
+    }
+
+    const int voxelsPerCell =
+        srMax(1, int(std::lround(double(majCell_ / srMax(voxelSize_, 1e-8f)))));
+    const int expected = voxelsPerCell * voxelsPerCell * voxelsPerCell;
+    const int filledThresh = srMax(1, int(float(expected) * 0.85f));
+    float globalMaj = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        if (counts[size_t(i)] <= 0 || majMax_[size_t(i)] <= 0.0f) {
+            majMin_[size_t(i)] = 0.0f;
+            majMax_[size_t(i)] = 0.0f;
+            continue;
+        }
+        if (counts[size_t(i)] < filledThresh) majMin_[size_t(i)] = 0.0f;
+        else majMin_[size_t(i)] = srMax(0.0f, majMin_[size_t(i)]);
+        // Mixed cells: slight max inflation for reconstruction overshoot.
+        if (majMax_[size_t(i)] > majMin_[size_t(i)] + 1e-4f)
+            majMax_[size_t(i)] *= 1.15f;
+        globalMaj = srMax(globalMaj, majMax_[size_t(i)]);
+    }
+    if (globalMaj > 0.0f) majorant_ = srMax(majorant_, globalMaj);
+}
+
+void VolumeGrid::majorantOccupancy(const Vec3& p, float& minD, float& maxD) const {
+    minD = 0.0f;
+    maxD = 0.0f;
+    if (!hasMajorantGrid()) {
+        maxD = majorant_;
+        return;
+    }
+    auto bin = [&](float w, float o) -> int {
+        return int(std::floor(double((w - o) / majCell_)));
+    };
+    const int ix = bin(p.x, majOrigin_.x);
+    const int iy = bin(p.y, majOrigin_.y);
+    const int iz = bin(p.z, majOrigin_.z);
+    if (ix < 0 || iy < 0 || iz < 0 || ix >= majNx_ || iy >= majNy_ || iz >= majNz_) return;
+    const int i = ix + majNx_ * (iy + majNy_ * iz);
+    minD = majMin_[size_t(i)];
+    maxD = majMax_[size_t(i)];
+}
+
+float VolumeGrid::majorantCellExitT(Vec3 origin, Vec3 direction, float t, float tMax) const {
+    if (!hasMajorantGrid() || tMax <= t) return tMax;
+    const float lookT = t + 1e-5f;
+    const Vec3 p = origin + direction * lookT;
+    auto binClamp = [&](float w, float o, int dim) -> int {
+        int i = int(std::floor(double((w - o) / majCell_)));
+        if (i < 0) i = 0;
+        if (i >= dim) i = dim - 1;
+        return i;
+    };
+    const Vec3 hi(majOrigin_.x + float(majNx_) * majCell_, majOrigin_.y + float(majNy_) * majCell_,
+                  majOrigin_.z + float(majNz_) * majCell_);
+    if (p.x < majOrigin_.x || p.y < majOrigin_.y || p.z < majOrigin_.z || p.x >= hi.x || p.y >= hi.y ||
+        p.z >= hi.z) {
+        return tMax;
+    }
+    const int ix = binClamp(p.x, majOrigin_.x, majNx_);
+    const int iy = binClamp(p.y, majOrigin_.y, majNy_);
+    const int iz = binClamp(p.z, majOrigin_.z, majNz_);
+    float tExit = tMax;
+    auto axisExit = [&](float o, float d, float orig, int i) {
+        if (fabsf(d) < 1e-20f) return tMax;
+        const float next = (d > 0.0f) ? (orig + float(i + 1) * majCell_) : (orig + float(i) * majCell_);
+        return (next - o) / d;
+    };
+    tExit = srMin(tExit, axisExit(origin.x, direction.x, majOrigin_.x, ix));
+    tExit = srMin(tExit, axisExit(origin.y, direction.y, majOrigin_.y, iy));
+    tExit = srMin(tExit, axisExit(origin.z, direction.z, majOrigin_.z, iz));
+    if (!(tExit > t)) tExit = t + 1e-4f;
+    return srMin(tExit, tMax);
+}
+
 Vec3 VolumeGrid::gradientWorld(const Vec3& p) const {
     const float eps = srMax(1e-4f, voxelSize_ * 0.5f);
     const float dx = sampleWorld(p + Vec3(eps, 0, 0)) - sampleWorld(p - Vec3(eps, 0, 0));
@@ -127,6 +282,7 @@ std::shared_ptr<VolumeGrid> VolumeGrid::loadVdb(const std::string& path, std::st
         float maj = 0.0f;
         for (auto it = grid->cbeginValueOn(); it; ++it) maj = srMax(maj, fabsf(float(*it)));
         out->majorant_ = srMax(maj, 1e-4f);
+        if (out->kind_ == VolumeGridKind::Fog) out->rebuildMajorantGrid();
         (void)className;
         return out;
     } catch (const std::exception& e) {
@@ -224,6 +380,7 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh& mesh, const Mat
     for (auto it = grid->cbeginValueOn(); it; ++it) maj = srMax(maj, fabsf(float(*it)));
     // Occupancy is normalized to ~1; runtime density multiplies in the integrator.
     out->majorant_ = srMax(maj, 1.0f);
+    if (out->kind_ == VolumeGridKind::Fog) out->rebuildMajorantGrid();
     return out;
 }
 
@@ -270,7 +427,18 @@ bool VolumeGrid::openVdbAvailable() { return false; }
 bool VolumeGrid::valid() const { return false; }
 void* VolumeGrid::nativeGrid() const { return nullptr; }
 float VolumeGrid::sampleWorld(const Vec3&) const { return kind_ == VolumeGridKind::Sdf ? 1e6f : 0.0f; }
+float VolumeGrid::sampleWorldTracking(const Vec3&) const { return 0.0f; }
 Vec3 VolumeGrid::gradientWorld(const Vec3&) const { return Vec3(0, 1, 0); }
+void VolumeGrid::rebuildMajorantGrid() {
+    majNx_ = majNy_ = majNz_ = 0;
+    majMin_.clear();
+    majMax_.clear();
+}
+void VolumeGrid::majorantOccupancy(const Vec3&, float& minD, float& maxD) const {
+    minD = 0.0f;
+    maxD = majorant_;
+}
+float VolumeGrid::majorantCellExitT(Vec3, Vec3, float, float tMax) const { return tMax; }
 bool VolumeGrid::saveVdb(const std::string&) const { return false; }
 std::shared_ptr<VolumeGrid> VolumeGrid::loadVdb(const std::string&, std::string* error) {
     if (error) *error = "OpenVDB support not built into this binary";

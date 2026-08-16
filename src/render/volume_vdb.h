@@ -14,14 +14,14 @@ namespace sol {
 bool intersectSdfVolume(const VolumeGrid& grid, Vec3 origin, Vec3 direction, float tMin, float tMax,
                         float& tHit, Vec3& normal);
 
-// Heterogeneous free-flight via delta tracking / null collisions (PBRT §11.2.1, §14.1–14.2).
-// Majorant from grid; real scatter multiplies throughput by σs/σt (albedo).
+// Heterogeneous free-flight via piecewise-majorant delta tracking (PBRT §11.2.1).
+// Supervoxels: empty cells skip, constant-density cells are analytical (no voxel samples).
 MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium, Vec3 origin,
                                 Vec3 direction, float tMax, Rng& rng, Vec3& throughput);
 
-// Shadow-ray transmittance through one fog VDB via ratio tracking (PBRT §11.2.1 Eq. 11.17;
-// VolPath §14.2.2 uses this for light-connection shadow rays — not Riemann exp(−τ̂)).
-// Caller should clip [origin, origin+dir*dist] to the fog AABB first.
+// Shadow-ray transmittance via residual ratio tracking (Novak et al. / PBRT §11.2.2):
+// control μ_c = σt(min occupancy) is analytic; leftover uses local Λ. Homogeneous
+// filled cells reduce to Beer–Lambert. Caller clips to the fog AABB first.
 Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 origin, Vec3 direction,
                        float dist, Rng& rng);
 

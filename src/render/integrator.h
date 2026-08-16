@@ -903,7 +903,18 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 // the phase→light strategy is the continuing path (MIS on light hits below).
                 // No extra firefly clamp beyond the user-authored clampDirect (0 = off).
                 if (scene.lightCount > 0 && depth < maxDepth) {
-                    const int nLight = srMax(1, settings.lightSamples);
+                    // Unbiased: 1 light sample after the first scatters; NEE Russian
+                    // roulette at high volume depth so 1000-bounce walks are not
+                    // 1000 full shadow tracks. Weight 1/pNee when a connection is taken.
+                    int nLight = srMax(1, settings.lightSamples);
+                    if (depth >= 4) nLight = 1;
+                    float pNee = 1.0f;
+                    bool takeNee = true;
+                    if (depth >= 16) {
+                        pNee = clampf(16.0f / float(depth + 1), 0.05f, 1.0f);
+                        takeNee = rng.nextFloat() < pNee;
+                    }
+                    if (takeNee) {
                     Vec3 volDirect(0.0f);
                     for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
                         float selectPdf = 0.0f;
@@ -945,7 +956,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
                         volDirect += contrib;
                     }
-                    radiance += volDirect * (1.0f / float(nLight));
+                    radiance += volDirect * (1.0f / (float(nLight) * pNee));
+                    }
                 }
 
                 // Continue the path by sampling the phase function (unidirectional strategy).

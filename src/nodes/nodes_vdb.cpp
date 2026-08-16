@@ -70,8 +70,10 @@ public:
                                          {"Nearest", "Linear", "Quadratic"}, 1)
                          .withTooltip("Voxel reconstruction filter when sampling the VDB.\n"
                                       "Nearest = 1 tap (blocky); Linear = 8-tap trilinear;\n"
-                                      "Quadratic = 27-tap triquadratic (smoothest, ~3–4× slower per\n"
-                                      "sample — costly under fog delta tracking / SDF gradients).\n"
+                                      "Quadratic = 27-tap triquadratic (smoothest; SDF gradients).\n"
+                                      "Fog tracking always uses Linear — local majorants skip empty "
+                                      "and constant-density cells, so deep multiple scattering is "
+                                      "not 27 taps per null collision.\n"
                                       "Changing filter does not rebuild the grid."));
         addParameter(Parameter::makeString("primname", "Prim Name", "vdb")
                          .withTooltip("Leaf name for the output VDB prim"));
@@ -230,7 +232,8 @@ public:
                                          {"Nearest", "Linear", "Quadratic"}, 1)
                          .withTooltip("Voxel reconstruction filter when sampling the VDB.\n"
                                       "Nearest = 1 tap; Linear = 8-tap trilinear;\n"
-                                      "Quadratic = 27-tap triquadratic (~3–4× slower per sample)."));
+                                      "Quadratic = 27-tap (SDF / display). Fog tracking uses Linear "
+                                      "plus local majorants (empty/constant cells skip voxel samples)."));
         addParameter(Parameter::makeString("primname", "Prim Name", "vdb"));
         addTransformParameters(*this);
     }

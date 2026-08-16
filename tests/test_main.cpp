@@ -4743,6 +4743,45 @@ void testNgonTriangulateAndVdb() {
             check(interiorHits == interiorCount, "fog lattice inside unit box is filled");
             std::printf("  fog fill: center=%.3f outside=%.3f lattice=%d/%d\n", densCenter,
                         densOutside, interiorHits, interiorCount);
+            check(fogA->hasMajorantGrid(), "fog builds supervoxel majorant grid");
+            float majMin = 0.0f, majMax = 0.0f;
+            fogA->majorantOccupancy(Vec3(0, 0, 0), majMin, majMax);
+            check(majMin > 0.85f, "interior supervoxel min occupancy ~1");
+            check(majMax > 0.85f && majMax < 1.6f, "interior supervoxel max occupancy ~1");
+            fogA->majorantOccupancy(Vec3(3, 0, 0), majMin, majMax);
+            check(majMax < 0.05f, "outside supervoxel is empty");
+            {
+                MediumData trackMed;
+                trackMed.type = 2;
+                trackMed.sigmaA = Vec3(0.0f);
+                trackMed.sigmaS = Vec3(1.0f);
+                trackMed.density = 1.0f;
+                Rng rngWalk(3u, 5u);
+                int scatters = 0;
+                const auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < 4000; ++i) {
+                    Vec3 thru(1.0f);
+                    const MediumSample ms = sampleMediumVdbFog(
+                        *fogA, trackMed, Vec3(0, 0, 0), Vec3(1, 0, 0), 4.0f, rngWalk, thru);
+                    if (ms.scattered) ++scatters;
+                }
+                const auto msWalk = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - t0)
+                                        .count();
+                check(scatters > 200, "analytical interior walk produces real scatters");
+                check(msWalk < 2000.0, "4000 free-flights stay cheap with local majorants");
+                std::printf("  majorant walk: scatters=%d in %.1f ms\n", scatters, msWalk);
+
+                Rng rngTr(11u, 13u);
+                Vec3 trAcc(0.0f);
+                constexpr int kN = 128;
+                for (int i = 0; i < kN; ++i)
+                    trAcc = trAcc + mediumShadowTrVdb(*fogA, trackMed, Vec3(-2, 0, 0), Vec3(1, 0, 0),
+                                                      4.0f, rngTr);
+                const Vec3 trMean = trAcc * (1.0f / float(kN));
+                check(trMean.x > 0.15f && trMean.x < 0.85f,
+                      "residual-ratio Tr through unit fog is between vacuum and opaque");
+            }
             RenderSettingsData deepMs;
             deepMs.maxDepth = 1024;
             deepMs.rrStartDepth = 1024;

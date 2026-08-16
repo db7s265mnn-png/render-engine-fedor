@@ -54,10 +54,21 @@ public:
 
     // Sample scalar field in world space (SDF distance or fog density).
     float sampleWorld(const Vec3& p) const;
+    // Density sample for delta / residual tracking. Quadratic is 27-tap and
+    // dominates deep multiple scattering; tracking always uses Linear (8-tap).
+    // SDF gradients and the authored Sample Filter still use sampleWorld().
+    float sampleWorldTracking(const Vec3& p) const;
     // Finite-difference gradient (world space). Useful for SDF normals.
     Vec3 gradientWorld(const Vec3& p) const;
     // Max |density| / majorant estimate for delta tracking (fog).
     float majorant() const { return majorant_; }
+
+    // Piecewise min/max occupancy (supervoxels). Empty / constant cells skip
+    // voxel sampling during Woodcock walks. Fog only.
+    bool hasMajorantGrid() const { return majNx_ > 0 && int(majMax_.size()) == majNx_ * majNy_ * majNz_; }
+    void majorantOccupancy(const Vec3& p, float& minD, float& maxD) const;
+    // Ray parameter of the current coarse-cell far face, clamped to tMax.
+    float majorantCellExitT(Vec3 origin, Vec3 direction, float t, float tMax) const;
 
     // Serialize helpers
     bool saveVdb(const std::string& path) const;
@@ -82,6 +93,15 @@ private:
     Bounds3 bounds_;
     float voxelSize_ = 0.05f;
     float majorant_ = 1.0f;
+
+    void rebuildMajorantGrid();
+    int majNx_ = 0;
+    int majNy_ = 0;
+    int majNz_ = 0;
+    float majCell_ = 0.0f;
+    Vec3 majOrigin_{};
+    std::vector<float> majMin_;
+    std::vector<float> majMax_;
 };
 
 using VolumeGridPtr = std::shared_ptr<VolumeGrid>;

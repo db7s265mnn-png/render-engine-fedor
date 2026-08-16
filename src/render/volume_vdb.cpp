@@ -127,99 +127,191 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
         out.t = 0.0f;
         return out;
     }
+    // Skip vacuum before the AABB; starting t=0 outside would treat the whole
+    // segment as an empty supervoxel and jump to tMax (Tr=1 / no scatters).
+    float t = srMax(0.0f, aabbEnter);
+    if (t >= tMax) {
+        out.t = tMax;
+        return out;
+    }
 
-    // PBRT §11.2.1: majorant Λ ≥ σ_t everywhere → homogeneous null-scattering rate.
-    const float majGrid = srMax(grid.majorant(), 1e-4f);
     const float densityScale = srMax(0.0f, medium.density);
     const Vec3 sigmaA0 = medium.sigmaA;
     const Vec3 sigmaS0 = medium.sigmaS;
+    const Vec3 sigmaT0 = sigmaA0 + sigmaS0;
     const float baseMaj =
-        srMax(sigmaA0.x + sigmaS0.x, srMax(sigmaA0.y + sigmaS0.y, sigmaA0.z + sigmaS0.z));
-    const float majorant = srMax(1e-6f, baseMaj * majGrid * densityScale);
-    float t = 0.0f;
-    // Null-collision candidates per free-flight segment (not path depth).
-    // E[iters] ≈ Λ·L; keep the cap >> dense optical depth so we never force an
-    // early exit (which would bias transmittance / punch holes in dense fog).
-    constexpr int kNullCollisionMaxIters = 1 << 20;
-    for (int iter = 0; iter < kNullCollisionMaxIters; ++iter) {
-        // Free-flight candidate ~ Exp(Λ).
-        const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
-        t += -logf(u) / majorant;
-        if (t >= tMax) {
-            // No real collision before the surface / AABB exit (delta-tracking transmit).
-            out.t = tMax;
-            return out;
-        }
-        const Vec3 p = origin + direction * t;
-        const float dens = srMax(0.0f, grid.sampleWorld(p)) * densityScale;
+        srMax(sigmaT0.x, srMax(sigmaT0.y, sigmaT0.z));
+    if (baseMaj <= 1e-12f || densityScale <= 0.0f) {
+        out.t = tMax;
+        return out;
+    }
+
+    auto collide = [&](float occupancy, float majorant, float tHit) -> bool {
+        const float dens = srMax(0.0f, occupancy) * densityScale;
         const Vec3 sigmaA = sigmaA0 * dens;
         const Vec3 sigmaS = sigmaS0 * dens;
         const Vec3 sigmaT = sigmaA + sigmaS;
         const float stAvg = (sigmaT.x + sigmaT.y + sigmaT.z) * (1.0f / 3.0f);
-        // Null collision if ξ ≥ σ_t / Λ (fictitious particle — continue).
-        if (rng.nextFloat() >= stAvg / majorant) continue;
-
-        // Real collision: absorb vs scatter by σa : σs (channel-averaged PDF; weight via albedo).
+        if (rng.nextFloat() >= stAvg / srMax(majorant, 1e-12f)) return false;
         const float saAvg = (sigmaA.x + sigmaA.y + sigmaA.z) * (1.0f / 3.0f);
         const float ssAvg = (sigmaS.x + sigmaS.y + sigmaS.z) * (1.0f / 3.0f);
         const float stSum = srMax(1e-8f, saAvg + ssAvg);
         if (rng.nextFloat() < saAvg / stSum) {
             throughput = Vec3(0.0f);
-            out.t = t;
+            out.t = tHit;
             out.absorbed = true;
-            return out;
+            return true;
         }
-        // Scatter: β *= σs/σt (PBRT path throughput for a real-scattering event).
         const Vec3 albedo(sigmaT.x > 1e-8f ? sigmaS.x / sigmaT.x : 0.0f,
                           sigmaT.y > 1e-8f ? sigmaS.y / sigmaT.y : 0.0f,
                           sigmaT.z > 1e-8f ? sigmaS.z / sigmaT.z : 0.0f);
         throughput = throughput * albedo;
-        out.t = t;
+        out.t = tHit;
         out.scattered = true;
-        return out;
+        return true;
+    };
+
+    constexpr int kNullCollisionMaxIters = 1 << 20;
+    for (int iter = 0; iter < kNullCollisionMaxIters && t < tMax; ++iter) {
+        float minD = 0.0f;
+        float maxD = grid.majorant();
+        grid.majorantOccupancy(origin + direction * (t + 1e-5f), minD, maxD);
+        const float tExit = grid.hasMajorantGrid()
+                                ? grid.majorantCellExitT(origin, direction, t, tMax)
+                                : tMax;
+        if (!(tExit > t)) {
+            t += 1e-4f;
+            continue;
+        }
+        if (maxD <= 1e-8f) {
+            t = tExit;
+            continue;
+        }
+
+        const float majorant = srMax(1e-8f, baseMaj * maxD * densityScale);
+        const bool homog =
+            (maxD - minD) <= (1e-3f * srMax(maxD, 1e-6f) + 1e-4f);
+
+        if (homog) {
+            // Constant occupancy: analytical Woodcock (0 voxel samples). Greyscale
+            // σt ⇒ one exponential draw is a real collision or a cell exit.
+            const float occ = 0.5f * (minD + maxD);
+            const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
+            const float tHit = t + (-logf(u) / majorant);
+            if (tHit >= tExit) {
+                t = tExit;
+                continue;
+            }
+            if (collide(occ, majorant, tHit)) return out;
+            t = tHit;
+            continue;
+        }
+
+        // Heterogeneous supervoxel: local-Λ delta tracking (Linear density samples).
+        float tLocal = t;
+        bool leftCell = false;
+        while (iter < kNullCollisionMaxIters) {
+            const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
+            tLocal += -logf(u) / majorant;
+            if (tLocal >= tExit) {
+                t = tExit;
+                leftCell = true;
+                break;
+            }
+            const float occ = srMax(0.0f, grid.sampleWorldTracking(origin + direction * tLocal));
+            if (collide(occ, majorant, tLocal)) return out;
+            ++iter;
+        }
+        if (leftCell) continue;
+        break;
     }
     out.t = tMax;
     return out;
 }
 
-// PBRT 4ed §11.2.1 Eq. 11.17 — ratio tracking transmittance.
-// T ← ∏ σ_n(p_i)/Λ  for free-flight samples p_i ~ Exp(Λ) until past the endpoint.
+// PBRT 4ed residual ratio tracking (Novak et al.): control μ_c = σt(min occupancy)
+// is taken out analytically; residual majorant Λ_r = Λ − μ_c walks only the leftover.
+// Homogeneous filled cells (min≈max) → Λ_r≈0 → T = exp(−σt L), no voxel samples.
 Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 origin, Vec3 direction,
                        float dist, Rng& rng) {
     if (!grid.valid() || dist <= 0.0f) return Vec3(1.0f);
 
-    const float majGrid = srMax(grid.majorant(), 1e-4f);
     const float densityScale = srMax(0.0f, medium.density);
-    const Vec3 sigmaA0 = medium.sigmaA;
-    const Vec3 sigmaS0 = medium.sigmaS;
-    const float baseMaj =
-        srMax(sigmaA0.x + sigmaS0.x, srMax(sigmaA0.y + sigmaS0.y, sigmaA0.z + sigmaS0.z));
-    const float majorant = srMax(1e-6f, baseMaj * majGrid * densityScale);
+    const Vec3 sigmaT0 = medium.sigmaA + medium.sigmaS;
+    const float baseMaj = srMax(sigmaT0.x, srMax(sigmaT0.y, sigmaT0.z));
+    if (baseMaj <= 1e-12f || densityScale <= 0.0f) return Vec3(1.0f);
+
+    float aabbEnter = 0.0f;
+    float aabbExit = dist;
+    if (!rayAabbInterval(origin, direction, grid.worldBounds(), aabbEnter, aabbExit)) return Vec3(1.0f);
+    const float tEnd = srMin(dist, srMax(0.0f, aabbExit));
+    float t = srMax(0.0f, aabbEnter);
+    if (tEnd <= t) return Vec3(1.0f);
 
     Vec3 Tr(1.0f);
-    float t = 0.0f;
     constexpr int kNullCollisionMaxIters = 1 << 20;
-    for (int iter = 0; iter < kNullCollisionMaxIters; ++iter) {
-        const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
-        t += -logf(u) / majorant;
-        if (t >= dist) return Tr;
-
-        const float dens = srMax(0.0f, grid.sampleWorld(origin + direction * t)) * densityScale;
-        const Vec3 sigmaT = (sigmaA0 + sigmaS0) * dens;
-        // σ_n = Λ − σ_t  (null-scattering coefficient). Clamp for majorant underestimates.
-        const float nx = srMax(0.0f, majorant - sigmaT.x);
-        const float ny = srMax(0.0f, majorant - sigmaT.y);
-        const float nz = srMax(0.0f, majorant - sigmaT.z);
-        Tr = Vec3(Tr.x * (nx / majorant), Tr.y * (ny / majorant), Tr.z * (nz / majorant));
-
-        // Russian roulette when transmittance is tiny (PBRT §11.2.1 RR / track-length motivation).
-        const float lum = luminance(Tr);
-        if (lum < 1e-3f) {
-            const float q = clampf(lum * 16.0f, 0.05f, 0.95f);
-            if (rng.nextFloat() > q) return Vec3(0.0f);
-            Tr = Tr / q;
+    int iter = 0;
+    while (t < tEnd && iter < kNullCollisionMaxIters) {
+        float minD = 0.0f;
+        float maxD = grid.majorant();
+        grid.majorantOccupancy(origin + direction * (t + 1e-5f), minD, maxD);
+        const float tExit =
+            grid.hasMajorantGrid() ? grid.majorantCellExitT(origin, direction, t, tEnd) : tEnd;
+        const float L = tExit - t;
+        if (!(L > 1e-8f)) {
+            t += 1e-4f;
+            ++iter;
+            continue;
         }
-        if (maxComponent(Tr) < 1e-6f) return Vec3(0.0f);
+        if (maxD <= 1e-8f) {
+            t = tExit;
+            continue;
+        }
+
+        const Vec3 muC = sigmaT0 * (srMax(0.0f, minD) * densityScale);
+        const float majorant = srMax(1e-8f, baseMaj * maxD * densityScale);
+        const float muCMin = srMin(muC.x, srMin(muC.y, muC.z));
+        const float residualMaj = srMax(0.0f, majorant - muCMin);
+
+        Tr = Vec3(Tr.x * expf(-muC.x * L), Tr.y * expf(-muC.y * L), Tr.z * expf(-muC.z * L));
+
+        auto russianRoulette = [&]() -> bool {
+            const float lum = luminance(Tr);
+            if (lum < 1e-3f) {
+                const float q = clampf(lum * 16.0f, 0.05f, 0.95f);
+                if (rng.nextFloat() > q) {
+                    Tr = Vec3(0.0f);
+                    return true;
+                }
+                Tr = Tr / q;
+            }
+            if (maxComponent(Tr) < 1e-6f) {
+                Tr = Vec3(0.0f);
+                return true;
+            }
+            return false;
+        };
+        if (russianRoulette()) return Tr;
+
+        if (residualMaj > 1e-8f) {
+            float tRes = t;
+            while (iter < kNullCollisionMaxIters) {
+                const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
+                tRes += -logf(u) / residualMaj;
+                if (tRes >= tExit) break;
+                const float occ = srMax(0.0f, grid.sampleWorldTracking(origin + direction * tRes));
+                const Vec3 sigmaT = sigmaT0 * (occ * densityScale);
+                const float nx = srMax(0.0f, residualMaj - (sigmaT.x - muC.x));
+                const float ny = srMax(0.0f, residualMaj - (sigmaT.y - muC.y));
+                const float nz = srMax(0.0f, residualMaj - (sigmaT.z - muC.z));
+                Tr = Vec3(Tr.x * (nx / residualMaj), Tr.y * (ny / residualMaj),
+                          Tr.z * (nz / residualMaj));
+                ++iter;
+                if (russianRoulette()) return Tr;
+            }
+        }
+        t = tExit;
+        ++iter;
     }
     return Tr;
 }
