@@ -97,7 +97,10 @@ SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMa
     // Analytical free-flight with max-channel majorant + null collisions so the
     // same control flow works for heterogeneous (VDB) majorant tracking later.
     float t = 0.0f;
-    for (int iter = 0; iter < 64; ++iter) {
+    // Homogeneous null collisions are cheap; keep the same high safety bound as VDB
+    // free-flight so high σt · L never truncates the walk (path depth is maxDepth).
+    constexpr int kNullCollisionMaxIters = 1 << 20;
+    for (int iter = 0; iter < kNullCollisionMaxIters; ++iter) {
         const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
         t += -logf(u) / majorant;
         if (t >= tMax) {

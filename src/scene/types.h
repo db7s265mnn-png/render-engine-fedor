@@ -501,9 +501,8 @@ struct RenderSettingsData {
     int resolutionX = 960;
     int resolutionY = 540;
     int samplesPerPixel = 64;
-    int maxDepth = 8;
-
-    int rrStartDepth = 3;
+    int maxDepth = 8;       // surfaces + volume scatters; UI up to 4096 for dense MS
+    int rrStartDepth = 3;   // raise near maxDepth for deep volume multiple scattering
     int lightSamples = 2;          // NEE samples per bounce (MIS with BSDF)
     int seed = 0;
     int integrator = kIntegratorPathTracer;
