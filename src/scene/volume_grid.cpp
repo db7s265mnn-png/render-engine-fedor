@@ -160,8 +160,6 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh& mesh, const Mat
     }
 
     openvdb::math::Transform::Ptr xformVdb = makeXform(settings.voxelSize);
-    // Level-set half-width must cover both exterior and interior bands so the
-    // surface ramp has enough active voxels before Fog conversion.
     const float halfWidth =
         srMax(1.0f, srMax(settings.exteriorBand, settings.interiorBand));
     openvdb::FloatGrid::Ptr grid;
@@ -174,16 +172,15 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh& mesh, const Mat
             grid->setName("sdf");
         } else {
             // Fog = filled density, not a hollow narrow-band shell.
-            // OpenVDB sdfToFogVolume: inactive interior → active dens=1; interior
-            // band ramps 0→1; exterior cleared. Fixes see-through "holes" through
-            // closed meshes (Buddha etc.) when using standard_volume.
-            grid = sdf->deepCopy();
+            // meshToLevelSet signed-flood-fills inactive interior (negative);
+            // sdfToFogVolume: interior → dens 1, interior band ramps 0→1, exterior 0.
+            grid = sdf;
             const float cutoffWorld =
                 settings.voxelSize * srMax(1.0f, settings.interiorBand);
             openvdb::tools::sdfToFogVolume(*grid, cutoffWorld);
             grid->setGridClass(openvdb::GRID_FOG_VOLUME);
             grid->setName("density");
-            // Mild AABB-edge fade only (1–2 voxels) — softens hard container cuts
+            // Mild AABB-edge fade only (2 voxels) — softens hard container cuts
             // without carving planar holes into a filled interior.
             const openvdb::CoordBBox densBox = grid->evalActiveVoxelBoundingBox();
             if (!densBox.empty()) {
