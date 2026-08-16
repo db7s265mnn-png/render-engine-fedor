@@ -227,7 +227,8 @@ public:
         addParameter(Parameter::makeMenu("filter", "Sample Filter",
                                          {"Nearest", "Linear", "Quadratic"}, 1)
                          .withTooltip("Voxel reconstruction filter when sampling the VDB.\n"
-                                      "Nearest = blocky; Linear = trilinear; Quadratic = smoothest."));
+                                      "Nearest = 1 tap; Linear = 8-tap trilinear;\n"
+                                      "Quadratic = 27-tap triquadratic (~3–4× slower per sample)."));
         addParameter(Parameter::makeString("primname", "Prim Name", "vdb"));
         addTransformParameters(*this);
     }
