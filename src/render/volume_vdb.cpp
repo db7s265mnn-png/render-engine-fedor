@@ -356,6 +356,15 @@ Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 or
         Tr = Vec3(Tr.x * expf(-muC.x * L), Tr.y * expf(-muC.y * L), Tr.z * expf(-muC.z * L));
 
         auto russianRoulette = [&]() -> bool {
+            const float lum = luminance(Tr);
+            if (lum < 1e-3f) {
+                const float q = clampf(lum * 16.0f, 0.05f, 0.95f);
+                if (rng.nextFloat() > q) {
+                    Tr = Vec3(0.0f);
+                    return true;
+                }
+                Tr = Tr / q;
+            }
             if (maxComponent(Tr) < 1e-6f) {
                 Tr = Vec3(0.0f);
                 return true;

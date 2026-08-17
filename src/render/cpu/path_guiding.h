@@ -42,7 +42,6 @@ public:
         bool active() const { return active_; }
         float guideProbability() const { return guideProb_; }
         bool prepared() const { return prepared_; }
-        bool preparedVolume() const { return preparedVolume_; }
 
         void beginPath();
         void endPath();
@@ -52,13 +51,7 @@ public:
         float pdf(Vec3 wiWorld) const;
         bool sample(float u1, float u2, Vec3& wiWorld, float& guidePdf) const;
 
-        // Volume: incident-radiance field × single-lobe HG product (OpenPGL).
-        bool prepareVolume(Vec3 p, Vec3 wo, float g, Rng& rng);
-        float pdfVolume(Vec3 wiWorld) const;
-        bool sampleVolume(float u1, float u2, Vec3& wiWorld, float& guidePdf) const;
-
         void beginSegment(Vec3 p, Vec3 wo);
-        void beginVolumeSegment(Vec3 p, Vec3 wo);
         // Opaque handle for the segment opened by the last beginSegment() — used by
         // BDPT to attribute NEE / connection radiance to the correct eye vertex.
         void* segmentHandle() const { return currentSegment_; }
@@ -66,7 +59,7 @@ public:
         void addScattered(Vec3 contrib);
         void addScatteredAt(void* segment, Vec3 contrib);
         void recordBounce(Vec3 n, Vec3 wi, float pdf, Vec3 weight, bool delta, float roughness,
-                          float eta, float rrSurvival, bool volumeScatter = false);
+                          float eta, float rrSurvival);
         void setRussianRoulette(float rrSurvival);
         void recordBackground(Vec3 rayOrigin, Vec3 rayDir, Vec3 Le, float misWeight);
         void recordLightHit(Vec3 p, Vec3 wo, Vec3 Le, float misWeight);
@@ -77,7 +70,6 @@ public:
         std::unique_ptr<Data> data_;
         bool active_ = false;
         bool prepared_ = false;
-        bool preparedVolume_ = false;
         float guideProb_ = 0.5f;
         void* currentSegment_ = nullptr;
     };

@@ -272,8 +272,7 @@ public:
         const bool useMnee = pathTracer && !hasVolumes && causticsUseMnee(settings, &scene);
         const bool useBdptPath = useBdpt && !hasVolumes;
 #if SOLSTICE_HAVE_OPENPGL
-        // OpenPGL guides eye-path diffuse sampling on PT and BDPT (RGB + Spectral),
-        // including volume phase (incident radiance × HG product).
+        // OpenPGL guides eye-path diffuse sampling on PT and BDPT (RGB + Spectral).
         // Specular / near-spec vertices are recorded as delta (radiance propagates for
         // caustic training) but never guide-sampled; MNEE/photon energy trains
         // diffuse receivers when Indirect Guides is on.

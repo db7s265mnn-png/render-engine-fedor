@@ -619,18 +619,13 @@ struct NullGuiding {
     SR_INL SR_HD bool active() const { return false; }
     SR_INL SR_HD float guideProbability() const { return 0.0f; }
     SR_INL SR_HD bool prepared() const { return false; }
-    SR_INL SR_HD bool preparedVolume() const { return false; }
     SR_INL SR_HD bool prepare(Vec3, Vec3, Rng&) { return false; }
     SR_INL SR_HD float pdf(Vec3) const { return 0.0f; }
     SR_INL SR_HD bool sample(float, float, Vec3&, float&) const { return false; }
-    SR_INL SR_HD bool prepareVolume(Vec3, Vec3, float, Rng&) { return false; }
-    SR_INL SR_HD float pdfVolume(Vec3) const { return 0.0f; }
-    SR_INL SR_HD bool sampleVolume(float, float, Vec3&, float&) const { return false; }
     SR_INL SR_HD void beginSegment(Vec3, Vec3) {}
-    SR_INL SR_HD void beginVolumeSegment(Vec3, Vec3) {}
     SR_INL SR_HD void recordEmission(Vec3, float) {}
     SR_INL SR_HD void addScattered(Vec3) {}
-    SR_INL SR_HD void recordBounce(Vec3, Vec3, float, Vec3, bool, float, float, float, bool = false) {}
+    SR_INL SR_HD void recordBounce(Vec3, Vec3, float, Vec3, bool, float, float, float) {}
     SR_INL SR_HD void setRussianRoulette(float) {}
     SR_INL SR_HD void recordBackground(Vec3, Vec3, Vec3, float) {}
     SR_INL SR_HD void recordLightHit(Vec3, Vec3, Vec3, float) {}
@@ -811,27 +806,10 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     return result;
 }
 
-// Continuation pdf at a volume vertex: HG, mixed with OpenPGL volume×HG when trained.
-template <typename Guiding>
-SR_INL SR_HD float volumeScatterPdf(Vec3 woVol, Vec3 wi, const MediumData& med, Guiding* guiding) {
-    const float phasePdf = henyeyGreenstein(clampf(dot(woVol, wi), -1.0f, 1.0f), med.g);
-#if !defined(__CUDACC__)
-    if (guiding && guiding->active() && guiding->preparedVolume()) {
-        const float pg = guiding->guideProbability();
-        return pg * guiding->pdfVolume(wi) + (1.0f - pg) * phasePdf;
-    }
-#else
-    (void)guiding;
-#endif
-    return phasePdf;
-}
-
 // Volume NEE: M light candidates scored by phase·Le/pdf, one shadow ray (RIS).
-// `skipType` (e.g. kLightDistant) excludes lights that are connected separately.
-template <typename Tracer, typename Guiding>
+template <typename Tracer>
 SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
-                                                Vec3 woVol, const MediumData& med, Rng& rng,
-                                                Guiding* guiding, int skipType = -1) {
+                                                Vec3 woVol, const MediumData& med, Rng& rng) {
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
@@ -839,12 +817,12 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
     int lis[kRisCandidates];
     float selPdfs[kRisCandidates];
     Vec3 rgb[kRisCandidates];
-    float scatterPdfs[kRisCandidates];
+    float phasePdfs[kRisCandidates];
     float ws[kRisCandidates];
     int nOk = 0;
     for (int i = 0; i < kRisCandidates; ++i) {
         float selectPdf = 0.0f;
-        const int li = sampleLightIndex(scene, origin, rng.nextFloat(), selectPdf, skipType);
+        const int li = sampleLightIndex(scene, origin, rng.nextFloat(), selectPdf);
         if (li < 0 || selectPdf <= 0.0f) continue;
         LightSample ls;
         if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
@@ -861,7 +839,7 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
         lis[nOk] = li;
         selPdfs[nOk] = selectPdf;
         rgb[nOk] = unshadowed;
-        scatterPdfs[nOk] = volumeScatterPdf(woVol, ls.wi, med, guiding);
+        phasePdfs[nOk] = phasePdfL;
         ws[nOk] = w;
         ++nOk;
     }
@@ -880,8 +858,7 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
     }
 
     const float lightPdf = ls.pdf * selPdfs[pick];
-    const float misW =
-        ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdfs[pick]);
+    const float misW = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phasePdfs[pick]);
     result = rgb[pick] * (vis * misW * wSum / (float(kRisCandidates) * ws[pick]));
 
 #if !defined(__CUDACC__)
@@ -889,41 +866,6 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
         result = result * shadowTransmittanceFogVolumes(scene, origin, ls.wi, tShadow, rng);
 #endif
     if (med.type != 2 && ls.distance < 1.0e7f) result = result * mediumShadowTr(med, ls.distance);
-    return result;
-}
-
-// Always connect every distant light (Physical Sky sun). Selection pdf = 1.
-template <typename Tracer, typename Guiding>
-SR_INL SR_HD Vec3 nextEventEstimationVolumeDistant(const SceneView& scene, const Tracer& tracer, Vec3 origin,
-                                                   Vec3 woVol, const MediumData& med, Rng& rng,
-                                                   Guiding* guiding) {
-    Vec3 result(0.0f);
-    for (int li = 0; li < scene.lightCount; ++li) {
-        if (scene.lights[li].type != kLightDistant) continue;
-        LightSample ls;
-        if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
-            isBlack(ls.radiance))
-            continue;
-        const float phasePdfL =
-            henyeyGreenstein(clampf(dot(woVol, ls.wi), -1.0f, 1.0f), med.g);
-        if (phasePdfL <= 0.0f) continue;
-        float vis = 1.0f;
-        float tShadow = 1.0e8f;
-        if (scene.lights[li].shadowEnable) {
-            if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
-            vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
-            if (vis <= 1e-5f) continue;
-        }
-        const float scatterPdf = volumeScatterPdf(woVol, ls.wi, med, guiding);
-        const float misW = ls.delta ? 1.0f : powerHeuristic(1.0f, ls.pdf, 1.0f, scatterPdf);
-        Vec3 contrib = ls.radiance * (phasePdfL * vis * misW / ls.pdf);
-#if !defined(__CUDACC__)
-        if (scene.lights[li].shadowEnable)
-            contrib = contrib * shadowTransmittanceFogVolumes(scene, origin, ls.wi, tShadow, rng);
-#endif
-        if (med.type != 2 && ls.distance < 1.0e7f) contrib = contrib * mediumShadowTr(med, ls.distance);
-        result += contrib;
-    }
     return result;
 }
 
@@ -959,7 +901,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     bool sawNonSpecular = false;
     // Specular suffix after a non-specular bounce — per-light Contribute to Caustics.
     bool causticSuffix = false;
-    bool afterVolumeScatter = false;
     int depth = 0;
     int passThrough = 0;
     // Homogeneous medium currently surrounding the ray (-1 = vacuum).
@@ -1033,20 +974,14 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 // Incident direction toward the previous vertex (phase frame).
                 const Vec3 woVol = -direction;
 
-#if !defined(__CUDACC__)
-                if (guiding && guiding->active()) {
-                    guiding->beginVolumeSegment(origin, woVol);
-                    guiding->prepareVolume(origin, woVol, med->g, rng);
-                }
-#endif
-
-                // Distant sun is always connected (select pdf 1). RIS then samples the
-                // remaining lights (sky dome / area) so the sun is not starved by the
-                // sky integral. OpenPGL volume×HG mixes into the continuation pdf.
-                Vec3 volDirect(0.0f);
+                // Volume next-event estimation with MIS vs phase sampling (PBRT VolPath).
+                // Unbiased: light strategy weight = powerHeuristic(pdf_light, pdf_phase);
+                // the phase→light strategy is the continuing path (MIS on light hits below).
+                // No extra firefly clamp beyond the user-authored clampDirect (0 = off).
                 if (scene.lightCount > 0 && depth < maxDepth) {
-                    volDirect += nextEventEstimationVolumeDistant(scene, tracer, origin, woVol, *med,
-                                                                  rng, guiding);
+                    // Unbiased: RIS NEE after each scatter; Russian roulette from the
+                    // 5th volume bounce so deep walks are not 1000 shadow tracks.
+                    // Weight 1/pNee when a connection is taken.
                     int nLight = srMax(1, settings.lightSamples);
                     if (depth >= 4) nLight = 1;
                     float pNee = 1.0f;
@@ -1056,68 +991,22 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         takeNee = rng.nextFloat() < pNee;
                     }
                     if (takeNee) {
-                        Vec3 ris(0.0f);
+                        Vec3 volDirect(0.0f);
                         for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
-                            ris += nextEventEstimationVolumeOnce(scene, tracer, origin, woVol, *med, rng,
-                                                                 guiding, kLightDistant);
+                            Vec3 contrib = throughput * nextEventEstimationVolumeOnce(
+                                                            scene, tracer, origin, woVol, *med, rng);
+                            contrib = clampContribution(contrib, settings.clampDirect);
+                            volDirect += contrib;
                         }
-                        volDirect += ris * (1.0f / (float(nLight) * pNee));
+                        radiance += volDirect * (1.0f / (float(nLight) * pNee));
                     }
-                    volDirect = clampContribution(volDirect, settings.clampDirect);
-                    radiance += throughput * volDirect;
-#if !defined(__CUDACC__)
-                    if (guiding && guiding->active()) guiding->addScattered(volDirect);
-#endif
                 }
 
+                // Continue the path by sampling the phase function (unidirectional strategy).
                 float phasePdf = 0.0f;
-                bool gotGuide = false;
-#if !defined(__CUDACC__)
-                if (guiding && guiding->active() && guiding->preparedVolume()) {
-                    const float pg = guiding->guideProbability();
-                    if (rng.nextFloat() < pg) {
-                        Vec3 wiWorld;
-                        float gPdf = 0.0f;
-                        if (guiding->sampleVolume(rng.nextFloat(), rng.nextFloat(), wiWorld, gPdf) &&
-                            gPdf > 0.0f) {
-                            phasePdf = henyeyGreenstein(clampf(dot(woVol, wiWorld), -1.0f, 1.0f), med->g);
-                            const float mixPdf = pg * gPdf + (1.0f - pg) * phasePdf;
-                            if (mixPdf > 0.0f && phasePdf > 0.0f) {
-                                direction = wiWorld;
-                                bsdfPdf = mixPdf;
-                                throughput = throughput * (phasePdf / mixPdf);
-                                gotGuide = true;
-                            }
-                        }
-                    }
-                }
-#endif
-                if (!gotGuide) {
-                    direction = sampleHenyeyGreenstein(woVol, med->g, rng.nextFloat(), rng.nextFloat(),
-                                                       phasePdf);
-                    bsdfPdf = phasePdf;
-#if !defined(__CUDACC__)
-                    if (guiding && guiding->active() && guiding->preparedVolume() && phasePdf > 0.0f) {
-                        const float pg = guiding->guideProbability();
-                        const float gPdf = guiding->pdfVolume(direction);
-                        const float mixPdf = pg * gPdf + (1.0f - pg) * phasePdf;
-                        if (mixPdf > 0.0f) {
-                            throughput = throughput * (phasePdf / mixPdf);
-                            bsdfPdf = mixPdf;
-                        }
-                    }
-#endif
-                }
-#if !defined(__CUDACC__)
-                if (guiding && guiding->active()) {
-                    const float phaseNow =
-                        henyeyGreenstein(clampf(dot(woVol, direction), -1.0f, 1.0f), med->g);
-                    const Vec3 weight = bsdfPdf > 0.0f ? Vec3(phaseNow / bsdfPdf) : Vec3(1.0f);
-                    guiding->recordBounce(woVol, direction, bsdfPdf, weight, false, 1.0f, 1.0f, 1.0f,
-                                          true);
-                }
-#endif
-                afterVolumeScatter = true;
+                direction = sampleHenyeyGreenstein(woVol, med->g, rng.nextFloat(), rng.nextFloat(),
+                                                   phasePdf);
+                bsdfPdf = phasePdf;
                 specularBounce = false;
                 sawNonSpecular = true;
                 rayKind = RayShadeKind::DiffuseReflection;
@@ -1126,9 +1015,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     const float lum = luminance(throughput);
                     const float q = clampf(lum, 0.05f, 0.95f);
                     if (rng.nextFloat() > q) break;
-#if !defined(__CUDACC__)
-                    if (guiding && guiding->active()) guiding->setRussianRoulette(q);
-#endif
                     throughput = throughput / q;
                 }
                 continue;
@@ -1159,14 +1045,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         if (!isBlack(envL)) {
                         float weight = 1.0f;
                         if (!specularBounce) {
-                            const float sel =
-                                afterVolumeScatter
-                                    ? lightSelectionPdfIndex(scene, origin, scene.domeLightIndex,
-                                                             kLightDistant)
-                                    : lightSelectionPdfIndex(scene, origin, scene.domeLightIndex);
                             const float lp = lightPdfDirection(scene, scene.domeLightIndex, origin, direction,
                                                                origin, direction) *
-                                             sel;
+                                             lightSelectionPdfIndex(scene, origin, scene.domeLightIndex);
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         Vec3 contrib = throughput * envL * weight;
@@ -1189,9 +1070,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             if (!suppressCausticLight) {
                 const bool primarySun = depth == 0 && passThrough == 0;
                 if (!(primarySun && !settings.envVisibleCamera)) {
-                    const Vec3 sunL = cameraSunDiscRadiance(
-                        scene, origin, direction, bsdfPdf, specularBounce, primarySun, causticSuffix,
-                        afterVolumeScatter ? 1.0f : -1.0f);
+                    const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, bsdfPdf,
+                                                            specularBounce, primarySun, causticSuffix);
                     if (!isBlack(sunL)) {
                         Vec3 contrib = throughput * sunL;
                         radiance += contrib;
@@ -1248,8 +1128,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             }
         }
 #endif
-
-        afterVolumeScatter = false;
 
         // Lights that are hidden from the camera let primary rays pass through.
         if (si.lightIndex >= 0 && depth == 0 && !inst.visibleCamera) {
