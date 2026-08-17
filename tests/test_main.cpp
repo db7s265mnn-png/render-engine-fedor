@@ -5377,6 +5377,64 @@ void testNgonTriangulateAndVdb() {
             deepMs.rrStartDepth = 1024;
             check(deepMs.maxDepth == 1024 && deepMs.rrStartDepth == 1024,
                   "settings accept 1000+ depth for volume multiple scattering");
+            check(deepMs.volumeSimilarity == 0, "Volume Similarity defaults off");
+
+            {
+                MediumData simMed;
+                simMed.sigmaS = Vec3(2.0f);
+                simMed.g = 0.9f;
+                const MediumData s0 = mediumWithVolumeSimilarity(simMed, 0);
+                const MediumData s5 = mediumWithVolumeSimilarity(simMed, 5);
+                const MediumData s20 = mediumWithVolumeSimilarity(simMed, 20);
+                check(std::fabs(s0.g - 0.9f) < 1e-5f && std::fabs(s0.sigmaS.x - 2.0f) < 1e-5f,
+                      "similarity leaves low-order g and σs unchanged");
+                check(std::fabs(s5.g - 0.9f) < 1e-5f, "similarity still full g at bounce 5");
+                check(std::fabs(s20.g) < 1e-5f, "similarity is isotropic by bounce 20");
+                const float red0 = s0.sigmaS.x * (1.0f - s0.g);
+                const float red20 = s20.sigmaS.x * (1.0f - s20.g);
+                check(std::fabs(red0 - red20) < 1e-4f, "similarity conserves σs(1−g)");
+            }
+
+            {
+                LightData lights[2];
+                lights[0].type = kLightDome;
+                lights[0].intensity = 1.0f;
+                lights[0].color = Vec3(1.0f);
+                lights[1].type = kLightDistant;
+                lights[1].intensity = 1.0f;
+                lights[1].color = Vec3(1.0f);
+                lights[1].normalize = 1;
+                lights[1].angle = 0.53f;
+                lights[1].xform = lookAtMatrix(Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 0.0f, 0.0f),
+                                               Vec3(0.0f, 0.0f, 1.0f));
+                lights[1].xformInv = inverse(lights[1].xform);
+                SceneView sv{};
+                sv.lights = lights;
+                sv.lightCount = 2;
+                sv.domeLightIndex = 0;
+                const Vec3 sunDir = normalize(lightAxisZ(lights[1]));
+                const Vec3 p(0.0f);
+                const float fDome = lightFluxWeight(sv, 0);
+                const float fSun = lightFluxWeight(sv, 1);
+                check(std::fabs(volumeLightSelectionWeight(sv, 0, p, sunDir, 0.0f) - fDome) < 1e-5f,
+                      "g=0 volume weight equals flux (dome)");
+                check(std::fabs(volumeLightSelectionWeight(sv, 1, p, sunDir, 0.0f) - fSun) < 1e-5f,
+                      "g=0 volume weight equals flux (sun)");
+                const float wSunFwd = volumeLightSelectionWeight(sv, 1, p, sunDir, 0.9f);
+                const float wDomeFwd = volumeLightSelectionWeight(sv, 0, p, sunDir, 0.9f);
+                const float fluxRatio = fSun / srMax(fDome, 1e-8f);
+                const float prodRatio = wSunFwd / srMax(wDomeFwd, 1e-8f);
+                check(prodRatio > fluxRatio * 10.0f,
+                      "HG×sun selection upweights the sun when wo is aligned at g=0.9");
+                const float wSunBack = volumeLightSelectionWeight(sv, 1, p, sunDir * -1.0f, 0.9f);
+                check(wSunBack < wSunFwd * 0.1f, "HG×sun selection downweights the sun in the HG tail");
+                float pdfSel = 0.0f;
+                const int picked = sampleVolumeLightIndex(sv, p, sunDir, 0.9f, 0.5f, pdfSel);
+                check(picked >= 0 && pdfSel > 0.0f, "volume light pick at g=0.9 succeeds");
+                check(std::fabs(pdfSel - volumeLightSelectionPdfIndex(sv, p, sunDir, 0.9f, picked)) <
+                          1e-5f,
+                      "volume light pick pdf matches selection pdf");
+            }
         }
     }
 
@@ -5548,6 +5606,81 @@ void testNgonTriangulateAndVdb() {
         check(finiteG, "Fog + Indirect Guides stays finite");
         check(sumG > 0.0, "Fog + Indirect Guides produces light");
         std::printf("  Fog + Indirect Guides sum=%.3f (maxDepth=160)\n", sumG);
+    }
+
+    {
+        VolumeFromPolygonsSettings vsS;
+        vsS.kind = VolumeGridKind::Fog;
+        vsS.voxelSize = 0.08f;
+        vsS.exteriorBand = 3.0f;
+        vsS.interiorBand = 3.0f;
+        vsS.fillDensity = 1.0f;
+        std::string eSim;
+        VolumeGridPtr gridS = VolumeGrid::fromPolygons(*box, Mat4::identity(), vsS, &eSim);
+        check(gridS && gridS->valid(), std::string("similarity fog grid: ") + eSim);
+        ScenePtr sceneS = std::make_shared<Scene>();
+        const int volumeIndex = sceneS->addVolume(gridS);
+        const Bounds3 bb = gridS->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int meshIndex = sceneS->addMesh(proxy);
+        Material mat;
+        mat.baseColor = Vec3(0.8f);
+        mat.roughness = 0.5f;
+        const int materialIndex = sceneS->addMaterial(mat);
+        InstanceData inst;
+        inst.meshIndex = meshIndex;
+        inst.materialIndex = materialIndex;
+        inst.volumeIndex = volumeIndex;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 8.0f;
+        med.sigmaA = Vec3(0.0f);
+        med.sigmaS = Vec3(1.0f);
+        med.g = 0.9f;
+        inst.mediumIndex = sceneS->addMedium(med);
+        sceneS->instances.push_back(inst);
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 4.0f;
+        light.xform = lookAtMatrix(Vec3(3, 5, 4), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        sceneS->lights.push_back(light);
+        sceneS->settings.resolutionX = 12;
+        sceneS->settings.resolutionY = 10;
+        sceneS->settings.samplesPerPixel = 4;
+        sceneS->settings.backend = kBackendCpuEmbree;
+        sceneS->settings.integrator = kIntegratorPathTracer;
+        sceneS->settings.caustics = 0;
+        sceneS->settings.pathGuiding = 0;
+        sceneS->settings.volumeSimilarity = 1;
+        sceneS->settings.maxDepth = 40;
+        sceneS->settings.rrStartDepth = 40;
+        sceneS->finalize();
+        sceneS->frameCameraOnContents();
+        RenderSession sessionS;
+        sessionS.setScene(sceneS);
+        sessionS.start();
+        sessionS.waitForCompletion();
+        const Image imageS = sessionS.linearImage();
+        double sumS = 0.0;
+        bool finiteS = true;
+        for (int y = 0; y < imageS.height(); ++y) {
+            for (int x = 0; x < imageS.width(); ++x) {
+                const Vec3 c = imageS.rgb(x, y);
+                if (!isFinite(c)) finiteS = false;
+                sumS += double(luminance(c));
+            }
+        }
+        check(finiteS, "Fog + Volume Similarity stays finite");
+        check(sumS > 0.0, "Fog + Volume Similarity produces light");
+        std::printf("  Fog + Volume Similarity sum=%.3f (maxDepth=40)\n", sumS);
     }
 
     // Cast-shadow regression: volume above a ground plane, light from an angle.

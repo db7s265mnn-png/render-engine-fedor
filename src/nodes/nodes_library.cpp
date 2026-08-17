@@ -1281,6 +1281,13 @@ public:
                                       "caustic radiance (MNEE / photons / paths through glass) trains "
                                       "the field at the floor so guides learn bright caustic regions.\n"
                                       "Kicks in after the first training passes."));
+        addParameter(Parameter::makeBool("volumesimilarity", "Volume Similarity", false)
+                         .withGroup("Engine")
+                         .withTooltip("Biased Disney/Hyperion similarity for deep volume multiple "
+                                      "scattering. Off (default) keeps authored anisotropy.\n"
+                                      "On: from volume bounce 5 to 20, lerp g toward 0 and stretch "
+                                      "the mean free path so σs(1−g) stays constant. Low-order "
+                                      "scatters stay anisotropic. Does not change the walk when off."));
         addParameter(Parameter::makeBool("motionblur", "Enable Motion Blur", false)
                          .withGroup("Motion Blur")
                          .withTooltip("Camera and geometry motion blur across the shutter "
@@ -1415,6 +1422,7 @@ public:
         settings.wireframeThickness =
             std::clamp(float(floatValue("wireframethickness", 1.0)), 0.25f, 8.0f);
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
+        settings.volumeSimilarity = boolValue("volumesimilarity", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
         settings.causticsEngine = std::clamp(intValue("causticsengine", 1), 0, 2);
         settings.causticClamp = float(floatValue("causticclamp", 0.0));

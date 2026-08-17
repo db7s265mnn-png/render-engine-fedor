@@ -39,6 +39,23 @@ SR_INL SR_HD Vec3 sampleHenyeyGreenstein(Vec3 wo, float g, float u1, float u2, f
     return wi;
 }
 
+// Disney / Hyperion similarity (opt-in, biased): lerp g → 0 between volume
+// scatters 5 and 20, keeping σs(1−g) so the mean free path grows. Low-order
+// bounces stay anisotropic. scatterIndex is 0-based (0 = first scatter).
+SR_INL SR_HD MediumData mediumWithVolumeSimilarity(const MediumData& m, int scatterIndex) {
+    MediumData out = m;
+    const float g0 = clampf(m.g, -0.999f, 0.999f);
+    float t = 0.0f;
+    if (scatterIndex >= 20) t = 1.0f;
+    else if (scatterIndex > 5) t = float(scatterIndex - 5) / 15.0f;
+    const float gStar = g0 * (1.0f - t);
+    const float denom = srMax(1e-3f, 1.0f - gStar);
+    const float scale = (1.0f - g0) / denom;
+    out.g = gStar;
+    out.sigmaS = m.sigmaS * srMax(0.0f, scale);
+    return out;
+}
+
 SR_INL SR_HD Vec3 mediumSigmaA(const MediumData& m) {
     return m.sigmaA * srMax(0.0f, m.density);
 }

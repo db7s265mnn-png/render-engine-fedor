@@ -540,6 +540,9 @@ struct RenderSettingsData {
     // Wireframe integrator: edge half-width in screen pixels (anti-aliased).
     float wireframeThickness = 1.0f;
     int pathGuiding = 0;           // OpenPGL indirect guides (CPU / Embree); PT + BDPT
+    // Opt-in, biased: Hyperion similarity on deep volume MS (Engine checkbox).
+    // Off (default) keeps authored g / σs. On: lerp g→0 from volume bounce 5..20.
+    int volumeSimilarity = 0;
     // Enable caustic light transport (specular→diffuse). Off = dark glass shadows
     // (soften per-material with shadow_opacity / contribute_caustics).
     int caustics = 1;

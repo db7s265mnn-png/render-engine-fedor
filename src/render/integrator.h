@@ -829,6 +829,8 @@ SR_INL SR_HD float volumeScatterPdf(Vec3 woVol, Vec3 wi, const MediumData& med, 
 
 // Volume NEE: M light candidates scored by phase·Le/pdf (product via RIS), one
 // shadow ray. M grows with |g| because the env CDF does not see the HG peak.
+// Light *selection* is flux × 4π·HG(wo, sun) so the sun is proposed when it
+// sits in the HG lobe. Continuation / walk phase stays vanilla HG.
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
                                                 Vec3 woVol, const MediumData& med, Rng& rng,
@@ -846,7 +848,7 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
     int nOk = 0;
     for (int i = 0; i < nCand; ++i) {
         float selectPdf = 0.0f;
-        const int li = sampleLightIndex(scene, origin, rng.nextFloat(), selectPdf);
+        const int li = sampleVolumeLightIndex(scene, origin, woVol, med.g, rng.nextFloat(), selectPdf);
         if (li < 0 || selectPdf <= 0.0f) continue;
         LightSample ls;
         if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
@@ -934,6 +936,11 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     bool causticSuffix = false;
     int depth = 0;
     int passThrough = 0;
+    int volumeScatterCount = 0;
+    // Last volume scatter (for MIS vs HG×sun volume NEE). Cleared on surface BSDF.
+    bool volumePhaseMis = false;
+    Vec3 volumeMisWo{0.0f, 1.0f, 0.0f};
+    float volumeMisG = 0.0f;
     // Homogeneous medium currently surrounding the ray (-1 = vacuum).
     int currentMedium = -1;
     // Arnold ray_switch: incoming ray type selects the surfaceshader port.
@@ -949,11 +956,14 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         if (const MediumData* med = getMedium(scene, currentMedium)) {
             float tMax = didHit ? hit.t : 1.0e6f;
             MediumSample ms;
+            MediumData medWalk = *med;
+            if (settings.volumeSimilarity != 0)
+                medWalk = mediumWithVolumeSimilarity(*med, volumeScatterCount);
 #if !defined(__CUDACC__)
-            if (med->type == 2 && med->volumeIndex >= 0 && med->volumeIndex < scene.volumeCount &&
-                scene.volumes && scene.volumes[med->volumeIndex]) {
+            if (medWalk.type == 2 && medWalk.volumeIndex >= 0 && medWalk.volumeIndex < scene.volumeCount &&
+                scene.volumes && scene.volumes[medWalk.volumeIndex]) {
                 // Prefer analytical AABB exit over Embree proxy (exit face is easy to miss).
-                const VolumeGrid& fogVol = *scene.volumes[med->volumeIndex];
+                const VolumeGrid& fogVol = *scene.volumes[medWalk.volumeIndex];
                 const Bounds3 bb = fogVol.worldBounds();
                 if (bb.valid()) {
                     float tEnter = 0.0f;
@@ -989,12 +999,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     }
                     if (hitAabb && tExit >= 0.0f) tMax = srMin(tMax, tExit);
                 }
-                ms = sampleMediumVdbFog(fogVol, *med, origin, direction, tMax, rng, throughput);
+                ms = sampleMediumVdbFog(fogVol, medWalk, origin, direction, tMax, rng, throughput);
             } else {
-                ms = sampleMediumHomogeneous(*med, tMax, rng, throughput);
+                ms = sampleMediumHomogeneous(medWalk, tMax, rng, throughput);
             }
 #else
-            ms = sampleMediumHomogeneous(*med, tMax, rng, throughput);
+            ms = sampleMediumHomogeneous(medWalk, tMax, rng, throughput);
 #endif
             if (ms.absorbed || isBlack(throughput)) break;
             if (ms.scattered) {
@@ -1004,11 +1014,14 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #endif
                 // Incident direction toward the previous vertex (phase frame).
                 const Vec3 woVol = -direction;
+                volumePhaseMis = true;
+                volumeMisWo = woVol;
+                volumeMisG = medWalk.g;
 
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active()) {
                     guiding->beginVolumeSegment(origin, woVol);
-                    guiding->prepareVolume(origin, woVol, med->g, rng);
+                    guiding->prepareVolume(origin, woVol, medWalk.g, rng);
                 }
 #endif
 
@@ -1032,7 +1045,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         Vec3 volDirect(0.0f);
                         for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
                             Vec3 contrib = nextEventEstimationVolumeOnce(scene, tracer, origin, woVol,
-                                                                         *med, rng, guiding);
+                                                                         medWalk, rng, guiding);
                             contrib = clampContribution(contrib, settings.clampDirect);
                             volDirect += contrib;
                         }
@@ -1055,7 +1068,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         float gPdf = 0.0f;
                         if (guiding->sampleVolume(rng.nextFloat(), rng.nextFloat(), wiWorld, gPdf) &&
                             gPdf > 0.0f) {
-                            phasePdf = henyeyGreenstein(clampf(dot(woVol, wiWorld), -1.0f, 1.0f), med->g);
+                            phasePdf = henyeyGreenstein(clampf(dot(woVol, wiWorld), -1.0f, 1.0f), medWalk.g);
                             const float mixPdf = pg * gPdf + (1.0f - pg) * phasePdf;
                             if (mixPdf > 0.0f && phasePdf > 0.0f) {
                                 direction = wiWorld;
@@ -1068,7 +1081,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 }
 #endif
                 if (!gotGuide) {
-                    direction = sampleHenyeyGreenstein(woVol, med->g, rng.nextFloat(), rng.nextFloat(),
+                    direction = sampleHenyeyGreenstein(woVol, medWalk.g, rng.nextFloat(), rng.nextFloat(),
                                                        phasePdf);
                     bsdfPdf = phasePdf;
 #if !defined(__CUDACC__)
@@ -1086,7 +1099,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #if !defined(__CUDACC__)
                 if (guiding && guiding->active()) {
                     const float phaseNow =
-                        henyeyGreenstein(clampf(dot(woVol, direction), -1.0f, 1.0f), med->g);
+                        henyeyGreenstein(clampf(dot(woVol, direction), -1.0f, 1.0f), medWalk.g);
                     const Vec3 weight = bsdfPdf > 0.0f ? Vec3(phaseNow / bsdfPdf) : Vec3(1.0f);
                     guiding->recordBounce(woVol, direction, bsdfPdf, weight, false, 1.0f, 1.0f, 1.0f,
                                           true);
@@ -1096,6 +1109,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 sawNonSpecular = true;
                 rayKind = RayShadeKind::DiffuseReflection;
                 ++depth;
+                ++volumeScatterCount;
                 if (depth >= settings.rrStartDepth) {
                     const float lum = luminance(throughput);
                     const float q = clampf(lum, 0.05f, 0.95f);
@@ -1109,7 +1123,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             }
 #if !defined(__CUDACC__)
             // Exited the fog AABB (analytical) before hitting any surface — leave the medium.
-            if (med->type == 2 && (!didHit || ms.t + 1e-4f < hit.t)) {
+            if (medWalk.type == 2 && (!didHit || ms.t + 1e-4f < hit.t)) {
                 origin = origin + direction * ms.t;
                 currentMedium = -1;
                 ++passThrough;
@@ -1135,7 +1149,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                         if (!specularBounce) {
                             const float lp = lightPdfDirection(scene, scene.domeLightIndex, origin, direction,
                                                                origin, direction) *
-                                             lightSelectionPdfIndex(scene, origin, scene.domeLightIndex);
+                                             lightSelectionPdfIndexMaybeVolume(
+                                                 scene, origin, scene.domeLightIndex, volumePhaseMis,
+                                                 volumeMisWo, volumeMisG);
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         Vec3 contrib = throughput * envL * weight;
@@ -1159,7 +1175,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 const bool primarySun = depth == 0 && passThrough == 0;
                 if (!(primarySun && !settings.envVisibleCamera)) {
                     const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, bsdfPdf,
-                                                            specularBounce, primarySun, causticSuffix);
+                                                            specularBounce, primarySun, causticSuffix,
+                                                            volumePhaseMis, volumeMisWo, volumeMisG);
                     if (!isBlack(sunL)) {
                         Vec3 contrib = throughput * sunL;
                         radiance += contrib;
@@ -1245,7 +1262,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 float weight = 1.0f;
                 if (!specularBounce) {
                     const float lp = lightPdfDirection(scene, si.lightIndex, origin, direction, si.p, lightN) *
-                                     lightSelectionPdfIndex(scene, origin, si.lightIndex);
+                                     lightSelectionPdfIndexMaybeVolume(scene, origin, si.lightIndex,
+                                                                        volumePhaseMis, volumeMisWo,
+                                                                        volumeMisG);
                     weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                 }
                 Vec3 contrib = throughput * emitted * weight;
@@ -1505,6 +1524,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         direction = wiWorld;
         bsdfPdf = bs.pdf;
         specularBounce = bs.specular;
+        volumePhaseMis = false;
         // Homogeneous volume interior: transmission across a geo-authored medium
         // boundary enters/exits the medium (PBRT MediumInterface on the prim).
         if (bs.transmitted && inst.mediumIndex >= 0 && mediumIsActive(scene, inst.mediumIndex)) {
