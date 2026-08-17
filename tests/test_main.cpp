@@ -5322,6 +5322,9 @@ void testNgonTriangulateAndVdb() {
                   "supervoxel grid is non-empty");
             float majMin = 0.0f, majMax = 0.0f;
             fogA->majorantOccupancy(Vec3(0, 0, 0), majMin, majMax);
+            std::printf("  majorant: dim=%dx%dx%d cell=%.4f center min=%.4f max=%.4f\n",
+                        fogA->majorantDimX(), fogA->majorantDimY(), fogA->majorantDimZ(),
+                        fogA->majorantCellSize(), majMin, majMax);
             check(majMin > 0.85f, "interior supervoxel min occupancy ~1");
             check(majMax > 0.85f && majMax < 1.6f, "interior supervoxel max occupancy ~1");
             fogA->majorantOccupancy(Vec3(3, 0, 0), majMin, majMax);

@@ -151,7 +151,8 @@ void VolumeGrid::rebuildMajorantGrid() {
     };
 
     const openvdb::FloatGrid& grid = *impl_->grid;
-    const float halo = voxelSize_ * float(kHaloVox);
+    const float haloMax = voxelSize_ * float(kHaloVox);
+    const float haloMin = voxelSize_;  // Linear 8-tap support; 2-vox would poison interior μc
     for (auto it = grid.cbeginValueOn(); it; ++it) {
         const float v = fabsf(float(*it));
         const openvdb::Coord c = it.getCoord();
@@ -165,29 +166,33 @@ void VolumeGrid::rebuildMajorantGrid() {
             majMax_[size_t(i)] = std::max(majMax_[size_t(i)], v);
             counts[size_t(i)] += 1;
         }
-        // Halo: trilinear can see this voxel from neighbouring cells (max AND min).
-        const float xLo = float(w.x()) - halo;
-        const float xHi = float(w.x()) + halo;
-        const float yLo = float(w.y()) - halo;
-        const float yHi = float(w.y()) + halo;
-        const float zLo = float(w.z()) - halo;
-        const float zHi = float(w.z()) + halo;
-        const int hx0 = bin(xLo, majOrigin_.x);
-        const int hx1 = bin(xHi, majOrigin_.x);
-        const int hy0 = bin(yLo, majOrigin_.y);
-        const int hy1 = bin(yHi, majOrigin_.y);
-        const int hz0 = bin(zLo, majOrigin_.z);
-        const int hz1 = bin(zHi, majOrigin_.z);
-        for (int z = hz0; z <= hz1; ++z) {
-            for (int y = hy0; y <= hy1; ++y) {
-                for (int x = hx0; x <= hx1; ++x) {
-                    if (!inRange(x, y, z)) continue;
-                    const int i = idx(x, y, z);
-                    majMax_[size_t(i)] = std::max(majMax_[size_t(i)], v);
-                    majMin_[size_t(i)] = std::min(majMin_[size_t(i)], v);
+        auto stampHalo = [&](float halo, bool bumpMin, bool bumpMax) {
+            const float xLo = float(w.x()) - halo;
+            const float xHi = float(w.x()) + halo;
+            const float yLo = float(w.y()) - halo;
+            const float yHi = float(w.y()) + halo;
+            const float zLo = float(w.z()) - halo;
+            const float zHi = float(w.z()) + halo;
+            const int hx0 = bin(xLo, majOrigin_.x);
+            const int hx1 = bin(xHi, majOrigin_.x);
+            const int hy0 = bin(yLo, majOrigin_.y);
+            const int hy1 = bin(yHi, majOrigin_.y);
+            const int hz0 = bin(zLo, majOrigin_.z);
+            const int hz1 = bin(zHi, majOrigin_.z);
+            for (int z = hz0; z <= hz1; ++z) {
+                for (int y = hy0; y <= hy1; ++y) {
+                    for (int x = hx0; x <= hx1; ++x) {
+                        if (!inRange(x, y, z)) continue;
+                        const int i = idx(x, y, z);
+                        if (bumpMax) majMax_[size_t(i)] = std::max(majMax_[size_t(i)], v);
+                        if (bumpMin) majMin_[size_t(i)] = std::min(majMin_[size_t(i)], v);
+                    }
                 }
             }
-        }
+        };
+        // Halo: trilinear can see this voxel from neighbouring cells.
+        stampHalo(haloMax, false, true);
+        stampHalo(haloMin, true, false);
     }
 
     const int voxelsPerCell =
