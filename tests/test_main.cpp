@@ -1020,6 +1020,49 @@ void testPhysicalSkyLight() {
                     checkNear(pDome, 1.0f, 1e-4f, "skip-distant selection pdf of the sky is 1");
                 }
             }
+            {
+                SceneView view = scene->view();
+                Vec3 sunDir;
+                check(volumeDistantGuideDir(view, sunDir), "volume phase guide finds the distant sun");
+                checkNear(dot(sunDir, physicalSkySunDirection(PhysicalSkyParams{})), 1.0f, 0.02f,
+                          "volume sun guide dir matches Hosek sun");
+                check(kVolumeRisCandidates > kRisCandidates, "volume sky RIS uses more candidates than surfaces");
+                const float g = 0.75f;
+                const Vec3 wo = normalize(Vec3(0.2f, 0.3f, 0.9f));
+                const float phaseSun = henyeyGreenstein(clampf(dot(wo, sunDir), -1.0f, 1.0f), g);
+                const float sunLobe = henyeyGreenstein(1.0f, g);
+                const float mixSun = volumePhaseMixPdf(wo, sunDir, g, &sunDir);
+                checkNear(mixSun, kVolumeSunGuideProb * sunLobe + (1.0f - kVolumeSunGuideProb) * phaseSun,
+                          1e-5f, "sun-guided mix pdf is w*HG(sun)+(1-w)*HG(wo)");
+                check(mixSun > phaseSun, "mix raises pdf toward the sun vs raw HG");
+                checkNear(volumePhaseMixPdf(wo, sunDir, 0.0f, &sunDir),
+                          henyeyGreenstein(clampf(dot(wo, sunDir), -1.0f, 1.0f), 0.0f), 1e-5f,
+                          "g=0 mix is isotropic HG");
+                checkNear(volumePhaseMixPdf(wo, sunDir, g, nullptr), phaseSun, 1e-6f,
+                          "no sun dir → raw HG");
+
+                Rng rngMix(3u, 5u);
+                double wSum = 0.0;
+                const int nDraw = 4000;
+                int nTowardSun = 0;
+                for (int i = 0; i < nDraw; ++i) {
+                    float pdfDummy = 0.0f;
+                    Vec3 wi;
+                    if (rngMix.nextFloat() < kVolumeSunGuideProb)
+                        wi = sampleHenyeyGreenstein(sunDir, g, rngMix.nextFloat(), rngMix.nextFloat(),
+                                                    pdfDummy);
+                    else
+                        wi = sampleHenyeyGreenstein(wo, g, rngMix.nextFloat(), rngMix.nextFloat(),
+                                                    pdfDummy);
+                    const float p = henyeyGreenstein(clampf(dot(wo, wi), -1.0f, 1.0f), g);
+                    const float q = volumePhaseMixPdf(wo, wi, g, &sunDir);
+                    wSum += double(p / srMax(q, 1e-12f));
+                    if (dot(wi, sunDir) > 0.5f) ++nTowardSun;
+                }
+                checkNear(float(wSum / double(nDraw)), 1.0f, 0.08f,
+                          "sun-guided phase weights have mean 1");
+                check(nTowardSun > nDraw / 8, "sun-guided samples point toward the sun");
+            }
         }
     }
     {
