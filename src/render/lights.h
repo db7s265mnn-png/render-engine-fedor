@@ -27,6 +27,23 @@ SR_INL SR_HD bool lightIsInfinite(const LightData& l) {
     return l.type == kLightDome || l.type == kLightDistant;
 }
 
+// Resampled importance sampling (RIS): M cheap light candidates, one shadow ray.
+// Pick candidate i with probability w_i / Σw; unbiased estimator is
+// vis(Y) · (Σw) / M · (rgb_Y / w_Y). See Talbot 2005 / Bitterli ReSTIR.
+constexpr int kRisCandidates = 8;
+
+SR_INL SR_HD int risPick(const float* w, int n, float u, float& wSum) {
+    wSum = 0.0f;
+    for (int i = 0; i < n; ++i) wSum += w[i];
+    if (wSum <= 1e-20f || n <= 0) return -1;
+    float x = u * wSum;
+    for (int i = 0; i < n; ++i) {
+        x -= w[i];
+        if (x <= 0.0f) return i;
+    }
+    return n - 1;
+}
+
 SR_INL SR_HD bool lightContributesCaustics(const LightData& l) { return l.contributeCaustics != 0; }
 
 SR_INL SR_HD bool materialContributesCaustics(const Material& m) { return m.contributeCaustics != 0; }

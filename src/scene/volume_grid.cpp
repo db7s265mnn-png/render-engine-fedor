@@ -165,7 +165,7 @@ void VolumeGrid::rebuildMajorantGrid() {
             majMax_[size_t(i)] = std::max(majMax_[size_t(i)], v);
             counts[size_t(i)] += 1;
         }
-        // Halo raises max only (filter support / quadratic overshoot).
+        // Halo: trilinear can see this voxel from neighbouring cells (max AND min).
         const float xLo = float(w.x()) - halo;
         const float xHi = float(w.x()) + halo;
         const float yLo = float(w.y()) - halo;
@@ -184,6 +184,7 @@ void VolumeGrid::rebuildMajorantGrid() {
                     if (!inRange(x, y, z)) continue;
                     const int i = idx(x, y, z);
                     majMax_[size_t(i)] = std::max(majMax_[size_t(i)], v);
+                    majMin_[size_t(i)] = std::min(majMin_[size_t(i)], v);
                 }
             }
         }
@@ -206,6 +207,24 @@ void VolumeGrid::rebuildMajorantGrid() {
         if (majMax_[size_t(i)] > majMin_[size_t(i)] + 1e-4f)
             majMax_[size_t(i)] *= 1.15f;
         globalMaj = srMax(globalMaj, majMax_[size_t(i)]);
+    }
+    // Tracking uses Linear (8-tap). A sample in a filled cell next to empty
+    // interpolates toward 0 and can go below voxel-min — residual ratio then
+    // yields Tr>1. Any cell touching empty space cannot use a positive control μc.
+    if (sampleFilter_ != VolumeSampleFilter::Nearest) {
+        auto cellEmpty = [&](int x, int y, int z) -> bool {
+            if (!inRange(x, y, z)) return true;
+            return majMax_[size_t(idx(x, y, z))] <= 1e-8f;
+        };
+        for (int z = 0; z < majNz_; ++z) {
+            for (int y = 0; y < majNy_; ++y) {
+                for (int x = 0; x < majNx_; ++x) {
+                    if (cellEmpty(x - 1, y, z) || cellEmpty(x + 1, y, z) || cellEmpty(x, y - 1, z) ||
+                        cellEmpty(x, y + 1, z) || cellEmpty(x, y, z - 1) || cellEmpty(x, y, z + 1))
+                        majMin_[size_t(idx(x, y, z))] = 0.0f;
+                }
+            }
+        }
     }
     if (globalMaj > 0.0f) majorant_ = srMax(majorant_, globalMaj);
 

@@ -204,12 +204,15 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
     auto collide = [&](float occupancy, float majorant, float tHit) -> bool {
         const float dens = srMax(0.0f, occupancy) * densityScale;
         const Vec3 sigmaT = (sigmaA0 + sigmaS0) * dens;
-        const float stAvg = (sigmaT.x + sigmaT.y + sigmaT.z) * (1.0f / 3.0f);
-        if (rng.nextFloat() >= stAvg / srMax(majorant, 1e-12f)) return false;
+        // Real-vs-null uses the densest channel (matches the max-channel majorant).
+        // Mean RGB under-collides the brightest extinction and spikes the others.
+        const float stHero = srMax(sigmaT.x, srMax(sigmaT.y, sigmaT.z));
+        if (rng.nextFloat() >= stHero / srMax(majorant, 1e-12f)) return false;
         return interact(occupancy, tHit);
     };
 
-    const float st0 = (sigmaT0.x + sigmaT0.y + sigmaT0.z) * (1.0f / 3.0f) * densityScale;
+    // Control μc and residual pReal use the same max-channel σt as the majorant.
+    const float st0 = baseMaj * densityScale;
 
     constexpr int kNullCollisionMaxIters = 1 << 20;
     for (int iter = 0; iter < kNullCollisionMaxIters && t < tMax; ++iter) {
@@ -277,10 +280,10 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
                 interact(minD, tCtrl);
                 return out;
             }
-            const float occ = sampleOcc(origin + direction * tRes);
+            const float occ = clampf(sampleOcc(origin + direction * tRes), minD, maxD);
             const float pReal = (st0 * occ - muC) / srMax(residualMaj, 1e-12f);
             ++iter;
-            if (rng.nextFloat() >= pReal) continue;
+            if (rng.nextFloat() >= clampf(pReal, 0.0f, 1.0f)) continue;
             interact(occ, tRes);
             return out;
         }
@@ -376,13 +379,14 @@ Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 or
                 const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
                 tRes += -logf(u) / residualMaj;
                 if (tRes >= tExit) break;
-                const float occ = sampleOcc(origin + direction * tRes);
+                const float occ = clampf(sampleOcc(origin + direction * tRes), minD, maxD);
                 const Vec3 sigmaT = sigmaT0 * (occ * densityScale);
-                const float nx = srMax(0.0f, residualMaj - (sigmaT.x - muC.x));
-                const float ny = srMax(0.0f, residualMaj - (sigmaT.y - muC.y));
-                const float nz = srMax(0.0f, residualMaj - (sigmaT.z - muC.z));
-                Tr = Vec3(Tr.x * (nx / residualMaj), Tr.y * (ny / residualMaj),
-                          Tr.z * (nz / residualMaj));
+                const float nx = residualMaj - (sigmaT.x - muC.x);
+                const float ny = residualMaj - (sigmaT.y - muC.y);
+                const float nz = residualMaj - (sigmaT.z - muC.z);
+                Tr = Vec3(Tr.x * clampf(nx / residualMaj, 0.0f, 1.0f),
+                          Tr.y * clampf(ny / residualMaj, 0.0f, 1.0f),
+                          Tr.z * clampf(nz / residualMaj, 0.0f, 1.0f));
                 ++iter;
                 if (russianRoulette()) return Tr;
             }

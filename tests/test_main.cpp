@@ -287,6 +287,27 @@ void testSampling() {
             check(jClamp <= 0.999999f && jClamp >= 0.0f, "Manual-Test clamps outside pixel");
         }
     }
+
+    // RIS: pick i ∝ w_i. Zero-weight slots are never chosen.
+    {
+        check(kRisCandidates == 8, "RIS uses 8 light candidates");
+        const float w[3] = {1.0f, 3.0f, 0.0f};
+        int counts[3] = {0, 0, 0};
+        Rng rngRis(3u, 5u);
+        constexpr int kN = 20000;
+        int badPick = 0;
+        for (int i = 0; i < kN; ++i) {
+            float wSum = 0.0f;
+            const int p = risPick(w, 3, rngRis.nextFloat(), wSum);
+            if (p < 0 || p > 1 || std::fabs(wSum - 4.0f) > 1e-5f) ++badPick;
+            else ++counts[p];
+        }
+        check(badPick == 0, "risPick skips the zero-weight slot");
+        checkNear(float(counts[0]) / float(kN), 0.25f, 0.03f, "risPick P(w=1) ≈ 1/4");
+        checkNear(float(counts[1]) / float(kN), 0.75f, 0.03f, "risPick P(w=3) ≈ 3/4");
+        float emptySum = 1.0f;
+        check(risPick(w, 0, 0.5f, emptySum) < 0, "risPick empty set");
+    }
 }
 
 void testBsdf() {
@@ -5305,6 +5326,8 @@ void testNgonTriangulateAndVdb() {
             check(majMax > 0.85f && majMax < 1.6f, "interior supervoxel max occupancy ~1");
             fogA->majorantOccupancy(Vec3(3, 0, 0), majMin, majMax);
             check(majMax < 0.05f, "outside supervoxel is empty");
+            fogA->majorantOccupancy(Vec3(-0.45f, 0, 0), majMin, majMax);
+            check(majMin < 0.05f, "boundary supervoxel min occupancy is 0 (linear halo)");
             check(fogA->majorantBrickEmpty(Vec3(3, 0, 0)), "outside brick is empty");
             check(!fogA->majorantBrickEmpty(Vec3(0, 0, 0)), "interior brick is occupied");
             {
@@ -5332,12 +5355,19 @@ void testNgonTriangulateAndVdb() {
                 Rng rngTr(11u, 13u);
                 Vec3 trAcc(0.0f);
                 constexpr int kN = 128;
-                for (int i = 0; i < kN; ++i)
-                    trAcc = trAcc + mediumShadowTrVdb(*fogA, trackMed, Vec3(-2, 0, 0), Vec3(1, 0, 0),
+                float trPeak = 0.0f;
+                for (int i = 0; i < kN; ++i) {
+                    const Vec3 tr = mediumShadowTrVdb(*fogA, trackMed, Vec3(-2, 0, 0), Vec3(1, 0, 0),
                                                       4.0f, rngTr);
+                    trAcc = trAcc + tr;
+                    trPeak = srMax(trPeak, srMax(tr.x, srMax(tr.y, tr.z)));
+                    check(tr.x <= 1.02f && tr.y <= 1.02f && tr.z <= 1.02f,
+                          "residual-ratio Tr sample does not exceed 1");
+                }
                 const Vec3 trMean = trAcc * (1.0f / float(kN));
                 check(trMean.x > 0.15f && trMean.x < 0.85f,
                       "residual-ratio Tr through unit fog is between vacuum and opaque");
+                check(trPeak <= 1.02f, "residual-ratio Tr peak stays ≤ 1");
             }
             RenderSettingsData deepMs;
             deepMs.maxDepth = 1024;
@@ -5614,8 +5644,13 @@ void testNgonTriangulateAndVdb() {
         Rng rngTr(42u, 7u);
         Vec3 TrAcc(0.0f);
         constexpr int kTrSamples = 256;
-        for (int i = 0; i < kTrSamples; ++i)
-            TrAcc = TrAcc + shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(1, 0, 0), 10.0f, rngTr);
+        for (int i = 0; i < kTrSamples; ++i) {
+            const Vec3 sample =
+                shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(1, 0, 0), 10.0f, rngTr);
+            TrAcc = TrAcc + sample;
+            check(sample.x <= 1.02f && sample.y <= 1.02f && sample.z <= 1.02f,
+                  "Fog ratio-tracking Tr sample does not exceed 1");
+        }
         const Vec3 Tr = TrAcc * (1.0f / float(kTrSamples));
         check(Tr.x < 0.95f && Tr.y < 0.95f && Tr.z < 0.95f,
               "Fog ratio-tracking Tr attenuates through the volume");

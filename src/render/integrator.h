@@ -734,62 +734,138 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
-    float selectPdf = 0.0f;
-    const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
-    if (lightIndex < 0 || selectPdf <= 0.0f) return result;
-
-    LightSample ls;
-    if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) return result;
-    if (ls.pdf <= 0.0f || isBlack(ls.radiance)) return result;
-    // The shading normal may claim the light is visible from a side the geometry
-    // does not expose; such a shadow ray starts inside the surface.
-    if (!shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) return result;
+    const Vec3 woLocal = frame.toLocal(wo);
+    LightSample cands[kRisCandidates];
+    int lis[kRisCandidates];
+    float selPdfs[kRisCandidates];
+    Vec3 rgb[kRisCandidates];
+    float scatterPdfs[kRisCandidates];
+    float ws[kRisCandidates];
+    int nOk = 0;
+    for (int i = 0; i < kRisCandidates; ++i) {
+        float selectPdf = 0.0f;
+        const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
+        if (lightIndex < 0 || selectPdf <= 0.0f) continue;
+        LightSample ls;
+        if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) continue;
+        if (ls.pdf <= 0.0f || isBlack(ls.radiance)) continue;
+        if (!shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) continue;
+        const Vec3 wiLocal = frame.toLocal(ls.wi);
+        const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
+        if (be.pdf <= 0.0f || isBlack(be.f)) continue;
+        float scatterPdf = be.pdf;
+#if !defined(__CUDACC__)
+        if (guiding && guiding->active() && guiding->prepared()) {
+            const float pg = guiding->guideProbability();
+            const float gPdf = guiding->pdf(ls.wi);
+            scatterPdf = pg * gPdf + (1.0f - pg) * be.pdf;
+        }
+#else
+        (void)guiding;
+#endif
+        const float lightPdf = ls.pdf * selectPdf;
+        const Vec3 unshadowed = ls.radiance * be.f * (fabsf(wiLocal.z) / lightPdf);
+        const float w = luminance(vmax(unshadowed, Vec3(0.0f)));
+        if (w <= 1e-20f) continue;
+        cands[nOk] = ls;
+        lis[nOk] = lightIndex;
+        selPdfs[nOk] = selectPdf;
+        rgb[nOk] = unshadowed;
+        scatterPdfs[nOk] = scatterPdf;
+        ws[nOk] = w;
+        ++nOk;
+    }
+    float wSum = 0.0f;
+    const int pick = risPick(ws, nOk, rng.nextFloat(), wSum);
+    if (pick < 0) return result;
+    const LightSample& ls = cands[pick];
+    const int lightIndex = lis[pick];
 
     float visibility = 1.0f;
     Vec3 shadowOrigin = si.p;
     float tMax = 1.0e8f;
     if (scene.lights[lightIndex].shadowEnable) {
         shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
-        // Use a large finite tMax for distant/dome lights — Embree is more stable
-        // with that than with FLT_MAX, and it still reaches any scene geometry.
         if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-        // Transparent / fake-caustic shadows: walk interfaces with shadow_opacity
-        // (Embree-style multi-hit visibility instead of binary rtcOccluded).
-        // Also field-tests SDF volumes (hard) — fog Tr applied below.
         visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax);
         if (visibility <= 1e-5f) return result;
     }
 
-    const Vec3 woLocal = frame.toLocal(wo);
-    const Vec3 wiLocal = frame.toLocal(ls.wi);
-    const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
-    if (be.pdf <= 0.0f || isBlack(be.f)) return result;
+    const float lightPdf = ls.pdf * selPdfs[pick];
+    const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdfs[pick]);
+    // RIS: vis * rgb_pick * (Σw) / (M * w_pick). Failed candidates are zeros in the M slots.
+    result = rgb[pick] * (visibility * misWeight * wSum / (float(kRisCandidates) * ws[pick]));
 
-    float scatterPdf = be.pdf;
 #if !defined(__CUDACC__)
-    if (guiding && guiding->active() && guiding->prepared()) {
-        const float pg = guiding->guideProbability();
-        const float gPdf = guiding->pdf(ls.wi);
-        scatterPdf = pg * gPdf + (1.0f - pg) * be.pdf;
-    }
-#else
-    (void)guiding;
-#endif
-
-    const float lightPdf = ls.pdf * selectPdf;
-    const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
-    result = ls.radiance * be.f * (fabsf(wiLocal.z) * misWeight / lightPdf) * visibility;
-
-    // Volumetric shadow transmittance along the light segment.
-#if !defined(__CUDACC__)
-    // Fog VDBs: ratio tracking Tr (PBRT §11.2.1 / VolPath §14.2.2), AABB-clipped.
     if (scene.lights[lightIndex].shadowEnable)
         result = result * shadowTransmittanceFogVolumes(scene, shadowOrigin, ls.wi, tMax, rng);
 #endif
-    // Homogeneous medium currently surrounding the shading point (non-VDB) — Beer’s law.
     if (const MediumData* med = getMedium(scene, mediumIndex)) {
         if (med->type != 2 && ls.distance < 1.0e7f) result = result * mediumShadowTr(*med, ls.distance);
     }
+    return result;
+}
+
+// Volume NEE: M light candidates scored by phase·Le/pdf, one shadow ray (RIS).
+template <typename Tracer>
+SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
+                                                Vec3 woVol, const MediumData& med, Rng& rng) {
+    Vec3 result(0.0f);
+    if (scene.lightCount <= 0) return result;
+
+    LightSample cands[kRisCandidates];
+    int lis[kRisCandidates];
+    float selPdfs[kRisCandidates];
+    Vec3 rgb[kRisCandidates];
+    float phasePdfs[kRisCandidates];
+    float ws[kRisCandidates];
+    int nOk = 0;
+    for (int i = 0; i < kRisCandidates; ++i) {
+        float selectPdf = 0.0f;
+        const int li = sampleLightIndex(scene, origin, rng.nextFloat(), selectPdf);
+        if (li < 0 || selectPdf <= 0.0f) continue;
+        LightSample ls;
+        if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
+            isBlack(ls.radiance))
+            continue;
+        const float cosTheta = clampf(dot(woVol, ls.wi), -1.0f, 1.0f);
+        const float phasePdfL = henyeyGreenstein(cosTheta, med.g);
+        if (phasePdfL <= 0.0f) continue;
+        const float lightPdf = ls.pdf * selectPdf;
+        const Vec3 unshadowed = ls.radiance * (phasePdfL / lightPdf);
+        const float w = luminance(vmax(unshadowed, Vec3(0.0f)));
+        if (w <= 1e-20f) continue;
+        cands[nOk] = ls;
+        lis[nOk] = li;
+        selPdfs[nOk] = selectPdf;
+        rgb[nOk] = unshadowed;
+        phasePdfs[nOk] = phasePdfL;
+        ws[nOk] = w;
+        ++nOk;
+    }
+    float wSum = 0.0f;
+    const int pick = risPick(ws, nOk, rng.nextFloat(), wSum);
+    if (pick < 0) return result;
+    const LightSample& ls = cands[pick];
+    const int li = lis[pick];
+
+    float vis = 1.0f;
+    float tShadow = 1.0e8f;
+    if (scene.lights[li].shadowEnable) {
+        if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
+        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
+        if (vis <= 1e-5f) return result;
+    }
+
+    const float lightPdf = ls.pdf * selPdfs[pick];
+    const float misW = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phasePdfs[pick]);
+    result = rgb[pick] * (vis * misW * wSum / (float(kRisCandidates) * ws[pick]));
+
+#if !defined(__CUDACC__)
+    if (scene.lights[li].shadowEnable)
+        result = result * shadowTransmittanceFogVolumes(scene, origin, ls.wi, tShadow, rng);
+#endif
+    if (med.type != 2 && ls.distance < 1.0e7f) result = result * mediumShadowTr(med, ls.distance);
     return result;
 }
 
@@ -903,59 +979,26 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 // the phase→light strategy is the continuing path (MIS on light hits below).
                 // No extra firefly clamp beyond the user-authored clampDirect (0 = off).
                 if (scene.lightCount > 0 && depth < maxDepth) {
-                    // Unbiased: 1 light sample after the first scatters; NEE Russian
-                    // roulette at high volume depth so 1000-bounce walks are not
-                    // 1000 full shadow tracks. Weight 1/pNee when a connection is taken.
+                    // Unbiased: RIS NEE after each scatter; Russian roulette from the
+                    // 5th volume bounce so deep walks are not 1000 shadow tracks.
+                    // Weight 1/pNee when a connection is taken.
                     int nLight = srMax(1, settings.lightSamples);
                     if (depth >= 4) nLight = 1;
                     float pNee = 1.0f;
                     bool takeNee = true;
-                    if (depth >= 16) {
-                        pNee = clampf(16.0f / float(depth + 1), 0.05f, 1.0f);
+                    if (depth >= 4) {
+                        pNee = clampf(4.0f / float(depth + 1), 0.05f, 1.0f);
                         takeNee = rng.nextFloat() < pNee;
                     }
                     if (takeNee) {
-                    Vec3 volDirect(0.0f);
-                    for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
-                        float selectPdf = 0.0f;
-                        const int li = sampleLightIndex(scene, origin, rng.nextFloat(), selectPdf);
-                        if (li < 0 || selectPdf <= 0.0f) continue;
-                        LightSample ls;
-                        if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) ||
-                            ls.pdf <= 0.0f || isBlack(ls.radiance))
-                            continue;
-
-                        float vis = 1.0f;
-                        float tShadow = 1.0e8f;
-                        if (scene.lights[li].shadowEnable) {
-                            if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
-                            vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
+                        Vec3 volDirect(0.0f);
+                        for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
+                            Vec3 contrib = throughput * nextEventEstimationVolumeOnce(
+                                                            scene, tracer, origin, woVol, *med, rng);
+                            contrib = clampContribution(contrib, settings.clampDirect);
+                            volDirect += contrib;
                         }
-                        if (vis <= 1e-5f) continue;
-
-                        const float cosTheta = clampf(dot(woVol, ls.wi), -1.0f, 1.0f);
-                        // HG: phase value == sampling pdf toward ls.wi.
-                        const float phasePdfL = henyeyGreenstein(cosTheta, med->g);
-                        if (phasePdfL <= 0.0f) continue;
-
-                        const float lightPdf = ls.pdf * selectPdf;
-                        // Delta lights are unreachable by phase sampling → MIS weight 1.
-                        const float misW =
-                            ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phasePdfL);
-
-                        Vec3 contrib = throughput * ls.radiance *
-                                       (phasePdfL * vis * misW / lightPdf);
-#if !defined(__CUDACC__)
-                        if (scene.lights[li].shadowEnable)
-                            contrib = contrib * shadowTransmittanceFogVolumes(scene, origin, ls.wi,
-                                                                              tShadow, rng);
-#endif
-                        if (med->type != 2 && ls.distance < 1.0e7f)
-                            contrib = contrib * mediumShadowTr(*med, ls.distance);
-                        contrib = clampContribution(contrib, settings.clampDirect);
-                        volDirect += contrib;
-                    }
-                    radiance += volDirect * (1.0f / (float(nLight) * pNee));
+                        radiance += volDirect * (1.0f / (float(nLight) * pNee));
                     }
                 }
 

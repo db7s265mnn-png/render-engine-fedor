@@ -106,14 +106,10 @@ SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMa
             out.t = tMax;
             return out;
         }
-        // Real collision probability σt/Λ (per channel via max → null leftover).
-        const float stMax = majorant;
-        const float stX = sigmaT.x / stMax;
-        const float stY = sigmaT.y / stMax;
-        const float stZ = sigmaT.z / stMax;
-        const float stAvg = (stX + stY + stZ) * (1.0f / 3.0f);
+        // Real collision probability: densest channel vs max-channel majorant.
+        const float stHero = srMax(sigmaT.x, srMax(sigmaT.y, sigmaT.z)) / srMax(majorant, 1e-12f);
         const float xi = rng.nextFloat();
-        if (xi >= stAvg) {
+        if (xi >= stHero) {
             // Null collision — continue.
             continue;
         }
