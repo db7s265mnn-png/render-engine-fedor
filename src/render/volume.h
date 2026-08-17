@@ -39,17 +39,6 @@ SR_INL SR_HD Vec3 sampleHenyeyGreenstein(Vec3 wo, float g, float u1, float u2, f
     return wi;
 }
 
-// Mix HG(wo) with HG(sunDir) so volume continuation finds the sun / bright sky
-// without OpenPGL. Unbiased: weight by HG(wo, wi) / mix.
-constexpr float kVolumeSunGuideProb = 0.5f;
-
-SR_INL SR_HD float volumePhaseMixPdf(Vec3 woVol, Vec3 wi, float g, const Vec3* sunDir) {
-    const float phasePdf = henyeyGreenstein(clampf(dot(woVol, wi), -1.0f, 1.0f), g);
-    if (!sunDir || fabsf(g) < 1e-3f) return phasePdf;
-    const float sunPdf = henyeyGreenstein(clampf(dot(*sunDir, wi), -1.0f, 1.0f), g);
-    return kVolumeSunGuideProb * sunPdf + (1.0f - kVolumeSunGuideProb) * phasePdf;
-}
-
 SR_INL SR_HD Vec3 mediumSigmaA(const MediumData& m) {
     return m.sigmaA * srMax(0.0f, m.density);
 }

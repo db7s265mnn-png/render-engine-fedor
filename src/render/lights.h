@@ -31,9 +31,6 @@ SR_INL SR_HD bool lightIsInfinite(const LightData& l) {
 // Pick candidate i with probability w_i / Σw; unbiased estimator is
 // vis(Y) · (Σw) / M · (rgb_Y / w_Y). See Talbot 2005 / Bitterli ReSTIR.
 constexpr int kRisCandidates = 8;
-// Volume sky/area NEE: env lookups are cheap; one shadow ray still. More
-// candidates cut fireflies when the dome CDF misses the bright sky near the sun.
-constexpr int kVolumeRisCandidates = 16;
 
 SR_INL SR_HD int risPick(const float* w, int n, float u, float& wSum) {
     wSum = 0.0f;
@@ -165,25 +162,6 @@ SR_INL SR_HD Vec3 lightAxisX(const LightData& l) { return transformVector(l.xfor
 SR_INL SR_HD Vec3 lightAxisY(const LightData& l) { return transformVector(l.xform, Vec3(0.0f, 1.0f, 0.0f)); }
 SR_INL SR_HD Vec3 lightAxisZ(const LightData& l) { return transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f)); }
 SR_INL SR_HD Vec3 lightOrigin(const LightData& l) { return transformPoint(l.xform, Vec3(0.0f, 0.0f, 0.0f)); }
-
-// Brightest distant light +Z (Physical Sky sun). Volume phase mixes HG toward this.
-SR_INL SR_HD bool volumeDistantGuideDir(const SceneView& scene, Vec3& sunDir) {
-    float best = -1.0f;
-    bool found = false;
-    for (int i = 0; i < scene.lightCount; ++i) {
-        const LightData& l = scene.lights[i];
-        if (l.type != kLightDistant) continue;
-        const float lum = luminance(l.emittedRadiance());
-        if (lum <= best) continue;
-        const Vec3 axis = lightAxisZ(l);
-        const float len2 = lengthSquared(axis);
-        if (len2 < 1e-20f) continue;
-        best = lum;
-        sunDir = axis * (1.0f / sqrtf(len2));
-        found = true;
-    }
-    return found;
-}
 
 SR_INL SR_HD float rectLightArea(const LightData& l) {
     return length(cross(lightAxisX(l) * l.width, lightAxisY(l) * l.height));
