@@ -24,7 +24,9 @@ public:
     bool available() const;
 
     // (Re)create the guiding field for a new scene.
-    void reset(const Bounds3& worldBounds, int threadCount);
+    // maxPathDepth sizes OpenPGL PathSegmentStorage (volume walks can be thousands
+    // of vertices; the default 64/128 slots overflow and crash on Windows).
+    void reset(const Bounds3& worldBounds, int threadCount, int maxPathDepth = 64);
 
     // Call once per progressive sample after all tiles finish.
     void commitSample();
@@ -80,6 +82,11 @@ public:
         bool preparedVolume_ = false;
         float guideProb_ = 0.5f;
         void* currentSegment_ = nullptr;
+        int segmentReserve_ = 64;
+        int segmentsUsed_ = 0;
+
+        // NextSegment() that never hits OpenPGL's off-by-one past Reserve().
+        void* takeSegment();
     };
 
     // Lock-free after reset(): states are preallocated per pool thread.

@@ -5472,6 +5472,84 @@ void testNgonTriangulateAndVdb() {
     check(volumeRisCandidateCount(0.9f) == kVolumeRisMax, "g=0.9 volume RIS uses 64 unshadowed probes");
     check(volumeRisCandidateCount(-0.9f) == kVolumeRisMax, "|g| drives volume RIS count");
 
+    // Indirect Guides + dense fog: OpenPGL used to Reserve(128) path segments.
+    // A walk past that (Windows ACCESS_VIOLATION at 0xFFFFFFFFFFFFFFFF) plus
+    // Init×HG product on a half-baked volume field. Deep maxDepth + no RR
+    // forces the overflow; extra spp trains the volume field.
+    {
+        VolumeFromPolygonsSettings vsG;
+        vsG.kind = VolumeGridKind::Fog;
+        vsG.voxelSize = 0.08f;
+        vsG.exteriorBand = 3.0f;
+        vsG.interiorBand = 3.0f;
+        vsG.fillDensity = 1.0f;
+        std::string eGuide;
+        VolumeGridPtr gridG = VolumeGrid::fromPolygons(*box, Mat4::identity(), vsG, &eGuide);
+        check(gridG && gridG->valid(), std::string("guiding fog grid: ") + eGuide);
+        ScenePtr sceneG = std::make_shared<Scene>();
+        const int volumeIndex = sceneG->addVolume(gridG);
+        const Bounds3 bb = gridG->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int meshIndex = sceneG->addMesh(proxy);
+        Material mat;
+        mat.baseColor = Vec3(0.8f);
+        mat.roughness = 0.5f;
+        const int materialIndex = sceneG->addMaterial(mat);
+        InstanceData inst;
+        inst.meshIndex = meshIndex;
+        inst.materialIndex = materialIndex;
+        inst.volumeIndex = volumeIndex;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 1.0f;
+        med.sigmaA = Vec3(0.0f);
+        med.sigmaS = Vec3(1.0f);
+        med.g = 0.9f;
+        inst.mediumIndex = sceneG->addMedium(med);
+        sceneG->instances.push_back(inst);
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 4.0f;
+        light.xform = lookAtMatrix(Vec3(3, 5, 4), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        sceneG->lights.push_back(light);
+        sceneG->settings.resolutionX = 20;
+        sceneG->settings.resolutionY = 16;
+        sceneG->settings.samplesPerPixel = 6;
+        sceneG->settings.backend = kBackendCpuEmbree;
+        sceneG->settings.integrator = kIntegratorPathTracer;
+        sceneG->settings.caustics = 0;
+        sceneG->settings.pathGuiding = 1;
+        sceneG->settings.maxDepth = 160;
+        sceneG->settings.rrStartDepth = 10000;
+        sceneG->finalize();
+        sceneG->frameCameraOnContents();
+        RenderSession sessionG;
+        sessionG.setScene(sceneG);
+        sessionG.start();
+        sessionG.waitForCompletion();
+        const Image imageG = sessionG.linearImage();
+        double sumG = 0.0;
+        bool finiteG = true;
+        for (int y = 0; y < imageG.height(); ++y) {
+            for (int x = 0; x < imageG.width(); ++x) {
+                const Vec3 c = imageG.rgb(x, y);
+                if (!isFinite(c)) finiteG = false;
+                sumG += double(luminance(c));
+            }
+        }
+        check(finiteG, "Fog + Indirect Guides stays finite");
+        check(sumG > 0.0, "Fog + Indirect Guides produces light");
+        std::printf("  Fog + Indirect Guides sum=%.3f (maxDepth=160)\n", sumG);
+    }
+
     // Cast-shadow regression: volume above a ground plane, light from an angle.
     // Lit side of the plane must be brighter than the shadowed side.
     auto castShadowContrast = [&](VolumeGridKind kind) -> double {

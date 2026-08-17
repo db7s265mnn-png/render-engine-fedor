@@ -218,7 +218,7 @@ public:
 #if SOLSTICE_HAVE_OPENPGL
         if (pathGuiding_) {
             const int threads = pool_ ? pool_->threadCount() : threadCount_;
-            pathGuiding_->reset(view_.worldBounds, threads);
+            pathGuiding_->reset(view_.worldBounds, threads, view_.settings.maxDepth);
         }
 #endif
 
