@@ -316,11 +316,14 @@ public:
                 logInfo(std::string("Integrator: PT Spectral (hero λ=") +
                         std::to_string(std::clamp(settings.spectralSamples, 2, 16)) + ", bins=" +
                         std::to_string(std::clamp(settings.spectralBins, 8, 32)) + ")");
-            else if (usePhoton)
+            if (usePhoton)
                 logInfo(std::string("Caustics: Photon map (VCM-style gather, ") +
                         std::to_string(photonMap_.size()) + " photons, r=" +
                         std::to_string(settings.photonRadius) +
                         (settings.causticsEngine == kCausticsEngineAuto ? ", MNEE+Photon→rough)" : ")"));
+            else if (useBdpt && hasVolumes)
+                logInfo("BDPT skipped: scene has VDB volumes — using Path Tracer "
+                        "(no light subpath from sky/sun; fog walk is PT-only)");
             else if (useBdpt)
                 logInfo(std::string("Caustics: BDPT (bidirectional + light-tracing splats)") +
                         (settings.caustics == 0 ? " [caustics flag off — specular chains suppressed]"
@@ -356,6 +359,8 @@ public:
             }
             logInfo(std::string("Sampling Type: ") + engineDetail +
                     "; Pixel Sampler: " + samplerName + "; Path: OwenSobol");
+            if (useGuiding && hasVolumes)
+                logInfo("OpenPGL: volume phase mixed with HG product (Indirect Guides)");
             if (settings.samplingDebug != kSamplingDebugOff) {
                 static const char* kDiagNames[] = {"Off", "PixelJitter", "PathRng", "Bucket", "PixelHash"};
                 const int d = std::clamp(settings.samplingDebug, 0, 4);

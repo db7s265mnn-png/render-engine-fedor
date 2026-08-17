@@ -31,6 +31,17 @@ SR_INL SR_HD bool lightIsInfinite(const LightData& l) {
 // Pick candidate i with probability w_i / Σw; unbiased estimator is
 // vis(Y) · (Σw) / M · (rgb_Y / w_Y). See Talbot 2005 / Bitterli ReSTIR.
 constexpr int kRisCandidates = 8;
+// Volume NEE: env CDF ignores HG, so high anisotropy needs more unshadowed
+// probes (still one shadow ray). g=0 keeps M=8; g≥0.8 uses the full 64.
+constexpr int kVolumeRisMax = 64;
+
+SR_INL SR_HD int volumeRisCandidateCount(float g) {
+    const float ag = fabsf(g);
+    if (ag < 0.25f) return kRisCandidates;
+    if (ag < 0.55f) return 16;
+    if (ag < 0.80f) return 32;
+    return kVolumeRisMax;
+}
 
 SR_INL SR_HD int risPick(const float* w, int n, float u, float& wSum) {
     wSum = 0.0f;

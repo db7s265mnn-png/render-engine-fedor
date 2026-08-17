@@ -5455,13 +5455,22 @@ void testNgonTriangulateAndVdb() {
     const double sdfDl = renderVolumeSum(VolumeGridKind::Sdf, kIntegratorDirectLighting, 0);
     const double fogPtOff = renderVolumeSum(VolumeGridKind::Fog, kIntegratorPathTracer, 0);
     const double fogDl = renderVolumeSum(VolumeGridKind::Fog, kIntegratorDirectLighting, 0);
-    std::printf("  VDB render sums: SDF PT-off=%.3f PT-on=%.3f DL=%.3f | Fog PT-off=%.3f DL=%.3f\n",
-                sdfPtOff, sdfPtOn, sdfDl, fogPtOff, fogDl);
+    const double fogBdpt = renderVolumeSum(VolumeGridKind::Fog, kIntegratorBdpt, 0);
+    std::printf("  VDB render sums: SDF PT-off=%.3f PT-on=%.3f DL=%.3f | Fog PT-off=%.3f DL=%.3f BDPT=%.3f\n",
+                sdfPtOff, sdfPtOn, sdfDl, fogPtOff, fogDl, fogBdpt);
     check(sdfPtOff > 1.0, "SDF PathTracer (caustics off) renders the volume");
     check(sdfPtOn > 1.0, "SDF PathTracer (caustics on / MNEE) renders the volume");
     check(sdfDl > 1.0, "SDF Direct Lighting renders the volume");
     check(fogPtOff > 0.5, "Fog PathTracer renders the volume");
     check(fogDl > 0.5, "Fog Direct Lighting renders the volume");
+    check(fogBdpt > 0.5, "Fog with BDPT selected still renders (falls back to PT)");
+    {
+        const float ratio = float(fogBdpt / srMax(fogPtOff, 1e-8));
+        check(ratio > 0.5f && ratio < 2.0f, "Fog BDPT fallback energy matches Path Tracer");
+    }
+    check(volumeRisCandidateCount(0.0f) == kRisCandidates, "isotropic volume RIS keeps M=8");
+    check(volumeRisCandidateCount(0.9f) == kVolumeRisMax, "g=0.9 volume RIS uses 64 unshadowed probes");
+    check(volumeRisCandidateCount(-0.9f) == kVolumeRisMax, "|g| drives volume RIS count");
 
     // Cast-shadow regression: volume above a ground plane, light from an angle.
     // Lit side of the plane must be brighter than the shadowed side.
