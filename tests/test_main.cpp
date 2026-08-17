@@ -5507,7 +5507,7 @@ void testNgonTriangulateAndVdb() {
         MediumData med;
         med.type = 2;
         med.volumeIndex = volumeIndex;
-        med.density = 1.0f;
+        med.density = 200.0f;
         med.sigmaA = Vec3(0.0f);
         med.sigmaS = Vec3(1.0f);
         med.g = 0.9f;
@@ -5520,9 +5520,9 @@ void testNgonTriangulateAndVdb() {
         light.xform = lookAtMatrix(Vec3(3, 5, 4), Vec3(0, 0, 0), Vec3(0, 1, 0));
         light.xformInv = inverse(light.xform);
         sceneG->lights.push_back(light);
-        sceneG->settings.resolutionX = 20;
-        sceneG->settings.resolutionY = 16;
-        sceneG->settings.samplesPerPixel = 6;
+        sceneG->settings.resolutionX = 12;
+        sceneG->settings.resolutionY = 10;
+        sceneG->settings.samplesPerPixel = 4;
         sceneG->settings.backend = kBackendCpuEmbree;
         sceneG->settings.integrator = kIntegratorPathTracer;
         sceneG->settings.caustics = 0;
