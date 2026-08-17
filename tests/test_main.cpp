@@ -997,6 +997,29 @@ void testPhysicalSkyLight() {
                 const float pdfCone = 1.0f / (kTwoPi * (1.0f - cosMax));
                 checkNear(ls.pdf, pdfCone, 0.02f * pdfCone, "sun NEE pdf is 1/ω");
             }
+            {
+                SceneView view = scene->view();
+                int domeIdx = -1;
+                for (int i = 0; i < int(scene->lights.size()); ++i)
+                    if (scene->lights[size_t(i)].type == kLightDome) domeIdx = i;
+                int nSun = 0, nOther = 0;
+                Rng rngSkip(7u, 11u);
+                for (int i = 0; i < 2000; ++i) {
+                    float pdf = 0.0f;
+                    const int li = sampleLightIndex(view, Vec3(0.0f, 1.0f, 0.0f), rngSkip.nextFloat(),
+                                                    pdf, kLightDistant);
+                    if (li < 0) continue;
+                    if (view.lights[li].type == kLightDistant) ++nSun;
+                    else ++nOther;
+                }
+                check(nSun == 0, "volume RIS skip-distant never picks the sun");
+                check(nOther > 0, "volume RIS skip-distant still samples the sky");
+                if (domeIdx >= 0) {
+                    const float pDome =
+                        lightSelectionPdfIndex(view, Vec3(0.0f, 1.0f, 0.0f), domeIdx, kLightDistant);
+                    checkNear(pDome, 1.0f, 1e-4f, "skip-distant selection pdf of the sky is 1");
+                }
+            }
         }
     }
     {

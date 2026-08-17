@@ -33,6 +33,7 @@ PGL_DEVICE_TYPE pickDeviceType() {
 struct PathGuiding::ThreadState::Data {
     openpgl::cpp::PathSegmentStorage segments;
     std::unique_ptr<openpgl::cpp::SurfaceSamplingDistribution> surfaceDist;
+    std::unique_ptr<openpgl::cpp::VolumeSamplingDistribution> volumeDist;
     openpgl::cpp::SampleStorage* sampleStorage = nullptr;
     openpgl::cpp::Field* field = nullptr;
 };
@@ -48,6 +49,7 @@ void PathGuiding::ThreadState::beginPath() {
     data_->segments.Clear();
     currentSegment_ = nullptr;
     prepared_ = false;
+    preparedVolume_ = false;
 }
 
 void PathGuiding::ThreadState::endPath() {
@@ -58,6 +60,7 @@ void PathGuiding::ThreadState::endPath() {
     data_->segments.Clear();
     currentSegment_ = nullptr;
     prepared_ = false;
+    preparedVolume_ = false;
 }
 
 bool PathGuiding::ThreadState::prepare(Vec3 p, Vec3 n, Rng& rng) {
@@ -102,6 +105,52 @@ void PathGuiding::ThreadState::beginSegment(Vec3 p, Vec3 wo) {
     openpgl::cpp::SetEta(seg, 1.0f);
     currentSegment_ = seg;
     prepared_ = false;
+    preparedVolume_ = false;
+}
+
+void PathGuiding::ThreadState::beginVolumeSegment(Vec3 p, Vec3 wo) {
+    if (!active_ || !data_) return;
+    openpgl::cpp::PathSegment* seg = data_->segments.NextSegment();
+    if (!seg) {
+        currentSegment_ = nullptr;
+        return;
+    }
+    openpgl::cpp::SetPosition(seg, toPglPoint(p));
+    openpgl::cpp::SetDirectionOut(seg, toPgl(wo));
+    openpgl::cpp::SetVolumeScatter(seg, true);
+    openpgl::cpp::SetScatteredContribution(seg, openpgl::cpp::Vector3(0.f, 0.f, 0.f));
+    openpgl::cpp::SetDirectContribution(seg, openpgl::cpp::Vector3(0.f, 0.f, 0.f));
+    openpgl::cpp::SetTransmittanceWeight(seg, openpgl::cpp::Vector3(1.f, 1.f, 1.f));
+    openpgl::cpp::SetEta(seg, 1.0f);
+    currentSegment_ = seg;
+    prepared_ = false;
+    preparedVolume_ = false;
+}
+
+bool PathGuiding::ThreadState::prepareVolume(Vec3 p, Vec3 wo, float g, Rng& rng) {
+    preparedVolume_ = false;
+    if (!active_ || !data_ || !data_->field || !data_->volumeDist) return false;
+    if (guideProb_ <= 0.0f) return false;
+    float u = rng.nextFloat();
+    if (!data_->volumeDist->Init(data_->field, toPglPoint(p), u)) return false;
+    if (data_->volumeDist->SupportsApplySingleLobeHenyeyGreensteinProduct())
+        data_->volumeDist->ApplySingleLobeHenyeyGreensteinProduct(toPgl(wo), g);
+    preparedVolume_ = true;
+    return true;
+}
+
+float PathGuiding::ThreadState::pdfVolume(Vec3 wiWorld) const {
+    if (!preparedVolume_ || !data_ || !data_->volumeDist) return 0.0f;
+    return data_->volumeDist->PDF(toPgl(wiWorld));
+}
+
+bool PathGuiding::ThreadState::sampleVolume(float u1, float u2, Vec3& wiWorld, float& guidePdf) const {
+    if (!preparedVolume_ || !data_ || !data_->volumeDist) return false;
+    pgl_vec3f dir{};
+    guidePdf = data_->volumeDist->SamplePDF(openpgl::cpp::Point2(u1, u2), dir);
+    if (!(guidePdf > 0.0f) || !std::isfinite(guidePdf)) return false;
+    wiWorld = normalize(fromPgl(dir));
+    return lengthSquared(wiWorld) > 0.0f;
 }
 
 void PathGuiding::ThreadState::recordEmission(Vec3 Le, float misWeight) {
@@ -122,11 +171,12 @@ void PathGuiding::ThreadState::addScatteredAt(void* segment, Vec3 contrib) {
 }
 
 void PathGuiding::ThreadState::recordBounce(Vec3 n, Vec3 wi, float pdfVal, Vec3 weight, bool delta,
-                                            float roughness, float eta, float rrSurvival) {
+                                            float roughness, float eta, float rrSurvival,
+                                            bool volumeScatter) {
     if (!currentSegment_) return;
     auto* seg = static_cast<openpgl::cpp::PathSegment*>(currentSegment_);
     openpgl::cpp::SetTransmittanceWeight(seg, openpgl::cpp::Vector3(1.f, 1.f, 1.f));
-    openpgl::cpp::SetVolumeScatter(seg, false);
+    openpgl::cpp::SetVolumeScatter(seg, volumeScatter);
     openpgl::cpp::SetNormal(seg, toPgl(n));
     openpgl::cpp::SetDirectionIn(seg, toPgl(wi));
     openpgl::cpp::SetPDFDirectionIn(seg, pdfVal);
@@ -225,6 +275,8 @@ void PathGuiding::reset(const Bounds3& worldBounds, int threadCount) {
             ts->data_->sampleStorage = impl_->sampleStorage.get();
             ts->data_->surfaceDist =
                 std::make_unique<openpgl::cpp::SurfaceSamplingDistribution>(impl_->field.get());
+            ts->data_->volumeDist =
+                std::make_unique<openpgl::cpp::VolumeSamplingDistribution>(impl_->field.get());
             ts->data_->segments.Reserve(128);
             ts->active_ = true;
             ts->guideProb_ = 0.0f;  // stays 0 until the field is trained

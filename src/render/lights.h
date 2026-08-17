@@ -467,16 +467,36 @@ SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
     }
 }
 
+// skipType >= 0 drops that LightData.type from selection (volume NEE always
+// connects distant lights separately, so RIS must not pick them again).
+SR_INL SR_HD bool lightTypeSkipped(const LightData& l, int skipType) {
+    return skipType >= 0 && l.type == skipType;
+}
+
+SR_INL SR_HD float infiniteLightPowerSkip(const SceneView& scene, int skipType) {
+    if (skipType < 0) return scene.infiniteLightPower;
+    float sum = 0.0f;
+    for (int i = 0; i < scene.infiniteLightCount; ++i) {
+        const int idx = scene.infiniteLightIndices[i];
+        if (idx < 0 || idx >= scene.lightCount) continue;
+        if (lightTypeSkipped(scene.lights[idx], skipType)) continue;
+        sum += lightFluxWeight(scene, idx);
+    }
+    return sum;
+}
+
 SR_INL SR_HD float lightSelectionPdf(const SceneView& scene) {
     return scene.lightCount > 0 ? 1.0f / float(scene.lightCount) : 0.0f;
 }
 
 // Flux-weighted probability of selecting a specific light.
-SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, int lightIndex) {
+SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, int lightIndex, int skipType = -1) {
     if (scene.lightCount <= 0 || lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
+    if (lightTypeSkipped(scene.lights[lightIndex], skipType)) return 0.0f;
     float total = 0.0f;
     float chosen = 0.0f;
     for (int i = 0; i < scene.lightCount; ++i) {
+        if (lightTypeSkipped(scene.lights[i], skipType)) continue;
         const float w = lightFluxWeight(scene, i);
         total += w;
         if (i == lightIndex) chosen = w;
@@ -486,21 +506,25 @@ SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, int lightIndex
 }
 
 // Sample a light index with probability ∝ flux. `pdf` is the selection pdf.
-SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
+SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf, int skipType = -1) {
     if (scene.lightCount <= 0) {
         pdf = 0.0f;
         return -1;
     }
     float total = 0.0f;
-    for (int i = 0; i < scene.lightCount; ++i) total += lightFluxWeight(scene, i);
-    if (total <= 1e-20f) {
-        int idx = int(u * float(scene.lightCount));
-        if (idx >= scene.lightCount) idx = scene.lightCount - 1;
-        pdf = lightSelectionPdf(scene);
-        return idx;
+    int last = -1;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        if (lightTypeSkipped(scene.lights[i], skipType)) continue;
+        total += lightFluxWeight(scene, i);
+        last = i;
+    }
+    if (total <= 1e-20f || last < 0) {
+        pdf = 0.0f;
+        return -1;
     }
     float r = clampf(u, 0.0f, 0.999999f) * total;
     for (int i = 0; i < scene.lightCount; ++i) {
+        if (lightTypeSkipped(scene.lights[i], skipType)) continue;
         const float w = lightFluxWeight(scene, i);
         if (r < w) {
             pdf = w / total;
@@ -508,8 +532,8 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
         }
         r -= w;
     }
-    pdf = lightFluxWeight(scene, scene.lightCount - 1) / total;
-    return scene.lightCount - 1;
+    pdf = lightFluxWeight(scene, last) / total;
+    return last;
 }
 
 // ---------------------------------------------------------------------------
@@ -556,31 +580,42 @@ SR_INL SR_HD bool bvhContainsLight(const LightBvhNode* nodes, int nodeCount,
 // Infinite lights (dome/distant) are weighted by flux and kept outside the BVH.
 // Falls back to the flux-only overload when the BVH is unavailable (or skipped
 // for scenes with few finite lights).
-SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, float& pdf) {
+SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, float& pdf,
+                                  int skipType = -1) {
     if (scene.lightCount <= 0) { pdf = 0.f; return -1; }
 
     if (!scene.lightBvh || scene.lightBvhNodeCount == 0)
-        return sampleLightIndex(scene, u, pdf);
+        return sampleLightIndex(scene, u, pdf, skipType);
 
-    const float wInf = scene.infiniteLightPower;
+    const float wInf = infiniteLightPowerSkip(scene, skipType);
     const float wFin = bvhNodeImportance(scene.lightBvh[0], refP);
     const float wTotal = wInf + wFin;
-    if (wTotal <= 1e-30f) return sampleLightIndex(scene, u, pdf);
+    if (wTotal <= 1e-30f) return sampleLightIndex(scene, u, pdf, skipType);
 
     float r = clampf(u, 0.f, 0.999999f) * wTotal;
 
     // -- Infinite-light branch --------------------------------------------------
     if (r < wInf && scene.infiniteLightCount > 0) {
         float cumW = 0.f;
+        int lastInf = -1;
         for (int i = 0; i < scene.infiniteLightCount; ++i) {
-            const int   idx = scene.infiniteLightIndices[i];
-            const float w   = lightFluxWeight(scene, idx);
+            const int idx = scene.infiniteLightIndices[i];
+            if (idx < 0 || idx >= scene.lightCount) continue;
+            if (lightTypeSkipped(scene.lights[idx], skipType)) continue;
+            const float w = lightFluxWeight(scene, idx);
             cumW += w;
-            if (r < cumW || i == scene.infiniteLightCount - 1) {
+            lastInf = idx;
+            if (r < cumW) {
                 pdf = (wInf > 0.f ? w / wInf : 1.f) * (wInf / wTotal);
                 if (pdf <= 0.f) { pdf = 0.f; return -1; }
                 return idx;
             }
+        }
+        if (lastInf >= 0) {
+            const float w = lightFluxWeight(scene, lastInf);
+            pdf = (wInf > 0.f ? w / wInf : 1.f) * (wInf / wTotal);
+            if (pdf <= 0.f) { pdf = 0.f; return -1; }
+            return lastInf;
         }
     }
 
@@ -624,15 +659,18 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, fl
 
 // Position-aware selection PDF for a specific light index.
 // Must be called with the same `refP` used during sampling for MIS correctness.
-SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int lightIndex) {
+SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int lightIndex,
+                                          int skipType = -1) {
     if (!scene.lightBvh || scene.lightBvhNodeCount == 0 ||
         lightIndex < 0 || lightIndex >= scene.lightCount)
-        return lightSelectionPdfIndex(scene, lightIndex);
+        return lightSelectionPdfIndex(scene, lightIndex, skipType);
 
-    const float wInf   = scene.infiniteLightPower;
+    if (lightTypeSkipped(scene.lights[lightIndex], skipType)) return 0.f;
+
+    const float wInf   = infiniteLightPowerSkip(scene, skipType);
     const float wFin   = bvhNodeImportance(scene.lightBvh[0], refP);
     const float wTotal = wInf + wFin;
-    if (wTotal <= 1e-30f) return lightSelectionPdfIndex(scene, lightIndex);
+    if (wTotal <= 1e-30f) return lightSelectionPdfIndex(scene, lightIndex, skipType);
 
     const LightData& l = scene.lights[lightIndex];
     if (l.type == kLightDome || l.type == kLightDistant) {
@@ -668,7 +706,8 @@ SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int
 // Solar disc for Physical Sky distant lights. The baked sky map has no disc
 // (avoids double lighting / HDRI fireflies); camera and glossy rays see this.
 SR_INL SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec3 dirWorld, float bsdfPdf,
-                                        bool specularBounce, bool primary, bool skipNonCausticLights) {
+                                        bool specularBounce, bool primary, bool skipNonCausticLights,
+                                        float distantSelectPdf = -1.0f) {
     Vec3 sum(0.0f);
     const Vec3 wi = normalize(dirWorld);
     for (int i = 0; i < scene.lightCount; ++i) {
@@ -684,8 +723,10 @@ SR_INL SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec
         const Vec3 Le = lightRadiance(l);
         float weight = 1.0f;
         if (!specularBounce) {
-            const float lp = lightPdfDirection(scene, i, origin, wi, origin, wi) *
-                             lightSelectionPdfIndex(scene, origin, i);
+            const float sel = distantSelectPdf >= 0.0f
+                                  ? distantSelectPdf
+                                  : lightSelectionPdfIndex(scene, origin, i);
+            const float lp = lightPdfDirection(scene, i, origin, wi, origin, wi) * sel;
             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
         }
         sum += Le * weight;
