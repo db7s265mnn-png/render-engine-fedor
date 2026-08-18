@@ -955,24 +955,32 @@ public:
                          .withGroup("Lens")
                          .withTooltip(units::focusDistanceTooltip()));
         addParameter(Parameter::makeMenu("opticalmodel", "Camera Model",
-                                         QStringList{"Thin Lens", "Polynomial Optics (Embree)"}, 0)
+                                         QStringList{"Thin Lens", "Polynomial Optics (Embree PT)"}, 0)
                          .withGroup("Optics")
                          .withTooltip("Polynomial Optics uses Lentil-style fitted real lenses "
-                                      "(Embree only; OptiX falls back to Thin Lens)"));
+                                      "(Path Tracer / Embree only).\n"
+                                      "BDPT, spectral integrators, and OptiX fall back to Thin Lens.\n"
+                                      "FOV comes from Sensor Width + the selected lens, not Focal Length."));
         {
             QStringList lenses;
             for (const std::string& name : polynomialOpticsLensNames()) lenses << QString::fromStdString(name);
             addParameter(Parameter::makeMenu("lensmodel", "Lens", lenses, 19)
                              .withGroup("Optics")
-                             .withTooltip("Real lens prescription (polynomial optics)"));
+                             .withVisibleWhen("opticalmodel==1")
+                             .withTooltip("Real lens prescription (polynomial optics). "
+                                          "Each model has a native focal length and maximum aperture."));
         }
         addParameter(Parameter::makeFloat("wavelength", "Wavelength (nm)", 550.0, 380.0, 780.0)
                          .withGroup("Optics")
+                         .withVisibleWhen("opticalmodel==1")
                          .withTooltip("Wavelength for polynomial evaluation when Chromatic Aberration is off"));
         addParameter(Parameter::makeBool("chromatic", "Chromatic Aberration", false)
                          .withGroup("Optics")
+                         .withVisibleWhen("opticalmodel==1")
                          .withTooltip("RGB chromatic aberration via per-sample R/G/B wavelengths "
-                                      "(Polynomial Optics + Embree only)"));
+                                      "(630 / 550 / 450 nm) through the fitted lens.\n"
+                                      "Path Tracer / Embree only. Produces coloured fringing at high "
+                                      "contrast edges."));
         addParameter(Parameter::makeBool("uselookat", "Use Look At", true).withGroup("Placement"));
         addParameter(Parameter::makeVec3("eye", "Eye", Vec3(6.0f, 4.0f, 9.0f))
                          .withGroup("Placement")
