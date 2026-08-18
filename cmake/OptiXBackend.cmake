@@ -8,6 +8,27 @@
 # OBJECT libraries). The VS generator otherwise injects host flags like /W3 /MP
 # into the nvcc cmdline and fails with:
 #   "A single input file is required for a non-link phase..."
+#
+# On Windows, nvcc must use MSVC cl.exe as the host compiler. Passing clang-cl
+# via -ccbin has hung CI for tens of minutes.
+
+set(SOLSTICE_CUDA_HOST_COMPILER "" CACHE FILEPATH
+    "Host compiler for nvcc (-ccbin). On Windows this should be MSVC cl.exe.")
+
+if(WIN32)
+    if(SOLSTICE_CUDA_HOST_COMPILER)
+        set(CMAKE_CUDA_HOST_COMPILER "${SOLSTICE_CUDA_HOST_COMPILER}" CACHE FILEPATH "" FORCE)
+    elseif(NOT CMAKE_CUDA_HOST_COMPILER AND CMAKE_CXX_COMPILER MATCHES "clang-cl")
+        find_program(_solstice_cl NAMES cl.exe)
+        if(_solstice_cl)
+            set(CMAKE_CUDA_HOST_COMPILER "${_solstice_cl}" CACHE FILEPATH "" FORCE)
+            set(SOLSTICE_CUDA_HOST_COMPILER "${_solstice_cl}" CACHE FILEPATH "" FORCE)
+            message(STATUS "nvcc host compiler (auto cl.exe): ${_solstice_cl}")
+        else()
+            message(WARNING "clang-cl build with OptiX: cl.exe not on PATH. Pass -DSOLSTICE_CUDA_HOST_COMPILER=<cl.exe>")
+        endif()
+    endif()
+endif()
 
 include(CheckLanguage)
 check_language(CUDA)
@@ -49,15 +70,25 @@ file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 
 set(_solstice_nvcc_inc_flags)
 foreach(_inc IN LISTS CUDAToolkit_INCLUDE_DIRS)
-    list(APPEND _solstice_nvcc_inc_flags -I${_inc})
+    list(APPEND _solstice_nvcc_inc_flags "-I${_inc}")
 endforeach()
 
 set(_solstice_nvcc_ccbin)
 if(SOLSTICE_CUDA_HOST_COMPILER)
-    set(_solstice_nvcc_ccbin -ccbin=${SOLSTICE_CUDA_HOST_COMPILER})
-elseif(MSVC AND CMAKE_CXX_COMPILER)
+    # Two-arg form so paths with spaces (Program Files) stay one nvcc flag value.
+    set(_solstice_nvcc_ccbin -ccbin "${SOLSTICE_CUDA_HOST_COMPILER}")
+elseif(WIN32 AND CMAKE_CUDA_HOST_COMPILER)
+    set(_solstice_nvcc_ccbin -ccbin "${CMAKE_CUDA_HOST_COMPILER}")
+elseif(MSVC AND CMAKE_CXX_COMPILER AND NOT CMAKE_CXX_COMPILER MATCHES "clang-cl")
     # Help nvcc find cl.exe when driven outside the VS CUDA .targets path.
-    set(_solstice_nvcc_ccbin -ccbin=${CMAKE_CXX_COMPILER})
+    set(_solstice_nvcc_ccbin -ccbin "${CMAKE_CXX_COMPILER}")
+endif()
+
+# -lineinfo makes the huge shared integrator PTX much slower to compile; keep it
+# for Debug so GPU faults still have source maps.
+set(_solstice_nvcc_lineinfo)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(_solstice_nvcc_lineinfo -lineinfo)
 endif()
 
 add_custom_command(
@@ -68,7 +99,7 @@ add_custom_command(
             -std=c++17
             --use_fast_math
             --expt-relaxed-constexpr
-            -lineinfo
+            ${_solstice_nvcc_lineinfo}
             -arch=${SOLSTICE_OPTIX_ARCH}
             -D_USE_MATH_DEFINES
             -DNOMINMAX
