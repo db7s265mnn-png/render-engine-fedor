@@ -271,10 +271,6 @@ public:
             !diagnosticIntegrator && !hasVolumes && !useSpectralPt && causticsUsePhotonMap(settings, &scene);
         const bool useMnee = pathTracer && !hasVolumes && causticsUseMnee(settings, &scene);
         const bool useBdptPath = useBdpt && !hasVolumes;
-        // Fitted lenses (vignetting, SA, CA) are Path Tracer only. BDPT light
-        // tracing still assumes a thin-lens / pinhole camera projection.
-        const bool usePolyOptics =
-            polyOptics_.active && settings.integrator == kIntegratorPathTracer;
 #if SOLSTICE_HAVE_OPENPGL
         // OpenPGL guides eye-path diffuse sampling on PT and BDPT (RGB + Spectral).
         // Specular / near-spec vertices are recorded as delta (radiance propagates for
@@ -365,9 +361,6 @@ public:
                     "; Pixel Sampler: " + samplerName + "; Path: OwenSobol");
             if (useGuiding && hasVolumes)
                 logInfo("OpenPGL: volume phase mixed with HG product (Indirect Guides)");
-            if (polyOptics_.active && !usePolyOptics)
-                logInfo("Polynomial Optics skipped: only Path Tracer uses the fitted lens "
-                        "(Thin Lens fallback)");
             if (settings.samplingDebug != kSamplingDebugOff) {
                 static const char* kDiagNames[] = {"Off", "PixelJitter", "PathRng", "Bucket", "PixelHash"};
                 const int d = std::clamp(settings.samplingDebug, 0, 4);
@@ -474,24 +467,20 @@ public:
 
             // Light-tracing splats assume the pinhole/thin-lens projection —
             // polynomial optics rays and camera motion blur bypass it.
-            const bool allowSplats = !usePolyOptics && scene.settings.motionBlur == 0;
+            const bool allowSplats = !polyOptics_.active && scene.settings.motionBlur == 0;
             auto splatFbFor = [&](DispersionContext*) -> Framebuffer* {
                 return allowSplats ? &fb : nullptr;
             };
 
-            const bool lensChromatic = usePolyOptics && scene.camera.chromaticAberration != 0;
             auto pickHeroChannel = [&](Rng& r) -> int {
-                const bool needGlassHero =
-                    scene.hasDispersion != 0 && dispersionMode != kDispersionFake;
-                if (!lensChromatic && !needGlassHero) return -1;
-                if (dispersionMode == kDispersionOptimized && needGlassHero) {
+                if (scene.camera.chromaticAberration == 0 && scene.hasDispersion == 0) return -1;
+                if (dispersionMode == kDispersionFake) return -1;  // no IOR hero
+                if (dispersionMode == kDispersionOptimized) {
                     // Stratified across spp (and lightly by pixel) — п.2.
                     return (sampleIndex + x + 2 * y) % 3;
                 }
                 if (dispersionMode == kDispersionSpectral3) return 0;  // filled per-channel below
-                if (dispersionMode == kDispersionOptimized && lensChromatic)
-                    return (sampleIndex + x + 2 * y) % 3;
-                // Hero (default) and lens CA: random R/G/B channel.
+                // Hero (default): random channel.
                 int ch = int(r.nextFloat() * 3.0f);
                 return ch > 2 ? 2 : ch;
             };
@@ -564,9 +553,9 @@ public:
                                    float shutterTime) -> bool {
                 tau = 1.0f;
                 tracer.time = shutterTime;
-                if (usePolyOptics) {
+                if (polyOptics_.active) {
                     float wavelengthNm = -1.0f;
-                    if (chromaticChannel >= 0 && lensChromatic)
+                    if (chromaticChannel >= 0 && scene.camera.chromaticAberration != 0)
                         wavelengthNm = chromaticWavelengthNm(chromaticChannel);
                     CameraData cam = scene.camera;
                     cam.cameraToWorld = cameraToWorldAtTime(scene, shutterTime);
@@ -599,7 +588,7 @@ public:
             float lensTau = 1.0f;
 
             if (dispersionMode == kDispersionSpectral3 &&
-                (scene.hasDispersion != 0 || lensChromatic)) {
+                (scene.hasDispersion != 0 || scene.camera.chromaticAberration != 0)) {
                 // п.4: average independent R/G/B hero traces.
                 for (int ch = 0; ch < 3; ++ch) {
                     Rng rCh = makePathRng(x, y, uint32_t(ch + 1));
@@ -611,7 +600,7 @@ public:
                     if (!generateRay(rCh, ch, origin, direction, lensTau, shutterTime)) continue;
                     Vec3 r = traceOnce(rCh, origin, direction, &ctx, x, y);
                     r = r * std::max(0.0f, lensTau);
-                    if (lensChromatic || ctx.used) r = heroMask(r, ch);
+                    if (ctx.used) r = heroMask(r, ch);
                     radiance = radiance + r * (1.0f / 3.0f);
                 }
             } else {
@@ -625,13 +614,12 @@ public:
                 radiance = radiance * std::max(0.0f, lensTau);
 
                 if (chromaticChannel >= 0) {
-                    // Lens CA always masks the sampled RGB channel. Glass dispersion
-                    // (Hero / Optimized) masks only if this path actually hit dispersing
+                    // Hero + Optimized: mask only if this path actually hit dispersing
                     // media (lazy mask). Fake never masks.
-                    const bool glassMask =
+                    const bool doMask =
                         (dispersionMode == kDispersionHero || dispersionMode == kDispersionOptimized) &&
                         ctx.used;
-                    if (lensChromatic || glassMask) radiance = heroMask(radiance, chromaticChannel);
+                    if (doMask) radiance = heroMask(radiance, chromaticChannel);
                 }
             }
 
