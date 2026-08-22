@@ -1,5 +1,5 @@
 // Cycles analogue: integrator_shade_volume.
-// Homogeneous media + dense-brick VDB fog. No optixTrace.
+// Homogeneous media + VDB fog (same residual-ratio tracker as Embree). No optixTrace.
 #include "render/lights.h"
 #include "render/optix/optix_volume.cuh"
 
@@ -105,6 +105,17 @@ extern "C" __global__ void __raygen__shade_volume() {
     }
 
     path.origin = path.origin + path.direction * ms.t;
+    // Exited the fog AABB before the surface — leave the medium (same as Embree).
+    if (walk.type == 2 && (!hit.didHit || ms.t + 1e-4f < hit.t)) {
+        path.mediumIndex = -1;
+        if (++path.hops > 32) {
+            path.queue = kQueueDead;
+            return;
+        }
+        path.queue = kQueueIntersectClosest;
+        hit = GpuHit{};
+        return;
+    }
     path.queue = hit.didHit ? kQueueShadeSurface : kQueueShadeBackground;
 }
 

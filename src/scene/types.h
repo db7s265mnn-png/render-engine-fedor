@@ -617,7 +617,7 @@ struct SceneView {
     const ProceduralNode* procedurals = nullptr;
     const MediumData* media = nullptr;
     // Host CPU only — OpenVDB grids (indexed by InstanceData::volumeIndex).
-    // OptiX path tracing uses LaunchParams::volumes (dense bricks), not these pointers.
+    // OptiX uses LaunchParams::volumes (occupancy + the same majorant bricks).
     const VolumeGrid* const* volumes = nullptr;
 
     int meshCount = 0;

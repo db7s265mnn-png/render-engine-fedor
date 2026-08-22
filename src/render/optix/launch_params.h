@@ -10,17 +10,31 @@ namespace sol {
 // Ray types in the shader binding table.
 enum OptixRayType : int { kRayTypeRadiance = 0, kRayTypeShadow = 1, kRayTypeCount = 2 };
 
-// Dense brick baked from an OpenVDB grid so volume PT can run on the GPU
-// without pulling OpenVDB into the OptiX modules (Cycles uses NanoVDB).
+// Dense occupancy + Embree majorant bricks so volume PT can run the same
+// residual-ratio tracker as CPU (OpenVDB itself stays off the OptiX modules).
 struct GpuVolumeGrid {
     const float* density = nullptr;
+    const float* majMin = nullptr;
+    const float* majMax = nullptr;
+    const unsigned char* bricks = nullptr;
     int nx = 0;
     int ny = 0;
     int nz = 0;
     int kind = 1;  // 0 = SDF, 1 = fog
+    int nearest = 0;
+    int majNx = 0;
+    int majNy = 0;
+    int majNz = 0;
+    int brNx = 0;
+    int brNy = 0;
+    int brNz = 0;
+    int brickSize = 4;
     Vec3 bmin{0.0f};
     Vec3 bmax{0.0f};
+    Vec3 majOrigin{0.0f};
     float majorant = 1.0f;
+    float majCell = 0.0f;
+    float voxelSize = 0.0f;
 };
 
 struct alignas(16) LaunchParams {

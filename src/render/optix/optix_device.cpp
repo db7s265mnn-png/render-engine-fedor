@@ -414,23 +414,52 @@ public:
             for (size_t i = 0; i < scene_->volumes.size(); ++i) {
                 const VolumeGridPtr& grid = scene_->volumes[i];
                 if (!grid || !grid->valid()) continue;
-                std::vector<float> dense;
-                int nx = 0, ny = 0, nz = 0;
-                if (!grid->exportDense(160, dense, nx, ny, nz) || dense.empty()) continue;
-                DeviceBuffer buf;
-                buf.upload(dense);
+                VolumeGpuExport exp;
+                if (!grid->exportGpuTracking(exp) || exp.occupancy.empty()) continue;
+                DeviceBuffer occ;
+                occ.upload(exp.occupancy);
                 GpuVolumeGrid view;
-                view.density = buf.as<const float>();
-                view.nx = nx;
-                view.ny = ny;
-                view.nz = nz;
-                view.kind = grid->kind() == VolumeGridKind::Sdf ? 0 : 1;
-                view.bmin = grid->worldBounds().lo;
-                view.bmax = grid->worldBounds().hi;
-                view.majorant = srMax(grid->majorant(), 1e-4f);
+                view.density = occ.as<const float>();
+                view.nx = exp.nx;
+                view.ny = exp.ny;
+                view.nz = exp.nz;
+                view.kind = exp.kind;
+                view.nearest = exp.nearest;
+                view.bmin = exp.bmin;
+                view.bmax = exp.bmax;
+                view.majorant = exp.majorant;
+                view.voxelSize = exp.voxelSize;
+                view.majOrigin = exp.majOrigin;
+                view.majCell = exp.majCell;
+                view.majNx = exp.majNx;
+                view.majNy = exp.majNy;
+                view.majNz = exp.majNz;
+                view.brNx = exp.brNx;
+                view.brNy = exp.brNy;
+                view.brNz = exp.brNz;
+                view.brickSize = exp.brickSize > 0 ? exp.brickSize : 4;
+                volumeDensityBuffers_.push_back(std::move(occ));
+                if (!exp.majMin.empty() && !exp.majMax.empty()) {
+                    DeviceBuffer mn, mx;
+                    mn.upload(exp.majMin);
+                    mx.upload(exp.majMax);
+                    view.majMin = mn.as<const float>();
+                    view.majMax = mx.as<const float>();
+                    volumeDensityBuffers_.push_back(std::move(mn));
+                    volumeDensityBuffers_.push_back(std::move(mx));
+                }
+                if (!exp.bricks.empty()) {
+                    DeviceBuffer br;
+                    br.upload(exp.bricks);
+                    view.bricks = br.as<const unsigned char>();
+                    volumeDensityBuffers_.push_back(std::move(br));
+                }
                 volumeViews[i] = view;
-                volumeDensityBuffers_.push_back(std::move(buf));
                 ++uploadedVolumes;
+                logInfo("OptiX: volume[" + std::to_string(i) + "] " + std::to_string(exp.nx) + "x" +
+                        std::to_string(exp.ny) + "x" + std::to_string(exp.nz) +
+                        (exp.kind == 1 ? " fog" : " sdf") + " maj " + std::to_string(exp.majNx) + "x" +
+                        std::to_string(exp.majNy) + "x" + std::to_string(exp.majNz));
             }
             volumeViewBuffer_.upload(volumeViews);
 
@@ -465,12 +494,12 @@ public:
             logInfo("OptiX: uploaded " + std::to_string(scene_->instances.size()) + " instances, " +
                     std::to_string(scene_->totalTriangles()) + " triangles, " +
                     std::to_string(textureViews.size()) + " textures, " +
-                    std::to_string(uploadedVolumes) + " GPU volume bricks");
+                    std::to_string(uploadedVolumes) + " GPU volumes (VDB tracking)");
             if (!iasHandle_ && uploadedVolumes == 0) {
                 logWarning("OptiX: no triangle IAS — GPU will only shade the environment.");
             }
             if (!scene_->volumes.empty() && uploadedVolumes == 0 && !warnedVolumes_) {
-                logWarning("OptiX: VDB grids present but dense GPU bake failed — volume PT skipped.");
+                logWarning("OptiX: VDB grids present but GPU volume upload failed — volume PT skipped.");
                 warnedVolumes_ = true;
             }
             if (!scene_->procedurals.empty() && !warnedProcedurals_) {

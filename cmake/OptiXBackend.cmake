@@ -212,7 +212,8 @@ solstice_optix_kernel(init_from_camera
             ${_solstice_optix_dir}/optix_geom.cuh
             ${_solstice_optix_dir}/optix_volume.cuh
             ${CMAKE_SOURCE_DIR}/src/render/blue_noise.h
-            ${CMAKE_SOURCE_DIR}/src/render/volume.h)
+            ${CMAKE_SOURCE_DIR}/src/render/volume.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
 solstice_optix_kernel(intersect_closest
     ${_solstice_optix_dir}/optix_intersect_closest.cu
@@ -233,7 +234,8 @@ solstice_optix_kernel(shade_surface
             ${_solstice_optix_dir}/optix_bsdf.cuh
             ${_solstice_optix_dir}/optix_volume.cuh
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
-            ${CMAKE_SOURCE_DIR}/src/render/volume.h)
+            ${CMAKE_SOURCE_DIR}/src/render/volume.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
 solstice_optix_kernel(shade_background
     ${_solstice_optix_dir}/optix_shade_background.cu
@@ -246,7 +248,8 @@ solstice_optix_kernel(shade_shadow
     solsticeOptixShadeShadowIr
     DEPENDS ${_solstice_optix_base}
             ${_solstice_optix_dir}/optix_volume.cuh
-            ${CMAKE_SOURCE_DIR}/src/render/volume.h)
+            ${CMAKE_SOURCE_DIR}/src/render/volume.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
 solstice_optix_kernel(shade_volume
     ${_solstice_optix_dir}/optix_shade_volume.cu
@@ -255,6 +258,7 @@ solstice_optix_kernel(shade_volume
     DEPENDS ${_solstice_optix_base}
             ${_solstice_optix_dir}/optix_volume.cuh
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h
             ${CMAKE_SOURCE_DIR}/src/render/lights.h)
 
 add_custom_target(solstice_optix_programs DEPENDS ${SOLSTICE_OPTIX_EMBED_SOURCES})

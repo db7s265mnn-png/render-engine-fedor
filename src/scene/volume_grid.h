@@ -32,6 +32,33 @@ struct VolumeFromPolygonsSettings {
     VolumeSampleFilter filter = VolumeSampleFilter::Linear;
 };
 
+// GPU upload of the Embree fog representation: occupancy at voxel size plus
+// the same supervoxel min/max majorants and 4³ empty-skip bricks.
+struct VolumeGpuExport {
+    std::vector<float> occupancy;
+    int nx = 0;
+    int ny = 0;
+    int nz = 0;
+    int kind = 1;  // 0 = SDF, 1 = fog
+    int nearest = 0;
+    Vec3 bmin{0.0f};
+    Vec3 bmax{0.0f};
+    float majorant = 1.0f;
+    float voxelSize = 0.05f;
+    std::vector<float> majMin;
+    std::vector<float> majMax;
+    int majNx = 0;
+    int majNy = 0;
+    int majNz = 0;
+    float majCell = 0.0f;
+    Vec3 majOrigin{0.0f};
+    std::vector<uint8_t> bricks;
+    int brNx = 0;
+    int brNy = 0;
+    int brNz = 0;
+    int brickSize = 4;
+};
+
 class VolumeGrid {
 public:
     VolumeGrid();
@@ -64,9 +91,15 @@ public:
     // Max |density| / majorant estimate for delta tracking (fog).
     float majorant() const { return majorant_; }
 
-    // Bake a dense brick for the OptiX volume kernel (trilinear GPU sampling).
-    // Caps each axis at maxDim. Returns false when the grid is empty.
+    // Occupancy (fog) or distance (SDF) at voxel size, plus Embree majorants.
+    // Caps total voxels at maxDim³ only as a GPU memory ceiling (default 256³).
+    // Typical clouds stay at native resolution. Returns false when empty.
+    bool exportGpuTracking(VolumeGpuExport& out, int maxDim = 256) const;
+
+    // Legacy dense AABB resample (still capped). Prefer exportGpuTracking.
     bool exportDense(int maxDim, std::vector<float>& density, int& nx, int& ny, int& nz) const;
+
+    static constexpr int majorantBrickSize() { return kMajBrick; }
 
     // Piecewise min/max occupancy (supervoxels). Empty / constant cells skip
     // voxel sampling during Woodcock walks. Fog only. Cell size tracks OpenVDB

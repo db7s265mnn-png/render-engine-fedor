@@ -15,7 +15,7 @@ extern "C" __global__ void __raygen__shade_shadow() {
         Vec3 contrib = shadow.contrib;
         if (shadow.volumeTr)
             contrib = contrib * gpuVolumeShadowTr(params, shadow.origin, shadow.direction, shadow.tMax,
-                                                  shadow.mediumIndex);
+                                                  shadow.mediumIndex, params.paths[pixel].rng);
         addRadiance(pixel, contrib);
     }
     shadow.queue = kShadowIdle;

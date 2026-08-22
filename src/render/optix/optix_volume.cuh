@@ -1,40 +1,13 @@
-// GPU dense-volume helpers. No optixTrace — used by shade_volume / shade_shadow / init.
+// GPU volume helpers. No optixTrace — used by shade_volume / shade_shadow / init.
+// Fog uses the same residual-ratio tracker as Embree (volume_track.h) on the
+// uploaded occupancy brick + CPU majorant / empty-skip grids.
 #pragma once
 
 #include "render/optix/optix_wavefront.cuh"
 #include "render/volume.h"
+#include "render/volume_track.h"
 
 namespace sol {
-
-__device__ inline bool gpuRayAabb(Vec3 origin, Vec3 direction, Vec3 bmin, Vec3 bmax, float& tEnter,
-                                  float& tExit) {
-    float t0 = -1.0e30f;
-    float t1 = 1.0e30f;
-    const float* o = &origin.x;
-    const float* d = &direction.x;
-    const float* lo = &bmin.x;
-    const float* hi = &bmax.x;
-    for (int axis = 0; axis < 3; ++axis) {
-        const float od = d[axis];
-        if (fabsf(od) < 1e-20f) {
-            if (o[axis] < lo[axis] || o[axis] > hi[axis]) return false;
-            continue;
-        }
-        float ta = (lo[axis] - o[axis]) / od;
-        float tb = (hi[axis] - o[axis]) / od;
-        if (ta > tb) {
-            const float tmp = ta;
-            ta = tb;
-            tb = tmp;
-        }
-        t0 = srMax(t0, ta);
-        t1 = srMin(t1, tb);
-        if (t0 > t1) return false;
-    }
-    tEnter = t0;
-    tExit = t1;
-    return t1 >= 0.0f;
-}
 
 __device__ inline bool gpuPointInAabb(Vec3 p, Vec3 bmin, Vec3 bmax) {
     return p.x >= bmin.x && p.x <= bmax.x && p.y >= bmin.y && p.y <= bmax.y && p.z >= bmin.z &&
@@ -64,6 +37,12 @@ __device__ inline float sampleGpuVolume(const GpuVolumeGrid& g, Vec3 p) {
     float v = (p.y - g.bmin.y) / ext.y;
     float w = (p.z - g.bmin.z) / ext.z;
     if (u < 0.0f || v < 0.0f || w < 0.0f || u > 1.0f || v > 1.0f || w > 1.0f) return 0.0f;
+    if (g.nearest) {
+        const int ix = int(floorf(u * float(g.nx)));
+        const int iy = int(floorf(v * float(g.ny)));
+        const int iz = int(floorf(w * float(g.nz)));
+        return gpuVolumeAt(g, ix, iy, iz);
+    }
     const float x = u * float(g.nx) - 0.5f;
     const float y = v * float(g.ny) - 0.5f;
     const float z = w * float(g.nz) - 0.5f;
@@ -90,65 +69,66 @@ __device__ inline float sampleGpuVolume(const GpuVolumeGrid& g, Vec3 p) {
     return c0 * (1.0f - fz) + c1 * fz;
 }
 
+struct GpuFogGrid {
+    const GpuVolumeGrid* g = nullptr;
+
+    SR_HD Vec3 bmin() const { return g->bmin; }
+    SR_HD Vec3 bmax() const { return g->bmax; }
+    SR_HD float majorant() const { return g->majorant; }
+    SR_HD bool hasMajorantGrid() const { return g->majMin && g->majMax && g->majNx > 0; }
+    SR_HD bool hasMajorantBricks() const { return g->bricks && g->brNx > 0; }
+
+    SR_HD bool brickEmpty(Vec3 p) const {
+        if (!hasMajorantBricks() || g->majCell <= 1e-12f) return false;
+        const int bs = g->brickSize > 0 ? g->brickSize : 4;
+        const float cell = g->majCell * float(bs);
+        const int bx = int(floorf((p.x - g->majOrigin.x) / cell));
+        const int by = int(floorf((p.y - g->majOrigin.y) / cell));
+        const int bz = int(floorf((p.z - g->majOrigin.z) / cell));
+        if (bx < 0 || by < 0 || bz < 0 || bx >= g->brNx || by >= g->brNy || bz >= g->brNz) return true;
+        return g->bricks[size_t(bx + g->brNx * (by + g->brNy * bz))] == 0;
+    }
+
+    SR_HD float brickExitT(Vec3 o, Vec3 d, float t, float tMax) const {
+        if (!hasMajorantBricks()) return tMax;
+        const int bs = g->brickSize > 0 ? g->brickSize : 4;
+        return ddaGridExitT(o, d, t, tMax, g->majOrigin, g->majCell * float(bs), g->brNx, g->brNy,
+                            g->brNz);
+    }
+
+    SR_HD void occupancy(Vec3 p, float& minD, float& maxD) const {
+        minD = 0.0f;
+        maxD = 0.0f;
+        if (!hasMajorantGrid() || g->majCell <= 1e-12f) {
+            maxD = g->majorant;
+            return;
+        }
+        const int ix = int(floorf((p.x - g->majOrigin.x) / g->majCell));
+        const int iy = int(floorf((p.y - g->majOrigin.y) / g->majCell));
+        const int iz = int(floorf((p.z - g->majOrigin.z) / g->majCell));
+        if (ix < 0 || iy < 0 || iz < 0 || ix >= g->majNx || iy >= g->majNy || iz >= g->majNz) return;
+        const int i = ix + g->majNx * (iy + g->majNy * iz);
+        minD = g->majMin[i];
+        maxD = g->majMax[i];
+    }
+
+    SR_HD float cellExitT(Vec3 o, Vec3 d, float t, float tMax) const {
+        if (!hasMajorantGrid()) return tMax;
+        return ddaGridExitT(o, d, t, tMax, g->majOrigin, g->majCell, g->majNx, g->majNy, g->majNz);
+    }
+
+    SR_HD float sampleOcc(Vec3 p) const { return srMax(0.0f, sampleGpuVolume(*g, p)); }
+};
+
 __device__ inline MediumSample sampleGpuFog(const GpuVolumeGrid& g, const MediumData& medium, Vec3 origin,
                                             Vec3 direction, float tMax, Rng& rng, Vec3& throughput) {
-    MediumSample out;
-    float tEnter = 0.0f;
-    float tExit = tMax;
-    if (gpuRayAabb(origin, direction, g.bmin, g.bmax, tEnter, tExit)) {
-        tMax = srMin(tMax, srMax(0.0f, tExit));
-    }
-    float t = srMax(0.0f, tEnter);
-    if (t >= tMax) {
-        out.t = tMax;
-        return out;
-    }
-    const float densityScale = srMax(0.0f, medium.density);
-    const Vec3 sigmaT0 = medium.sigmaA + medium.sigmaS;
-    const float baseMaj = srMax(sigmaT0.x, srMax(sigmaT0.y, sigmaT0.z));
-    const float majorant = srMax(1e-8f, baseMaj * srMax(g.majorant, 1e-6f) * densityScale);
-    if (baseMaj <= 1e-12f || densityScale <= 0.0f) {
-        out.t = tMax;
-        return out;
-    }
-    constexpr int kMaxIters = 4096;
-    for (int iter = 0; iter < kMaxIters; ++iter) {
-        const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
-        t += -logf(u) / majorant;
-        if (t >= tMax) {
-            out.t = tMax;
-            return out;
-        }
-        const float occ = srMax(0.0f, sampleGpuVolume(g, origin + direction * t));
-        const float dens = occ * densityScale;
-        const Vec3 sigmaT = sigmaT0 * dens;
-        const float stHero = srMax(sigmaT.x, srMax(sigmaT.y, sigmaT.z));
-        if (rng.nextFloat() >= stHero / majorant) continue;
-        const Vec3 sigmaA = medium.sigmaA * dens;
-        const Vec3 sigmaS = medium.sigmaS * dens;
-        const float saAvg = (sigmaA.x + sigmaA.y + sigmaA.z) * (1.0f / 3.0f);
-        const float ssAvg = (sigmaS.x + sigmaS.y + sigmaS.z) * (1.0f / 3.0f);
-        const float stSum = srMax(1e-8f, saAvg + ssAvg);
-        if (rng.nextFloat() < saAvg / stSum) {
-            throughput = Vec3(0.0f);
-            out.t = t;
-            out.absorbed = true;
-            return out;
-        }
-        const Vec3 albedo(sigmaT.x > 1e-8f ? sigmaS.x / sigmaT.x : 0.0f,
-                          sigmaT.y > 1e-8f ? sigmaS.y / sigmaT.y : 0.0f,
-                          sigmaT.z > 1e-8f ? sigmaS.z / sigmaT.z : 0.0f);
-        throughput = throughput * albedo;
-        out.t = t;
-        out.scattered = true;
-        return out;
-    }
-    out.t = tMax;
-    return out;
+    GpuFogGrid view;
+    view.g = &g;
+    return sampleHeterogeneousFog(view, medium, origin, direction, tMax, rng, throughput);
 }
 
 __device__ inline Vec3 gpuVolumeShadowTr(const LaunchParams& params, Vec3 origin, Vec3 direction, float dist,
-                                         int mediumIndex) {
+                                         int mediumIndex, Rng& rng) {
     if (dist <= 1e-6f) return Vec3(1.0f);
     Vec3 Tr(1.0f);
     const SceneView& scene = params.scene;
@@ -156,29 +136,15 @@ __device__ inline Vec3 gpuVolumeShadowTr(const LaunchParams& params, Vec3 origin
         if (med->type == 1) Tr = Tr * mediumShadowTr(*med, dist);
     }
     if (!params.volumes || params.volumeCount <= 0) return Tr;
-    constexpr int kSteps = 48;
     for (int vi = 0; vi < params.volumeCount; ++vi) {
         const GpuVolumeGrid& g = params.volumes[vi];
         if (!g.density || g.kind != 1) continue;
         const int medIndex = gpuMediumIndexForVolume(scene, vi);
         if (medIndex < 0) continue;
         const MediumData& med = scene.media[medIndex];
-        float tEnter = 0.0f;
-        float tExit = dist;
-        if (!gpuRayAabb(origin, direction, g.bmin, g.bmax, tEnter, tExit)) continue;
-        const float a = srMax(0.0f, tEnter);
-        const float b = srMin(dist, tExit);
-        if (b <= a + 1e-6f) continue;
-        const Vec3 sigmaT0 = med.sigmaA + med.sigmaS;
-        const float maj = srMax(sigmaT0.x, srMax(sigmaT0.y, sigmaT0.z)) * srMax(0.0f, med.density);
-        const float dt = (b - a) / float(kSteps);
-        float tau = 0.0f;
-        for (int s = 0; s < kSteps; ++s) {
-            const float t = a + (float(s) + 0.5f) * dt;
-            tau += maj * srMax(0.0f, sampleGpuVolume(g, origin + direction * t)) * dt;
-        }
-        const float att = expf(-tau);
-        Tr = Tr * Vec3(att);
+        GpuFogGrid view;
+        view.g = &g;
+        Tr = Tr * mediumShadowTrHeterogeneous(view, med, origin, direction, dist, rng);
         if (maxComponent(Tr) < 1e-5f) return Vec3(0.0f);
     }
     return Tr;
@@ -189,7 +155,7 @@ __device__ inline bool sphereTraceGpuSdf(const GpuVolumeGrid& g, Vec3 origin, Ve
     if (!g.density || g.kind != 0) return false;
     float tEnter = tMin;
     float tExit = tMax;
-    if (!gpuRayAabb(origin, direction, g.bmin, g.bmax, tEnter, tExit)) return false;
+    if (!rayAabbInterval(origin, direction, g.bmin, g.bmax, tEnter, tExit)) return false;
     tMin = srMax(tMin, tEnter);
     tMax = srMin(tMax, tExit);
     if (tMax <= tMin) return false;

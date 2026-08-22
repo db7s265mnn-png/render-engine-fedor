@@ -1,5 +1,5 @@
-// CPU-only OpenVDB sampling helpers for the Embree path tracer.
-// Volume algorithms follow PBRT 4ed Ch.11 (null scattering) and Ch.14 (VolPath).
+// CPU OpenVDB sampling helpers for the Embree path tracer.
+// Free-flight + residual-ratio Tr live in volume_track.h and are shared with OptiX.
 #pragma once
 
 #include "core/rng.h"

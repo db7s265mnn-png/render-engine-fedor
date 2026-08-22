@@ -1,6 +1,7 @@
 #include "scene/volume_grid.h"
 
 #include "core/log.h"
+#include "render/volume_track.h"
 #include "scene/triangulate.h"
 #include "solstice_config.h"
 
@@ -33,36 +34,6 @@ void ensureOpenVdb() {
 
 openvdb::math::Transform::Ptr makeXform(float voxelSize) {
     return openvdb::math::Transform::createLinearTransform(double(srMax(1e-6f, voxelSize)));
-}
-
-float ddaGridExitT(Vec3 origin, Vec3 direction, float t, float tMax, Vec3 org, float cell, int nx,
-                   int ny, int nz) {
-    if (tMax <= t || cell <= 1e-12f || nx <= 0 || ny <= 0 || nz <= 0) return tMax;
-    const float lookT = t + 1e-5f;
-    const Vec3 p = origin + direction * lookT;
-    const Vec3 hi(org.x + float(nx) * cell, org.y + float(ny) * cell, org.z + float(nz) * cell);
-    if (p.x < org.x || p.y < org.y || p.z < org.z || p.x >= hi.x || p.y >= hi.y || p.z >= hi.z)
-        return tMax;
-    auto binClamp = [&](float w, float o, int dim) -> int {
-        int i = int(std::floor(double((w - o) / cell)));
-        if (i < 0) i = 0;
-        if (i >= dim) i = dim - 1;
-        return i;
-    };
-    const int ix = binClamp(p.x, org.x, nx);
-    const int iy = binClamp(p.y, org.y, ny);
-    const int iz = binClamp(p.z, org.z, nz);
-    auto axisExit = [&](float o, float d, float orig, int i) {
-        if (fabsf(d) < 1e-20f) return tMax;
-        const float next = (d > 0.0f) ? (orig + float(i + 1) * cell) : (orig + float(i) * cell);
-        return (next - o) / d;
-    };
-    float tExit = tMax;
-    tExit = srMin(tExit, axisExit(origin.x, direction.x, org.x, ix));
-    tExit = srMin(tExit, axisExit(origin.y, direction.y, org.y, iy));
-    tExit = srMin(tExit, axisExit(origin.z, direction.z, org.z, iz));
-    if (!(tExit > t)) tExit = t + 1e-4f;
-    return srMin(tExit, tMax);
 }
 
 }  // namespace
@@ -484,6 +455,68 @@ MeshPtr VolumeGrid::toPolygonsOpenVDB(float isovalue, float adaptivity) const {
     return mesh;
 }
 
+bool VolumeGrid::exportGpuTracking(VolumeGpuExport& out, int maxDim) const {
+    out = VolumeGpuExport{};
+    if (!valid() || !bounds_.valid()) return false;
+    maxDim = std::max(8, std::min(maxDim, 256));
+    const Vec3 ext = bounds_.extent();
+    const float vs = srMax(voxelSize_, 1e-8f);
+    if (srMax(ext.x, srMax(ext.y, ext.z)) < 1e-6f) return false;
+
+    int nx = std::max(1, int(std::lround(double(ext.x / vs))));
+    int ny = std::max(1, int(std::lround(double(ext.y / vs))));
+    int nz = std::max(1, int(std::lround(double(ext.z / vs))));
+    long long n = static_cast<long long>(nx) * static_cast<long long>(ny) * static_cast<long long>(nz);
+    const long long cap = static_cast<long long>(maxDim) * maxDim * maxDim;
+    if (n > cap) {
+        const double s = std::cbrt(double(n) / double(cap));
+        nx = std::max(1, int(nx / s));
+        ny = std::max(1, int(ny / s));
+        nz = std::max(1, int(nz / s));
+        n = static_cast<long long>(nx) * ny * nz;
+    }
+
+    out.occupancy.resize(size_t(n), 0.0f);
+    const bool sdf = kind_ == VolumeGridKind::Sdf;
+    for (int z = 0; z < nz; ++z) {
+        const float fz = (float(z) + 0.5f) / float(nz);
+        for (int y = 0; y < ny; ++y) {
+            const float fy = (float(y) + 0.5f) / float(ny);
+            for (int x = 0; x < nx; ++x) {
+                const float fx = (float(x) + 0.5f) / float(nx);
+                const Vec3 p(bounds_.lo.x + ext.x * fx, bounds_.lo.y + ext.y * fy,
+                             bounds_.lo.z + ext.z * fz);
+                const float v = sdf ? sampleWorld(p) : srMax(0.0f, sampleWorldTracking(p));
+                out.occupancy[(size_t(z) * size_t(ny) + size_t(y)) * size_t(nx) + size_t(x)] = v;
+            }
+        }
+    }
+    out.nx = nx;
+    out.ny = ny;
+    out.nz = nz;
+    out.kind = sdf ? 0 : 1;
+    out.nearest = sampleFilter_ == VolumeSampleFilter::Nearest ? 1 : 0;
+    out.bmin = bounds_.lo;
+    out.bmax = bounds_.hi;
+    out.majorant = srMax(majorant_, 1e-4f);
+    out.voxelSize = vs;
+    if (!sdf && hasMajorantGrid()) {
+        out.majMin = majMin_;
+        out.majMax = majMax_;
+        out.majNx = majNx_;
+        out.majNy = majNy_;
+        out.majNz = majNz_;
+        out.majCell = majCell_;
+        out.majOrigin = majOrigin_;
+        out.bricks = brOcc_;
+        out.brNx = brNx_;
+        out.brNy = brNy_;
+        out.brNz = brNz_;
+        out.brickSize = kMajBrick;
+    }
+    return true;
+}
+
 bool VolumeGrid::exportDense(int maxDim, std::vector<float>& density, int& nx, int& ny, int& nz) const {
     density.clear();
     nx = ny = nz = 0;
@@ -561,6 +594,11 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh&, const Mat4&, c
     return nullptr;
 }
 MeshPtr VolumeGrid::toPolygonsOpenVDB(float, float) const { return nullptr; }
+
+bool VolumeGrid::exportGpuTracking(VolumeGpuExport& out, int) const {
+    out = VolumeGpuExport{};
+    return false;
+}
 
 bool VolumeGrid::exportDense(int, std::vector<float>& density, int& nx, int& ny, int& nz) const {
     density.clear();

@@ -558,6 +558,9 @@ set(SOLSTICE_LIB_HEADERS
     src/scene/tessellate.h
     src/scene/triangulate.h
     src/scene/volume_grid.h
+    src/render/volume.h
+    src/render/volume_track.h
+    src/render/volume_vdb.h
     src/scene/dcsdd_contouring.h
     src/io/image_io.h
     src/io/tx_cache.h

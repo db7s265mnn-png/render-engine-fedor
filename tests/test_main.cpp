@@ -5398,6 +5398,27 @@ void testNgonTriangulateAndVdb() {
                 check(trMean.x > 0.15f && trMean.x < 0.85f,
                       "residual-ratio Tr through unit fog is between vacuum and opaque");
                 check(trPeak <= 1.02f, "residual-ratio Tr peak stays ≤ 1");
+
+                VolumeGpuExport gpuExp;
+                check(fogA->exportGpuTracking(gpuExp), "GPU tracking export of unit fog");
+                check(gpuExp.kind == 1 && gpuExp.nx > 4 && gpuExp.nx < 40,
+                      "GPU occupancy is voxel resolution, not the old 160³ bake");
+                check(gpuExp.majNx == fogA->majorantDimX() && gpuExp.majNy == fogA->majorantDimY() &&
+                          gpuExp.majNz == fogA->majorantDimZ(),
+                      "GPU majorant grid matches Embree");
+                check(!gpuExp.majMin.empty() && !gpuExp.majMax.empty() && !gpuExp.bricks.empty(),
+                      "GPU upload includes min/max majorants and empty-skip bricks");
+                check(gpuExp.brickSize == VolumeGrid::majorantBrickSize(),
+                      "GPU brick size matches Embree 4³ skip bricks");
+                const size_t cIdx =
+                    (size_t(gpuExp.nz / 2) * size_t(gpuExp.ny) + size_t(gpuExp.ny / 2)) *
+                        size_t(gpuExp.nx) +
+                    size_t(gpuExp.nx / 2);
+                check(cIdx < gpuExp.occupancy.size() && gpuExp.occupancy[cIdx] > 0.85f,
+                      "GPU occupancy at the box center is filled");
+                float cpuMin = 0.0f, cpuMax = 0.0f;
+                fogA->majorantOccupancy(Vec3(0, 0, 0), cpuMin, cpuMax);
+                check(cpuMax > 0.85f, "CPU majorant at center is occupied (matches GPU brick)");
             }
             RenderSettingsData deepMs;
             deepMs.maxDepth = 1024;
