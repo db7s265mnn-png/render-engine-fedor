@@ -129,61 +129,6 @@ bool intersectSdfVolume(const VolumeGrid& grid, Vec3 origin, Vec3 direction, flo
     return false;
 }
 
-bool fogRayFirstDenseT(const VolumeGrid& grid, Vec3 origin, Vec3 direction, float tMin, float tMax,
-                       float& tDense, float& tExitOut) {
-    tDense = tMin;
-    tExitOut = tMin;
-    if (!grid.valid() || grid.kind() != VolumeGridKind::Fog) return false;
-
-    float tEnter = 0.0f;
-    float tExit = tMax;
-    if (!rayAabbInterval(origin, direction, grid.worldBounds(), tEnter, tExit)) return false;
-    tExitOut = tExit;
-    float t = srMax(srMax(0.0f, tMin), srMax(0.0f, tEnter));
-    const float tEnd = srMin(tMax, srMax(0.0f, tExit));
-    if (t >= tEnd) return false;
-
-    const float maj = srMax(grid.majorant(), 1e-6f);
-    const float thresh = kVolumeOccupancyEnterMin * maj;
-    const float voxel = srMax(1e-4f, grid.voxelSize());
-
-#if SOLSTICE_HAVE_OPENVDB
-    auto* vdb = static_cast<openvdb::FloatGrid*>(grid.nativeGrid());
-    if (!vdb) return false;
-    FogTrackSampler track(*vdb, grid.sampleFilter() == VolumeSampleFilter::Nearest);
-    auto sampleOcc = [&](Vec3 p) { return srMax(0.0f, track.sample(p)); };
-#else
-    auto sampleOcc = [&](Vec3 p) { return srMax(0.0f, grid.sampleWorldTracking(p)); };
-#endif
-
-    constexpr int kMaxIters = 8192;
-    for (int i = 0; i < kMaxIters && t < tEnd; ++i) {
-        const Vec3 pLook = origin + direction * (t + 1e-5f);
-        if (grid.hasMajorantBricks() && grid.majorantBrickEmpty(pLook)) {
-            const float tBr = grid.majorantBrickExitT(origin, direction, t, tEnd);
-            t = (tBr > t) ? tBr : t + voxel;
-            continue;
-        }
-        float minD = 0.0f;
-        float maxD = grid.majorant();
-        grid.majorantOccupancy(pLook, minD, maxD);
-        if (maxD <= thresh) {
-            const float tCell = grid.hasMajorantGrid()
-                                    ? grid.majorantCellExitT(origin, direction, t, tEnd)
-                                    : t + voxel;
-            t = (tCell > t) ? tCell : t + voxel;
-            continue;
-        }
-        const float occ = sampleOcc(pLook);
-        if (volumeOccupancyIsDense(occ, maj)) {
-            tDense = t;
-            return true;
-        }
-        t += voxel;
-    }
-    return false;
-}
-
 MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium, Vec3 origin,
                                 Vec3 direction, float tMax, Rng& rng, Vec3& throughput) {
     MediumSample out;
@@ -244,8 +189,6 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
         if (rng.nextFloat() < saAvg / stSum) {
             throughput = Vec3(0.0f);
             out.t = tHit;
-            out.occupancy = occupancy;
-            out.dense = volumeOccupancyIsDense(occupancy, grid.majorant());
             out.absorbed = true;
             return true;
         }
@@ -254,8 +197,6 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
                           sigmaT.z > 1e-8f ? sigmaS.z / sigmaT.z : 0.0f);
         throughput = throughput * albedo;
         out.t = tHit;
-        out.occupancy = occupancy;
-        out.dense = volumeOccupancyIsDense(occupancy, grid.majorant());
         out.scattered = true;
         return true;
     };

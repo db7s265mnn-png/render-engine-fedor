@@ -51,13 +51,11 @@ extern "C" __global__ void __raygen__shade_volume() {
     if (ms.scattered) {
         const Vec3 p = path.origin + path.direction * ms.t;
         const Vec3 wo = -path.direction;
-        if (ms.dense) path.realVolumeScatter = 1;
         if (scene.lightCount > 0) {
             float selectPdf = 0.0f;
             const int lightIndex = sampleLightIndex(scene, p, path.rng.nextFloat(), selectPdf);
             LightSample ls;
             if (lightIndex >= 0 && selectPdf > 0.0f &&
-                !(path.realVolumeScatter == 0 && lightIsInfinite(scene.lights[lightIndex])) &&
                 sampleLight(scene, lightIndex, p, path.rng.nextFloat(), path.rng.nextFloat(), ls) &&
                 ls.pdf > 0.0f && !isBlack(ls.radiance)) {
                 const float phase = henyeyGreenstein(dot(wo, ls.wi), walk.g);

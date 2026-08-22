@@ -44,20 +44,8 @@ extern "C" __global__ void __raygen__shade_surface() {
                 path.mediumIndex = -1;
                 path.origin = offsetRay(si.p, si.ng, path.direction);
             } else {
-                float tEnter = 0.0f;
-                float tExit = 0.0f;
-                float tDense = 0.0f;
-                const bool hitAabb =
-                    gpuRayAabb(path.origin, path.direction, vol.bmin, vol.bmax, tEnter, tExit);
-                if (hitAabb && gpuFogFirstDenseT(vol, path.origin, path.direction, srMax(0.0f, tEnter),
-                                                 srMax(0.0f, tExit), tDense)) {
-                    path.mediumIndex = volInst.mediumIndex;
-                    path.origin = path.origin + path.direction * (tDense + 1e-4f);
-                } else if (hitAabb) {
-                    path.origin = path.origin + path.direction * (srMax(0.0f, tExit) + 1e-4f);
-                } else {
-                    path.origin = offsetRay(si.p, si.ng, path.direction);
-                }
+                path.mediumIndex = volInst.mediumIndex;
+                path.origin = offsetRay(si.p, si.ng * -1.0f, path.direction);
             }
             if (++path.hops > 32) {
                 path.queue = kQueueDead;

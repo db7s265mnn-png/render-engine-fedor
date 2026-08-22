@@ -90,26 +90,6 @@ __device__ inline float sampleGpuVolume(const GpuVolumeGrid& g, Vec3 p) {
     return c0 * (1.0f - fz) + c1 * fz;
 }
 
-__device__ inline bool gpuFogFirstDenseT(const GpuVolumeGrid& g, Vec3 origin, Vec3 direction, float tMin,
-                                         float tMax, float& tDense) {
-    if (!g.density || g.kind != 1 || g.nx <= 0 || g.ny <= 0 || g.nz <= 0) return false;
-    const Vec3 ext = g.bmax - g.bmin;
-    const float voxel =
-        srMax(1e-4f, srMin(ext.x / float(srMax(1, g.nx)),
-                           srMin(ext.y / float(srMax(1, g.ny)), ext.z / float(srMax(1, g.nz)))));
-    float t = srMax(0.0f, tMin);
-    constexpr int kMax = 512;
-    for (int i = 0; i < kMax && t < tMax; ++i) {
-        const float occ = srMax(0.0f, sampleGpuVolume(g, origin + direction * t));
-        if (volumeOccupancyIsDense(occ, g.majorant)) {
-            tDense = t;
-            return true;
-        }
-        t += voxel;
-    }
-    return false;
-}
-
 __device__ inline MediumSample sampleGpuFog(const GpuVolumeGrid& g, const MediumData& medium, Vec3 origin,
                                             Vec3 direction, float tMax, Rng& rng, Vec3& throughput) {
     MediumSample out;
@@ -152,8 +132,6 @@ __device__ inline MediumSample sampleGpuFog(const GpuVolumeGrid& g, const Medium
         if (rng.nextFloat() < saAvg / stSum) {
             throughput = Vec3(0.0f);
             out.t = t;
-            out.occupancy = occ;
-            out.dense = volumeOccupancyIsDense(occ, g.majorant);
             out.absorbed = true;
             return out;
         }
@@ -162,8 +140,6 @@ __device__ inline MediumSample sampleGpuFog(const GpuVolumeGrid& g, const Medium
                           sigmaT.z > 1e-8f ? sigmaS.z / sigmaT.z : 0.0f);
         throughput = throughput * albedo;
         out.t = t;
-        out.occupancy = occ;
-        out.dense = volumeOccupancyIsDense(occ, g.majorant);
         out.scattered = true;
         return out;
     }

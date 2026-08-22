@@ -36,13 +36,11 @@ extern "C" __global__ void __raygen__init_from_camera() {
     path.specularBounce = 1;
     path.mediumIndex = -1;
     path.volumeScatters = 0;
-    path.realVolumeScatter = 0;
     if (params.volumes && params.volumeCount > 0) {
         for (int i = 0; i < params.volumeCount; ++i) {
             const GpuVolumeGrid& g = params.volumes[i];
             if (!g.density || g.kind != 1) continue;
             if (!gpuPointInAabb(path.origin, g.bmin, g.bmax)) continue;
-            if (!volumeOccupancyIsDense(sampleGpuVolume(g, path.origin), g.majorant)) continue;
             const int med = gpuMediumIndexForVolume(params.scene, i);
             if (med >= 0 && mediumIsActive(params.scene, med)) {
                 path.mediumIndex = med;
