@@ -126,27 +126,26 @@ void applyDarkTheme(QApplication& application) {
         QTabWidget::pane {
             border: 1px solid #555960;
             background: #3a3e44;
-            top: -1px;
             padding: 2px;
         }
         QTabBar::tab {
             background: #2a2e33;
-            color: #a8adb4;
-            padding: 5px 12px;
+            color: #d0d4da;
+            padding: 6px 12px;
             margin-right: 2px;
             border: 1px solid #555960;
-            border-bottom: none;
+            min-height: 22px;
             min-width: 4em;
         }
         QTabBar::tab:selected {
-            background: #3a3e44;
-            color: #ffa82e;
+            background: #ffa82e;
+            color: #1a1c20;
         }
         QTabBar::tab:hover:!selected {
             color: #e8eaed;
             background: #32363c;
         }
-        QTabBar::scroller { width: 20px; }
+        QTabBar::scroller { width: 24px; }
         QLineEdit, QComboBox, QPlainTextEdit, QTreeWidget {
             background: #22242a; border: 1px solid #3a3e44; border-radius: 2px; padding: 2px 4px;
         }

@@ -1,6 +1,8 @@
 #include "ui/parameter_panel.h"
 
+#include <QAbstractButton>
 #include <QAbstractSpinBox>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
@@ -15,7 +17,10 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLayout>
+#include <QLayoutItem>
 #include <QLineEdit>
+#include <QList>
 #include <QMimeData>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -24,7 +29,7 @@
 #include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
-#include <QTabWidget>
+#include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVector3D>
@@ -43,6 +48,63 @@
 
 namespace sol {
 namespace {
+
+// Wrapping Houdini-style folder strip (QTabWidget cannot wrap in a 280px dock,
+// and Fusion + pane{top:-1px} can cover the tab bar entirely).
+class FlowLayout final : public QLayout {
+public:
+    explicit FlowLayout(QWidget* parent = nullptr, int hSpacing = 4, int vSpacing = 4)
+        : QLayout(parent), hSpacing_(hSpacing), vSpacing_(vSpacing) {}
+    ~FlowLayout() override {
+        while (QLayoutItem* item = takeAt(0)) delete item;
+    }
+
+    void addItem(QLayoutItem* item) override { items_.append(item); }
+    int count() const override { return items_.size(); }
+    QLayoutItem* itemAt(int index) const override { return items_.value(index); }
+    QLayoutItem* takeAt(int index) override {
+        if (index < 0 || index >= items_.size()) return nullptr;
+        return items_.takeAt(index);
+    }
+    Qt::Orientations expandingDirections() const override { return {}; }
+    bool hasHeightForWidth() const override { return true; }
+    int heightForWidth(int width) const override { return doLayout(QRect(0, 0, width, 0), true); }
+    void setGeometry(const QRect& rect) override {
+        QLayout::setGeometry(rect);
+        doLayout(rect, false);
+    }
+    QSize sizeHint() const override { return minimumSize(); }
+    QSize minimumSize() const override {
+        QSize size;
+        for (QLayoutItem* item : items_) size = size.expandedTo(item->minimumSize());
+        const QMargins m = contentsMargins();
+        size += QSize(m.left() + m.right(), m.top() + m.bottom());
+        return size;
+    }
+
+private:
+    int doLayout(const QRect& rect, bool testOnly) const {
+        int x = rect.x();
+        int y = rect.y();
+        int lineHeight = 0;
+        for (QLayoutItem* item : items_) {
+            const QSize hint = item->sizeHint();
+            if (x + hint.width() > rect.right() + 1 && lineHeight > 0) {
+                x = rect.x();
+                y += lineHeight + vSpacing_;
+                lineHeight = 0;
+            }
+            if (!testOnly) item->setGeometry(QRect(QPoint(x, y), hint));
+            x += hint.width() + hSpacing_;
+            lineHeight = qMax(lineHeight, hint.height());
+        }
+        return y + lineHeight - rect.y();
+    }
+
+    QList<QLayoutItem*> items_;
+    int hSpacing_ = 4;
+    int vSpacing_ = 4;
+};
 
 QComboBox* makeColorSpaceCombo(const QString& current, const std::function<void(const QString&)>& commit) {
     auto* combo = new QComboBox();
@@ -540,8 +602,8 @@ void ParameterPanel::rebuildLop() {
     }
     contentLayout_->addWidget(header);
 
-    // One Houdini-style folder tab per parameter group. Only the active folder
-    // is shown; the tab bar stays pinned while the page contents scroll.
+    // Houdini-style wrapping folder buttons. Only the active folder's parameters
+    // are shown. Orange = selected.
     QStringList groups;
     groups << QString();
     for (const Parameter& parameter : node_->parameters()) {
@@ -606,35 +668,50 @@ void ParameterPanel::rebuildLop() {
         return;
     }
 
-    auto* tabs = new QTabWidget();
-    tabs->setDocumentMode(true);
-    tabs->setUsesScrollButtons(true);
-    tabs->setElideMode(Qt::ElideNone);
-    tabs->setMovable(false);
-    tabs->setTabPosition(QTabWidget::North);
-    tabs->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    for (const FolderPage& folder : pages) {
-        const QString title = folder.name.isEmpty() ? QStringLiteral("Parameters") : folder.name;
-        tabs->addTab(folder.page, title);
-    }
+    auto* strip = new QWidget();
+    strip->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    auto* flow = new FlowLayout(strip, 4, 4);
+    flow->setContentsMargins(0, 2, 0, 2);
+    auto* buttons = new QButtonGroup(strip);
+    buttons->setExclusive(true);
+    auto* stack = new QStackedWidget();
+    stack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
+    const QString folderBtnCss = QStringLiteral(
+        "QPushButton { background:#2a2e33; color:#d0d4da; border:1px solid #666b73;"
+        " border-radius:2px; padding:4px 10px; min-height:22px; }"
+        "QPushButton:hover { background:#3a3f46; color:#f0f2f5; }"
+        "QPushButton:checked { background:#ffa82e; color:#1a1c20; font-weight:bold;"
+        " border-color:#ffa82e; }");
+
+    int restore = 0;
     const QString previous = lastFolderByType_.value(node_->typeName());
-    if (!previous.isEmpty()) {
-        for (int i = 0; i < tabs->count(); ++i) {
-            if (tabs->tabText(i) == previous) {
-                tabs->setCurrentIndex(i);
-                break;
-            }
-        }
+    for (int i = 0; i < static_cast<int>(pages.size()); ++i) {
+        const FolderPage& folder = pages[static_cast<size_t>(i)];
+        const QString title = folder.name.isEmpty() ? QStringLiteral("Parameters") : folder.name;
+        auto* btn = new QPushButton(title);
+        btn->setCheckable(true);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setFocusPolicy(Qt::NoFocus);
+        btn->setStyleSheet(folderBtnCss);
+        flow->addWidget(btn);
+        buttons->addButton(btn, i);
+        stack->addWidget(folder.page);
+        if (!previous.isEmpty() && title == previous) restore = i;
     }
-    connect(tabs, &QTabWidget::currentChanged, this, [this, tabs](int index) {
-        if (!node_ || index < 0) return;
-        lastFolderByType_[node_->typeName()] = tabs->tabText(index);
-    });
-    if (tabs->count() > 0)
-        lastFolderByType_[node_->typeName()] = tabs->tabText(tabs->currentIndex());
+    if (QAbstractButton* restored = buttons->button(restore)) restored->setChecked(true);
+    stack->setCurrentIndex(restore);
+    if (restore >= 0 && restore < stack->count())
+        lastFolderByType_[node_->typeName()] = buttons->button(restore)->text();
 
-    contentLayout_->addWidget(tabs, 1);
+    connect(buttons, &QButtonGroup::idClicked, this, [this, stack, buttons](int id) {
+        if (id < 0 || id >= stack->count()) return;
+        stack->setCurrentIndex(id);
+        if (node_) lastFolderByType_[node_->typeName()] = buttons->button(id)->text();
+    });
+
+    contentLayout_->addWidget(strip);
+    contentLayout_->addWidget(stack, 1);
 }
 
 void ParameterPanel::rebuildMaterialX() {
