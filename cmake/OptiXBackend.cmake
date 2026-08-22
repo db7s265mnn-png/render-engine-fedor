@@ -54,7 +54,18 @@ if(NOT WIN32)
 endif()
 find_package(CUDAToolkit REQUIRED)
 
-set(SOLSTICE_OPTIX_ARCH "compute_60" CACHE STRING "Virtual CUDA arch for OptiX PTX (--gpu-architecture)")
+set(_solstice_default_optix_arch "compute_60")
+if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+    set(_solstice_default_optix_arch "compute_75")
+endif()
+set(SOLSTICE_OPTIX_ARCH "${_solstice_default_optix_arch}" CACHE STRING
+    "Virtual CUDA arch for OptiX PTX (--gpu-architecture)")
+# CUDA 13 dropped Pascal (compute_60). A leftover cache from CUDA 12 would fail nvcc.
+if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0 AND SOLSTICE_OPTIX_ARCH MATCHES "compute_6")
+    message(STATUS "CUDA ${CUDAToolkit_VERSION} dropped ${SOLSTICE_OPTIX_ARCH}; OptiX PTX uses compute_75")
+    set(SOLSTICE_OPTIX_ARCH "compute_75")
+endif()
+message(STATUS "OptiX PTX arch: ${SOLSTICE_OPTIX_ARCH} (CUDA ${CUDAToolkit_VERSION})")
 
 find_path(OptiX_INCLUDE_DIR
     NAMES optix.h
@@ -108,7 +119,10 @@ endif()
 # VS 2026 STL (yvals_core.h STL1002) requires CUDA 13.2; CUDA 12.0 needs this define.
 set(_solstice_nvcc_unsupported)
 if(WIN32)
-    set(_solstice_nvcc_unsupported --allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH)
+    set(_solstice_nvcc_unsupported
+        --allow-unsupported-compiler
+        -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
+        -D_ENABLE_EXTENDED_ALIGNED_STORAGE)
 endif()
 
 add_custom_command(

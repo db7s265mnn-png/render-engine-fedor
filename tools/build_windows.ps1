@@ -2,7 +2,9 @@
 # ASCII-only: Windows PowerShell 5.1 on a Russian locale mis-parses UTF-8
 # without BOM and treats Cyrillic bytes as quotes / broken tokens.
 # Override paths with env vars if auto-detect is wrong:
-#   QT_ROOT, VCPKG_ROOT, CUDA_PATH, OptiX_ROOT, GRENDIZER_BUILD_DIR
+#   QT_ROOT, CUDA_PATH, OptiX_ROOT, GRENDIZER_BUILD_DIR, GRENDIZER_DEPS
+# CUDA 13.2+ is required for Visual Studio 2026 (MSVC 14.50+). CUDA 12.x is
+# enough only with VS 2022 / MSVC 14.44. If both are installed, 13.2 is used.
 $ErrorActionPreference = 'Stop'
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -28,52 +30,276 @@ function Find-VsWhere {
     return $null
 }
 
-function Import-VcVars64 {
-    $vswhere = Find-VsWhere
-    if (-not $vswhere) {
-        Fail 'Visual Studio Installer (vswhere) not found. Install VS 2022 with Desktop development with C++.'
+function Get-MsvcToolsetDirFromCl([string]$ClPath) {
+    if (-not $ClPath) { return $null }
+    return [IO.Path]::GetFullPath((Join-Path $ClPath '..\..\..\..'))
+}
+
+function Find-MsvcToolsets {
+    $hits = @()
+    $bases = @(
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio')
+    )
+    if (${env:ProgramFiles(x86)}) {
+        $bases += (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio')
     }
-    $vsRoot = & $vswhere -latest -version "[17.0,18.0)" -products * `
-        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-        -property installationPath
-    if ($vsRoot) {
-        Info 'Using Visual Studio 2022 (CUDA 12.0 cannot host-compile VS 2026 STL).'
-    } else {
+    foreach ($base in $bases) {
+        if (-not (Test-Path -LiteralPath $base)) { continue }
+        foreach ($year in (Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue)) {
+            foreach ($ed in (Get-ChildItem -LiteralPath $year.FullName -Directory -ErrorAction SilentlyContinue)) {
+                $msvcRoot = Join-Path $ed.FullName 'VC\Tools\MSVC'
+                if (-not (Test-Path -LiteralPath $msvcRoot)) { continue }
+                foreach ($ts in (Get-ChildItem -LiteralPath $msvcRoot -Directory -ErrorAction SilentlyContinue)) {
+                    $cl = Join-Path $ts.FullName 'bin\Hostx64\x64\cl.exe'
+                    if (-not (Test-Path -LiteralPath $cl)) { continue }
+                    $ver = $null
+                    try { $ver = [version]$ts.Name } catch { continue }
+                    $hits += [pscustomobject]@{
+                        Version = $ver
+                        Dir     = $ts.FullName
+                        Cl      = $cl
+                        VsRoot  = $ed.FullName
+                    }
+                }
+            }
+        }
+    }
+    return $hits
+}
+
+function Find-CudaFriendlyMsvcToolset {
+    $hits = @(Find-MsvcToolsets)
+    $friendly = @($hits | Where-Object { $_.Version -lt [version]'14.50' } | Sort-Object Version -Descending)
+    if ($friendly.Count -gt 0) { return $friendly[0] }
+    return $null
+}
+
+function Switch-MsvcToolsetDir([string]$FromDir, [string]$ToDir) {
+    $from = $FromDir.TrimEnd('\')
+    $to = $ToDir.TrimEnd('\')
+    if (-not $from -or -not $to -or ($from -eq $to)) { return }
+    foreach ($var in @('INCLUDE', 'LIB', 'LIBPATH', 'PATH', 'Path')) {
+        $val = [Environment]::GetEnvironmentVariable($var)
+        if ($val -and $val.Contains($from)) {
+            Set-Item -LiteralPath ("Env:" + $var) -Value ($val.Replace($from, $to))
+        }
+    }
+    $hostBin = Join-Path $to 'bin\Hostx64\x64'
+    $env:PATH = "$hostBin;$env:PATH"
+    $env:VCToolsInstallDir = $to + '\'
+}
+
+function Find-VsInstallRoot {
+    # CUDA 12.0 can parse MSVC 14.44 / VS 2022 headers, not VS 2026 14.51 STL.
+    $friendly = Find-CudaFriendlyMsvcToolset
+    if ($friendly) { return $friendly.VsRoot }
+
+    foreach ($year in @('2022', '2019')) {
+        foreach ($ed in @('Community', 'Professional', 'Enterprise', 'BuildTools')) {
+            $root = Join-Path $env:ProgramFiles "Microsoft Visual Studio\$year\$ed"
+            $vcvars = Join-Path $root 'VC\Auxiliary\Build\vcvars64.bat'
+            if (Test-Path -LiteralPath $vcvars) { return $root }
+        }
+    }
+    $vswhere = Find-VsWhere
+    if ($vswhere) {
+        $vsRoot = & $vswhere -latest -version "[17.0,18.0)" -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+        if ($vsRoot) { return ("$vsRoot").Trim() }
         $vsRoot = & $vswhere -latest -products * `
             -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
             -property installationPath
+        if ($vsRoot) { return ("$vsRoot").Trim() }
     }
-    if (-not $vsRoot) {
-        Fail 'Visual Studio found, but the C++ toolset is missing. Enable Desktop development with C++.'
-    }
-    $script:VsYear = '2022'
-    $year = & $vswhere -path $vsRoot -property catalog_productLineVersion | Select-Object -First 1
-    if ($year) { $script:VsYear = ("$year").Trim() }
-    $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
-    if (-not (Test-Path -LiteralPath $vcvars)) {
-        Fail "vcvars64.bat missing under $vsRoot"
-    }
-    Info "Visual Studio: $vsRoot ($script:VsYear)"
+    return $null
+}
+
+function Import-EnvFromVcVars([string]$Vcvars, [string]$VcvarsVer) {
+    $extra = ''
+    if ($VcvarsVer) { $extra = " -vcvars_ver=$VcvarsVer" }
     $tmp = [IO.Path]::GetTempFileName()
-    cmd.exe /c "`"$vcvars`" >nul && set" | Set-Content -Path $tmp -Encoding ascii
+    cmd.exe /c "`"$Vcvars`"$extra >nul && set" | Set-Content -Path $tmp -Encoding ascii
     Get-Content -Path $tmp | ForEach-Object {
         if ($_ -match '^(.*?)=(.*)$') {
             Set-Item -LiteralPath ("Env:" + $matches[1]) -Value $matches[2]
         }
     }
     Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+}
+
+function Get-ClToolsetVersion {
+    $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
+    if (-not $cl) { return $null }
+    if ($cl.Source -match '\\MSVC\\(14\.\d+)') { return $matches[1] }
+    return $null
+}
+
+function Import-VcVars64 {
+    $vsRoot = Find-VsInstallRoot
+    if (-not $vsRoot) {
+        Fail 'Visual Studio with C++ is not installed. Install VS 2022 Desktop development with C++.'
+    }
+    $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
+    if (-not (Test-Path -LiteralPath $vcvars)) {
+        Fail "vcvars64.bat missing under $vsRoot"
+    }
+    $script:VsYear = 'unknown'
+    if ($vsRoot -match '\\2022\\') { $script:VsYear = '2022' }
+    elseif ($vsRoot -match '\\2019\\') { $script:VsYear = '2019' }
+    elseif ($vsRoot -match '\\18\\') { $script:VsYear = '2026' }
+
+    Info "Visual Studio: $vsRoot"
+    Import-EnvFromVcVars $vcvars $null
     if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
         Fail 'cl.exe not on PATH after vcvars64'
     }
-    if ($env:VCPKG_ROOT -and ($env:VCPKG_ROOT -match 'Visual Studio\\.*\\VC\\vcpkg')) {
-        Info 'Ignoring Visual Studio bundled vcpkg (it requires builtin-baseline).'
-        Remove-Item Env:\VCPKG_ROOT
+
+    $toolset = Get-ClToolsetVersion
+    Info ("cl.exe toolset: " + $toolset + " (" + (Get-Command cl.exe).Source + ")")
+
+    # VS 2026 default toolset 14.51 cannot host CUDA 12. Prefer any 14.4x on disk.
+    if ($toolset -and ([version]$toolset -ge [version]'14.50')) {
+        foreach ($ver in @('14.44', '14.43', '14.42', '14.41', '14.40', '14.39', '14.38')) {
+            Info "Trying MSVC $ver with vcvars (CUDA 12 compatible) ..."
+            try {
+                Import-EnvFromVcVars $vcvars $ver
+            } catch { continue }
+            $toolset = Get-ClToolsetVersion
+            if ($toolset -and ([version]$toolset -lt [version]'14.50')) {
+                Info "Pinned MSVC toolset $toolset"
+                break
+            }
+        }
     }
-    # Never let a random C:\vcpkg toolchain hijack this build (hwloc fails on VS 2026).
+
+    $toolset = Get-ClToolsetVersion
+    if ($toolset -and ([version]$toolset -ge [version]'14.50')) {
+        $friendly = Find-CudaFriendlyMsvcToolset
+        if ($friendly) {
+            $fromDir = Get-MsvcToolsetDirFromCl ((Get-Command cl.exe).Source)
+            Info ("Switching host MSVC " + $toolset + " -> " + $friendly.Version)
+            Switch-MsvcToolsetDir $fromDir $friendly.Dir
+            $toolset = Get-ClToolsetVersion
+        }
+    }
+
+    Info ("nvcc host cl.exe: " + (Get-Command cl.exe).Source)
+    $script:MsvcToolset = $toolset
+
     Remove-Item Env:\VCPKG_ROOT -ErrorAction SilentlyContinue
     if ($env:CMAKE_TOOLCHAIN_FILE -and ($env:CMAKE_TOOLCHAIN_FILE -match 'vcpkg')) {
         Remove-Item Env:\CMAKE_TOOLCHAIN_FILE
     }
+}
+
+function Get-NvccRelease([string]$NvccPath) {
+    $out = & $NvccPath --version 2>&1 | Out-String
+    if ($out -match 'release\s+(\d+)\.(\d+)') {
+        return [version]($matches[1] + '.' + $matches[2])
+    }
+    return [version]'0.0'
+}
+
+function Get-CudaInstalls {
+    $hits = @()
+    $seen = @{}
+    $paths = @()
+    $base = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA'
+    if (Test-Path -LiteralPath $base) {
+        Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^v1[123]\.' } |
+            ForEach-Object { $paths += $_.FullName }
+    }
+    if ($env:CUDA_PATH) { $paths += $env:CUDA_PATH }
+    if ($env:CUDA_PATH_V13_2) { $paths += $env:CUDA_PATH_V13_2 }
+    if ($env:CUDA_PATH_V13_1) { $paths += $env:CUDA_PATH_V13_1 }
+    $paths += (Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA\v13.2')
+    foreach ($p in $paths) {
+        if (-not $p) { continue }
+        $full = $null
+        try { $full = [IO.Path]::GetFullPath($p) } catch { continue }
+        if (-not $full -or $seen.ContainsKey($full)) { continue }
+        $nvcc = Join-Path $full 'bin\nvcc.exe'
+        if (-not (Test-Path -LiteralPath $nvcc)) { continue }
+        $seen[$full] = $true
+        $ver = Get-NvccRelease $nvcc
+        $hits += [pscustomobject]@{ Path = $full; Version = $ver; Nvcc = $nvcc }
+    }
+    return ,$hits
+}
+
+function Test-NvccHostStl([string]$Nvcc, [string]$Cl, [string]$Arch) {
+    $dir = Join-Path $env:TEMP 'grendizer-nvcc-probe'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $cu = Join-Path $dir 'probe.cu'
+    $ptx = Join-Path $dir 'probe.ptx'
+    Set-Content -LiteralPath $cu -Encoding ascii -Value @"
+#include <type_traits>
+__device__ int probe() { return (int)sizeof(std::integral_constant<int, 1>::value); }
+"@
+    if (Test-Path -LiteralPath $ptx) { Remove-Item -LiteralPath $ptx -Force }
+    Info "Probing nvcc vs MSVC STL (must pass before the OptiX kernel build) ..."
+    & $Nvcc -ptx -std=c++17 --allow-unsupported-compiler `
+        -ccbin $Cl "-arch=$Arch" `
+        -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH `
+        -D_ENABLE_EXTENDED_ALIGNED_STORAGE `
+        -DNOMINMAX `
+        -o $ptx $cu
+    return (($LASTEXITCODE -eq 0) -and (Test-Path -LiteralPath $ptx))
+}
+
+function Select-CudaInstall([object[]]$All) {
+    if (-not $All -or $All.Count -eq 0) { return $null }
+    $valid = @($All | Where-Object { $_ -and $_.Nvcc })
+    # Prefer CUDA 13.2+ whenever it is installed (needed for VS 2026 STL).
+    $v132 = @($valid | Where-Object { $_.Version -ge [version]'13.2' } | Sort-Object Version -Descending)
+    if ($v132.Count -gt 0) { return $v132[0] }
+    $v12 = @($valid | Where-Object { $_.Version -lt [version]'13.0' } | Sort-Object Version -Descending)
+    if ($v12.Count -gt 0) { return $v12[0] }
+    $any = @($valid | Sort-Object Version -Descending)
+    if ($any.Count -gt 0) { return $any[0] }
+    return $null
+}
+
+function Resolve-CudaForOptix {
+    $script:OptixArch = 'compute_60'
+    $toolset = Get-ClToolsetVersion
+    $all = @(Get-CudaInstalls)
+    $pick = Select-CudaInstall $all
+    if (-not $pick) {
+        Fail @"
+CUDA Toolkit not found (nvcc.exe).
+Visual Studio 2026 needs CUDA 13.2 at:
+  C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2
+Download: https://developer.nvidia.com/cuda-downloads
+Close this window, open a NEW cmd, then re-run BUILD_WINDOWS.bat.
+"@
+    }
+
+    if ($toolset -and ([version]$toolset -ge [version]'14.50') -and ($pick.Version -lt [version]'13.2')) {
+        Fail @"
+MSVC $toolset (VS 2026) cannot compile OptiX PTX with CUDA $($pick.Version).
+This script found: $($pick.Path)
+
+Install CUDA 13.2 (keep 12.0 if you want) so this folder exists:
+  C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\nvcc.exe
+
+Then close this window and double-click BUILD_WINDOWS.bat again.
+Do NOT delete %LOCALAPPDATA%\grendizer-deps
+Delete only the build-windows folder if cmake still picks CUDA 12.0.
+"@
+    }
+
+    $script:CudaRelease = $pick.Version
+    if ($pick.Version -ge [version]'13.0') {
+        $script:OptixArch = 'compute_75'
+    } else {
+        $script:OptixArch = 'compute_60'
+    }
+    Info ("Using CUDA " + $pick.Version + " at " + $pick.Path)
+    Info ("OptiX PTX arch: " + $script:OptixArch)
+    return $pick.Path
 }
 
 function Find-CMake {
@@ -226,26 +452,6 @@ Do this once, then re-run BUILD_WINDOWS.bat:
 
 Kits found: $hint
 "@
-}
-
-function Find-CudaPath {
-    $candidates = @()
-    $base = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA'
-    if (Test-Path -LiteralPath $base) {
-        Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^v1[23]\.' } |
-            ForEach-Object {
-                $nvcc = Join-Path $_.FullName (Join-Path 'bin' 'nvcc.exe')
-                if (Test-Path -LiteralPath $nvcc) { $candidates += $_.FullName }
-            }
-    }
-    if ($env:CUDA_PATH) {
-        $nvcc = Join-Path $env:CUDA_PATH (Join-Path 'bin' 'nvcc.exe')
-        if (Test-Path -LiteralPath $nvcc) { $candidates += $env:CUDA_PATH }
-    }
-    $candidates = @($candidates | Select-Object -Unique | Sort-Object -Descending)
-    if ($candidates.Count -gt 0) { return $candidates[0] }
-    Fail 'CUDA Toolkit not found (need nvcc). Install CUDA 12.x from https://developer.nvidia.com/cuda-downloads then re-run BUILD_WINDOWS.bat'
 }
 
 function Find-OptiXRoot([string]$GitExe) {
@@ -479,16 +685,29 @@ Import-VcVars64
 $CMake = Find-CMake
 $Git = Find-Git
 $Qt = Find-QtPrefix
-$Cuda = Find-CudaPath
+$Cl = (Get-Command cl.exe).Source
+$Cuda = Resolve-CudaForOptix
 $env:CUDA_PATH = $Cuda
+$env:CUDA_HOME = $Cuda
 $cudaBin = Join-Path $Cuda 'bin'
 $env:PATH = "$cudaBin;$env:PATH"
+$Nvcc = Join-Path $cudaBin 'nvcc.exe'
+if (-not (Test-Path -LiteralPath $Nvcc)) { Fail "nvcc.exe missing: $Nvcc" }
+if (-not (Test-NvccHostStl $Nvcc $Cl $script:OptixArch)) {
+    Fail @"
+nvcc cannot parse this MSVC STL (type_traits).
+cl.exe: $Cl
+nvcc:   $Nvcc
+
+Need CUDA 13.2+ with Visual Studio 2026.
+Confirm: `"$Nvcc`" --version   shows release 13.2
+Then delete the build-windows folder (keep %LOCALAPPDATA%\grendizer-deps) and re-run.
+"@
+}
 $OptiX = Find-OptiXRoot $Git
 $Ninja = Find-Ninja
 $ninjaDir = Split-Path $Ninja -Parent
 $env:PATH = "$ninjaDir;$env:PATH"
-$Cl = (Get-Command cl.exe).Source
-$Nvcc = Join-Path $cudaBin 'nvcc.exe'
 Ensure-NativeDeps
 $embreeRoot = Resolve-EmbreePrefix
 if ($env:GRENDIZER_BUILD_DIR) {
@@ -503,14 +722,13 @@ Info "CMake:  $CMake"
 Info "Qt:     $Qt"
 Info "CUDA:   $Cuda"
 Info "nvcc:   $Nvcc"
+Info "arch:   $script:OptixArch"
 Info "cl.exe: $Cl"
 Info "OptiX:  $OptiX"
 Info "Deps:   $script:DepsPrefix"
 Info "Ninja:  $Ninja"
 Info "Build:  $BuildDir"
 Write-Host ''
-
-if (-not (Test-Path -LiteralPath $Nvcc)) { Fail "nvcc.exe missing: $Nvcc" }
 
 # Ninja + cl.exe works on VS 2022 and VS 2026. The VS 17 generator cannot see VS 18.
 $Generator = 'Ninja'
@@ -524,8 +742,16 @@ if (Test-Path -LiteralPath $cache) {
     if ($oldGen -and $oldGen.Matches[0].Groups[1].Value -ne $Generator) { $stale = $true }
     $errLog = Join-Path $BuildDir 'CMakeFiles\CMakeError.log'
     if (Test-Path -LiteralPath $errLog) { $stale = $true }
+    $oldNvcc = Select-String -Path $cache -Pattern '^CMAKE_CUDA_COMPILER:FILEPATH=(.+)$' | Select-Object -First 1
+    if ($oldNvcc) {
+        $oldNvccPath = $oldNvcc.Matches[0].Groups[1].Value.Replace('/', '\')
+        if ($oldNvccPath -ne $Nvcc) { $stale = $true }
+    }
+    if ($script:CudaRelease -ge [version]'13.0') {
+        if (Select-String -Path $cache -Pattern 'compute_60|CUDA\\\\v12|CUDA/v12' -Quiet) { $stale = $true }
+    }
     if ($stale) {
-        Info "Clearing $BuildDir (old vcpkg / generator cache)"
+        Info "Clearing $BuildDir (old CUDA 12 / vcpkg / generator cache)"
         Remove-Item -LiteralPath $BuildDir -Recurse -Force
     }
 }
@@ -543,10 +769,13 @@ $env:NVCC_APPEND_FLAGS = '--allow-unsupported-compiler'
     "-DCMAKE_CUDA_HOST_COMPILER=$Cl" `
     "-DCMAKE_CUDA_COMPILER_ID=NVIDIA" `
     "-DCMAKE_CUDA_COMPILER_FORCED=TRUE" `
+    "-DCUDAToolkit_ROOT=$Cuda" `
+    "-DCUDA_TOOLKIT_ROOT_DIR=$Cuda" `
     "-DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler" `
     "-DCMAKE_CUDA_COMPILER_ID_FLAGS=--allow-unsupported-compiler" `
     "-DSOLSTICE_CUDA_HOST_COMPILER=$Cl" `
     '-DSOLSTICE_ENABLE_OPTIX=ON' `
+    "-DSOLSTICE_OPTIX_ARCH=$script:OptixArch" `
     "-DOptiX_ROOT=$OptiX" `
     '-DSOLSTICE_ENABLE_OCIO=ON' `
     '-DSOLSTICE_ENABLE_OPENVDB=ON' `
@@ -567,7 +796,14 @@ Info 'OptiX is compiled into this build (SOLSTICE_HAVE_OPTIX 1).'
 Write-Host ''
 Info 'Building Release (nvcc PTX can take several minutes) ...'
 & $CMake --build $BuildDir --parallel
-if ($LASTEXITCODE -ne 0) { Fail 'Build failed.' }
+if ($LASTEXITCODE -ne 0) {
+    Fail @"
+Build failed.
+If nvcc died on type_traits / aligned_storage / result_of:
+  CUDA 12.0 was used. This script must print CUDA 13.2 and arch compute_75.
+Delete the build-windows folder, keep %LOCALAPPDATA%\grendizer-deps, re-run BUILD_WINDOWS.bat.
+"@
+}
 
 Write-Host ''
 Info 'Deploying Qt DLLs next to the exe ...'

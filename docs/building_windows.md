@@ -7,6 +7,17 @@ On a Windows machine with the prerequisites below already installed, double-clic
 fetches Embree + builds Imath/OpenEXR/Alembic/TBB/OpenVDB (no vcpkg), configures
 `-DSOLSTICE_ENABLE_OPTIX=ON`, builds Release and runs `deploy`.
 
+**Visual Studio 2026** (MSVC 14.50+) needs **CUDA 13.2 or newer**. CUDA 12.0 cannot
+parse that STL (`type_traits` / `aligned_storage` / `result_of` while compiling
+`optix_programs.cu`). CUDA 13 dropped Pascal (`compute_60`); the script passes
+`-DSOLSTICE_OPTIX_ARCH=compute_75`.
+
+**Visual Studio 2022** can still use CUDA 12.x and `compute_60`.
+
+If both CUDA 12.0 and 13.2 are installed, the script **always uses 13.2**. After
+upgrading CUDA, delete only the `build-windows` folder — keep
+`%LOCALAPPDATA%\grendizer-deps`.
+
 Override auto-detected paths with environment variables if needed: `QT_ROOT`,
 `CUDA_PATH`, `OptiX_ROOT`, `GRENDIZER_BUILD_DIR`, `GRENDIZER_DEPS`.
 
@@ -20,12 +31,12 @@ The exe lands in `build-windows\bin\Release\`. Engine → Render Backend should 
 
 ## Prerequisites
 
-* Visual Studio 2022 with the C++ desktop workload
+* Visual Studio 2022 (C++ desktop) **or** Visual Studio 2026
 * CMake 3.20+
 * Qt 6 MSVC kit (`msvc2022_64` or `msvc2019_64`). Any 6.x is fine, including 6.11.1
   at `C:\Qt\6.11.1\msvc2022_64`. MinGW kits cannot be used with this Visual Studio build.
-* [vcpkg](https://vcpkg.io) for Embree, Alembic and OpenEXR
-* Optional: CUDA Toolkit 12.x and the OptiX SDK 7.7 or newer for GPU rendering
+* CUDA Toolkit: **13.2+** with VS 2026, or 12.x with VS 2022. OptiX headers are cloned
+  automatically if the SDK is missing.
 
 ## Dependencies through vcpkg
 
@@ -99,3 +110,8 @@ PTX target.
   configuring; without it the import node reports that the feature is missing.
 * **The GPU backend falls back to Embree** — check the log panel, it prints why OptiX was
   unavailable (no CUDA device, driver too old, or a build without OptiX support).
+* **nvcc fails on `type_traits` / `aligned_storage` / `result_of`** — CUDA 12.0 was used
+  with VS 2026. Install CUDA 13.2, delete `build-windows`, re-run `BUILD_WINDOWS.bat`.
+  The log must show `nvcc release 13.2` and `OptiX PTX arch: compute_75`.
+* **`Unsupported gpu architecture 'compute_60'`** — leftover CMake cache from CUDA 12.
+  Delete `build-windows` and re-run. Do not delete `%LOCALAPPDATA%\grendizer-deps`.

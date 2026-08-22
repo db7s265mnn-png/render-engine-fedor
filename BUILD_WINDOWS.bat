@@ -4,8 +4,9 @@ cd /d "%~dp0"
 
 echo.
 echo Double-click this file to compile (Release + OptiX).
-echo First run can take a long time (Embree / OpenEXR / OpenVDB + nvcc).
-echo Deps are cached in %%LOCALAPPDATA%%\grendizer-deps and reused.
+echo Visual Studio 2026 needs CUDA 13.2. CUDA 12.0 can stay installed.
+echo After upgrading CUDA, delete only the build-windows folder.
+echo Keep %%LOCALAPPDATA%%\grendizer-deps (Embree / OpenVDB cache).
 echo.
 
 where powershell >nul 2>&1
