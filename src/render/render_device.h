@@ -27,6 +27,14 @@ struct RenderProgress {
 // Optional mid-sample preview hook (e.g. after each bootstrap phase).
 using RenderMidProgressFn = std::function<void()>;
 
+// XPU work split: checkerboard tiles. GPU-only / CPU-only leave xpuTileRole < 0.
+struct RenderSampleOptions {
+    int xpuTileRole = -1;   // -1 = all pixels, 0 = CPU tiles, 1 = GPU tiles
+    int xpuTileSize = 32;
+    int xpuGpuParity = 0;   // GPU owns (tx+ty)%2 == parity
+    bool skipFramebufferStore = false;  // OptiX: keep accum internal (XPU merge)
+};
+
 class RenderDevice {
 public:
     virtual ~RenderDevice() = default;
@@ -44,7 +52,11 @@ public:
     // `cancel` is polled frequently so the UI stays responsive.
     // `midProgress` may be invoked during long passes (bootstrap) for smoother IPR.
     virtual void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
-                              const RenderMidProgressFn& midProgress) = 0;
+                              const RenderMidProgressFn& midProgress,
+                              const RenderSampleOptions* options = nullptr) = 0;
+
+    // OptiX internal accum after skipFramebufferStore (XPU merge). Count is width*height.
+    virtual bool copyInternalAccum(Vec4* /*dst*/, size_t /*count*/) const { return false; }
 
     // Picks up in-place edits of the scene that do not touch geometry, such as
     // a camera move or a change of film settings, without rebuilding the
@@ -66,7 +78,12 @@ using RenderDevicePtr = std::shared_ptr<RenderDevice>;
 // or no capable device is present.
 RenderDevicePtr createEmbreeDevice(int threadCount = 0);
 RenderDevicePtr createOptixDevice();
+RenderDevicePtr createXpuDevice(int threadCount = 0);
 bool optixBackendCompiledIn();
+
+// Align CPU Path Tracer with the OptiX wavefront estimator (1 NEE, box filter,
+// no MNEE/SSS/OpenPGL/motion blur / polynomial optics).
+void applyXpuDeviceMatch(Scene& scene);
 
 // Live CUDA + optixInit probe (cached, never on the Qt UI thread).
 // createOptixDevice() overwrites this with the real initialize() result.

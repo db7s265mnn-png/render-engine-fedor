@@ -529,6 +529,7 @@ set(SOLSTICE_LIB_SOURCES
     src/render/physical_sky.cpp
     third_party/hosek_wilkie/ArHosekSkyModel.cc
     src/render/cpu/embree_device.cpp
+    src/render/xpu_device.cpp
     src/render/cpu/polynomial_optics.cpp
     src/render/cpu/path_guiding.cpp
     src/render/optix/optix_device_stub.cpp
@@ -579,6 +580,8 @@ set(SOLSTICE_LIB_HEADERS
     src/render/photon_map.h
     src/render/framebuffer.h
     src/render/render_device.h
+    src/render/xpu_split.h
+    src/render/camera_sample.h
     src/render/render_session.h
     src/render/scene_picker.h
     src/nodes/parameter.h

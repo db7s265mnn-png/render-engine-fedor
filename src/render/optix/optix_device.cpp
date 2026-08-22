@@ -26,6 +26,7 @@
 #include "core/log.h"
 #include "render/optix/launch_params.h"
 #include "render/render_device.h"
+#include "render/xpu_split.h"
 #include "scene/volume_grid.h"
 
 // Emitted by the build from the wavefront OptiX modules.
@@ -520,7 +521,7 @@ public:
     }
 
     void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
-                      const RenderMidProgressFn& midProgress) override {
+                      const RenderMidProgressFn& midProgress, const RenderSampleOptions* options) override {
         if (!initialized_ || !scene_ || !stream_) return;
         if (cancel.load(std::memory_order_relaxed)) return;
         try {
@@ -565,6 +566,11 @@ public:
             launchParams.sampleIndex = sampleIndex;
             launchParams.frameSeed = unsigned(scene_->settings.seed) * 9781u + unsigned(sampleIndex) * 6271u;
             launchParams.pixelSampler = scene_->settings.pixelSampler;
+            launchParams.manualTestMult = scene_->settings.manualTestMult;
+            const RenderSampleOptions opt = options ? *options : RenderSampleOptions{};
+            launchParams.xpuSplit = opt.xpuTileRole == 1 ? 1 : 0;
+            launchParams.xpuTileSize = xpuTileSizeOrDefault(opt.xpuTileSize);
+            launchParams.xpuGpuParity = opt.xpuGpuParity;
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
             launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();
             launchParams.volumeCount = gpuVolumeCount_;
@@ -585,8 +591,14 @@ public:
             // OPTIX_ERROR_CUDA_ERROR (7900) on current Windows OptiX/driver stacks.
             launchBounceLoop(w, h, maxIters);
             CUDA_CHECK(cudaEventRecord(gpuStopEvent_, stream_));
-            CUDA_CHECK(cudaMemcpyAsync(fb.data(), accumBuffer_.as<Vec4>(), pixelCount * sizeof(Vec4),
-                                       cudaMemcpyDeviceToHost, stream_));
+            if (opt.skipFramebufferStore) {
+                hostAccum_.resize(pixelCount);
+                CUDA_CHECK(cudaMemcpyAsync(hostAccum_.data(), accumBuffer_.as<Vec4>(),
+                                           pixelCount * sizeof(Vec4), cudaMemcpyDeviceToHost, stream_));
+            } else {
+                CUDA_CHECK(cudaMemcpyAsync(fb.data(), accumBuffer_.as<Vec4>(), pixelCount * sizeof(Vec4),
+                                           cudaMemcpyDeviceToHost, stream_));
+            }
             CUDA_CHECK(cudaEventSynchronize(gpuStopEvent_));
             float gpuMs = 0.0f;
             CUDA_CHECK(cudaEventElapsedTime(&gpuMs, gpuStartEvent_, gpuStopEvent_));
@@ -605,7 +617,7 @@ public:
                 logInfo(msg.str());
             }
 
-            fb.markHasData();
+            if (!opt.skipFramebufferStore) fb.markHasData();
             if (midProgress) midProgress();
         } catch (const std::exception& e) {
             lastGpuSampleMs_ = 0.0;
@@ -623,6 +635,12 @@ public:
     }
 
     void release() override { releaseScene(); }
+
+    bool copyInternalAccum(Vec4* dst, size_t count) const override {
+        if (!dst || hostAccum_.size() != count) return false;
+        std::memcpy(dst, hostAccum_.data(), count * sizeof(Vec4));
+        return true;
+    }
 
 private:
     void launchKernel(int raygenIndex, unsigned width, unsigned height) {
@@ -932,6 +950,8 @@ private:
         destroyGraph();
         deviceScene_ = SceneView();
         scene_.reset();
+        hostAccum_.clear();
+        hostAccum_.shrink_to_fit();
     }
 
     void shutdown() {
@@ -1023,6 +1043,7 @@ private:
 
     ScenePtr scene_;
     SceneView deviceScene_;
+    std::vector<Vec4> hostAccum_;
 };
 
 enum class OptixRuntimeState { Unknown, Ok, Fail };

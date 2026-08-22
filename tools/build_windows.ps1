@@ -1026,7 +1026,7 @@ if ($script:DepsPrefix) {
 
 Write-Host ''
 Write-Host ("DONE: " + $Exe.FullName) -ForegroundColor Green
-Write-Host 'In the app: Engine -> Render Backend -> GPU (OptiX)'
+Write-Host 'In the app: Engine -> Render Device -> GPU (OptiX)'
 Write-Host 'It must NOT say "not in this build". Needs an NVIDIA GPU + current driver.'
 Write-Host ''
 

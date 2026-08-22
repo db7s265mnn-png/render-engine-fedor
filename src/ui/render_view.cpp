@@ -1187,22 +1187,23 @@ void RenderView::paintEvent(QPaintEvent*) {
         int rightLimit = textRect.right() - margin;
         if (hasBackendHud_) {
             const QString sep = QStringLiteral("  ·  ");
-            const QString supportText =
-                optixSupportText_.isEmpty() ? QStringLiteral("OptiX not supported") : optixSupportText_;
             const int activeW = fm.horizontalAdvance(backendActive_);
-            const int sepW = fm.horizontalAdvance(sep);
-            const int supportW = fm.horizontalAdvance(supportText);
+            const int sepW = optixSupportText_.isEmpty() ? 0 : fm.horizontalAdvance(sep);
+            const int supportW =
+                optixSupportText_.isEmpty() ? 0 : fm.horizontalAdvance(optixSupportText_);
             const int hudW = activeW + sepW + supportW;
             const int hudX = std::max(textRect.left() + margin, rightLimit - hudW);
             painter.setPen(QColor(235, 237, 240));
             painter.drawText(QRect(hudX, textRect.top(), activeW, textRect.height()),
                              Qt::AlignVCenter | Qt::AlignLeft, backendActive_);
-            painter.setPen(QColor(160, 164, 170));
-            painter.drawText(QRect(hudX + activeW, textRect.top(), sepW, textRect.height()),
-                             Qt::AlignVCenter | Qt::AlignLeft, sep);
-            painter.setPen(optixSupportColor_);
-            painter.drawText(QRect(hudX + activeW + sepW, textRect.top(), supportW, textRect.height()),
-                             Qt::AlignVCenter | Qt::AlignLeft, supportText);
+            if (!optixSupportText_.isEmpty()) {
+                painter.setPen(QColor(160, 164, 170));
+                painter.drawText(QRect(hudX + activeW, textRect.top(), sepW, textRect.height()),
+                                 Qt::AlignVCenter | Qt::AlignLeft, sep);
+                painter.setPen(optixSupportColor_);
+                painter.drawText(QRect(hudX + activeW + sepW, textRect.top(), supportW, textRect.height()),
+                                 Qt::AlignVCenter | Qt::AlignLeft, optixSupportText_);
+            }
             rightLimit = hudX - margin;
         }
 

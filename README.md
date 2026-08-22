@@ -1,9 +1,8 @@
 # Solstice
 
 A standalone desktop path tracer with a node based workflow inspired by Houdini Solaris.
-Load Alembic caches, place lights and an HDRI environment, and render with either the
-Intel Embree CPU backend or the NVIDIA OptiX GPU backend — both driven by the same
-light transport code.
+Load Alembic caches, place lights and an HDRI environment, and render with the
+Intel Embree CPU device, the NVIDIA OptiX GPU device, or XPU (both together).
 
 ![Solstice user interface](docs/images/ui.png)
 
@@ -20,9 +19,11 @@ light transport code.
   rough dielectric transmission, emission), Russian roulette and firefly clamping.
 * **Path guiding** — Intel OpenPGL on the CPU backend (enabled by default in Render Settings)
   learns incident radiance while rendering and guides BSDF samples with MIS.
-* **Two backends** — `CPU (Embree)` uses Embree 4 with a tiled thread pool; `GPU (OptiX)` uses
-  OptiX with per-mesh GAS and a top level IAS. The integrator, BSDF and light sampling code
-  is a single set of headers compiled for both.
+* **Render Device** — `CPU (Embree)` uses Embree 4 with a tiled thread pool; `GPU (OptiX)` uses
+  OptiX wavefront path tracing; `XPU (Embree+OptiX)` splits the frame across checkerboard
+  buckets so CPU and GPU render together with the GPU estimator (matching sampling, lights
+  and shaders). GPU and XPU are Path Tracer only; if OptiX cannot start they stop with an
+  error instead of falling back to Embree.
 * **Node network** — a Solaris-like network where every node edits the stage flowing through
   it: geometry sources, transforms, material assignment by prim pattern, lights, camera and
   render settings. Display flags, bypass flags, a Tab menu and a scene graph tree included.
@@ -90,8 +91,8 @@ cmake -S . -B build -DSOLSTICE_ENABLE_OPTIX=ON -DOptiX_ROOT=/path/to/OptiX-SDK-9
 ```
 
 The device programs are compiled to PTX by `nvcc` and embedded into the executable, so no
-extra files have to ship next to it. When the build has no OptiX support, or no CUDA device
-is present at runtime, the renderer logs a warning and falls back to Embree.
+extra files have to ship next to it. When GPU or XPU is selected and OptiX cannot start,
+the render stops with an error — it does not fall back to Embree.
 
 ## Using it
 
@@ -178,5 +179,5 @@ and two end to end renders that verify instance transforms and overall image san
 * Subdivision surfaces are rendered as their polygon cage; no Catmull-Clark refinement yet.
 * Alembic curves, points and NuPatch prims are skipped.
 * No texture maps on materials yet — colours are constant per material node.
-* The OptiX backend is compiled and validated in CI, but it needs an NVIDIA GPU at runtime;
-  without one the application transparently uses Embree.
+* The OptiX backend is compiled and validated in CI, but it needs an NVIDIA GPU at runtime.
+  GPU / XPU stop with an error if OptiX cannot start (no silent Embree fallback).

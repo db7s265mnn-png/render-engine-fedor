@@ -41,6 +41,8 @@
 #include "render/render_session.h"
 #include "render/shading.h"
 #include "render/volume_vdb.h"
+#include "render/xpu_split.h"
+#include "render/camera_sample.h"
 #include "render/spectrum.h"
 #include "render/spectrum_rgb.h"
 #include "render/spectrum_types.h"
@@ -498,6 +500,68 @@ void testGraphCook() {
     CookContext context2;
     StagePtr stage2 = reloaded.cookDisplay(context2);
     check(stage2 != nullptr && stage2->prims.size() == stage->prims.size(), "reloaded graph cooks the same");
+}
+
+void testXpuDevice() {
+    std::printf("xpu device\n");
+    check(xpuGpuOwnsPixel(0, 0, 32, 0), "GPU owns tile (0,0) at parity 0");
+    check(!xpuGpuOwnsPixel(32, 0, 32, 0), "CPU owns tile (1,0) at parity 0");
+    check(!xpuGpuOwnsPixel(0, 32, 32, 0), "CPU owns tile (0,1) at parity 0");
+    check(xpuGpuOwnsPixel(32, 32, 32, 0), "GPU owns tile (1,1) at parity 0");
+    check(xpuTileSizeOrDefault(0) == 32, "auto tile size is 32 for XPU");
+    check(xpuTileSizeOrDefault(64) == 64, "explicit tile size kept");
+
+    Scene scene;
+    scene.settings.backend = kBackendXpu;
+    scene.settings.lightSamples = 8;
+    scene.settings.pathGuiding = 1;
+    scene.settings.motionBlur = 1;
+    scene.settings.pixelFilter = 2;
+    scene.settings.filterRadius = 2.0f;
+    scene.settings.samplingEngine = kSamplingEngineProgressive;
+    scene.camera.opticalModel = 1;
+    Material sss;
+    sss.subsurface = 0.7f;
+    scene.materials.push_back(sss);
+    applyXpuDeviceMatch(scene);
+    check(scene.settings.lightSamples == 1, "XPU match uses 1 NEE sample");
+    check(scene.settings.pathGuiding == 0, "XPU match disables OpenPGL");
+    check(scene.settings.motionBlur == 0, "XPU match disables motion blur");
+    check(scene.settings.pixelFilter == kPixelFilterBox, "XPU match uses box filter");
+    check(scene.settings.filterRadius == 0.5f, "XPU match box radius 0.5");
+    check(scene.settings.samplingEngine == kSamplingEngineBuckets, "XPU match uses buckets");
+    check(scene.camera.opticalModel == 0, "XPU match uses thin-lens camera");
+    check(scene.materials[0].subsurface == 0.0f, "XPU match disables SSS");
+
+    registerBuiltinNodes();
+    NodeGraph graph;
+    buildDefaultGraph(graph);
+    Node* settings = nullptr;
+    for (const NodePtr& node : graph.nodes()) {
+        if (node && node->typeName() == QLatin1String("rendersettings")) {
+            settings = node.get();
+            break;
+        }
+    }
+    check(settings != nullptr, "default graph has render settings");
+    if (settings) {
+        settings->setParameterValue("backend", 2);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage != nullptr, "XPU cook produces a stage");
+        ScenePtr cooked = stage->toScene();
+        check(cooked->settings.backend == kBackendXpu, "menu value 2 cooks to XPU");
+    }
+
+    float jx = 0, jy = 0, lu = 0, lv = 0;
+    sampleCameraPixelLens(kPixelSamplerSobol, 10, 20, 3, 64, 0u, 0.0f, jx, jy, lu, lv);
+    float jx2 = 0, jy2 = 0, lu2 = 0, lv2 = 0;
+    pixelSample(10, 20, 3, jx2, jy2);
+    lensSample(10, 20, 3, lu2, lv2);
+    checkNear(jx, jx2, 1e-6f, "shared camera jitter X matches Sobol");
+    checkNear(jy, jy2, 1e-6f, "shared camera jitter Y matches Sobol");
+    checkNear(lu, lu2, 1e-6f, "shared lens U matches Sobol");
+    checkNear(lv, lv2, 1e-6f, "shared lens V matches Sobol");
 }
 
 void testRender() {
@@ -6048,6 +6112,7 @@ int main() {
     testBsdf();
     testGlob();
     testGraphCook();
+    testXpuDevice();
     testCameraDofFocus();
     testPolyOpticsApertureSpread();
     testPolynomialOpticsCamera();

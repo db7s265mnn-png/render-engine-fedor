@@ -1134,24 +1134,27 @@ public:
         // this binary has no GPU backend (Windows CI historically shipped Embree-only).
         const QStringList backends =
             optixBackendCompiledIn()
-                ? QStringList{"CPU (Embree)", "GPU (OptiX)"}
-                : QStringList{"CPU (Embree)", "GPU (OptiX) — not in this build"};
-        addParameter(Parameter::makeMenu("backend", "Render Backend", backends, 0)
+                ? QStringList{"CPU (Embree)", "GPU (OptiX)", "XPU (Embree+OptiX)"}
+                : QStringList{"CPU (Embree)", "GPU (OptiX) — not in this build",
+                              "XPU (Embree+OptiX) — not in this build"};
+        addParameter(Parameter::makeMenu("backend", "Render Device", backends, 0)
                          .withGroup("Engine")
                          .withTooltip(optixBackendCompiledIn()
-                                          ? QStringLiteral("CPU uses Embree (full feature set).\n"
-                                                           "GPU (OptiX) path-traces on NVIDIA CUDA: "
-                                                           "camera rays, bounces, shadows, GGX/glass, "
-                                                           "NEE/MIS, HDRI, thin-lens DoF, and VDB fog "
-                                                           "with the same residual-ratio tracker as CPU "
-                                                           "(occupancy + local majorants).\n"
-                                                           "Still CPU-only: BDPT, spectral, MNEE, SSS, "
-                                                           "MaterialX procedurals, polynomial optics.\n"
-                                                           "If OptiX cannot start, render stops with an "
-                                                           "error — it does not switch to Embree.")
+                                          ? QStringLiteral("CPU (Embree): full feature set on the host.\n"
+                                                           "GPU (OptiX): NVIDIA wavefront path tracer.\n"
+                                                           "XPU (Embree+OptiX): CPU and GPU render the same "
+                                                           "frame on checkerboard buckets, using the GPU "
+                                                           "estimator on both so sampling, lights and "
+                                                           "shaders match (1 NEE, image maps + Lambert/GGX/"
+                                                           "glass, residual-ratio fog).\n"
+                                                           "XPU is Path Tracer only. Still CPU-only: BDPT, "
+                                                           "spectral, MNEE, SSS, MaterialX procedurals, "
+                                                           "polynomial optics, OpenPGL.\n"
+                                                           "If OptiX cannot start, GPU/XPU stop with an "
+                                                           "error — they do not switch to Embree.")
                                           : QStringLiteral("This executable was built without OptiX/CUDA. "
-                                                          "GPU (OptiX) will stop with an error — it does not "
-                                                          "fall back to Embree.")));
+                                                          "GPU (OptiX) and XPU will stop with an error — "
+                                                          "they do not fall back to Embree.")));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
                                           "Ambient Occlusion", "PT Spectral", "BDPT Spectral",
@@ -1160,7 +1163,7 @@ public:
                          .withGroup("Engine")
                          .withTooltip("Path Tracer: unidirectional (+ MNEE or Photon caustics).\n"
                                       "BDPT: bidirectional + light-tracing / Photon caustics "
-                                      "(CPU only — GPU (OptiX) stops with an error).\n"
+                                      "(CPU only — GPU/XPU stop with an error).\n"
                                       "PT Spectral: hero-wavelength path tracer (CPU / Embree).\n"
                                       "BDPT Spectral: bidirectional + spectral transport "
                                       "(LT / MNEE / Photon + Indirect Guides; CPU / Embree).\n"
@@ -1401,7 +1404,7 @@ public:
         settings.resolutionX = intValue("resx", 960);
         settings.resolutionY = intValue("resy", 540);
         settings.samplesPerPixel = intValue("samples", 128);
-        settings.backend = intValue("backend", 0) == 1 ? kBackendGpuOptix : kBackendCpuEmbree;
+        settings.backend = std::clamp(intValue("backend", 0), 0, 2);
         settings.integrator = std::clamp(intValue("integrator", 0), 0, 6);
         settings.maxDepth = std::clamp(intValue("maxdepth", 8), 1, 4096);
         settings.rrStartDepth = std::clamp(intValue("rrdepth", 3), 1, 4096);
@@ -1619,7 +1622,7 @@ void registerBuiltinNodes() {
     registry.registerType(
         makeType<CameraNode>("camera", "Camera", "Camera", "Render camera with lens controls", "#3a76b2"));
     registry.registerType(makeType<RenderSettingsNode>("rendersettings", "Render Settings", "Render",
-                                                       "Resolution, sampling and backend selection", "#8a4550"));
+                                                       "Resolution, sampling and render device", "#8a4550"));
 
     registerVdbNodes(registry);
 }

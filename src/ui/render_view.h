@@ -60,7 +60,7 @@ public:
         statusTextRight_ = text;
         update();
     }
-    // Far-right HUD: live backend (Embree / OptiX) plus OptiX support text.
+    // Far-right HUD: live device (Embree / OptiX / XPU). Support text is empty on Embree.
     void setBackendHud(const QString& activeBackend, const QString& supportText,
                        const QColor& supportColor) {
         backendActive_ = activeBackend;

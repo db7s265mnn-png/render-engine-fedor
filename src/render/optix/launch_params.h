@@ -52,6 +52,11 @@ struct alignas(16) LaunchParams {
     int sampleIndex = 0;
     unsigned int frameSeed = 0;
     int pixelSampler = 0;  // PixelSampler enum
+    float manualTestMult = 0.0f;
+
+    int xpuSplit = 0;
+    int xpuTileSize = 32;
+    int xpuGpuParity = 0;
 
     unsigned long long traversable = 0;  // OptixTraversableHandle
 };

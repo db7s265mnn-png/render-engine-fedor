@@ -192,27 +192,41 @@ bool RenderSession::prepareDevice(std::string& error) {
     }
     const int backend = scene->settings.backend;
     const int threads = scene->settings.threads;
+    if (backend == kBackendXpu) applyXpuDeviceMatch(*scene);
     if (!device_ || backend != deviceBackend_ || threads != deviceThreads_) {
         device_.reset();
-        if (backend == kBackendGpuOptix) {
+        if (backend == kBackendGpuOptix || backend == kBackendXpu) {
+            const char* label = backend == kBackendXpu ? "XPU (Embree+OptiX)" : "GPU (OptiX)";
             if (!optixBackendCompiledIn()) {
-                error = "GPU (OptiX) is selected, but this build has no OptiX/CUDA backend. "
+                error = std::string(label) + " is selected, but this build has no OptiX/CUDA backend. "
                         "Rebuild with BUILD_WINDOWS.bat.";
                 return false;
             }
             if (scene->settings.integrator != kIntegratorPathTracer) {
-                error = "GPU (OptiX) only supports Path Tracer. Switch Integrator to Path Tracer, "
-                        "or set Render Backend to CPU (Embree).";
+                error = std::string(label) + " only supports Path Tracer. Switch Integrator to Path Tracer, "
+                        "or set Render Device to CPU (Embree).";
                 return false;
             }
-            device_ = createOptixDevice();
-            if (!device_) {
-                std::string err;
-                optixRuntimeAvailable(&err);
-                error = "GPU (OptiX) cannot start";
-                if (!err.empty()) error += ": " + err;
-                else error += ": NVIDIA GPU / driver / CUDA runtime unavailable";
-                return false;
+            if (backend == kBackendXpu) {
+                device_ = createXpuDevice(threads);
+                if (!device_) {
+                    std::string err;
+                    optixRuntimeAvailable(&err);
+                    error = "XPU (Embree+OptiX) cannot start";
+                    if (!err.empty()) error += ": " + err;
+                    else error += ": NVIDIA GPU / driver / CUDA runtime unavailable";
+                    return false;
+                }
+            } else {
+                device_ = createOptixDevice();
+                if (!device_) {
+                    std::string err;
+                    optixRuntimeAvailable(&err);
+                    error = "GPU (OptiX) cannot start";
+                    if (!err.empty()) error += ": " + err;
+                    else error += ": NVIDIA GPU / driver / CUDA runtime unavailable";
+                    return false;
+                }
             }
         } else {
             device_ = createEmbreeDevice(threads);
@@ -234,6 +248,9 @@ bool RenderSession::prepareDevice(std::string& error) {
             if (backend == kBackendGpuOptix) {
                 error = std::string("GPU (OptiX) failed to build the scene") +
                         (error.empty() ? std::string() : ": " + error);
+            } else if (backend == kBackendXpu) {
+                error = std::string("XPU (Embree+OptiX) failed to build the scene") +
+                        (error.empty() ? std::string() : ": " + error);
             }
             return false;
         }
@@ -254,7 +271,9 @@ void RenderSession::threadMain() {
             std::lock_guard<std::mutex> lock(progressMutex_);
             progress_.running = false;
             progress_.message = error;
-            if (scene && scene->settings.backend == kBackendGpuOptix)
+            if (scene && scene->settings.backend == kBackendXpu)
+                progress_.backendName = "XPU / Embree+OptiX";
+            else if (scene && scene->settings.backend == kBackendGpuOptix)
                 progress_.backendName = "GPU / OptiX";
             else if (device_)
                 progress_.backendName = device_->name();
@@ -355,9 +374,11 @@ void RenderSession::threadMain() {
         try {
             device_->renderSample(framebuffer_, sample, cancel_, midProgress);
         } catch (const std::exception& ex) {
-            const std::string prefix = (scene->settings.backend == kBackendGpuOptix)
-                                           ? "GPU (OptiX) render failed: "
-                                           : "Render failed: ";
+            const int backend = scene->settings.backend;
+            const std::string prefix = backend == kBackendXpu
+                                           ? "XPU (Embree+OptiX) render failed: "
+                                           : (backend == kBackendGpuOptix ? "GPU (OptiX) render failed: "
+                                                                          : "Render failed: ");
             fail(prefix + ex.what());
             return;
         }

@@ -386,8 +386,21 @@ struct CameraData {
 // Render settings
 // ---------------------------------------------------------------------------
 enum ToneMapper : int { kToneNone = 0, kToneReinhard = 1, kToneAces = 2 };  // legacy (removed from UI)
-enum RenderBackendType : int { kBackendCpuEmbree = 0, kBackendGpuOptix = 1 };
-// BDPT is CPU / Embree only; OptiX falls back to the unidirectional path tracer.
+enum RenderBackendType : int {
+    kBackendCpuEmbree = 0,
+    kBackendGpuOptix = 1,
+    kBackendXpu = 2,  // Embree + OptiX together (Karma / RenderMan XPU)
+};
+
+SR_INL SR_HD bool renderDeviceUsesGpu(int backend) {
+    return backend == kBackendGpuOptix || backend == kBackendXpu;
+}
+SR_INL SR_HD bool renderDeviceUsesCpu(int backend) {
+    return backend == kBackendCpuEmbree || backend == kBackendXpu;
+}
+SR_INL SR_HD bool renderDeviceIsXpu(int backend) { return backend == kBackendXpu; }
+// BDPT / spectral / wireframe are CPU / Embree only; GPU and XPU require Path Tracer
+// and stop with an error (no Embree fallback).
 // Menu order matches these values: Path Tracer, BDPT, Direct Lighting, AO,
 // PT Spectral, BDPT Spectral, Wireframe.
 enum IntegratorMode : int {

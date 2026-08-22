@@ -19,8 +19,11 @@ Mat4 cameraWorldFromPrim(const StagePrim& prim) {
 
 void attachMotionBlurKeys(NodeGraph& graph, const CookContext& centerContext, Scene& scene) {
     if (!scene.settings.motionBlur) return;
-    if (scene.settings.backend == kBackendGpuOptix) {
-        logWarning("Motion blur is supported on CPU / Embree only; ignoring for OptiX");
+    if (renderDeviceUsesGpu(scene.settings.backend)) {
+        if (scene.settings.backend == kBackendXpu)
+            logWarning("Motion blur is supported on CPU / Embree only; ignoring for XPU");
+        else
+            logWarning("Motion blur is supported on CPU / Embree only; ignoring for OptiX");
         return;
     }
 

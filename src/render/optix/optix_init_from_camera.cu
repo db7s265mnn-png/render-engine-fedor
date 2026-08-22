@@ -1,8 +1,10 @@
 // Cycles analogue: integrator_init_from_camera.
 // Pinhole + thin-lens DoF. Polynomial optics stay on Embree.
 #include "render/blue_noise.h"
+#include "render/camera_sample.h"
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_volume.cuh"
+#include "render/xpu_split.h"
 
 namespace sol {
 
@@ -16,16 +18,18 @@ extern "C" __global__ void __raygen__init_from_camera() {
     GpuHit& hit = params.hits[pixel];
     GpuShadow& shadow = params.shadows[pixel];
 
-    path.rng = makePixelRng(x, y, params.sampleIndex, params.frameSeed);
-    float jitterX = 0.5f, jitterY = 0.5f;
-    if (params.pixelSampler == kPixelSamplerBlueNoise) {
-        blueNoisePixelJitter(x, y, params.sampleIndex, jitterX, jitterY);
-    } else {
-        jitterX = path.rng.nextFloat();
-        jitterY = path.rng.nextFloat();
+    if (params.xpuSplit && !xpuGpuOwnsPixel(x, y, params.xpuTileSize, params.xpuGpuParity)) {
+        path.queue = kQueueDead;
+        path.throughput = Vec3(0.0f);
+        hit = GpuHit{};
+        shadow = GpuShadow{};
+        return;
     }
-    const float lensU = path.rng.nextFloat();
-    const float lensV = path.rng.nextFloat();
+
+    path.rng = makePixelRng(x, y, params.sampleIndex, params.frameSeed);
+    float jitterX = 0.5f, jitterY = 0.5f, lensU = 0.5f, lensV = 0.5f;
+    sampleCameraPixelLens(params.pixelSampler, x, y, params.sampleIndex, params.width, params.frameSeed,
+                          params.manualTestMult, jitterX, jitterY, lensU, lensV);
 
     cameraRay(params.scene, float(x) + jitterX, float(y) + jitterY, lensU, lensV, path.origin, path.direction);
     path.throughput = Vec3(1.0f);
