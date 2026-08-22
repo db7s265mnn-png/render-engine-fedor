@@ -10,6 +10,8 @@
 #include "core/math.h"
 #include "nodes/node.h"
 
+#include <QColor>
+
 class QToolButton;
 class QComboBox;
 
@@ -58,10 +60,12 @@ public:
         statusTextRight_ = text;
         update();
     }
-    // Far-right HUD: live backend (Embree / OptiX) plus a real OptiX support flag.
-    void setBackendHud(const QString& activeBackend, bool optixSupported) {
+    // Far-right HUD: live backend (Embree / OptiX) plus OptiX support text.
+    void setBackendHud(const QString& activeBackend, const QString& supportText,
+                       const QColor& supportColor) {
         backendActive_ = activeBackend;
-        optixSupported_ = optixSupported;
+        optixSupportText_ = supportText;
+        optixSupportColor_ = supportColor;
         hasBackendHud_ = true;
         update();
     }
@@ -181,7 +185,8 @@ private:
     QString statusText_;
     QString statusTextRight_;
     QString backendActive_;
-    bool optixSupported_ = false;
+    QString optixSupportText_;
+    QColor optixSupportColor_{255, 80, 80};
     bool hasBackendHud_ = false;
     ViewCamera camera_;
     PickCallback pickCallback_;

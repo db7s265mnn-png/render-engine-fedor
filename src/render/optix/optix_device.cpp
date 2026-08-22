@@ -14,11 +14,13 @@
 #include <optix_stubs.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core/log.h"
@@ -996,6 +998,8 @@ private:
 enum class OptixRuntimeState { Unknown, Ok, Fail };
 
 std::mutex gOptixRuntimeMutex;
+std::condition_variable gOptixProbeCv;
+bool gOptixProbeRunning = false;
 OptixRuntimeState gOptixRuntimeState = OptixRuntimeState::Unknown;
 std::string gOptixRuntimeError;
 
@@ -1004,8 +1008,9 @@ void setOptixRuntime(bool ok, std::string error) {
     gOptixRuntimeError = std::move(error);
 }
 
-// CUDA device enumeration + optixInit only. Do not cudaSetDevice here: the HUD
-// probe runs on the UI thread and must not bind a CUDA context there.
+// CUDA + optixInit. Must not run on the Qt UI thread: with an Intel display GPU
+// plus an NVIDIA card, cudaGetDeviceCount there often returns 0 / no-device and
+// then the cached failure silently keeps OptiX off for the rest of the session.
 bool probeOptixRuntimeUnlocked(std::string& error) {
     int deviceCount = 0;
     const cudaError_t status = cudaGetDeviceCount(&deviceCount);
@@ -1014,35 +1019,76 @@ bool probeOptixRuntimeUnlocked(std::string& error) {
         return false;
     }
     if (deviceCount <= 0) {
-        error = "no CUDA capable device found";
+        error = "no CUDA GPU";
         return false;
     }
     const OptixResult init = optixInit();
     if (init != OPTIX_SUCCESS) {
+#ifdef OPTIX_ERROR_LIBRARY_NOT_FOUND
+        if (init == OPTIX_ERROR_LIBRARY_NOT_FOUND) {
+            error = "nvoptix.dll missing (update NVIDIA driver)";
+            return false;
+        }
+#endif
         error = "optixInit failed (" + std::to_string(int(init)) + ")";
         return false;
     }
+    cudaDeviceProp properties{};
+    if (cudaGetDeviceProperties(&properties, 0) == cudaSuccess && properties.name[0]) {
+        logInfo(std::string("OptiX runtime probe: CUDA sees ") + properties.name);
+    }
     return true;
+}
+
+void kickOptixProbeLocked() {
+    if (gOptixRuntimeState != OptixRuntimeState::Unknown || gOptixProbeRunning) return;
+    gOptixProbeRunning = true;
+    std::thread([] {
+        std::string err;
+        bool ok = false;
+        try {
+            ok = probeOptixRuntimeUnlocked(err);
+        } catch (const std::exception& e) {
+            err = e.what();
+        } catch (...) {
+            err = "CUDA probe crashed";
+        }
+        {
+            std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
+            setOptixRuntime(ok, err);
+            gOptixProbeRunning = false;
+        }
+        gOptixProbeCv.notify_all();
+        if (ok) logInfo("OptiX runtime probe: available");
+        else logWarning("OptiX runtime probe: not available (" + err + ")");
+    }).detach();
+}
+
+void waitForOptixProbe() {
+    std::unique_lock<std::mutex> lock(gOptixRuntimeMutex);
+    kickOptixProbeLocked();
+    gOptixProbeCv.wait(lock, [] { return !gOptixProbeRunning; });
 }
 
 }  // namespace
 
 bool optixBackendCompiledIn() { return true; }
 
+bool optixRuntimeProbePending() {
+    std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
+    kickOptixProbeLocked();
+    return gOptixRuntimeState == OptixRuntimeState::Unknown || gOptixProbeRunning;
+}
+
 bool optixRuntimeAvailable(std::string* error) {
     std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
-    if (gOptixRuntimeState == OptixRuntimeState::Unknown) {
-        std::string err;
-        const bool ok = probeOptixRuntimeUnlocked(err);
-        setOptixRuntime(ok, err);
-        if (ok) logInfo("OptiX runtime probe: available");
-        else logWarning("OptiX runtime probe: not available (" + err + ")");
-    }
+    kickOptixProbeLocked();
     if (error) *error = gOptixRuntimeError;
     return gOptixRuntimeState == OptixRuntimeState::Ok;
 }
 
 RenderDevicePtr createOptixDevice() {
+    waitForOptixProbe();
     auto device = std::make_shared<OptixPathTracer>();
     std::string error;
     if (!device->initialize(error)) {

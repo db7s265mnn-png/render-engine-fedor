@@ -1187,8 +1187,8 @@ void RenderView::paintEvent(QPaintEvent*) {
         int rightLimit = textRect.right() - margin;
         if (hasBackendHud_) {
             const QString sep = QStringLiteral("  ·  ");
-            const QString supportText = optixSupported_ ? QStringLiteral("OptiX supported")
-                                                        : QStringLiteral("OptiX not supported");
+            const QString supportText =
+                optixSupportText_.isEmpty() ? QStringLiteral("OptiX not supported") : optixSupportText_;
             const int activeW = fm.horizontalAdvance(backendActive_);
             const int sepW = fm.horizontalAdvance(sep);
             const int supportW = fm.horizontalAdvance(supportText);
@@ -1200,7 +1200,7 @@ void RenderView::paintEvent(QPaintEvent*) {
             painter.setPen(QColor(160, 164, 170));
             painter.drawText(QRect(hudX + activeW, textRect.top(), sepW, textRect.height()),
                              Qt::AlignVCenter | Qt::AlignLeft, sep);
-            painter.setPen(optixSupported_ ? QColor(110, 210, 140) : QColor(255, 80, 80));
+            painter.setPen(optixSupportColor_);
             painter.drawText(QRect(hudX + activeW + sepW, textRect.top(), supportW, textRect.height()),
                              Qt::AlignVCenter | Qt::AlignLeft, supportText);
             rightLimit = hudX - margin;

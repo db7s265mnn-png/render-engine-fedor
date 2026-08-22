@@ -201,7 +201,11 @@ bool RenderSession::prepareDevice(std::string& error) {
             }
             device_ = createOptixDevice();
             if (!device_) {
-                logWarning("OptiX backend is unavailable, falling back to Embree");
+                std::string err;
+                optixRuntimeAvailable(&err);
+                logWarning("OptiX backend is unavailable"
+                           + (err.empty() ? std::string() : " (" + err + ")")
+                           + ", falling back to Embree");
                 device_ = createEmbreeDevice(threads);
             }
         } else {

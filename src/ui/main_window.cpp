@@ -4,6 +4,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QColor>
 #include <QDir>
 #include <QDockWidget>
 #include <QFileDialog>
@@ -30,6 +31,7 @@
 #include <cstring>
 #include <exception>
 #include <new>
+#include <string>
 
 #include "app/default_scene.h"
 #include "app/document.h"
@@ -1622,30 +1624,47 @@ void MainWindow::updateStatusBar() {
     if (!renderView_) return;
     renderView_->setStatusText(overlay);
 
-    const bool optixOk = optixRuntimeAvailable();
+    const bool wantGpu = [&] {
+        if (scene_) return scene_->settings.backend == kBackendGpuOptix;
+        for (const NodePtr& node : graph_.nodes()) {
+            if (node && node->typeName() == QLatin1String("rendersettings"))
+                return node->intValue("backend", 0) == 1;
+        }
+        return false;
+    }();
+
     QString active = QStringLiteral("Embree");
     const std::string& live = progress.backendName;
     if (!live.empty()) {
         if (live.find("OptiX") != std::string::npos) active = QStringLiteral("OptiX");
-        else if (live.find("Embree") != std::string::npos) active = QStringLiteral("Embree");
-    } else {
-        int backend = kBackendCpuEmbree;
-        if (scene_) {
-            backend = scene_->settings.backend;
-        } else {
-            for (const NodePtr& node : graph_.nodes()) {
-                if (node && node->typeName() == QLatin1String("rendersettings")) {
-                    backend = node->intValue("backend", 0) == 1 ? kBackendGpuOptix : kBackendCpuEmbree;
-                    break;
-                }
-            }
+        else if (live.find("Embree") != std::string::npos) {
+            active = wantGpu ? QStringLiteral("Embree (fallback)") : QStringLiteral("Embree");
         }
-        if (backend == kBackendGpuOptix && optixOk) active = QStringLiteral("OptiX");
+    } else if (wantGpu && optixRuntimeAvailable()) {
+        active = QStringLiteral("OptiX");
     }
     if (active.startsWith(QLatin1String("OptiX")) && progress.backendGpuMs > 0.0) {
         active = QStringLiteral("OptiX %1 ms").arg(progress.backendGpuMs, 0, 'f', 1);
     }
-    renderView_->setBackendHud(active, optixOk);
+
+    QString support = QStringLiteral("OptiX not supported");
+    QColor supportColor(255, 80, 80);
+    if (!optixBackendCompiledIn()) {
+        support = QStringLiteral("OptiX not in this build");
+    } else if (optixRuntimeProbePending()) {
+        support = QStringLiteral("OptiX checking…");
+        supportColor = QColor(255, 210, 70);
+    } else {
+        std::string err;
+        if (optixRuntimeAvailable(&err)) {
+            support = QStringLiteral("OptiX supported");
+            supportColor = QColor(110, 210, 140);
+        } else if (!err.empty()) {
+            support = QString::fromStdString(err);
+            if (support.size() > 42) support = support.left(40) + QStringLiteral("…");
+        }
+    }
+    renderView_->setBackendHud(active, support, supportColor);
 }
 
 

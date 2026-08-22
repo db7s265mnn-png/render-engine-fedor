@@ -9,8 +9,10 @@ namespace sol {
 
 bool optixBackendCompiledIn() { return false; }
 
+bool optixRuntimeProbePending() { return false; }
+
 bool optixRuntimeAvailable(std::string* error) {
-    if (error) *error = "not compiled into this build";
+    if (error) *error = "not in this build";
     return false;
 }
 
