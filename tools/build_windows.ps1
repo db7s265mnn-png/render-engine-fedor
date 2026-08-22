@@ -131,6 +131,46 @@ function Select-MsvcQtKit([object]$Kits) {
     return $sorted[0]
 }
 
+function Find-Python {
+    foreach ($name in @('py', 'python', 'python3')) {
+        $cmd = Get-Command $name -ErrorAction SilentlyContinue
+        if ($cmd) { return $cmd.Source }
+    }
+    return $null
+}
+
+function Install-MsvcQtKit {
+    $outDir = 'C:\Qt'
+    $want = Join-Path $outDir '6.8.3\msvc2022_64'
+    if (Test-QtPrefix $want) { return $want }
+
+    $py = Find-Python
+    if (-not $py) {
+        return $null
+    }
+
+    Info 'Only MinGW Qt is installed. Downloading Qt 6.8.3 MSVC 2022 64-bit into C:\Qt (about 1 GB, one-time) ...'
+    Info 'Your existing C:\Qt\6.11.1\mingw_64 is left untouched.'
+    $aqtArgs = @('-m', 'pip', 'install', '--user', '--upgrade', 'aqtinstall')
+    if ($py -match '\\py.exe$') {
+        & $py -3 @aqtArgs
+    } else {
+        & $py @aqtArgs
+    }
+    $aqtInstall = @(
+        '-m', 'aqt', 'install-qt',
+        'windows', 'desktop', '6.8.3', 'win64_msvc2022_64',
+        '--outputdir', $outDir
+    )
+    if ($py -match '\\py.exe$') {
+        & $py -3 @aqtInstall
+    } else {
+        & $py @aqtInstall
+    }
+    if (Test-QtPrefix $want) { return $want }
+    return $null
+}
+
 function Find-QtPrefix {
     foreach ($envName in @('QT_ROOT', 'QT_ROOT_DIR', 'QTDIR')) {
         $v = [Environment]::GetEnvironmentVariable($envName)
@@ -146,16 +186,26 @@ function Find-QtPrefix {
     $all = @($all | Select-Object -Unique)
     $pick = Select-MsvcQtKit $all
     if ($pick) { return $pick }
+
+    $downloaded = Install-MsvcQtKit
+    if ($downloaded) { return $downloaded }
+
     $hint = 'none'
     if ($all.Count -gt 0) { $hint = ($all -join ', ') }
     Fail @"
-Qt 6 MSVC kit not found (need lib\cmake\Qt6\Qt6Config.cmake under an msvc folder).
-Looked under C:\Qt. Kits found: $hint
-Qt 6.11.1 is fine. This build uses Visual Studio, so you need the MSVC 2022 64-bit kit, e.g.
-  C:\Qt\6.11.1\msvc2022_64
-If you only installed MinGW/llvm-mingw, open C:\Qt\MaintenanceTool.exe and add:
-  Qt 6.11.1 -> MSVC 2022 64-bit
-Or set QT_ROOT to that kit folder and re-run BUILD_WINDOWS.bat.
+No Qt MSVC kit. You currently have MinGW only (C:\Qt\6.11.1\mingw_64).
+MinGW cannot be linked with this Visual Studio + OptiX build.
+
+Do this once, then re-run BUILD_WINDOWS.bat:
+
+1. Run C:\Qt\MaintenanceTool.exe
+2. Choose Add or remove components
+3. Open Qt -> Qt 6.11.1
+4. Check MSVC 2022 64-bit (NOT MinGW)
+5. Next / Update
+6. Confirm folder exists: C:\Qt\6.11.1\msvc2022_64
+
+Kits found: $hint
 "@
 }
 
