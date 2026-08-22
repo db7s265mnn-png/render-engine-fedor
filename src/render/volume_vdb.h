@@ -20,6 +20,12 @@ bool intersectSdfVolume(const VolumeGrid& grid, Vec3 origin, Vec3 direction, flo
 MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium, Vec3 origin,
                                 Vec3 direction, float tMax, Rng& rng, Vec3& throughput);
 
+// First t in [tMin, tMax] ∩ AABB where occupancy is dense enough to enter the
+// medium. False = the ray only sees vacuum / halo (skip the AABB proxy).
+// tExit is the analytical AABB far hit when the ray overlaps the bounds.
+bool fogRayFirstDenseT(const VolumeGrid& grid, Vec3 origin, Vec3 direction, float tMin, float tMax,
+                       float& tDense, float& tExit);
+
 // Shadow-ray transmittance via residual ratio tracking (Novak et al. / PBRT §11.2.2):
 // control μ_c = σt(min occupancy) is analytic; leftover uses local Λ. Homogeneous
 // filled cells reduce to Beer–Lambert. Caller clips to the fog AABB first.

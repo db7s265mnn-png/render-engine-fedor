@@ -5354,6 +5354,20 @@ void testNgonTriangulateAndVdb() {
                 check(scatters > 200, "analytical interior walk produces real scatters");
                 check(msWalk < 2000.0, "4000 free-flights stay cheap with local majorants");
                 std::printf("  majorant walk: scatters=%d in %.1f ms\n", scatters, msWalk);
+                check(!volumeOccupancyIsDense(0.0f, fogA->majorant()), "zero occupancy is not dense");
+                check(!volumeOccupancyIsDense(1e-4f, 1.0f), "1e-4 of unit majorant is halo");
+                check(volumeOccupancyIsDense(0.05f, 1.0f), "5% occupancy is dense enough to enter");
+                {
+                    float tDense = 0.0f;
+                    float tExit = 0.0f;
+                    check(fogRayFirstDenseT(*fogA, Vec3(-3, 0, 0), Vec3(1, 0, 0), 0.0f, 10.0f, tDense,
+                                            tExit),
+                          "ray through the filled box finds dense occupancy");
+                    check(tDense > 1.8f && tDense < 3.5f, "dense entry is near the box face");
+                    check(!fogRayFirstDenseT(*fogA, Vec3(8, 0, 0), Vec3(1, 0, 0), 0.0f, 10.0f, tDense,
+                                            tExit),
+                          "ray that misses the cloud does not enter the AABB");
+                }
 
                 Rng rngTr(11u, 13u);
                 Vec3 trAcc(0.0f);

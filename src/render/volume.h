@@ -74,6 +74,15 @@ SR_INL SR_HD float mediumMajorant(const MediumData& m) {
     return srMax(st.x, srMax(st.y, st.z));
 }
 
+// Fog AABBs are larger than the visible cloud. Occupancy above this fraction of
+// the grid majorant counts as "inside the cloud": the path may enter the medium
+// and infinite-light NEE / env MIS are allowed. Below it is vacuum / halo.
+constexpr float kVolumeOccupancyEnterMin = 1e-3f;
+
+SR_INL SR_HD bool volumeOccupancyIsDense(float occupancy, float gridMajorant) {
+    return occupancy > kVolumeOccupancyEnterMin * srMax(gridMajorant, 1e-6f);
+}
+
 SR_INL SR_HD bool mediumIsActive(const SceneView& scene, int mediumIndex) {
     if (mediumIndex < 0 || mediumIndex >= scene.mediumCount || !scene.media) return false;
     const MediumData& m = scene.media[mediumIndex];
@@ -96,8 +105,10 @@ SR_INL SR_HD Vec3 mediumTr(const MediumData& m, float t) {
 // returns false with t = tMax.
 struct MediumSample {
     float t = 0.0f;
+    float occupancy = 0.0f;
     bool scattered = false;
     bool absorbed = false;
+    bool dense = false;  // occupancy above kVolumeOccupancyEnterMin · majorant
 };
 
 SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMax, Rng& rng,
@@ -137,6 +148,8 @@ SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMa
         if (rng.nextFloat() < saAvg / stSum) {
             throughput = Vec3(0.0f);
             out.t = t;
+            out.occupancy = 1.0f;
+            out.dense = true;
             out.absorbed = true;
             return out;
         }
@@ -145,6 +158,8 @@ SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMa
                           sigmaT.z > 1e-8f ? sigmaS.z / sigmaT.z : 0.0f);
         throughput = throughput * albedo;
         out.t = t;
+        out.occupancy = 1.0f;
+        out.dense = true;
         out.scattered = true;
         return out;
     }

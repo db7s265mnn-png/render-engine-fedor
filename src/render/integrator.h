@@ -834,7 +834,7 @@ SR_INL SR_HD float volumeScatterPdf(Vec3 woVol, Vec3 wi, const MediumData& med, 
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
                                                 Vec3 woVol, const MediumData& med, Rng& rng,
-                                                Guiding* guiding) {
+                                                Guiding* guiding, bool allowInfiniteLights = true) {
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
@@ -850,6 +850,7 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
         float selectPdf = 0.0f;
         const int li = sampleVolumeLightIndex(scene, origin, woVol, med.g, rng.nextFloat(), selectPdf);
         if (li < 0 || selectPdf <= 0.0f) continue;
+        if (!allowInfiniteLights && lightIsInfinite(scene.lights[li])) continue;
         LightSample ls;
         if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
             isBlack(ls.radiance))
@@ -897,9 +898,10 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
 
 template <typename Tracer>
 SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
-                                                Vec3 woVol, const MediumData& med, Rng& rng) {
+                                                Vec3 woVol, const MediumData& med, Rng& rng,
+                                                bool allowInfiniteLights = true) {
     return nextEventEstimationVolumeOnce<Tracer, NullGuiding>(scene, tracer, origin, woVol, med, rng,
-                                                              nullptr);
+                                                              nullptr, allowInfiniteLights);
 }
 
 template <typename Tracer, typename Guiding>
@@ -941,6 +943,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     bool volumePhaseMis = false;
     Vec3 volumeMisWo{0.0f, 1.0f, 0.0f};
     float volumeMisG = 0.0f;
+    // Infinite-light NEE / env MIS wait until a scatter in dense occupancy.
+    bool hadRealVolumeScatter = false;
     // Homogeneous medium currently surrounding the ray (-1 = vacuum).
     int currentMedium = -1;
     // Arnold ray_switch: incoming ray type selects the surfaceshader port.
@@ -1025,6 +1029,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 }
 #endif
 
+                if (ms.dense) hadRealVolumeScatter = true;
+
                 // Volume next-event estimation with MIS vs phase sampling (PBRT VolPath).
                 // Unbiased: light strategy weight = powerHeuristic(pdf_light, pdf_phase);
                 // the phase→light strategy is the continuing path (MIS on light hits below).
@@ -1044,8 +1050,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     if (takeNee) {
                         Vec3 volDirect(0.0f);
                         for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
-                            Vec3 contrib = nextEventEstimationVolumeOnce(scene, tracer, origin, woVol,
-                                                                         medWalk, rng, guiding);
+                            Vec3 contrib = nextEventEstimationVolumeOnce(
+                                scene, tracer, origin, woVol, medWalk, rng, guiding,
+                                /*allowInfiniteLights=*/hadRealVolumeScatter);
                             contrib = clampContribution(contrib, settings.clampDirect);
                             volDirect += contrib;
                         }
@@ -1137,7 +1144,10 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         if (!didHit) {
             // Wireframe diagnostic: empty background (no env).
             if (settings.integrator == kIntegratorWireframe) break;
-            if (scene.domeLightIndex >= 0) {
+            // Halo / vacuum volume scatters must not NEE or MIS the dome — that is
+            // the empty-sky sparkle. Wait for a dense ("real") scatter.
+            const bool skipInfiniteAfterHalo = volumePhaseMis && !hadRealVolumeScatter;
+            if (scene.domeLightIndex >= 0 && !skipInfiniteAfterHalo) {
                 if (!suppressCausticLight) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
                 if (!(causticSuffix && !lightContributesCaustics(dome))) {
@@ -1171,7 +1181,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 }
                 }
             }
-            if (!suppressCausticLight) {
+            if (!suppressCausticLight && !skipInfiniteAfterHalo) {
                 const bool primarySun = depth == 0 && passThrough == 0;
                 if (!(primarySun && !settings.envVisibleCamera)) {
                     const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, bsdfPdf,
@@ -1202,13 +1212,21 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     // Second hit on the AABB proxy = leaving the volume.
                     currentMedium = -1;
                     origin = offsetRayOrigin(si.p, si.ng, direction);
+                    ++passThrough;
                 } else {
-                    // Enter the medium. Empty AABB corners are OK (dens≈0 → null collisions);
-                    // container silhouettes are softened by boundary feather in fromPolygons.
-                    currentMedium = inst.mediumIndex;
-                    origin = offsetRayOrigin(si.p, -si.ng, direction);
+                    // Enter only where occupancy is actually the cloud — empty AABB
+                    // corners stay camera rays (smooth primary env, no volume NEE).
+                    float tDense = hit.t;
+                    float tAabbExit = hit.t;
+                    if (fogRayFirstDenseT(vol, origin, direction, hit.t, 1.0e6f, tDense, tAabbExit)) {
+                        currentMedium = inst.mediumIndex;
+                        origin = origin + direction * (tDense + 1e-4f);
+                        ++passThrough;
+                    } else {
+                        origin = origin + direction * srMax(hit.t, tAabbExit);
+                        origin = offsetRayOrigin(origin, si.ng, direction);
+                    }
                 }
-                ++passThrough;
                 if (passThrough > 32) break;
                 continue;
             }

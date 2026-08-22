@@ -16,8 +16,9 @@ extern "C" __global__ void __raygen__shade_background() {
 
     const SceneView& scene = params.scene;
     const bool primary = path.depth == 0;
+    const bool skipInfiniteAfterHalo = path.volumeScatters > 0 && path.realVolumeScatter == 0;
 
-    if (scene.domeLightIndex >= 0 && scene.lights) {
+    if (scene.domeLightIndex >= 0 && scene.lights && !skipInfiniteAfterHalo) {
         const LightData& dome = scene.lights[scene.domeLightIndex];
         const bool hidePrimary = primary && (!scene.settings.envVisibleCamera || !dome.visibleCamera);
         if (!hidePrimary) {
@@ -37,9 +38,11 @@ extern "C" __global__ void __raygen__shade_background() {
         }
     }
 
-    const Vec3 sunL = cameraSunDiscRadiance(scene, path.origin, path.direction, path.bsdfPdf,
-                                           path.specularBounce != 0, primary, false);
-    if (!isBlack(sunL)) addRadiance(pixel, path.throughput * sunL);
+    if (!skipInfiniteAfterHalo) {
+        const Vec3 sunL = cameraSunDiscRadiance(scene, path.origin, path.direction, path.bsdfPdf,
+                                               path.specularBounce != 0, primary, false);
+        if (!isBlack(sunL)) addRadiance(pixel, path.throughput * sunL);
+    }
 }
 
 }  // namespace sol

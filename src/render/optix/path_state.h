@@ -45,6 +45,7 @@ struct GpuPath {
     int specularBounce = 1;
     int mediumIndex = -1;
     int volumeScatters = 0;
+    int realVolumeScatter = 0;  // 1 after a dense fog/homogeneous scatter
     Rng rng;
 };
 
