@@ -55,6 +55,10 @@ function Import-VcVars64 {
     if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
         Fail 'cl.exe not on PATH after vcvars64'
     }
+    if ($env:VCPKG_ROOT -and ($env:VCPKG_ROOT -match 'Visual Studio\\.*\\VC\\vcpkg')) {
+        Info 'Ignoring Visual Studio bundled vcpkg (it requires builtin-baseline).'
+        Remove-Item Env:\VCPKG_ROOT
+    }
 }
 
 function Find-CMake {
@@ -210,20 +214,22 @@ Kits found: $hint
 }
 
 function Find-CudaPath {
-    if ($env:CUDA_PATH) {
-        $nvcc = Join-Path $env:CUDA_PATH (Join-Path 'bin' 'nvcc.exe')
-        if (Test-Path -LiteralPath $nvcc) { return $env:CUDA_PATH }
-    }
+    $candidates = @()
     $base = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA'
     if (Test-Path -LiteralPath $base) {
-        $vers = Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
+        Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^v1[23]\.' } |
-            Sort-Object Name -Descending
-        foreach ($v in $vers) {
-            $nvcc = Join-Path $v.FullName (Join-Path 'bin' 'nvcc.exe')
-            if (Test-Path -LiteralPath $nvcc) { return $v.FullName }
-        }
+            ForEach-Object {
+                $nvcc = Join-Path $_.FullName (Join-Path 'bin' 'nvcc.exe')
+                if (Test-Path -LiteralPath $nvcc) { $candidates += $_.FullName }
+            }
     }
+    if ($env:CUDA_PATH) {
+        $nvcc = Join-Path $env:CUDA_PATH (Join-Path 'bin' 'nvcc.exe')
+        if (Test-Path -LiteralPath $nvcc) { $candidates += $env:CUDA_PATH }
+    }
+    $candidates = @($candidates | Select-Object -Unique | Sort-Object -Descending)
+    if ($candidates.Count -gt 0) { return $candidates[0] }
     Fail 'CUDA Toolkit not found (need nvcc). Install CUDA 12.x from https://developer.nvidia.com/cuda-downloads then re-run BUILD_WINDOWS.bat'
 }
 
@@ -261,8 +267,37 @@ function Find-OptiXRoot([string]$GitExe) {
     return $local
 }
 
+function Test-VsBundledVcpkg([string]$Path) {
+    return ($Path -and ($Path -match 'Visual Studio\\.*\\VC\\vcpkg'))
+}
+
+function Find-Ninja {
+    $cmd = Get-Command ninja.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $vswhere = Find-VsWhere
+    if ($vswhere) {
+        $fromVs = & $vswhere -latest -products * -find 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe' |
+            Select-Object -First 1
+        if ($fromVs -and (Test-Path -LiteralPath $fromVs)) { return $fromVs }
+        $fromVs2 = & $vswhere -latest -products * -find '**/ninja.exe' |
+            Select-Object -First 1
+        if ($fromVs2 -and (Test-Path -LiteralPath $fromVs2)) { return $fromVs2 }
+    }
+    $local = Join-Path $env:LOCALAPPDATA 'grendizer-ninja'
+    $exe = Join-Path $local 'ninja.exe'
+    if (Test-Path -LiteralPath $exe) { return $exe }
+    Info 'Ninja not found - downloading ninja-win.zip ...'
+    New-Item -ItemType Directory -Force -Path $local | Out-Null
+    $zip = Join-Path $env:TEMP 'grendizer-ninja-win.zip'
+    $url = 'https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip'
+    Invoke-WebRequest -Uri $url -OutFile $zip
+    Expand-Archive -Path $zip -DestinationPath $local -Force
+    if (-not (Test-Path -LiteralPath $exe)) { Fail 'Failed to download ninja.exe' }
+    return $exe
+}
+
 function Find-VcpkgRoot([string]$GitExe) {
-    if ($env:VCPKG_ROOT) {
+    if ($env:VCPKG_ROOT -and -not (Test-VsBundledVcpkg $env:VCPKG_ROOT)) {
         $tc = Join-Path $env:VCPKG_ROOT 'scripts\buildsystems\vcpkg.cmake'
         if (Test-Path -LiteralPath $tc) { return $env:VCPKG_ROOT }
     }
@@ -272,6 +307,7 @@ function Find-VcpkgRoot([string]$GitExe) {
         (Join-Path $Root 'vcpkg'),
         (Join-Path (Split-Path $Root -Parent) 'vcpkg')
     )) {
+        if (Test-VsBundledVcpkg $p) { continue }
         $tc = Join-Path $p 'scripts\buildsystems\vcpkg.cmake'
         if (Test-Path -LiteralPath $tc) { return $p }
     }
@@ -306,6 +342,9 @@ $cudaBin = Join-Path $Cuda 'bin'
 $env:PATH = "$cudaBin;$env:PATH"
 $OptiX = Find-OptiXRoot $Git
 $Vcpkg = Find-VcpkgRoot $Git
+$Ninja = Find-Ninja
+$ninjaDir = Split-Path $Ninja -Parent
+$env:PATH = "$ninjaDir;$env:PATH"
 $Cl = (Get-Command cl.exe).Source
 $Nvcc = Join-Path $cudaBin 'nvcc.exe'
 if ($env:GRENDIZER_BUILD_DIR) {
@@ -321,21 +360,36 @@ Info "nvcc:   $Nvcc"
 Info "cl.exe: $Cl"
 Info "OptiX:  $OptiX"
 Info "vcpkg:  $Vcpkg"
+Info "Ninja:  $Ninja"
 Info "Build:  $BuildDir"
 Write-Host ''
 
 if (-not (Test-Path -LiteralPath $Nvcc)) { Fail "nvcc.exe missing: $Nvcc" }
 
-$Generator = 'Visual Studio 17 2022'
-if ($script:VsYear -eq '2019') { $Generator = 'Visual Studio 16 2019' }
-Info "CMake generator: $Generator"
+# Ninja + cl.exe works on VS 2022 and VS 2026. The VS 17 generator cannot see VS 18.
+$Generator = 'Ninja'
+Info "CMake generator: $Generator (cl.exe from VS $script:VsYear)"
+
+$cache = Join-Path $BuildDir 'CMakeCache.txt'
+if (Test-Path -LiteralPath $cache) {
+    $oldGen = Select-String -Path $cache -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' | Select-Object -First 1
+    if ($oldGen -and $oldGen.Matches[0].Groups[1].Value -ne $Generator) {
+        Info "Clearing $BuildDir (previous generator was different)"
+        Remove-Item -LiteralPath $BuildDir -Recurse -Force
+    }
+}
 
 $Toolchain = Join-Path $Vcpkg 'scripts\buildsystems\vcpkg.cmake'
-& $CMake -S $Root -B $BuildDir -G $Generator -A x64 `
+& $CMake -S $Root -B $BuildDir -G $Generator `
+    "-DCMAKE_BUILD_TYPE=Release" `
+    "-DCMAKE_MAKE_PROGRAM=$Ninja" `
+    "-DCMAKE_C_COMPILER=$Cl" `
+    "-DCMAKE_CXX_COMPILER=$Cl" `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
     "-DCMAKE_PREFIX_PATH=$Qt" `
     "-DCMAKE_CUDA_COMPILER=$Nvcc" `
     "-DCMAKE_CUDA_HOST_COMPILER=$Cl" `
+    "-DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler" `
     "-DSOLSTICE_CUDA_HOST_COMPILER=$Cl" `
     '-DSOLSTICE_ENABLE_OPTIX=ON' `
     "-DOptiX_ROOT=$OptiX" `
@@ -355,12 +409,12 @@ Info 'OptiX is compiled into this build (SOLSTICE_HAVE_OPTIX 1).'
 
 Write-Host ''
 Info 'Building Release (nvcc PTX can take several minutes) ...'
-& $CMake --build $BuildDir --config Release --parallel
+& $CMake --build $BuildDir --parallel
 if ($LASTEXITCODE -ne 0) { Fail 'Build failed.' }
 
 Write-Host ''
 Info 'Deploying Qt DLLs next to the exe ...'
-& $CMake --build $BuildDir --config Release --target deploy
+& $CMake --build $BuildDir --target deploy
 if ($LASTEXITCODE -ne 0) {
     Write-Host 'Warning: deploy target failed. The exe may need Qt on PATH.' -ForegroundColor Yellow
 }

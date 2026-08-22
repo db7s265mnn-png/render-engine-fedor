@@ -31,6 +31,10 @@ if(WIN32)
 endif()
 
 include(CheckLanguage)
+if(WIN32)
+    # CUDA 12.0 nvcc rejects VS 2026 cl.exe without this.
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
+endif()
 check_language(CUDA)
 if(NOT CMAKE_CUDA_COMPILER)
     message(WARNING "OptiX backend requested but no CUDA compiler was found - disabling it")
@@ -91,6 +95,12 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(_solstice_nvcc_lineinfo -lineinfo)
 endif()
 
+# VS 2026 (cl 19.50+) is newer than CUDA 12.0's supported host list.
+set(_solstice_nvcc_unsupported)
+if(WIN32)
+    set(_solstice_nvcc_unsupported --allow-unsupported-compiler)
+endif()
+
 add_custom_command(
     OUTPUT ${SOLSTICE_OPTIX_PTX}
     COMMAND ${CMAKE_CUDA_COMPILER}
@@ -100,6 +110,7 @@ add_custom_command(
             --use_fast_math
             --expt-relaxed-constexpr
             ${_solstice_nvcc_lineinfo}
+            ${_solstice_nvcc_unsupported}
             -arch=${SOLSTICE_OPTIX_ARCH}
             -D_USE_MATH_DEFINES
             -DNOMINMAX
