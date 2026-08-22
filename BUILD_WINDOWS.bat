@@ -6,8 +6,8 @@ echo.
 echo Double-click this file to compile (Release + OptiX).
 echo Visual Studio 2026 needs CUDA 13.2. CUDA 12.0 can stay installed.
 echo Output goes to C:\gz-build  (NOT inside Downloads - Windows path limit).
-echo TinyUSDZ is OFF (MSVC hangs while linking tinyusdz_static.lib).
-echo Keep %%LOCALAPPDATA%%\grendizer-deps (Embree / OpenVDB cache).
+echo OptiX-min: no MaterialX, OpenPGL, TinyUSDZ, OpenVDB, Alembic, tests.
+echo Keep %%LOCALAPPDATA%%\grendizer-deps (Embree cache).
 echo.
 
 where powershell >nul 2>&1

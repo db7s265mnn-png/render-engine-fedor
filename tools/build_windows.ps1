@@ -608,6 +608,13 @@ function Ensure-NativeDeps {
         }
     }
 
+    # OptiX one-click only needs the Embree zip (TBB is inside it). Skip
+    # Imath/OpenEXR/Alembic/oneTBB/OpenVDB/OCIO source builds.
+    if (-not $env:GRENDIZER_FULL_DEPS) {
+        Info "OptiX-min deps ready (Embree only): $script:DepsPrefix"
+        return
+    }
+
     if (Test-Path -LiteralPath $stamp) {
         Info "Native deps already installed: $script:DepsPrefix"
         return
@@ -726,8 +733,8 @@ Write-Host ''
 Write-Host '=== Grendizer Render - Windows OptiX build ===' -ForegroundColor Green
 Write-Host "Repo: $Root"
 Write-Host 'Build output: C:\gz-build (short path; GitHub zip under Downloads is too long for MSVC).'
-Write-Host 'TinyUSDZ OFF (avoids MSVC hanging on tinyusdz_static.lib).'
-Write-Host 'First run can take a long time (Embree zip + Imath/OpenEXR/Alembic/TBB/OpenVDB + nvcc).'
+Write-Host 'OptiX-min: Embree + Qt + CUDA. No MaterialX / OpenPGL / TinyUSDZ / OpenVDB / Alembic / tests.'
+Write-Host 'First run: Embree zip + nvcc PTX. Extra deps (OpenVDB/MaterialX/...) are skipped.'
 Write-Host ''
 
 Import-VcVars64
@@ -825,12 +832,20 @@ $env:NVCC_APPEND_FLAGS = '--allow-unsupported-compiler'
     '-DSOLSTICE_ENABLE_OPTIX=ON' `
     "-DSOLSTICE_OPTIX_ARCH=$script:OptixArch" `
     "-DOptiX_ROOT=$OptiX" `
-    '-DSOLSTICE_ENABLE_OCIO=ON' `
-    '-DSOLSTICE_ENABLE_OPENVDB=ON' `
+    '-DSOLSTICE_ENABLE_ALEMBIC=OFF' `
+    '-DSOLSTICE_ENABLE_OPENEXR=OFF' `
+    '-DSOLSTICE_ENABLE_TIFF=OFF' `
+    '-DSOLSTICE_ENABLE_MATERIALX=OFF' `
+    '-DSOLSTICE_ENABLE_OPENPGL=OFF' `
+    '-DSOLSTICE_ENABLE_OPENSUBDIV=OFF' `
+    '-DSOLSTICE_ENABLE_OPENVDB=OFF' `
+    '-DSOLSTICE_ENABLE_OCIO=OFF' `
     '-DSOLSTICE_ENABLE_TINYUSDZ=OFF' `
-    '-DSOLSTICE_MODERN_CPU=ON' `
+    '-DSOLSTICE_BUILD_TESTS=OFF' `
+    '-DSOLSTICE_BUILD_TOOLS=OFF' `
     '-DSOLSTICE_BUILD_TX_TOOLS_ALPHA=OFF' `
-    '-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=OFF'
+    '-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=OFF' `
+    '-DSOLSTICE_MODERN_CPU=ON'
 if ($LASTEXITCODE -ne 0) { Fail 'cmake configure failed. Check Qt / CUDA / OptiX / deps in the log above.' }
 
 $Cfg = Join-Path $BuildDir 'generated\solstice_config.h'
