@@ -1028,29 +1028,24 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 // Volume next-event estimation with MIS vs phase sampling (PBRT VolPath).
                 // Unbiased: light strategy weight = powerHeuristic(pdf_light, pdf_phase);
                 // the phase→light strategy is the continuing path (MIS on light hits below).
-                // No extra firefly clamp beyond the user-authored clampDirect (0 = off).
+                // Direct Clamp (0 = off) applies to β · NEE / pNee — the pixel deposit —
+                // matching env miss. Clamping raw NEE first left spikes of clamp·β/pNee.
                 if (scene.lightCount > 0 && depth < maxDepth) {
                     // Unbiased: RIS NEE after each scatter; Russian roulette from the
                     // 5th volume bounce so deep walks are not 1000 shadow tracks.
                     // Weight 1/pNee when a connection is taken.
                     int nLight = srMax(1, settings.lightSamples);
                     if (depth >= 4) nLight = 1;
-                    float pNee = 1.0f;
-                    bool takeNee = true;
-                    if (depth >= 4) {
-                        pNee = clampf(4.0f / float(depth + 1), 0.05f, 1.0f);
-                        takeNee = rng.nextFloat() < pNee;
-                    }
+                    const float pNee = volumeNeeRouletteP(depth);
+                    const bool takeNee = pNee >= 1.0f || rng.nextFloat() < pNee;
                     if (takeNee) {
                         Vec3 volDirect(0.0f);
                         for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
-                            Vec3 contrib = nextEventEstimationVolumeOnce(scene, tracer, origin, woVol,
-                                                                         medWalk, rng, guiding);
-                            contrib = clampContribution(contrib, settings.clampDirect);
-                            volDirect += contrib;
+                            volDirect += nextEventEstimationVolumeOnce(scene, tracer, origin, woVol,
+                                                                       medWalk, rng, guiding);
                         }
                         volDirect = volDirect * (1.0f / (float(nLight) * pNee));
-                        radiance += throughput * volDirect;
+                        radiance += clampContribution(throughput * volDirect, settings.clampDirect);
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active()) guiding->addScattered(volDirect);
 #endif
@@ -1111,8 +1106,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 ++depth;
                 ++volumeScatterCount;
                 if (depth >= settings.rrStartDepth) {
-                    const float lum = luminance(throughput);
-                    const float q = clampf(lum, 0.05f, 0.95f);
+                    const float q = volumeRussianRouletteQ(throughput);
                     if (rng.nextFloat() > q) break;
 #if !defined(__CUDACC__)
                     if (guiding && guiding->active()) guiding->setRussianRoulette(q);

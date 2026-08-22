@@ -194,9 +194,9 @@ public:
             ++depth;
 
             if (depth >= settings.rrStartDepth) {
-                const float q = srMin(0.95f, spectrumMaxComponent(throughput));
+                const float q = clampf(spectrumMaxComponent(throughput), 0.05f, 1.0f);
                 if (rng.nextFloat() > q) break;
-                throughput *= (1.0f / srMax(q, 1e-4f));
+                throughput *= (1.0f / q);
             }
             if (spectrumMaxComponent(throughput) < 1e-6f) break;
         }

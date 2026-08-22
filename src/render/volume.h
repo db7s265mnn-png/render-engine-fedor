@@ -159,6 +159,22 @@ SR_INL SR_HD Vec3 mediumShadowTr(const MediumData& m, float dist) {
     return mediumTr(m, dist);
 }
 
+// Volume-path Russian roulette survival probability.
+// Conservative fog (σs/σt ≈ 1) keeps luminance from dropping. A 0.95 cap would
+// divide throughput by 0.95 on every bounce — unbiased in expectation, but the
+// survivor weight explodes at high maxDepth and lights up NEE fireflies.
+// Floor 0.05 still kills near-dead paths.
+SR_INL SR_HD float volumeRussianRouletteQ(Vec3 throughput) {
+    return clampf(luminance(throughput), 0.05f, 1.0f);
+}
+
+// Unbiased volume NEE skip from the 5th scatter (depth >= 4). Survivors are
+// weighted by 1/p. Direct Clamp must run on β · NEE / p, not on raw NEE.
+SR_INL SR_HD float volumeNeeRouletteP(int depth) {
+    if (depth < 4) return 1.0f;
+    return clampf(4.0f / float(depth + 1), 0.05f, 1.0f);
+}
+
 // Resolve medium for an instance (type 2 VDB falls back to homogeneous coeffs
 // until a density grid is wired — same σa/σs/density still apply as a base).
 SR_INL SR_HD const MediumData* getMedium(const SceneView& scene, int mediumIndex) {

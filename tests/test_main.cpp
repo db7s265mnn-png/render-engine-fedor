@@ -5248,6 +5248,33 @@ void testNgonTriangulateAndVdb() {
               "default standard_volume scattering is 1");
     }
 
+    // Deep volume MS fireflies: RR must not inflate albedo-1 fog, and Direct Clamp
+    // must bound β · NEE / pNee (not raw NEE before the 1/pNee lottery).
+    {
+        const Vec3 conservative(1.0f);
+        const float q = volumeRussianRouletteQ(conservative);
+        checkNear(q, 1.0f, 1e-6f, "volume RR survival is 1 at luminance 1");
+        const Vec3 after = conservative / q;
+        checkNear(after.x, 1.0f, 1e-6f, "volume RR does not boost conservative-fog throughput");
+        checkNear(volumeRussianRouletteQ(Vec3(2.0f)), 1.0f, 1e-6f,
+                  "volume RR cap is 1 (no 0.95 inflation)");
+        checkNear(volumeRussianRouletteQ(Vec3(0.02f)), 0.05f, 1e-6f, "volume RR floor stays 0.05");
+
+        checkNear(volumeNeeRouletteP(0), 1.0f, 1e-6f, "volume NEE RR is 1 before bounce 4");
+        checkNear(volumeNeeRouletteP(3), 1.0f, 1e-6f, "volume NEE RR is 1 at bounce 3");
+        checkNear(volumeNeeRouletteP(4), 4.0f / 5.0f, 1e-6f, "volume NEE RR at bounce 4 is 4/5");
+        checkNear(volumeNeeRouletteP(499), 0.05f, 1e-6f, "volume NEE RR floor is 0.05 at depth 500");
+
+        const Vec3 rawNee(100.0f);
+        const Vec3 pathThru(50.0f);
+        const float pNee = volumeNeeRouletteP(499);
+        const Vec3 oldWrong = clampContribution(rawNee, 10.0f) * (1.0f / pNee) * pathThru;
+        const Vec3 pathNee = clampContribution(pathThru * rawNee * (1.0f / pNee), 10.0f);
+        check(maxComponent(oldWrong) > 1000.0f, "clamping raw NEE left 1/pNee spikes");
+        checkNear(maxComponent(pathNee), 10.0f, 1e-5f,
+                  "volume NEE path contribution is clamped after 1/pNee");
+    }
+
 #if SOLSTICE_HAVE_OPENVDB
     MeshPtr box = makeBoxMesh(Vec3(1, 1, 1));
     check(box && !box->indices.empty(), "box mesh for VDB");

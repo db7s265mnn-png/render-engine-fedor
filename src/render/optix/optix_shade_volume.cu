@@ -52,23 +52,29 @@ extern "C" __global__ void __raygen__shade_volume() {
         const Vec3 p = path.origin + path.direction * ms.t;
         const Vec3 wo = -path.direction;
         if (scene.lightCount > 0) {
-            float selectPdf = 0.0f;
-            const int lightIndex = sampleLightIndex(scene, p, path.rng.nextFloat(), selectPdf);
-            LightSample ls;
-            if (lightIndex >= 0 && selectPdf > 0.0f &&
-                sampleLight(scene, lightIndex, p, path.rng.nextFloat(), path.rng.nextFloat(), ls) &&
-                ls.pdf > 0.0f && !isBlack(ls.radiance)) {
-                const float phase = henyeyGreenstein(dot(wo, ls.wi), walk.g);
-                const float lightPdf = ls.pdf * selectPdf;
-                const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phase);
-                Vec3 contrib = path.throughput * ls.radiance * (phase / srMax(1e-8f, lightPdf)) * mis;
-                contrib = clampFirefly(contrib, scene.settings.clampDirect);
-                if (scene.lights[lightIndex].shadowEnable) {
-                    float tSh = 1.0e8f;
-                    if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
-                    enqueueShadow(shadow, p, ls.wi, tSh, contrib, path.mediumIndex);
-                } else {
-                    addRadiance(pixel, contrib);
+            const float pNee = volumeNeeRouletteP(path.depth);
+            const bool takeNee = pNee >= 1.0f || path.rng.nextFloat() < pNee;
+            if (takeNee) {
+                float selectPdf = 0.0f;
+                const int lightIndex = sampleLightIndex(scene, p, path.rng.nextFloat(), selectPdf);
+                LightSample ls;
+                if (lightIndex >= 0 && selectPdf > 0.0f &&
+                    sampleLight(scene, lightIndex, p, path.rng.nextFloat(), path.rng.nextFloat(), ls) &&
+                    ls.pdf > 0.0f && !isBlack(ls.radiance)) {
+                    const float phase = henyeyGreenstein(dot(wo, ls.wi), walk.g);
+                    const float lightPdf = ls.pdf * selectPdf;
+                    const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phase);
+                    // Clamp β · NEE / pNee (the pixel deposit), not raw NEE.
+                    Vec3 contrib =
+                        path.throughput * ls.radiance * (phase / srMax(1e-8f, lightPdf)) * mis * (1.0f / pNee);
+                    contrib = clampFirefly(contrib, scene.settings.clampDirect);
+                    if (scene.lights[lightIndex].shadowEnable) {
+                        float tSh = 1.0e8f;
+                        if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
+                        enqueueShadow(shadow, p, ls.wi, tSh, contrib, path.mediumIndex);
+                    } else {
+                        addRadiance(pixel, contrib);
+                    }
                 }
             }
         }
@@ -86,7 +92,7 @@ extern "C" __global__ void __raygen__shade_volume() {
             return;
         }
         if (path.depth >= srMax(1, scene.settings.rrStartDepth)) {
-            const float q = clampf(maxComponent(path.throughput), 0.05f, 1.0f);
+            const float q = volumeRussianRouletteQ(path.throughput);
             if (path.rng.nextFloat() > q) {
                 path.queue = kQueueDead;
                 return;
