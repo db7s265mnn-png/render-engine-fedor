@@ -367,8 +367,7 @@ struct CameraData {
     float fStop = 0.0f;           // 0 disables depth of field
     float focusDistance = 5.0f;
 
-    // 0 = thin lens (Embree), 1 = polynomial optics (Embree only).
-    // OptiX is pinhole only — no DoF, no Lentil/polynomial optics.
+    // 0 = thin lens (Embree + OptiX). 1 = polynomial optics (Embree only).
     int opticalModel = 0;
     // Index into polynomialOpticsLensNames() when opticalModel == 1.
     int lensModel = 19;  // cooke__speed_panchro__1920__50mm
@@ -618,6 +617,7 @@ struct SceneView {
     const ProceduralNode* procedurals = nullptr;
     const MediumData* media = nullptr;
     // Host CPU only — OpenVDB grids (indexed by InstanceData::volumeIndex).
+    // OptiX path tracing uses LaunchParams::volumes (dense bricks), not these pointers.
     const VolumeGrid* const* volumes = nullptr;
 
     int meshCount = 0;

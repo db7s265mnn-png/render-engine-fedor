@@ -1139,8 +1139,13 @@ public:
         addParameter(Parameter::makeMenu("backend", "Render Backend", backends, 0)
                          .withGroup("Engine")
                          .withTooltip(optixBackendCompiledIn()
-                                          ? QStringLiteral("CPU uses Embree. GPU requires an NVIDIA GPU "
-                                                           "and a build with OptiX enabled.")
+                                          ? QStringLiteral("CPU uses Embree (full feature set).\n"
+                                                           "GPU (OptiX) path-traces on NVIDIA CUDA: "
+                                                           "camera rays, bounces, shadows, GGX/glass, "
+                                                           "NEE/MIS, HDRI, thin-lens DoF, and VDB fog "
+                                                           "baked to a dense brick.\n"
+                                                           "Still CPU-only: BDPT, spectral, MNEE, SSS, "
+                                                           "MaterialX procedurals, polynomial optics.")
                                           : QStringLiteral("This executable was built without OptiX/CUDA. "
                                                           "GPU (OptiX) will fall back to Embree.")));
         addParameter(Parameter::makeMenu("integrator", "Integrator",

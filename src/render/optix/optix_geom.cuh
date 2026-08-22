@@ -1,4 +1,4 @@
-// Surface reconstruction + pinhole camera for shade / init kernels.
+// Surface reconstruction + thin-lens camera for shade / init kernels.
 #pragma once
 
 #include "render/optix/optix_wavefront.cuh"
@@ -15,17 +15,31 @@ struct Surf {
     int lightIndex = -1;
 };
 
-__device__ inline void pinholeRay(const SceneView& scene, float pixelX, float pixelY, Vec3& origin,
-                                  Vec3& direction) {
+__device__ inline void cameraRay(const SceneView& scene, float pixelX, float pixelY, float lensU,
+                                 float lensV, Vec3& origin, Vec3& direction) {
     const CameraData& cam = scene.camera;
     const float resX = float(srMax(1, scene.settings.resolutionX));
     const float resY = float(srMax(1, scene.settings.resolutionY));
     const float sensorHeight = cam.sensorWidth * (resY / resX);
     const float sx = (pixelX / resX - 0.5f) * cam.sensorWidth;
     const float sy = (0.5f - pixelY / resY) * sensorHeight;
-    const Vec3 dirCam = normalize(Vec3(sx, sy, -srMax(1e-3f, cam.focalLength)));
-    origin = transformPoint(cam.cameraToWorld, Vec3(0.0f, 0.0f, 0.0f));
+    Vec3 dirCam = normalize(Vec3(sx, sy, -srMax(1e-3f, cam.focalLength)));
+    Vec3 originCam(0.0f, 0.0f, 0.0f);
+    if (cam.fStop > 0.0f) {
+        const float lensRadius = (cam.focalLength * 0.001f) / (2.0f * cam.fStop);
+        const Vec2 lens = sampleConcentricDisk(lensU, lensV) * lensRadius;
+        const float ft = srMax(1e-4f, cam.focusDistance) / srMax(1e-6f, -dirCam.z);
+        const Vec3 focusPoint = dirCam * ft;
+        originCam = Vec3(lens.x, lens.y, 0.0f);
+        dirCam = normalize(focusPoint - originCam);
+    }
+    origin = transformPoint(cam.cameraToWorld, originCam);
     direction = normalize(transformVector(cam.cameraToWorld, dirCam));
+}
+
+__device__ inline void pinholeRay(const SceneView& scene, float pixelX, float pixelY, Vec3& origin,
+                                  Vec3& direction) {
+    cameraRay(scene, pixelX, pixelY, 0.5f, 0.5f, origin, direction);
 }
 
 __device__ inline bool buildSurf(const SceneView& scene, const GpuHit& hit, Vec3 origin, Vec3 dir,

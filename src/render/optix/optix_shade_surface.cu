@@ -3,24 +3,9 @@
 #include "render/lights.h"
 #include "render/optix/optix_bsdf.cuh"
 #include "render/optix/optix_geom.cuh"
+#include "render/optix/optix_volume.cuh"
 
 namespace sol {
-namespace {
-
-__device__ void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, float tMax, Vec3 contrib) {
-    if (!isFinite(contrib) || isBlack(contrib)) {
-        shadow.queue = kShadowIdle;
-        return;
-    }
-    shadow.origin = origin;
-    shadow.direction = dir;
-    shadow.tMax = tMax;
-    shadow.contrib = contrib;
-    shadow.occluded = 0;
-    shadow.queue = kShadowTrace;
-}
-
-}  // namespace
 
 extern "C" __global__ void __raygen__shade_surface() {
     int x = 0, y = 0;
@@ -40,6 +25,53 @@ extern "C" __global__ void __raygen__shade_surface() {
     if (!buildSurf(scene, hit, path.origin, path.direction, si)) {
         path.queue = kQueueDead;
         return;
+    }
+
+    const InstanceData& volInst = scene.instances[si.instanceIndex];
+    if (volInst.volumeIndex >= 0 && volInst.volumeIndex < params.volumeCount && params.volumes) {
+        const GpuVolumeGrid& vol = params.volumes[volInst.volumeIndex];
+        if (!vol.density) {
+            path.origin = offsetRay(si.p, si.ng, path.direction);
+            if (++path.hops > 32) {
+                path.queue = kQueueDead;
+                return;
+            }
+            path.queue = kQueueIntersectClosest;
+            return;
+        }
+        if (vol.kind == 1) {
+            if (path.mediumIndex == volInst.mediumIndex) {
+                path.mediumIndex = -1;
+                path.origin = offsetRay(si.p, si.ng, path.direction);
+            } else {
+                path.mediumIndex = volInst.mediumIndex;
+                path.origin = offsetRay(si.p, si.ng * -1.0f, path.direction);
+            }
+            if (++path.hops > 32) {
+                path.queue = kQueueDead;
+                return;
+            }
+            path.queue = kQueueIntersectClosest;
+            return;
+        }
+        if (vol.kind == 0) {
+            float tSdf = hit.t;
+            Vec3 nSdf;
+            const float tNear = srMax(0.0f, hit.t - 0.05f);
+            if (sphereTraceGpuSdf(vol, path.origin, path.direction, tNear, hit.t + 1.0e6f, tSdf, nSdf)) {
+                si.p = path.origin + path.direction * tSdf;
+                si.ng = nSdf;
+                si.ns = nSdf;
+            } else {
+                path.origin = offsetRay(si.p, si.ng, path.direction);
+                if (++path.hops > 32) {
+                    path.queue = kQueueDead;
+                    return;
+                }
+                path.queue = kQueueIntersectClosest;
+                return;
+            }
+        }
     }
 
     if (si.lightIndex >= 0 && path.depth == 0) {
@@ -131,7 +163,7 @@ extern "C" __global__ void __raygen__shade_surface() {
                     const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
                     float tMax = 1.0e8f;
                     if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-                    enqueueShadow(shadow, shadowOrigin, ls.wi, tMax, contrib);
+                    enqueueShadow(shadow, shadowOrigin, ls.wi, tMax, contrib, path.mediumIndex);
                 } else {
                     addRadiance(pixel, contrib);
                 }
@@ -161,6 +193,13 @@ extern "C" __global__ void __raygen__shade_surface() {
     path.direction = wiWorld;
     path.bsdfPdf = bs.pdf;
     path.specularBounce = bs.specular ? 1 : 0;
+    if (bs.transmitted && volInst.mediumIndex >= 0) {
+        const MediumData* med = getMedium(scene, volInst.mediumIndex);
+        if (med && med->type == 1) {
+            const bool entering = dot(si.ng, wiWorld) < 0.0f;
+            path.mediumIndex = entering ? volInst.mediumIndex : -1;
+        }
+    }
     ++path.depth;
 
     if (path.depth >= srMax(1, scene.settings.rrStartDepth)) {

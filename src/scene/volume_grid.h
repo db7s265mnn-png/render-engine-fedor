@@ -64,6 +64,10 @@ public:
     // Max |density| / majorant estimate for delta tracking (fog).
     float majorant() const { return majorant_; }
 
+    // Bake a dense brick for the OptiX volume kernel (trilinear GPU sampling).
+    // Caps each axis at maxDim. Returns false when the grid is empty.
+    bool exportDense(int maxDim, std::vector<float>& density, int& nx, int& ny, int& nz) const;
+
     // Piecewise min/max occupancy (supervoxels). Empty / constant cells skip
     // voxel sampling during Woodcock walks. Fog only. Cell size tracks OpenVDB
     // leaves (~8 voxels) so Λ stays tight.

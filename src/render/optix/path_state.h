@@ -16,6 +16,7 @@ enum PathQueue : int {
     kQueueIntersectClosest = 1,
     kQueueShadeSurface = 2,
     kQueueShadeBackground = 3,
+    kQueueShadeVolume = 4,
 };
 
 enum ShadowQueue : int {
@@ -42,6 +43,8 @@ struct GpuPath {
     int hops = 0;
     int queue = kQueueDead;
     int specularBounce = 1;
+    int mediumIndex = -1;
+    int volumeScatters = 0;
     Rng rng;
 };
 
@@ -52,6 +55,8 @@ struct GpuShadow {
     float tMax = 0.0f;
     int queue = kShadowIdle;
     int occluded = 0;
+    int volumeTr = 0;     // 1 = multiply by GPU volume / homogeneous transmittance
+    int mediumIndex = -1;  // current path medium for homogeneous Beer–Lambert on the shadow ray
 };
 
 }  // namespace sol

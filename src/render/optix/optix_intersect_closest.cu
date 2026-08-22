@@ -14,7 +14,11 @@ extern "C" __global__ void __raygen__intersect_closest() {
 
     GpuHit& hit = params.hits[pixel];
     traceClosest(path.origin, path.direction, kFloatMax, hit);
-    path.queue = hit.didHit ? kQueueShadeSurface : kQueueShadeBackground;
+    if (path.mediumIndex >= 0) {
+        path.queue = kQueueShadeVolume;
+    } else {
+        path.queue = hit.didHit ? kQueueShadeSurface : kQueueShadeBackground;
+    }
 }
 
 }  // namespace sol

@@ -484,6 +484,45 @@ MeshPtr VolumeGrid::toPolygonsOpenVDB(float isovalue, float adaptivity) const {
     return mesh;
 }
 
+bool VolumeGrid::exportDense(int maxDim, std::vector<float>& density, int& nx, int& ny, int& nz) const {
+    density.clear();
+    nx = ny = nz = 0;
+    if (!valid() || !bounds_.valid()) return false;
+    maxDim = std::max(8, std::min(maxDim, 160));
+    const Vec3 ext = bounds_.extent();
+    const float longest = srMax(ext.x, srMax(ext.y, ext.z));
+    if (longest < 1e-6f) return false;
+    const float step = longest / float(maxDim);
+    nx = std::max(1, int(std::ceil(double(ext.x / step))));
+    ny = std::max(1, int(std::ceil(double(ext.y / step))));
+    nz = std::max(1, int(std::ceil(double(ext.z / step))));
+    long long n = long long(nx) * long long(ny) * long long(nz);
+    const long long cap = 160ll * 160ll * 160ll;
+    if (n > cap) {
+        const double s = std::cbrt(double(n) / double(cap));
+        nx = std::max(1, int(nx / s));
+        ny = std::max(1, int(ny / s));
+        nz = std::max(1, int(nz / s));
+        n = long long(nx) * long long(ny) * long long(nz);
+    }
+    density.resize(size_t(n), 0.0f);
+    const bool sdf = kind_ == VolumeGridKind::Sdf;
+    for (int z = 0; z < nz; ++z) {
+        const float fz = (float(z) + 0.5f) / float(nz);
+        for (int y = 0; y < ny; ++y) {
+            const float fy = (float(y) + 0.5f) / float(ny);
+            for (int x = 0; x < nx; ++x) {
+                const float fx = (float(x) + 0.5f) / float(nx);
+                const Vec3 p(bounds_.lo.x + ext.x * fx, bounds_.lo.y + ext.y * fy,
+                             bounds_.lo.z + ext.z * fz);
+                const float v = sdf ? sampleWorld(p) : srMax(0.0f, sampleWorldTracking(p));
+                density[(size_t(z) * size_t(ny) + size_t(y)) * size_t(nx) + size_t(x)] = v;
+            }
+        }
+    }
+    return true;
+}
+
 #else  // !SOLSTICE_HAVE_OPENVDB
 
 struct VolumeGrid::Impl {};
@@ -522,6 +561,12 @@ std::shared_ptr<VolumeGrid> VolumeGrid::fromPolygons(const Mesh&, const Mat4&, c
     return nullptr;
 }
 MeshPtr VolumeGrid::toPolygonsOpenVDB(float, float) const { return nullptr; }
+
+bool VolumeGrid::exportDense(int, std::vector<float>& density, int& nx, int& ny, int& nz) const {
+    density.clear();
+    nx = ny = nz = 0;
+    return false;
+}
 
 #endif
 

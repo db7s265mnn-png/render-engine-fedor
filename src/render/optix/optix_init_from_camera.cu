@@ -1,7 +1,8 @@
 // Cycles analogue: integrator_init_from_camera.
-// Pinhole only. Thin-lens DoF and polynomial optics stay on Embree.
+// Pinhole + thin-lens DoF. Polynomial optics stay on Embree.
 #include "render/blue_noise.h"
 #include "render/optix/optix_geom.cuh"
+#include "render/optix/optix_volume.cuh"
 
 namespace sol {
 
@@ -23,14 +24,30 @@ extern "C" __global__ void __raygen__init_from_camera() {
         jitterX = path.rng.nextFloat();
         jitterY = path.rng.nextFloat();
     }
+    const float lensU = path.rng.nextFloat();
+    const float lensV = path.rng.nextFloat();
 
-    pinholeRay(params.scene, float(x) + jitterX, float(y) + jitterY, path.origin, path.direction);
+    cameraRay(params.scene, float(x) + jitterX, float(y) + jitterY, lensU, lensV, path.origin, path.direction);
     path.throughput = Vec3(1.0f);
     path.bsdfPdf = 0.0f;
     path.depth = 0;
     path.hops = 0;
     path.queue = kQueueIntersectClosest;
     path.specularBounce = 1;
+    path.mediumIndex = -1;
+    path.volumeScatters = 0;
+    if (params.volumes && params.volumeCount > 0) {
+        for (int i = 0; i < params.volumeCount; ++i) {
+            const GpuVolumeGrid& g = params.volumes[i];
+            if (!g.density || g.kind != 1) continue;
+            if (!gpuPointInAabb(path.origin, g.bmin, g.bmax)) continue;
+            const int med = gpuMediumIndexForVolume(params.scene, i);
+            if (med >= 0 && mediumIsActive(params.scene, med)) {
+                path.mediumIndex = med;
+                break;
+            }
+        }
+    }
 
     hit = GpuHit{};
     shadow = GpuShadow{};

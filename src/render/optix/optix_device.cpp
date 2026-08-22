@@ -24,6 +24,7 @@
 #include "core/log.h"
 #include "render/optix/launch_params.h"
 #include "render/render_device.h"
+#include "scene/volume_grid.h"
 
 // Emitted by the build from the wavefront OptiX modules.
 extern "C" const unsigned char solsticeOptixInitIr[];
@@ -38,6 +39,8 @@ extern "C" const unsigned char solsticeOptixShadeBackgroundIr[];
 extern "C" const unsigned long long solsticeOptixShadeBackgroundIrSize;
 extern "C" const unsigned char solsticeOptixShadeShadowIr[];
 extern "C" const unsigned long long solsticeOptixShadeShadowIrSize;
+extern "C" const unsigned char solsticeOptixShadeVolumeIr[];
+extern "C" const unsigned long long solsticeOptixShadeVolumeIrSize;
 extern "C" const unsigned char solsticeOptixHitIr[];
 extern "C" const unsigned long long solsticeOptixHitIrSize;
 
@@ -167,6 +170,7 @@ enum RaygenId : int {
     kRgShadeSurface,
     kRgShadeBackground,
     kRgShadeShadow,
+    kRgShadeVolume,
     kRgCount
 };
 
@@ -177,6 +181,7 @@ enum ModuleId : int {
     kModShadeSurface,
     kModShadeBackground,
     kModShadeShadow,
+    kModShadeVolume,
     kModHit,
     kModCount
 };
@@ -223,7 +228,8 @@ public:
             warmupPrograms();
             initialized_ = true;
             logInfo("OptiX backend initialised on " + deviceName_ +
-                    " (" + std::to_string(properties.multiProcessorCount) + " SMs, wavefront PT, pinhole, basic surfaces)");
+                    " (" + std::to_string(properties.multiProcessorCount) +
+                    " SMs, wavefront PT: surfaces + thin-lens + GPU volumes)");
             logInfo("OptiX submits CUDA/Compute work. Windows Task Manager defaults to the 3D graph "
                     "(~0% for path tracing) — switch a GPU graph to CUDA or Compute_0, or watch the HUD ms.");
             return true;
@@ -367,6 +373,33 @@ public:
             textureViewBuffer_.upload(textureViews);
 
             proceduralBuffer_.upload(scene_->procedurals);
+            mediaBuffer_.upload(scene_->media);
+
+            std::vector<GpuVolumeGrid> volumeViews(scene_->volumes.size());
+            volumeDensityBuffers_.clear();
+            int uploadedVolumes = 0;
+            for (size_t i = 0; i < scene_->volumes.size(); ++i) {
+                const VolumeGridPtr& grid = scene_->volumes[i];
+                if (!grid || !grid->valid()) continue;
+                std::vector<float> dense;
+                int nx = 0, ny = 0, nz = 0;
+                if (!grid->exportDense(160, dense, nx, ny, nz) || dense.empty()) continue;
+                DeviceBuffer buf;
+                buf.upload(dense);
+                GpuVolumeGrid view;
+                view.density = buf.as<const float>();
+                view.nx = nx;
+                view.ny = ny;
+                view.nz = nz;
+                view.kind = grid->kind() == VolumeGridKind::Sdf ? 0 : 1;
+                view.bmin = grid->worldBounds().lo;
+                view.bmax = grid->worldBounds().hi;
+                view.majorant = srMax(grid->majorant(), 1e-4f);
+                volumeViews[i] = view;
+                volumeDensityBuffers_.push_back(std::move(buf));
+                ++uploadedVolumes;
+            }
+            volumeViewBuffer_.upload(volumeViews);
 
             meshViewBuffer_.upload(meshViews);
             instanceBuffer_.upload(scene_->instances);
@@ -384,19 +417,27 @@ public:
             deviceScene_.textureCount = int(textureViews.size());
             deviceScene_.procedurals = proceduralBuffer_.as<const ProceduralNode>();
             deviceScene_.proceduralCount = int(scene_->procedurals.size());
+            deviceScene_.media = mediaBuffer_.as<const MediumData>();
+            deviceScene_.mediumCount = int(scene_->media.size());
+            deviceScene_.volumes = nullptr;
+            deviceScene_.volumeCount = int(scene_->volumes.size());
+            deviceScene_.lightBvh = nullptr;
+            deviceScene_.lightBvhNodeCount = 0;
+            deviceScene_.infiniteLightIndices = nullptr;
+            deviceScene_.infiniteLightCount = 0;
+            deviceScene_.motionXforms = nullptr;
+            deviceScene_.cameraMotionXforms = nullptr;
+            gpuVolumeCount_ = int(volumeViews.size());
 
             logInfo("OptiX: uploaded " + std::to_string(scene_->instances.size()) + " instances, " +
                     std::to_string(scene_->totalTriangles()) + " triangles, " +
                     std::to_string(textureViews.size()) + " textures, " +
-                    std::to_string(scene_->procedurals.size()) + " procedurals");
-            if (!iasHandle_) {
-                logWarning("OptiX: no triangle IAS — GPU will only shade the environment "
-                           "(volumes / VDB fog are Embree-only and do not run on the GPU).");
+                    std::to_string(uploadedVolumes) + " GPU volume bricks");
+            if (!iasHandle_ && uploadedVolumes == 0) {
+                logWarning("OptiX: no triangle IAS — GPU will only shade the environment.");
             }
-            if (!scene_->volumes.empty() && !warnedVolumes_) {
-                logWarning("GPU (OptiX) does not march VDB / fog volumes. "
-                           "For clouds keep Engine → Render Backend = CPU (Embree), "
-                           "or the GPU pass will skip the volume and look idle.");
+            if (!scene_->volumes.empty() && uploadedVolumes == 0 && !warnedVolumes_) {
+                logWarning("OptiX: VDB grids present but dense GPU bake failed — volume PT skipped.");
                 warnedVolumes_ = true;
             }
             if (!scene_->procedurals.empty() && !warnedProcedurals_) {
@@ -404,8 +445,8 @@ public:
                            "MaterialX procedurals stay on Embree.");
                 warnedProcedurals_ = true;
             }
-            if ((hostView.camera.fStop > 1e-4f || hostView.camera.opticalModel != 0) && !warnedOptics_) {
-                logWarning("GPU (OptiX) uses a pinhole camera (no thin-lens DoF, no polynomial optics).");
+            if (hostView.camera.opticalModel != 0 && !warnedOptics_) {
+                logWarning("GPU (OptiX) uses thin-lens DoF. Polynomial / Lentil optics stay on Embree.");
                 warnedOptics_ = true;
             }
             CUDA_CHECK(cudaDeviceSynchronize());
@@ -437,7 +478,9 @@ public:
                 accumBuffer_.alloc(pixelCount * sizeof(Vec4));
                 CUDA_CHECK(cudaMemsetAsync(accumBuffer_.as<void>(), 0, accumBuffer_.size(), stream_));
             }
-            if (pathBuffer_.size() != pixelCount * sizeof(GpuPath)) {
+            if (pathBuffer_.size() != pixelCount * sizeof(GpuPath) ||
+                hitBuffer_.size() != pixelCount * sizeof(GpuHit) ||
+                shadowBuffer_.size() != pixelCount * sizeof(GpuShadow)) {
                 destroyGraph();
                 pathBuffer_.alloc(pixelCount * sizeof(GpuPath));
                 hitBuffer_.alloc(pixelCount * sizeof(GpuHit));
@@ -459,6 +502,8 @@ public:
             launchParams.frameSeed = unsigned(scene_->settings.seed) * 9781u + unsigned(sampleIndex) * 6271u;
             launchParams.pixelSampler = scene_->settings.pixelSampler;
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
+            launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();
+            launchParams.volumeCount = gpuVolumeCount_;
 
             if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
             CUDA_CHECK(cudaMemcpyAsync(launchParamsBuffer_.as<void>(), &launchParams, sizeof(LaunchParams),
@@ -527,6 +572,7 @@ private:
         launchKernel(kRgInit, width, height);
         for (int i = 0; i < maxIters; ++i) {
             launchKernel(kRgIntersectClosest, width, height);
+            launchKernel(kRgShadeVolume, width, height);
             launchKernel(kRgShadeBackground, width, height);
             launchKernel(kRgShadeSurface, width, height);
             launchKernel(kRgIntersectShadow, width, height);
@@ -585,7 +631,7 @@ private:
         // Capture requires an idle stream (no pending memcpy / events).
         CUDA_CHECK(cudaStreamSynchronize(stream_));
         if (captureGraph(width, height, maxIters)) {
-            logInfo("OptiX: CUDA graph captured (" + std::to_string(1 + 5 * maxIters) +
+            logInfo("OptiX: CUDA graph captured (" + std::to_string(1 + 6 * maxIters) +
                     " launches/spp) so the GPU stays busy instead of waiting on CPU optixLaunch");
             return;
         }
@@ -731,6 +777,7 @@ private:
             solsticeOptixShadeSurfaceIr,
             solsticeOptixShadeBackgroundIr,
             solsticeOptixShadeShadowIr,
+            solsticeOptixShadeVolumeIr,
             solsticeOptixHitIr,
         };
         const unsigned long long irSize[kModCount] = {
@@ -740,6 +787,7 @@ private:
             solsticeOptixShadeSurfaceIrSize,
             solsticeOptixShadeBackgroundIrSize,
             solsticeOptixShadeShadowIrSize,
+            solsticeOptixShadeVolumeIrSize,
             solsticeOptixHitIrSize,
         };
         for (int i = 0; i < kModCount; ++i) loadModule(ir[i], irSize[i], modules_[i]);
@@ -748,6 +796,7 @@ private:
         const char* raygenNames[kRgCount] = {
             "__raygen__init_from_camera",     "__raygen__intersect_closest", "__raygen__intersect_shadow",
             "__raygen__shade_surface",        "__raygen__shade_background",  "__raygen__shade_shadow",
+            "__raygen__shade_volume",
         };
         for (int i = 0; i < kRgCount; ++i) {
             OptixProgramGroupDesc raygenDesc{};
@@ -831,6 +880,7 @@ private:
     }
 
     void releaseScene() {
+        destroyGraph();
         geometryBuffers_.clear();
         accelBuffers_.clear();
         gasHandles_.clear();
@@ -842,7 +892,12 @@ private:
         envViewBuffer_.free();
         textureViewBuffer_.free();
         proceduralBuffer_.free();
+        mediaBuffer_.free();
+        volumeViewBuffer_.free();
+        volumeDensityBuffers_.clear();
+        gpuVolumeCount_ = 0;
         iasHandle_ = 0;
+        destroyGraph();
         deviceScene_ = SceneView();
         scene_.reset();
     }
@@ -924,6 +979,10 @@ private:
     DeviceBuffer meshViewBuffer_, instanceBuffer_, materialBuffer_, lightBuffer_, envViewBuffer_;
     DeviceBuffer textureViewBuffer_;
     DeviceBuffer proceduralBuffer_;
+    DeviceBuffer mediaBuffer_;
+    DeviceBuffer volumeViewBuffer_;
+    std::vector<DeviceBuffer> volumeDensityBuffers_;
+    int gpuVolumeCount_ = 0;
     DeviceBuffer instanceDescBuffer_;
     std::vector<DeviceBuffer> geometryBuffers_;
     std::vector<DeviceBuffer> accelBuffers_;

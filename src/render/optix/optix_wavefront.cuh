@@ -36,4 +36,20 @@ __device__ inline Vec3 offsetRay(Vec3 p, Vec3 n, Vec3 dir) {
     return dot(dir, n) > 0.0f ? p + offset : p - offset;
 }
 
+__device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, float tMax, Vec3 contrib,
+                                     int mediumIndex) {
+    if (!isFinite(contrib) || isBlack(contrib)) {
+        shadow.queue = kShadowIdle;
+        return;
+    }
+    shadow.origin = origin;
+    shadow.direction = dir;
+    shadow.tMax = tMax;
+    shadow.contrib = contrib;
+    shadow.occluded = 0;
+    shadow.volumeTr = 1;
+    shadow.mediumIndex = mediumIndex;
+    shadow.queue = kShadowTrace;
+}
+
 }  // namespace sol
