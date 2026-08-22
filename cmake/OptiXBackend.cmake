@@ -130,14 +130,12 @@ endif()
 # until PTX is done (often 10-20 min). Echo so the log shows the step started.
 add_custom_command(
     OUTPUT ${SOLSTICE_OPTIX_PTX}
-    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX start (can take 10-20 min, ninja will not advance until done)"
+    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX start"
     COMMAND ${CMAKE_CUDA_COMPILER}
             ${_solstice_nvcc_ccbin}
             -ptx
             -std=c++17
-            -t 0
             --use_fast_math
-            --expt-relaxed-constexpr
             ${_solstice_nvcc_lineinfo}
             ${_solstice_nvcc_unsupported}
             -arch=${SOLSTICE_OPTIX_ARCH}
@@ -157,7 +155,7 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/src/render/integrator.h
         ${CMAKE_SOURCE_DIR}/src/render/optix/launch_params.h
         ${CMAKE_BINARY_DIR}/generated/solstice_config.h
-    COMMENT "nvcc OptiX PTX (no percent until finished, often 10-20 min)"
+    COMMENT "nvcc OptiX PTX"
     VERBATIM
 )
 

@@ -4,7 +4,13 @@
 
 #if defined(__CUDACC__)
 #  define SR_HD __host__ __device__
-#  define SR_INL __forceinline__
+// __forceinline__ on the whole integrator makes cicc optimize one megakernel
+// for hours (seen: 3h+ on a 14900K). Keep it optional.
+#  if defined(SOLSTICE_CUDA_FORCEINLINE)
+#    define SR_INL __forceinline__
+#  else
+#    define SR_INL inline
+#  endif
 #else
 #  define SR_HD
 #  define SR_INL inline
