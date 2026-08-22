@@ -3,8 +3,9 @@
 ## One-click (OptiX ON)
 
 On a Windows machine with the prerequisites below already installed, double-click
-`BUILD_WINDOWS.bat` in the repo root. It finds Visual Studio, Qt, CUDA, OptiX and
-vcpkg, configures `-DSOLSTICE_ENABLE_OPTIX=ON`, builds Release and runs `deploy`.
+`BUILD_WINDOWS.bat` in the repo root. It finds Visual Studio, Qt, CUDA and OptiX,
+fetches Embree + builds Imath/OpenEXR/Alembic/TBB/OpenVDB (no vcpkg), configures
+`-DSOLSTICE_ENABLE_OPTIX=ON`, builds Release and runs `deploy`.
 
 Override auto-detected paths with environment variables if needed: `QT_ROOT`,
 `VCPKG_ROOT`, `CUDA_PATH`, `OptiX_ROOT`, `GRENDIZER_BUILD_DIR`.

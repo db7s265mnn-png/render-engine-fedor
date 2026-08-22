@@ -4,6 +4,9 @@
 # Override paths with env vars if auto-detect is wrong:
 #   QT_ROOT, VCPKG_ROOT, CUDA_PATH, OptiX_ROOT, GRENDIZER_BUILD_DIR
 $ErrorActionPreference = 'Stop'
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+} catch { }
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $Root
@@ -58,6 +61,11 @@ function Import-VcVars64 {
     if ($env:VCPKG_ROOT -and ($env:VCPKG_ROOT -match 'Visual Studio\\.*\\VC\\vcpkg')) {
         Info 'Ignoring Visual Studio bundled vcpkg (it requires builtin-baseline).'
         Remove-Item Env:\VCPKG_ROOT
+    }
+    # Never let a random C:\vcpkg toolchain hijack this build (hwloc fails on VS 2026).
+    Remove-Item Env:\VCPKG_ROOT -ErrorAction SilentlyContinue
+    if ($env:CMAKE_TOOLCHAIN_FILE -and ($env:CMAKE_TOOLCHAIN_FILE -match 'vcpkg')) {
+        Remove-Item Env:\CMAKE_TOOLCHAIN_FILE
     }
 }
 
@@ -267,8 +275,132 @@ function Find-OptiXRoot([string]$GitExe) {
     return $local
 }
 
-function Test-VsBundledVcpkg([string]$Path) {
-    return ($Path -and ($Path -match 'Visual Studio\\.*\\VC\\vcpkg'))
+function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest) {
+    if (Test-Path -LiteralPath $Dest) { return }
+    New-Item -ItemType Directory -Force -Path (Split-Path $Dest -Parent) | Out-Null
+    & $Git clone --depth 1 --branch $Branch $Url $Dest
+    if ($LASTEXITCODE -ne 0) { Fail "git clone failed: $Url" }
+}
+
+function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [switch]$AllowFail) {
+    $b = Join-Path $Src 'build'
+    Info "Building $Name ..."
+    $cfg = @(
+        '-S', $Src, '-B', $b, '-G', 'Ninja',
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_INSTALL_PREFIX=$script:DepsPrefix",
+        "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
+        "-DCMAKE_MAKE_PROGRAM=$Ninja",
+        "-DCMAKE_C_COMPILER=$Cl",
+        "-DCMAKE_CXX_COMPILER=$Cl"
+    ) + $Extra
+    & $CMake @cfg
+    if ($LASTEXITCODE -ne 0) {
+        if ($AllowFail) {
+            Write-Host "Warning: $Name configure failed (optional)." -ForegroundColor Yellow
+            return
+        }
+        Fail "$Name cmake configure failed"
+    }
+    & $CMake --build $b --target install --parallel
+    if ($LASTEXITCODE -ne 0) {
+        if ($AllowFail) {
+            Write-Host "Warning: $Name install failed (optional)." -ForegroundColor Yellow
+            return
+        }
+        Fail "$Name install failed"
+    }
+}
+
+function Ensure-NativeDeps {
+    $script:DepsPrefix = Join-Path $env:LOCALAPPDATA 'grendizer-deps'
+    $stamp = Join-Path $script:DepsPrefix 'stamp-native-1.txt'
+    $srcRoot = Join-Path $env:LOCALAPPDATA 'grendizer-deps-src'
+    New-Item -ItemType Directory -Force -Path $script:DepsPrefix | Out-Null
+    New-Item -ItemType Directory -Force -Path $srcRoot | Out-Null
+
+    $embreeCmake = Get-ChildItem -Path $script:DepsPrefix -Recurse -Filter 'embree-config.cmake' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $embreeCmake) {
+        $embreeCmake = Get-ChildItem -Path $script:DepsPrefix -Recurse -Filter 'EmbreeConfig.cmake' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if (-not $embreeCmake) {
+        Info 'Downloading Embree 4.4.0 Windows zip ...'
+        $zip = Join-Path $env:TEMP 'embree-4.4.0.x64.windows.zip'
+        $url = 'https://github.com/RenderKit/embree/releases/download/v4.4.0/embree-4.4.0.x64.windows.zip'
+        Invoke-WebRequest -Uri $url -OutFile $zip
+        $embreeDest = Join-Path $script:DepsPrefix 'embree'
+        if (Test-Path -LiteralPath $embreeDest) { Remove-Item -LiteralPath $embreeDest -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $embreeDest -Force
+        $embreeCmake = Get-ChildItem -Path $embreeDest -Recurse -Filter 'embree-config.cmake' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if (-not $embreeCmake) {
+            Fail 'Embree cmake config missing after unzip'
+        }
+    }
+
+    if (Test-Path -LiteralPath $stamp) {
+        Info "Native deps already installed: $script:DepsPrefix"
+        return
+    }
+
+    Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/Imath.git' 'v3.1.12' (Join-Path $srcRoot 'imath')
+    Invoke-DepCMakeInstall (Join-Path $srcRoot 'imath') 'Imath' @(
+        '-DBUILD_SHARED_LIBS=OFF', '-DBUILD_TESTING=OFF'
+    )
+
+    Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/openexr.git' 'v3.2.4' (Join-Path $srcRoot 'openexr')
+    Invoke-DepCMakeInstall (Join-Path $srcRoot 'openexr') 'OpenEXR' @(
+        '-DBUILD_SHARED_LIBS=OFF', '-DBUILD_TESTING=OFF',
+        '-DOPENEXR_BUILD_TOOLS=OFF', '-DOPENEXR_INSTALL_EXAMPLES=OFF',
+        '-DOPENEXR_FORCE_INTERNAL_DEFLATE=ON'
+    )
+
+    Invoke-GitClone 'https://github.com/alembic/alembic.git' '1.8.6' (Join-Path $srcRoot 'alembic')
+    Invoke-DepCMakeInstall (Join-Path $srcRoot 'alembic') 'Alembic' @(
+        '-DUSE_HDF5=OFF', '-DALEMBIC_SHARED_LIBS=OFF', '-DUSE_TESTS=OFF',
+        '-DUSE_BINARIES=OFF', '-DUSE_EXAMPLES=OFF', '-DALEMBIC_BUILD_LIBS=ON'
+    )
+
+    Invoke-GitClone 'https://github.com/oneapi-src/oneTBB.git' 'v2021.12.0' (Join-Path $srcRoot 'onetbb')
+    Invoke-DepCMakeInstall (Join-Path $srcRoot 'onetbb') 'oneTBB' @(
+        '-DTBB_TEST=OFF', '-DTBB_STRICT=OFF', '-DBUILD_SHARED_LIBS=ON'
+    )
+
+    Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/openvdb.git' 'v12.0.1' (Join-Path $srcRoot 'openvdb')
+    Invoke-DepCMakeInstall (Join-Path $srcRoot 'openvdb') 'OpenVDB' @(
+        "-DTBB_ROOT=$script:DepsPrefix",
+        '-DOPENVDB_BUILD_CORE=ON', '-DOPENVDB_BUILD_BINARIES=OFF',
+        '-DOPENVDB_BUILD_VDB_PRINT=OFF', '-DOPENVDB_BUILD_VDB_LOD=OFF',
+        '-DOPENVDB_BUILD_VDB_RENDER=OFF', '-DOPENVDB_BUILD_VDB_VIEW=OFF',
+        '-DOPENVDB_BUILD_PYTHON_MODULE=OFF', '-DOPENVDB_BUILD_UNITTESTS=OFF',
+        '-DOPENVDB_BUILD_NANOVDB=OFF', '-DOPENVDB_CORE_SHARED=ON',
+        '-DOPENVDB_CORE_STATIC=OFF', '-DUSE_BLOSC=OFF', '-DUSE_ZLIB=OFF',
+        '-DUSE_EXR=OFF', '-DUSE_IMATH_HALF=OFF',
+        '-DOPENVDB_USE_DELAYED_LOADING=OFF'
+    )
+
+    Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/OpenColorIO.git' 'v2.3.2' (Join-Path $srcRoot 'ocio')
+    Invoke-DepCMakeInstall (Join-Path $srcRoot 'ocio') 'OpenColorIO' @(
+            '-DBUILD_SHARED_LIBS=ON', '-DOCIO_BUILD_APPS=OFF', '-DOCIO_BUILD_TESTS=OFF',
+            '-DOCIO_BUILD_GPU_TESTS=OFF', '-DOCIO_BUILD_PYTHON=OFF', '-DOCIO_BUILD_JAVA=OFF',
+            '-DOCIO_BUILD_DOCS=OFF', '-DOCIO_INSTALL_EXT_PACKAGES=ALL'
+        ) -AllowFail
+
+    Set-Content -Path $stamp -Value 'ok' -Encoding ascii
+    Info "Native deps installed: $script:DepsPrefix"
+}
+
+function Resolve-EmbreePrefix {
+    $f = Get-ChildItem -Path $script:DepsPrefix -Recurse -Filter 'embree-config.cmake' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $f) {
+        $f = Get-ChildItem -Path $script:DepsPrefix -Recurse -Filter 'EmbreeConfig.cmake' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if (-not $f) { Fail 'embree-config.cmake not found under deps' }
+    return $f.Directory.Parent.Parent.Parent.FullName
 }
 
 function Find-Ninja {
@@ -296,40 +428,10 @@ function Find-Ninja {
     return $exe
 }
 
-function Find-VcpkgRoot([string]$GitExe) {
-    if ($env:VCPKG_ROOT -and -not (Test-VsBundledVcpkg $env:VCPKG_ROOT)) {
-        $tc = Join-Path $env:VCPKG_ROOT 'scripts\buildsystems\vcpkg.cmake'
-        if (Test-Path -LiteralPath $tc) { return $env:VCPKG_ROOT }
-    }
-    foreach ($p in @(
-        'C:\vcpkg',
-        'D:\vcpkg',
-        (Join-Path $Root 'vcpkg'),
-        (Join-Path (Split-Path $Root -Parent) 'vcpkg')
-    )) {
-        if (Test-VsBundledVcpkg $p) { continue }
-        $tc = Join-Path $p 'scripts\buildsystems\vcpkg.cmake'
-        if (Test-Path -LiteralPath $tc) { return $p }
-    }
-    $local = Join-Path $env:LOCALAPPDATA 'grendizer-vcpkg'
-    $tcLocal = Join-Path $local 'scripts\buildsystems\vcpkg.cmake'
-    if (Test-Path -LiteralPath $tcLocal) { return $local }
-    Info "vcpkg not found - cloning into $local (first run is slow) ..."
-    & $GitExe clone --depth 1 https://github.com/microsoft/vcpkg.git $local
-    if ($LASTEXITCODE -ne 0) { Fail 'Failed to clone vcpkg. Check network / GitHub.' }
-    $boot = Join-Path $local 'bootstrap-vcpkg.bat'
-    cmd.exe /c "`"$boot`" -disableMetrics"
-    $vcpkgExe = Join-Path $local 'vcpkg.exe'
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $vcpkgExe)) {
-        Fail 'bootstrap-vcpkg.bat failed'
-    }
-    return $local
-}
-
 Write-Host ''
 Write-Host '=== Grendizer Render - Windows OptiX build ===' -ForegroundColor Green
 Write-Host "Repo: $Root"
-Write-Host 'First run can take a long time (vcpkg + nvcc PTX + Release).'
+Write-Host 'First run can take a long time (Embree zip + Imath/OpenEXR/Alembic/TBB/OpenVDB + nvcc).'
 Write-Host ''
 
 Import-VcVars64
@@ -341,17 +443,20 @@ $env:CUDA_PATH = $Cuda
 $cudaBin = Join-Path $Cuda 'bin'
 $env:PATH = "$cudaBin;$env:PATH"
 $OptiX = Find-OptiXRoot $Git
-$Vcpkg = Find-VcpkgRoot $Git
 $Ninja = Find-Ninja
 $ninjaDir = Split-Path $Ninja -Parent
 $env:PATH = "$ninjaDir;$env:PATH"
 $Cl = (Get-Command cl.exe).Source
 $Nvcc = Join-Path $cudaBin 'nvcc.exe'
+Ensure-NativeDeps
+$embreeRoot = Resolve-EmbreePrefix
 if ($env:GRENDIZER_BUILD_DIR) {
     $BuildDir = $env:GRENDIZER_BUILD_DIR
 } else {
     $BuildDir = Join-Path $Root 'build-windows'
 }
+
+$Prefix = "$Qt;$script:DepsPrefix;$embreeRoot"
 
 Info "CMake:  $CMake"
 Info "Qt:     $Qt"
@@ -359,7 +464,7 @@ Info "CUDA:   $Cuda"
 Info "nvcc:   $Nvcc"
 Info "cl.exe: $Cl"
 Info "OptiX:  $OptiX"
-Info "vcpkg:  $Vcpkg"
+Info "Deps:   $script:DepsPrefix"
 Info "Ninja:  $Ninja"
 Info "Build:  $BuildDir"
 Write-Host ''
@@ -372,21 +477,22 @@ Info "CMake generator: $Generator (cl.exe from VS $script:VsYear)"
 
 $cache = Join-Path $BuildDir 'CMakeCache.txt'
 if (Test-Path -LiteralPath $cache) {
+    $stale = $false
+    if (Select-String -Path $cache -Pattern 'vcpkg' -Quiet) { $stale = $true }
     $oldGen = Select-String -Path $cache -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' | Select-Object -First 1
-    if ($oldGen -and $oldGen.Matches[0].Groups[1].Value -ne $Generator) {
-        Info "Clearing $BuildDir (previous generator was different)"
+    if ($oldGen -and $oldGen.Matches[0].Groups[1].Value -ne $Generator) { $stale = $true }
+    if ($stale) {
+        Info "Clearing $BuildDir (old vcpkg / generator cache)"
         Remove-Item -LiteralPath $BuildDir -Recurse -Force
     }
 }
 
-$Toolchain = Join-Path $Vcpkg 'scripts\buildsystems\vcpkg.cmake'
 & $CMake -S $Root -B $BuildDir -G $Generator `
     "-DCMAKE_BUILD_TYPE=Release" `
     "-DCMAKE_MAKE_PROGRAM=$Ninja" `
     "-DCMAKE_C_COMPILER=$Cl" `
     "-DCMAKE_CXX_COMPILER=$Cl" `
-    "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
-    "-DCMAKE_PREFIX_PATH=$Qt" `
+    "-DCMAKE_PREFIX_PATH=$Prefix" `
     "-DCMAKE_CUDA_COMPILER=$Nvcc" `
     "-DCMAKE_CUDA_HOST_COMPILER=$Cl" `
     "-DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler" `
@@ -395,8 +501,10 @@ $Toolchain = Join-Path $Vcpkg 'scripts\buildsystems\vcpkg.cmake'
     "-DOptiX_ROOT=$OptiX" `
     '-DSOLSTICE_ENABLE_OCIO=ON' `
     '-DSOLSTICE_ENABLE_OPENVDB=ON' `
-    '-DSOLSTICE_MODERN_CPU=ON'
-if ($LASTEXITCODE -ne 0) { Fail 'cmake configure failed. Check Qt / CUDA / OptiX / vcpkg in the log above.' }
+    '-DSOLSTICE_MODERN_CPU=ON' `
+    '-DSOLSTICE_BUILD_TX_TOOLS_ALPHA=OFF' `
+    '-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=OFF'
+if ($LASTEXITCODE -ne 0) { Fail 'cmake configure failed. Check Qt / CUDA / OptiX / deps in the log above.' }
 
 $Cfg = Join-Path $BuildDir 'generated\solstice_config.h'
 if (-not (Test-Path -LiteralPath $Cfg)) {
@@ -428,6 +536,21 @@ if (Test-Path -LiteralPath $cudartDir) {
         $Cudart | ForEach-Object {
             Copy-Item -LiteralPath $_.FullName -Destination $Bin -Force
             Info ("Copied " + $_.Name)
+        }
+    }
+}
+if ($script:DepsPrefix -and (Test-Path -LiteralPath $Bin)) {
+    foreach ($dir in @(
+        (Join-Path $script:DepsPrefix 'bin'),
+        (Join-Path $script:DepsPrefix 'embree\bin'),
+        (Join-Path $script:DepsPrefix 'embree')
+    )) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll', 'OpenColorIO*.dll')) {
+            Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination $Bin -Force
+                Info ("Copied " + $_.Name)
+            }
         }
     }
 }
