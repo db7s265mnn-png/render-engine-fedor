@@ -496,14 +496,14 @@ bool VolumeGrid::exportDense(int maxDim, std::vector<float>& density, int& nx, i
     nx = std::max(1, int(std::ceil(double(ext.x / step))));
     ny = std::max(1, int(std::ceil(double(ext.y / step))));
     nz = std::max(1, int(std::ceil(double(ext.z / step))));
-    long long n = long long(nx) * long long(ny) * long long(nz);
+    long long n = static_cast<long long>(nx) * static_cast<long long>(ny) * static_cast<long long>(nz);
     const long long cap = 160ll * 160ll * 160ll;
     if (n > cap) {
         const double s = std::cbrt(double(n) / double(cap));
         nx = std::max(1, int(nx / s));
         ny = std::max(1, int(ny / s));
         nz = std::max(1, int(nz / s));
-        n = long long(nx) * long long(ny) * long long(nz);
+        n = static_cast<long long>(nx) * static_cast<long long>(ny) * static_cast<long long>(nz);
     }
     density.resize(size_t(n), 0.0f);
     const bool sdf = kind_ == VolumeGridKind::Sdf;
