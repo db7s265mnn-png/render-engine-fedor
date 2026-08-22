@@ -3,10 +3,11 @@
 ## One-click (OptiX ON)
 
 On a Windows machine with the prerequisites below already installed, double-click
-`BUILD_WINDOWS.bat` in the repo root. It finds Visual Studio, Qt, CUDA and OptiX,
-fetches the Embree zip only, configures a **minimal OptiX** build (no MaterialX,
-OpenPGL, TinyUSDZ, OpenVDB, Alembic, OpenEXR, tests, or TX Tools), builds Release
-and runs `deploy`. Set `GRENDIZER_FULL_DEPS=1` to restore the extra native libs.
+`BUILD_WINDOWS.bat` — **OptiX-min** (Qt + Embree + CUDA). Output: `C:\gz-build`.
+
+`BUILD_WINDOWS_FULL.bat` — **full app** (OptiX + OpenVDB + MaterialX + OpenPGL + Alembic +
+OpenEXR + OCIO + TinyUSDZ + TX Tools). Output: `C:\gz-full`. First full run builds
+Imath/OpenEXR/Alembic/TBB/OpenVDB/OCIO into `%LOCALAPPDATA%\grendizer-deps`.
 
 **Visual Studio 2026** (MSVC 14.50+) needs **CUDA 13.2 or newer**. CUDA 12.0 cannot
 parse that STL (`type_traits` / `aligned_storage` / `result_of` while compiling

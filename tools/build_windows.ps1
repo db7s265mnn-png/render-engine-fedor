@@ -723,19 +723,32 @@ function Resolve-BuildDir {
     }
     # GitHub zip in Downloads\...\name (7)\name\build-windows blows MSVC's 250-char
     # object path (C1083 / OpenPGL CMAKE warning). Keep the build tree short.
-    foreach ($d in @('C:\gz-build', (Join-Path $env:LOCALAPPDATA 'gz-build'))) {
+    $short = 'C:\gz-build'
+    $fallbackName = 'gz-build'
+    if ($env:GRENDIZER_FULL_DEPS) {
+        $short = 'C:\gz-full'
+        $fallbackName = 'gz-full'
+    }
+    foreach ($d in @($short, (Join-Path $env:LOCALAPPDATA $fallbackName))) {
         if (Test-WritableDir $d) { return $d }
     }
-    Fail 'Cannot create C:\gz-build. Set GRENDIZER_BUILD_DIR to a short path (example C:\g).'
+    Fail "Cannot create $short. Set GRENDIZER_BUILD_DIR to a short path (example C:\g)."
 }
 
 Write-Host ''
 Write-Host '=== Grendizer Render - Windows OptiX build ===' -ForegroundColor Green
 Write-Host "Repo: $Root"
-Write-Host 'Build output: C:\gz-build (short path; GitHub zip under Downloads is too long for MSVC).'
-Write-Host 'OptiX-min: Embree + Qt + CUDA. No MaterialX / OpenPGL / TinyUSDZ / OpenVDB / Alembic / tests.'
-Write-Host 'First run: Embree zip + nvcc PTX. Extra deps (OpenVDB/MaterialX/...) are skipped.'
-Write-Host ''
+$script:FullBuild = $false
+if ($env:GRENDIZER_FULL_DEPS) { $script:FullBuild = $true }
+if ($script:FullBuild) {
+    Write-Host 'Mode: FULL (VDB, MaterialX, OpenPGL, Alembic, OpenEXR, OCIO, TinyUSDZ, TX Tools).'
+    Write-Host 'Output: C:\gz-full   (BUILD_WINDOWS_FULL.bat)'
+    Write-Host 'TinyUSDZ lib.exe can sit quiet for many minutes - that is not a hang.'
+} else {
+    Write-Host 'Mode: OPTIX-MIN (Qt + Embree + CUDA). Fast path to GPU OptiX.'
+    Write-Host 'Output: C:\gz-build'
+    Write-Host 'Full app (VDB/MaterialX/Alembic/...): double-click BUILD_WINDOWS_FULL.bat'
+}
 
 Import-VcVars64
 $CMake = Find-CMake
@@ -812,6 +825,44 @@ if (Test-Path -LiteralPath $cache) {
 $env:NVCC_PREPEND_FLAGS = '--allow-unsupported-compiler'
 $env:NVCC_APPEND_FLAGS = '--allow-unsupported-compiler'
 
+$featureFlags = @(
+    '-DSOLSTICE_ENABLE_OPTIX=ON',
+    "-DSOLSTICE_OPTIX_ARCH=$script:OptixArch",
+    "-DOptiX_ROOT=$OptiX",
+    '-DSOLSTICE_MODERN_CPU=ON',
+    '-DSOLSTICE_BUILD_TESTS=OFF',
+    '-DSOLSTICE_BUILD_TOOLS=OFF'
+)
+if ($script:FullBuild) {
+    $featureFlags += @(
+        '-DSOLSTICE_ENABLE_ALEMBIC=ON',
+        '-DSOLSTICE_ENABLE_OPENEXR=ON',
+        '-DSOLSTICE_ENABLE_TIFF=ON',
+        '-DSOLSTICE_ENABLE_MATERIALX=ON',
+        '-DSOLSTICE_ENABLE_OPENPGL=ON',
+        '-DSOLSTICE_ENABLE_OPENSUBDIV=ON',
+        '-DSOLSTICE_ENABLE_OPENVDB=ON',
+        '-DSOLSTICE_ENABLE_OCIO=ON',
+        '-DSOLSTICE_ENABLE_TINYUSDZ=ON',
+        '-DSOLSTICE_BUILD_TX_TOOLS_ALPHA=ON',
+        '-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON'
+    )
+} else {
+    $featureFlags += @(
+        '-DSOLSTICE_ENABLE_ALEMBIC=OFF',
+        '-DSOLSTICE_ENABLE_OPENEXR=OFF',
+        '-DSOLSTICE_ENABLE_TIFF=OFF',
+        '-DSOLSTICE_ENABLE_MATERIALX=OFF',
+        '-DSOLSTICE_ENABLE_OPENPGL=OFF',
+        '-DSOLSTICE_ENABLE_OPENSUBDIV=OFF',
+        '-DSOLSTICE_ENABLE_OPENVDB=OFF',
+        '-DSOLSTICE_ENABLE_OCIO=OFF',
+        '-DSOLSTICE_ENABLE_TINYUSDZ=OFF',
+        '-DSOLSTICE_BUILD_TX_TOOLS_ALPHA=OFF',
+        '-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=OFF'
+    )
+}
+
 & $CMake -S $Root -B $BuildDir -G $Generator `
     "-DCMAKE_BUILD_TYPE=Release" `
     "-DCMAKE_MAKE_PROGRAM=$Ninja" `
@@ -829,23 +880,7 @@ $env:NVCC_APPEND_FLAGS = '--allow-unsupported-compiler'
     "-DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler" `
     "-DCMAKE_CUDA_COMPILER_ID_FLAGS=--allow-unsupported-compiler" `
     "-DSOLSTICE_CUDA_HOST_COMPILER=$Cl" `
-    '-DSOLSTICE_ENABLE_OPTIX=ON' `
-    "-DSOLSTICE_OPTIX_ARCH=$script:OptixArch" `
-    "-DOptiX_ROOT=$OptiX" `
-    '-DSOLSTICE_ENABLE_ALEMBIC=OFF' `
-    '-DSOLSTICE_ENABLE_OPENEXR=OFF' `
-    '-DSOLSTICE_ENABLE_TIFF=OFF' `
-    '-DSOLSTICE_ENABLE_MATERIALX=OFF' `
-    '-DSOLSTICE_ENABLE_OPENPGL=OFF' `
-    '-DSOLSTICE_ENABLE_OPENSUBDIV=OFF' `
-    '-DSOLSTICE_ENABLE_OPENVDB=OFF' `
-    '-DSOLSTICE_ENABLE_OCIO=OFF' `
-    '-DSOLSTICE_ENABLE_TINYUSDZ=OFF' `
-    '-DSOLSTICE_BUILD_TESTS=OFF' `
-    '-DSOLSTICE_BUILD_TOOLS=OFF' `
-    '-DSOLSTICE_BUILD_TX_TOOLS_ALPHA=OFF' `
-    '-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=OFF' `
-    '-DSOLSTICE_MODERN_CPU=ON'
+    @featureFlags
 if ($LASTEXITCODE -ne 0) { Fail 'cmake configure failed. Check Qt / CUDA / OptiX / deps in the log above.' }
 
 $Cfg = Join-Path $BuildDir 'generated\solstice_config.h'
