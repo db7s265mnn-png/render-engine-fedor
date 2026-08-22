@@ -120,6 +120,8 @@ __device__ inline MediumSample sampleGpuFog(const GpuVolumeGrid& g, const Medium
             return out;
         }
         const float occ = srMax(0.0f, sampleGpuVolume(g, origin + direction * t));
+        // Same vacuum floor as CPU Woodcock: empty bake texels must not scatter.
+        if (!volumeOccupancyCanScatter(occ, g.majorant)) continue;
         const float dens = occ * densityScale;
         const Vec3 sigmaT = sigmaT0 * dens;
         const float stHero = srMax(sigmaT.x, srMax(sigmaT.y, sigmaT.z));

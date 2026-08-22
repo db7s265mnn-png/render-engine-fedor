@@ -105,6 +105,17 @@ SR_INL SR_HD Vec3 envLookup(const EnvMapView& env, Vec3 dirLocal) {
     return lerp(lerp(c00, c10, tx), lerp(c01, c11, tx), ty);
 }
 
+// Equirect jacobian sinθ is 0 at the poles. Returning pdf=0 there makes
+// NEE / MIS divide by zero (volume phase/pdf sparkles on a smooth sky).
+// Floor so the solid-angle pdf stays finite; slight bias only at the poles.
+constexpr float kEnvSinThetaMin = 1e-4f;
+
+SR_INL SR_HD float envSolidAnglePdf(float funcValue, float integral, float sinTheta) {
+    if (!(integral > 0.0f)) return kInv4Pi;
+    const float s = srMax(kEnvSinThetaMin, sinTheta);
+    return (funcValue / integral) / (kTwoPi * kPi * s);
+}
+
 // Discrete texel that owns `envPdf` — NEE must use this, not bilinear. Mixing a
 // dark sampled texel with a neighbouring sun texel is the classic HDRI firefly.
 SR_INL SR_HD Vec3 envLookupNearest(const EnvMapView& env, Vec3 dirLocal) {
@@ -138,12 +149,10 @@ SR_INL SR_HD float envPdf(const EnvMapView& env, Vec3 dirLocal) {
     if (!env.sampled()) return kInv4Pi;
     const Vec2 uv = directionToEquirect(normalize(dirLocal));
     const float sinTheta = sinf(clampf(uv.y, 0.0f, 1.0f) * kPi);
-    if (sinTheta <= 0.0f) return 0.0f;
     int x = 0, y = 0;
     envDirectionToTexel(env, dirLocal, x, y);
     const float funcValue = env.func[size_t(y) * size_t(env.width) + size_t(x)];
-    const float pdfUv = funcValue / env.integral;
-    return pdfUv / (kTwoPi * kPi * sinTheta);
+    return envSolidAnglePdf(funcValue, env.integral, sinTheta);
 }
 
 // Importance sample the environment; returns a direction in dome-local space.
@@ -165,12 +174,15 @@ SR_INL SR_HD Vec3 envSample(const EnvMapView& env, float u1, float u2, float& pd
     const float v = (float(y) + dy) / float(env.height);
     const float theta = v * kPi;
     const float sinTheta = sinf(theta);
-    if (sinTheta <= 0.0f) {
+    const float funcValue = env.func[size_t(y) * size_t(env.width) + size_t(x)];
+    pdf = envSolidAnglePdf(funcValue, env.integral, sinTheta);
+    // Pole rows can evaluate sinθ=0; do not return a direction with pdf 0
+    // (NEE inverts it). The floored jacobian above already keeps pdf finite
+    // when the texel has energy; reject only a true zero-mass bin.
+    if (pdf <= 0.0f) {
         pdf = 0.0f;
         return Vec3(0.0f, 1.0f, 0.0f);
     }
-    const float funcValue = env.func[size_t(y) * size_t(env.width) + size_t(x)];
-    pdf = (funcValue / env.integral) / (kTwoPi * kPi * sinTheta);
     return equirectToDirection(u, v);
 }
 
