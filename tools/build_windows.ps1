@@ -893,25 +893,44 @@ if (-not (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_OPTIX 1' -Quiet)) {
 Info 'OptiX is compiled into this build (SOLSTICE_HAVE_OPTIX 1).'
 
 function Invoke-LoggedCMakeBuild([string[]]$BuildArgs) {
-    Info 'Ninja PTX step has NO percent bar. nvcc/cicc/cl should be busy in Task Manager.'
+    Info 'Ninja PTX has NO percent. The seconds counter is a timer, not 0-100 progress.'
+    Info 'Watch cicc cpu= in this log: the number must grow. If cpu= stays the same, it is hung.'
     $p = Start-Process -FilePath $CMake -ArgumentList $BuildArgs -NoNewWindow -PassThru
     $t0 = Get-Date
+    $lastCpu = -1
+    $idleTicks = 0
     while (-not $p.HasExited) {
         Start-Sleep -Seconds 20
-        $alive = Get-Process -Name nvcc,cicc,cudafe++,ptxas,cl -ErrorAction SilentlyContinue
+        $alive = @(Get-Process -Name nvcc,cicc,cudafe++,ptxas,cl -ErrorAction SilentlyContinue)
         $sec = [int]((Get-Date) - $t0).TotalSeconds
-        if ($alive) {
-            $names = @($alive | ForEach-Object { $_.ProcessName } | Select-Object -Unique)
-            Info ("  still compiling  ${sec}s   " + ($names -join ', '))
+        if ($alive.Count -gt 0) {
+            $bits = @()
+            $cpuSum = 0
+            foreach ($proc in $alive) {
+                $cpuSec = 0
+                try { $cpuSec = [int]$proc.TotalProcessorTime.TotalSeconds } catch { }
+                $cpuSum = $cpuSum + $cpuSec
+                $mb = [int]($proc.WorkingSet64 / 1MB)
+                $bits += ($proc.ProcessName + ' cpu=' + $cpuSec + 's ram=' + $mb + 'MB')
+            }
+            if ($cpuSum -eq $lastCpu) { $idleTicks = $idleTicks + 1 } else { $idleTicks = 0 }
+            $lastCpu = $cpuSum
+            $line = "  timer ${sec}s   " + ($bits -join ' | ')
+            if ($idleTicks -ge 3) {
+                $line = $line + '   *** CPU not moving, probably hung ***'
+            }
+            Info $line
         } else {
-            Info ("  still building  ${sec}s   (no nvcc/cl this tick - link or wait)")
+            Info ("  timer ${sec}s   (no nvcc/cicc this tick - link or wait)")
+            $lastCpu = -1
+            $idleTicks = 0
         }
     }
     return [int]$p.ExitCode
 }
 
 Write-Host ''
-Info '1/2 nvcc OptiX PTX (often 10-20 min at [0/N], this is normal) ...'
+Info '1/2 nvcc OptiX PTX. Timer will climb; ninja stays at [0/N] until nvcc exits.'
 $code = Invoke-LoggedCMakeBuild @('--build', $BuildDir, '--target', 'solstice_optix_programs', '--parallel')
 if ($code -ne 0) {
     Fail @"
