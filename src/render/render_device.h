@@ -27,12 +27,13 @@ struct RenderProgress {
 // Optional mid-sample preview hook (e.g. after each bootstrap phase).
 using RenderMidProgressFn = std::function<void()>;
 
-// XPU: GPU renders `sampleIndex`; CPU renders `xpuPartnerSample` in parallel
-// when >= 0. Standalone devices leave partner < 0.
+// XPU: GPU keeps even spp until Embree finishes one odd spp (adaptive ratio).
+// Standalone devices leave remaining at 0.
 struct RenderSampleOptions {
-    int xpuPartnerSample = -1;  // Embree sample index, or -1 for GPU-only leftover
+    int xpuRemainingSamples = 0;        // spp left in the session (XPU batch cap)
     bool skipFramebufferStore = false;  // OptiX: keep this sample internal (XPU add)
     bool resetAccum = false;            // OptiX: memset accum before this sample
+    bool deferHostCopy = false;         // OptiX: skip D2H; caller downloads the batch
 };
 
 class RenderDevice {
@@ -43,6 +44,8 @@ public:
     virtual bool isAvailable() const = 0;
     // CUDA event time of the last renderSample(); 0 on CPU backends.
     virtual double lastGpuSampleMs() const { return 0.0; }
+    // Samples folded into the film by the last renderSample() (XPU may do many).
+    virtual int lastCompletedSamples() const { return 1; }
 
     // Uploads/builds acceleration structures. Returns false and fills `error`
     // when the scene cannot be prepared.
@@ -57,6 +60,8 @@ public:
 
     // OptiX internal accum after skipFramebufferStore (XPU merge). Count is width*height.
     virtual bool copyInternalAccum(Vec4* /*dst*/, size_t /*count*/) const { return false; }
+    // D2H of the device accum (XPU batch). Default falls back to copyInternalAccum.
+    virtual bool downloadInternalAccum(Vec4* dst, size_t count) { return copyInternalAccum(dst, count); }
 
     // Picks up in-place edits of the scene that do not touch geometry, such as
     // a camera move or a change of film settings, without rebuilding the

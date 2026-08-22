@@ -587,23 +587,25 @@ public:
             // OPTIX_ERROR_CUDA_ERROR (7900) on current Windows OptiX/driver stacks.
             launchBounceLoop(w, h, maxIters);
             CUDA_CHECK(cudaEventRecord(gpuStopEvent_, stream_));
-            if (opt.skipFramebufferStore) {
-                hostAccum_.resize(pixelCount);
-                CUDA_CHECK(cudaMemcpyAsync(hostAccum_.data(), accumBuffer_.as<Vec4>(),
-                                           pixelCount * sizeof(Vec4), cudaMemcpyDeviceToHost, stream_));
-            } else {
-                CUDA_CHECK(cudaMemcpyAsync(fb.data(), accumBuffer_.as<Vec4>(), pixelCount * sizeof(Vec4),
-                                           cudaMemcpyDeviceToHost, stream_));
+            if (!opt.deferHostCopy) {
+                if (opt.skipFramebufferStore) {
+                    hostAccum_.resize(pixelCount);
+                    CUDA_CHECK(cudaMemcpyAsync(hostAccum_.data(), accumBuffer_.as<Vec4>(),
+                                               pixelCount * sizeof(Vec4), cudaMemcpyDeviceToHost, stream_));
+                } else {
+                    CUDA_CHECK(cudaMemcpyAsync(fb.data(), accumBuffer_.as<Vec4>(), pixelCount * sizeof(Vec4),
+                                               cudaMemcpyDeviceToHost, stream_));
+                }
             }
             CUDA_CHECK(cudaEventSynchronize(gpuStopEvent_));
             float gpuMs = 0.0f;
             CUDA_CHECK(cudaEventElapsedTime(&gpuMs, gpuStartEvent_, gpuStopEvent_));
             lastGpuSampleMs_ = double(gpuMs);
-            CUDA_CHECK(cudaStreamSynchronize(stream_));
+            if (!opt.deferHostCopy) CUDA_CHECK(cudaStreamSynchronize(stream_));
             const double wallMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
 
-            if (sampleIndex < 2 || sampleIndex % 32 == 0) {
+            if (!opt.deferHostCopy && (sampleIndex < 2 || sampleIndex % 32 == 0)) {
                 std::ostringstream msg;
                 msg.setf(std::ios::fixed);
                 msg.precision(2);
@@ -613,7 +615,7 @@ public:
                 logInfo(msg.str());
             }
 
-            if (!opt.skipFramebufferStore) fb.markHasData();
+            if (!opt.skipFramebufferStore && !opt.deferHostCopy) fb.markHasData();
             if (midProgress) midProgress();
         } catch (const std::exception& e) {
             lastGpuSampleMs_ = 0.0;
@@ -635,6 +637,15 @@ public:
     bool copyInternalAccum(Vec4* dst, size_t count) const override {
         if (!dst || hostAccum_.size() != count) return false;
         std::memcpy(dst, hostAccum_.data(), count * sizeof(Vec4));
+        return true;
+    }
+
+    bool downloadInternalAccum(Vec4* dst, size_t count) override {
+        if (!dst || !stream_ || accumBuffer_.size() != count * sizeof(Vec4)) return false;
+        CUDA_CHECK(cudaSetDevice(0));
+        CUDA_CHECK(cudaMemcpyAsync(dst, accumBuffer_.as<Vec4>(), count * sizeof(Vec4),
+                                   cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
         return true;
     }
 

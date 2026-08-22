@@ -1143,8 +1143,10 @@ public:
                          .withTooltip(optixBackendCompiledIn()
                                           ? QStringLiteral("CPU (Embree): full feature set on the host.\n"
                                                            "GPU (OptiX): NVIDIA wavefront path tracer.\n"
-                                                           "XPU (Embree+OptiX): even spp on GPU, odd spp on "
-                                                           "CPU, both full-frame. CPU keeps MNEE / SSS / "
+                                                           "XPU (Embree+OptiX): GPU keeps rendering even spp "
+                                                           "until Embree finishes one odd spp, then both are "
+                                                           "added to the film. Faster GPU means more GPU spp "
+                                                           "per CPU spp (no 1:1 wait). CPU keeps MNEE / SSS / "
                                                            "OpenPGL / N light samples / pixel filters; GPU "
                                                            "runs the OptiX wavefront PT (image maps + "
                                                            "Lambert/GGX/glass, residual-ratio fog).\n"

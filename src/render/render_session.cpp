@@ -372,8 +372,7 @@ void RenderSession::threadMain() {
 
         RenderSampleOptions xpuOpt;
         const bool xpu = scene->settings.backend == kBackendXpu;
-        const bool xpuPair = xpu && sample + 1 < targetSamples;
-        if (xpuPair) xpuOpt.xpuPartnerSample = sample + 1;
+        if (xpu) xpuOpt.xpuRemainingSamples = targetSamples - sample;
 
         try {
             device_->renderSample(framebuffer_, sample, cancel_, midProgress, xpu ? &xpuOpt : nullptr);
@@ -391,7 +390,7 @@ void RenderSession::threadMain() {
         if (softRestart_.load(std::memory_order_relaxed)) continue;  // handled at loop top
         if (cancel_.load(std::memory_order_relaxed)) break;
 
-        const int sampleStep = xpuPair ? 2 : 1;
+        const int sampleStep = std::max(1, device_ ? device_->lastCompletedSamples() : 1);
         framebuffer_.setSampleCount(sample + sampleStep);
         const auto now = std::chrono::steady_clock::now();
         const double elapsed = std::chrono::duration<double>(now - sampleStartTime).count();

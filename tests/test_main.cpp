@@ -509,6 +509,10 @@ void testXpuDevice() {
     check(!xpuGpuOwnsSample(1), "CPU owns odd spp 1");
     check(xpuGpuOwnsSample(2), "GPU owns even spp 2");
     check(!xpuGpuOwnsSample(3), "CPU owns odd spp 3");
+    check(xpuEmbreeThreadCount(8) == 7, "XPU reserves one core for GPU submit");
+    check(xpuEmbreeThreadCount(2) == 1, "XPU with 2 threads leaves 1 for GPU");
+    check(xpuEmbreeThreadCount(1) == 1, "XPU keeps at least one Embree thread");
+    check(xpuEmbreeThreadCount(0) >= 1, "XPU auto thread count is at least 1");
 
     Scene scene;
     scene.settings.backend = kBackendXpu;
