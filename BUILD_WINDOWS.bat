@@ -4,7 +4,8 @@ cd /d "%~dp0"
 
 echo.
 echo Double-click this file to compile (Release + OptiX).
-echo First run can take a long time (vcpkg + nvcc).
+echo First run can take a long time (Embree / OpenEXR / OpenVDB + nvcc).
+echo Deps are cached in %%LOCALAPPDATA%%\grendizer-deps and reused.
 echo.
 
 where powershell >nul 2>&1

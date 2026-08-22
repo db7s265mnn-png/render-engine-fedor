@@ -312,10 +312,33 @@ function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [
     }
 }
 
+function Find-EmbreeZip {
+    $name = 'embree-4.4.0.x64.windows.zip'
+    $dirs = @(
+        $script:DepsPrefix,
+        (Join-Path $Root 'deps-cache'),
+        'C:\grendizer-deps',
+        (Join-Path $env:USERPROFILE 'Downloads'),
+        $env:TEMP
+    )
+    if ($env:GRENDIZER_DEPS) { $dirs = @($env:GRENDIZER_DEPS) + $dirs }
+    foreach ($d in $dirs) {
+        if (-not $d) { continue }
+        $p = Join-Path $d $name
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    return $null
+}
+
 function Ensure-NativeDeps {
-    $script:DepsPrefix = Join-Path $env:LOCALAPPDATA 'grendizer-deps'
+    if ($env:GRENDIZER_DEPS) {
+        $script:DepsPrefix = $env:GRENDIZER_DEPS
+    } else {
+        $script:DepsPrefix = Join-Path $env:LOCALAPPDATA 'grendizer-deps'
+    }
     $stamp = Join-Path $script:DepsPrefix 'stamp-native-1.txt'
     $srcRoot = Join-Path $env:LOCALAPPDATA 'grendizer-deps-src'
+    if ($env:GRENDIZER_DEPS_SRC) { $srcRoot = $env:GRENDIZER_DEPS_SRC }
     New-Item -ItemType Directory -Force -Path $script:DepsPrefix | Out-Null
     New-Item -ItemType Directory -Force -Path $srcRoot | Out-Null
 
@@ -326,10 +349,21 @@ function Ensure-NativeDeps {
             Select-Object -First 1
     }
     if (-not $embreeCmake) {
-        Info 'Downloading Embree 4.4.0 Windows zip ...'
-        $zip = Join-Path $env:TEMP 'embree-4.4.0.x64.windows.zip'
-        $url = 'https://github.com/RenderKit/embree/releases/download/v4.4.0/embree-4.4.0.x64.windows.zip'
-        Invoke-WebRequest -Uri $url -OutFile $zip
+        $zip = Find-EmbreeZip
+        if ($zip) {
+            Info "Using local Embree zip: $zip"
+        } else {
+            Info 'Downloading Embree 4.4.0 Windows zip (one-time, then reused) ...'
+            $zip = Join-Path $script:DepsPrefix 'embree-4.4.0.x64.windows.zip'
+            $url = 'https://github.com/RenderKit/embree/releases/download/v4.4.0/embree-4.4.0.x64.windows.zip'
+            $oldPref = $ProgressPreference
+            $ProgressPreference = 'SilentlyContinue'
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $zip
+            } finally {
+                $ProgressPreference = $oldPref
+            }
+        }
         $embreeDest = Join-Path $script:DepsPrefix 'embree'
         if (Test-Path -LiteralPath $embreeDest) { Remove-Item -LiteralPath $embreeDest -Recurse -Force }
         Expand-Archive -Path $zip -DestinationPath $embreeDest -Force

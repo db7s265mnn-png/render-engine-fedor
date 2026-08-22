@@ -8,7 +8,12 @@ fetches Embree + builds Imath/OpenEXR/Alembic/TBB/OpenVDB (no vcpkg), configures
 `-DSOLSTICE_ENABLE_OPTIX=ON`, builds Release and runs `deploy`.
 
 Override auto-detected paths with environment variables if needed: `QT_ROOT`,
-`VCPKG_ROOT`, `CUDA_PATH`, `OptiX_ROOT`, `GRENDIZER_BUILD_DIR`.
+`CUDA_PATH`, `OptiX_ROOT`, `GRENDIZER_BUILD_DIR`, `GRENDIZER_DEPS`.
+
+To skip the Embree download, put `embree-4.4.0.x64.windows.zip` in
+`%USERPROFILE%\Downloads`, `C:\grendizer-deps`, or a `deps-cache` folder next to
+`BUILD_WINDOWS.bat` ([Embree 4.4.0 zip](https://github.com/RenderKit/embree/releases/download/v4.4.0/embree-4.4.0.x64.windows.zip)).
+After one successful run, compiled deps live in `%LOCALAPPDATA%\grendizer-deps`.
 
 The exe lands in `build-windows\bin\Release\`. Engine → Render Backend should list
 `GPU (OptiX)` without “not in this build”.
