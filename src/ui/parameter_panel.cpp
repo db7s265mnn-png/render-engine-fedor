@@ -9,6 +9,7 @@
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -23,12 +24,14 @@
 #include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
+#include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVector3D>
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <vector>
 
 #include "nodes/node_registry.h"
 #include "core/expr_eval.h"
@@ -416,20 +419,15 @@ ParameterPanel::ParameterPanel(QWidget* parent) : QWidget(parent) {
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
 
-    auto* scroll = new QScrollArea(this);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    outer->addWidget(scroll);
-
+    // Folder tabs own their own scroll areas so the tab bar stays pinned
+    // (Houdini-style). MaterialX pages wrap themselves the same way.
     content_ = new QWidget();
     content_->setMinimumWidth(0);
-    content_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    content_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     contentLayout_ = new QVBoxLayout(content_);
     contentLayout_->setContentsMargins(8, 8, 8, 8);
     contentLayout_->setSpacing(8);
-    scroll->setWidget(content_);
+    outer->addWidget(content_);
 
     rebuild();
 }
@@ -514,7 +512,7 @@ void ParameterPanel::rebuild() {
 }
 
 void ParameterPanel::rebuildLop() {
-    // Header: node name plus type description.
+    // Header: node name plus type description (stays above the folder tabs).
     auto* header = new QGroupBox(node_->typeName());
     auto* headerLayout = new QFormLayout(header);
     nameEdit_ = new QLineEdit(node_->name());
@@ -542,7 +540,8 @@ void ParameterPanel::rebuildLop() {
     }
     contentLayout_->addWidget(header);
 
-    // One group box per parameter folder, ungrouped parameters first.
+    // One Houdini-style folder tab per parameter group. Only the active folder
+    // is shown; the tab bar stays pinned while the page contents scroll.
     QStringList groups;
     groups << QString();
     for (const Parameter& parameter : node_->parameters()) {
@@ -550,33 +549,92 @@ void ParameterPanel::rebuildLop() {
         if (!groups.contains(parameter.group)) groups << parameter.group;
     }
 
-    for (const QString& group : groups) {
+    auto makeFolderPage = [](QFormLayout** formOut) -> QWidget* {
+        auto* scroll = new QScrollArea();
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        auto* inner = new QWidget();
+        auto* layout = new QVBoxLayout(inner);
+        layout->setContentsMargins(6, 8, 6, 8);
+        layout->setSpacing(4);
+        auto* form = new QFormLayout();
+        form->setContentsMargins(0, 0, 0, 0);
+        form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+        layout->addLayout(form);
+        layout->addStretch(1);
+        scroll->setWidget(inner);
+        *formOut = form;
+        return scroll;
+    };
+
+    struct FolderPage {
+        QString name;
+        QWidget* page = nullptr;
         QFormLayout* form = nullptr;
+    };
+    std::vector<FolderPage> pages;
+
+    for (const QString& group : groups) {
+        FolderPage* folder = nullptr;
         for (Parameter& parameter : node_->parameters()) {
             if (parameter.name == "mtlx") continue;
             if (parameter.name.startsWith(QLatin1String("_"))) continue;
             if (parameter.group != group) continue;
             if (!evaluateVisibleWhen(parameter.visibleWhen, *node_)) continue;
-            if (!form) {
-                auto* box = new QGroupBox(group.isEmpty() ? QString("Parameters") : group);
-                form = new QFormLayout(box);
-                form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-                form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-                form->setRowWrapPolicy(QFormLayout::WrapLongRows);
-                contentLayout_->addWidget(box);
+            if (!folder) {
+                pages.emplace_back();
+                folder = &pages.back();
+                folder->name = group;
+                folder->page = makeFolderPage(&folder->form);
             }
             QWidget* editor = createEditor(parameter);
             if (!editor) continue;
             if (!parameter.tooltip.isEmpty()) editor->setToolTip(parameter.tooltip);
             // Buttons carry their own label text — avoid "Render: [Render]".
             if (parameter.type == ParamType::Button)
-                form->addRow(QString(), editor);
+                folder->form->addRow(QString(), editor);
             else
-                form->addRow(parameter.label, editor);
+                folder->form->addRow(parameter.label, editor);
         }
     }
 
-    contentLayout_->addStretch(1);
+    if (pages.empty()) {
+        contentLayout_->addStretch(1);
+        return;
+    }
+
+    auto* tabs = new QTabWidget();
+    tabs->setDocumentMode(true);
+    tabs->setUsesScrollButtons(true);
+    tabs->setElideMode(Qt::ElideNone);
+    tabs->setMovable(false);
+    tabs->setTabPosition(QTabWidget::North);
+    tabs->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    for (const FolderPage& folder : pages) {
+        const QString title = folder.name.isEmpty() ? QStringLiteral("Parameters") : folder.name;
+        tabs->addTab(folder.page, title);
+    }
+
+    const QString previous = lastFolderByType_.value(node_->typeName());
+    if (!previous.isEmpty()) {
+        for (int i = 0; i < tabs->count(); ++i) {
+            if (tabs->tabText(i) == previous) {
+                tabs->setCurrentIndex(i);
+                break;
+            }
+        }
+    }
+    connect(tabs, &QTabWidget::currentChanged, this, [this, tabs](int index) {
+        if (!node_ || index < 0) return;
+        lastFolderByType_[node_->typeName()] = tabs->tabText(index);
+    });
+    if (tabs->count() > 0)
+        lastFolderByType_[node_->typeName()] = tabs->tabText(tabs->currentIndex());
+
+    contentLayout_->addWidget(tabs, 1);
 }
 
 void ParameterPanel::rebuildMaterialX() {
@@ -889,8 +947,12 @@ void ParameterPanel::rebuildMaterialX() {
         form->addRow(label, edit);
     }
 
-    contentLayout_->addWidget(paramsBox);
-    contentLayout_->addStretch(1);
+    auto* scroll = new QScrollArea();
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setWidget(paramsBox);
+    contentLayout_->addWidget(scroll, 1);
 }
 
 QWidget* ParameterPanel::createEditor(Parameter& parameter) {

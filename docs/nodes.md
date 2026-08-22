@@ -117,9 +117,17 @@ parameters, and *Look Through Camera Node* goes back to the authored camera.
 
 | Group | Parameters |
 | --- | --- |
-| Image | Resolution X/Y, Samples Per Pixel |
-| Engine | Render Device (CPU Embree, GPU OptiX, or XPU), Integrator (Path Tracer, Direct Lighting, Ambient Occlusion), Max Ray Depth, Russian Roulette Depth, Direct Clamp, Indirect Clamp, Seed, CPU Threads, Tile Size, AO Distance |
-| Film | Tone Map (None, Reinhard, ACES), Exposure, Gamma, Environment Visible To Camera |
+| Image | Resolution X/Y, Pixel Filter, Filter Radius, Output Path, Bit Depth, TX cache |
+| Sampling | Samples Per Pixel, Light Samples, Pixel Sampler, Sampling Type, Bucket Size, Seed, Direct / Indirect Clamp |
+| Engine | Render Device (CPU Embree, GPU OptiX, or XPU), Integrator, spectral options, CPU Threads, AO Distance, Dispersion, Indirect Guides, Volume Similarity |
+| Depth | Max Ray Depth, Russian Roulette Depth |
+| Caustics | Caustics, Caustics Engine, Caustic Firefly Clamp, Photon Count / Radius |
+| Motion Blur | Enable Motion Blur, Motion Keys, Shutter Length |
+| Displacement | Frustum Cull, Screen Adaptive, Enable Displacement, Dicing Camera |
+| Film | Working Space, OCIO, Environment Visible To Camera |
+| Diagnostic | Sampling Debug, Spectral False Color |
+
+Folders are Houdini-style tabs in the parameter panel: click a tab to show only that group.
 
 Film settings are applied when the framebuffer is displayed or written to an LDR file; `.exr`
 and `.hdr` outputs stay linear.

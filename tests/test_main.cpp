@@ -15,6 +15,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QStringList>
 #include <QVector3D>
 
 #include "app/default_scene.h"
@@ -562,6 +563,75 @@ void testXpuDevice() {
     checkNear(jy, jy2, 1e-6f, "shared camera jitter Y matches Sobol");
     checkNear(lu, lu2, 1e-6f, "shared lens U matches Sobol");
     checkNear(lv, lv2, 1e-6f, "shared lens V matches Sobol");
+}
+
+void testRenderSettingsFolders() {
+    std::printf("render settings folders\n");
+    registerBuiltinNodes();
+    NodeGraph graph;
+    Node* settings = graph.createNode("rendersettings", "rendersettings1");
+    check(settings != nullptr, "create rendersettings");
+    if (!settings) return;
+
+    auto groupOf = [&](const char* name) -> QString {
+        const Parameter* parameter = settings->findParameter(QLatin1String(name));
+        return parameter ? parameter->group : QString();
+    };
+    auto indexOf = [&](const char* name) -> int {
+        const auto& params = settings->parameters();
+        for (int i = 0; i < static_cast<int>(params.size()); ++i) {
+            if (params[static_cast<size_t>(i)].name == QLatin1String(name)) return i;
+        }
+        return -1;
+    };
+
+    check(groupOf("pixelfilter") == QLatin1String("Image"), "pixelfilter in Image");
+    check(groupOf("filterradius") == QLatin1String("Image"), "filterradius in Image");
+    check(indexOf("pixelfilter") == indexOf("resy") + 1, "pixelfilter after resy");
+    check(indexOf("filterradius") == indexOf("pixelfilter") + 1, "filterradius after pixelfilter");
+
+    check(groupOf("lightsamples") == QLatin1String("Sampling"), "lightsamples in Sampling");
+    check(indexOf("lightsamples") == indexOf("samples") + 1, "lightsamples after samples");
+
+    check(groupOf("maxdepth") == QLatin1String("Depth"), "maxdepth in Depth");
+    check(groupOf("rrdepth") == QLatin1String("Depth"), "rrdepth in Depth");
+
+    check(groupOf("caustics") == QLatin1String("Caustics"), "caustics in Caustics");
+    check(groupOf("causticsengine") == QLatin1String("Caustics"), "causticsengine in Caustics");
+    check(groupOf("causticclamp") == QLatin1String("Caustics"), "causticclamp in Caustics");
+    check(groupOf("photoncount") == QLatin1String("Caustics"), "photoncount in Caustics");
+    check(groupOf("photonradius") == QLatin1String("Caustics"), "photonradius in Caustics");
+    {
+        QStringList causticsOrder;
+        for (const Parameter& parameter : settings->parameters()) {
+            if (parameter.group != QLatin1String("Caustics")) continue;
+            if (parameter.name.startsWith(QLatin1Char('_'))) continue;
+            causticsOrder << parameter.name;
+        }
+        const QStringList causticsExpected{
+            QStringLiteral("caustics"), QStringLiteral("causticsengine"),
+            QStringLiteral("causticclamp"), QStringLiteral("photoncount"),
+            QStringLiteral("photonradius")};
+        check(causticsOrder == causticsExpected, "caustics tab parameter order");
+    }
+
+    check(groupOf("enabledisplacement") == QLatin1String("Displacement"),
+          "enabledisplacement in Displacement");
+    check(groupOf("frustumcull") == QLatin1String("Displacement"), "frustumcull in Displacement");
+    check(groupOf("screenadaptive") == QLatin1String("Displacement"), "screenadaptive in Displacement");
+
+    QStringList groups;
+    for (const Parameter& parameter : settings->parameters()) {
+        if (parameter.name.startsWith(QLatin1Char('_'))) continue;
+        if (parameter.group.isEmpty()) continue;
+        if (!groups.contains(parameter.group)) groups << parameter.group;
+    }
+    const QStringList expected{QStringLiteral("Image"),       QStringLiteral("Sampling"),
+                               QStringLiteral("Engine"),      QStringLiteral("Depth"),
+                               QStringLiteral("Caustics"),    QStringLiteral("Motion Blur"),
+                               QStringLiteral("Displacement"), QStringLiteral("Film"),
+                               QStringLiteral("Diagnostic")};
+    check(groups == expected, "render settings tab order");
 }
 
 void testRender() {
@@ -6090,6 +6160,12 @@ int main() {
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
+    if (getenv("SOL_ONLY_FOLDERS")) {
+        registerBuiltinNodes();
+        testRenderSettingsFolders();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (getenv("SOL_ONLY_TESS")) {
         registerBuiltinNodes();
         testTessellationTriangleBudget();
@@ -6113,6 +6189,7 @@ int main() {
     testGlob();
     testGraphCook();
     testXpuDevice();
+    testRenderSettingsFolders();
     testCameraDofFocus();
     testPolyOpticsApertureSpread();
     testPolynomialOpticsCamera();

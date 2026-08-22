@@ -2,6 +2,7 @@
 // LOP/network node or a MaterialX node inside a material container.
 #pragma once
 
+#include <QHash>
 #include <QWidget>
 
 #include "nodes/node.h"
@@ -54,6 +55,8 @@ private:
     bool updating_ = false;
     bool focusPickActive_ = false;
     QPushButton* focusPickButton_ = nullptr;
+    // Last open parameter folder per node type (Houdini-style tabs survive rebuild).
+    QHash<QString, QString> lastFolderByType_;
 };
 
 }  // namespace sol

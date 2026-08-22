@@ -123,6 +123,30 @@ void applyDarkTheme(QApplication& application) {
         }
         QGroupBox { border: 1px solid #3a3e44; border-radius: 2px; margin-top: 14px; padding-top: 6px; }
         QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #ffa82e; }
+        QTabWidget::pane {
+            border: 1px solid #555960;
+            background: #3a3e44;
+            top: -1px;
+            padding: 2px;
+        }
+        QTabBar::tab {
+            background: #2a2e33;
+            color: #a8adb4;
+            padding: 5px 12px;
+            margin-right: 2px;
+            border: 1px solid #555960;
+            border-bottom: none;
+            min-width: 4em;
+        }
+        QTabBar::tab:selected {
+            background: #3a3e44;
+            color: #ffa82e;
+        }
+        QTabBar::tab:hover:!selected {
+            color: #e8eaed;
+            background: #32363c;
+        }
+        QTabBar::scroller { width: 20px; }
         QLineEdit, QComboBox, QPlainTextEdit, QTreeWidget {
             background: #22242a; border: 1px solid #3a3e44; border-radius: 2px; padding: 2px 4px;
         }

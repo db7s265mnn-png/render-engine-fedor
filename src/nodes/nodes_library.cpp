@@ -1019,11 +1019,28 @@ public:
 class RenderSettingsNode : public Node {
 public:
     explicit RenderSettingsNode(const QString& name) : Node("rendersettings", name) {
-        // Group order follows first appearance: Image → Sampling → Engine → …
+        // Tab order follows first appearance:
+        // Image → Sampling → Engine → Depth → Caustics → Motion Blur → Displacement → Film → Diagnostic.
 
         // --- Image --------------------------------------------------------------------
         addParameter(Parameter::makeInt("resx", "Resolution X", 960, 16, 8192, false).withGroup("Image"));
         addParameter(Parameter::makeInt("resy", "Resolution Y", 540, 16, 8192, false).withGroup("Image"));
+        addParameter(Parameter::makeMenu("pixelfilter", "Pixel Filter",
+                                         {"Box", "Triangle", "Gaussian", "Mitchell"}, 0)
+                         .withGroup("Image")
+                         .withTooltip("Film reconstruction filter — how each continuous sample is "
+                                      "weighted into neighbouring pixels (PBRT / Arnold).\n"
+                                      "Box (default): hard 1×1 pixels — sharp but makes 1spp noise "
+                                      "look blocky when zoomed.\n"
+                                      "Triangle / Gaussian / Mitchell: softer AA; softens the "
+                                      "visible pixel grid at low spp.\n"
+                                      "Does not change the Pixel Sampler (Sobol / GenPnt2D / …)."));
+        addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.5, 0.0, 8.0, false)
+                         .withGroup("Image")
+                         .withTooltip("Filter support in pixels. Changing Pixel Filter fills the "
+                                      "PBRT-v4 recommended radius (Box 0.5, Triangle 2, "
+                                      "Gaussian 1.5, Mitchell 2). You can still override.\n"
+                                      "Larger = softer / more blur."));
         addParameter(Parameter::makeFile("outputpath", "Output Path", "render.exr",
                                          "OpenEXR (*.exr);;All Files (*)")
                          .withGroup("Image")
@@ -1052,6 +1069,10 @@ public:
         // --- Sampling -----------------------------------------------------------------
         addParameter(Parameter::makeInt("samples", "Samples Per Pixel", 128, 1, 100000, false)
                          .withGroup("Sampling"));
+        addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
+                         .withGroup("Sampling")
+                         .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
+                                      "Higher = less light/reflection noise, slower."));
         addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
                                          {"Sobol (Owen)", "Blue Noise", "Xorshift", "GenPnt2D",
                                           "Manual-Test"},
@@ -1094,10 +1115,6 @@ public:
                                       "0 = Auto (~8× threads tiles, side 8/16/32/64).\n"
                                       "Ignored by Progressive."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Sampling"));
-        addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
-                         .withGroup("Sampling")
-                         .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
-                                      "Higher = less light/reflection noise, slower."));
         addParameter(Parameter::makeFloat("clampdirect", "Direct Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Sampling")
                          .withTooltip("Caps eye-path sample contributions in linear pixel radiance "
@@ -1112,22 +1129,6 @@ public:
                                       "radiance (Arnold Indirect Clamp). Raw LT deposits carry "
                                       "camera PDF — they are scaled to radiance before clamping.\n"
                                       "Affects BDPT / BDPT Spectral caustics from LT. 0 disables."));
-        addParameter(Parameter::makeMenu("pixelfilter", "Pixel Filter",
-                                         {"Box", "Triangle", "Gaussian", "Mitchell"}, 0)
-                         .withGroup("Sampling")
-                         .withTooltip("Film reconstruction filter — how each continuous sample is "
-                                      "weighted into neighbouring pixels (PBRT / Arnold).\n"
-                                      "Box (default): hard 1×1 pixels — sharp but makes 1spp noise "
-                                      "look blocky when zoomed.\n"
-                                      "Triangle / Gaussian / Mitchell: softer AA; softens the "
-                                      "visible pixel grid at low spp.\n"
-                                      "Does not change the Pixel Sampler (Sobol / GenPnt2D / …)."));
-        addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.5, 0.0, 8.0, false)
-                         .withGroup("Sampling")
-                         .withTooltip("Filter support in pixels. Changing Pixel Filter fills the "
-                                      "PBRT-v4 recommended radius (Box 0.5, Triangle 2, "
-                                      "Gaussian 1.5, Mitchell 2). You can still override.\n"
-                                      "Larger = softer / more blur."));
 
         // --- Engine -------------------------------------------------------------------
         // OptiX is optional at compile time — label the menu so artists know when
@@ -1201,15 +1202,6 @@ public:
                          .withVisibleWhen("integrator==4||integrator==5")
                          .withTooltip("Visible: pbrt-style PDF peaked near 538 nm (less colour noise).\n"
                                       "Uniform: stratified across 360–830 nm."));
-        addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 4096)
-                         .withGroup("Engine")
-                         .withTooltip("Max path bounces after the camera (surfaces + volume scatters).\n"
-                                      "Dense fog / clouds with deep multiple scattering need 1000+.\n"
-                                      "Also raise Russian Roulette Depth, or RR will kill deep paths early."));
-        addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 4096)
-                         .withGroup("Engine")
-                         .withTooltip("Start Russian roulette after this depth.\n"
-                                      "For deep volume multiple scattering, set near Max Ray Depth."));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
@@ -1223,47 +1215,6 @@ public:
                          .withVisibleWhen("integrator==6")
                          .withTooltip("Wireframe: edge half-width in screen pixels (anti-aliased). "
                                       "Higher = thicker mesh lines."));
-        addParameter(Parameter::makeBool("caustics", "Caustics", true)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
-                         .withTooltip("Enable caustic light transport (light focused through glass "
-                                      "and off mirrors).\n"
-                                      "Engine picks the estimator (MNEE / MNEE+Photon / Photon).\n"
-                                      "Per-light and per-material Contribute to Caustics can disable "
-                                      "individual sources or casters.\n"
-                                      "Off: glass casts dark shadows (soften with shadow_opacity)."));
-        addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
-                                         {"MNEE (manifolds)", "MNEE+Photon", "Photon / VCM"}, 1)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
-                         .withTooltip("MNEE: manifold next-event — best for near-delta glass + "
-                                      "area lights.\n"
-                                      "MNEE+Photon: picks one estimator for the scene — delta-only "
-                                      "glass → MNEE; if any rough refractive caster exists → "
-                                      "Photon / VCM. When Photon is active, MNEE / LT / eye-path "
-                                      "BSDF caustics are turned off (no stacking).\n"
-                                      "Photon / VCM: caustic-only photon map — rough glass and "
-                                      "black bases through refraction."));
-        // Hidden migration: legacy menu was Automatic / MNEE / Photon (0/1/2).
-        addParameter(Parameter::makeBool("_caustics_engine_menu_v2", "", true));
-        addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)
-                         .withGroup("Engine")
-                         .withVisibleWhen("caustics==1&&causticsengine==1||caustics==1&&causticsengine==2")
-                         .withTooltip("Photons emitted per progressive pass when Caustics Engine "
-                                      "is Photon / VCM or MNEE+Photon (Auto→Photon)."));
-        addParameter(Parameter::makeFloat("photonradius", "Photon Radius", 0.08, 0.001, 10.0, false)
-                         .withGroup("Engine")
-                         .withVisibleWhen("caustics==1&&causticsengine==1||caustics==1&&causticsengine==2")
-                         .withTooltip("Initial gather radius (scene units) for the caustic photon "
-                                      "map. Shrinks as samples accumulate."));
-        addParameter(Parameter::makeFloat("causticclamp", "Caustic Firefly Clamp", 0.0, 0.0, 1000.0, false)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
-                         .withTooltip("Extra cap on paths that look through glass/mirrors at a light "
-                                      "(the sparkle inside refractive objects).\n"
-                                      "Even at 0, a safety cap of 10 is applied to those paths — they "
-                                      "never converge with more samples when the light is small.\n"
-                                      "Raise to tighten further; the caustic on the floor is not capped."));
         addParameter(Parameter::makeMenu(
                          "dispersionmode", "Dispersion Mode",
                          {"Hero (default)", "Optimized", "Spectral RGB ×3", "Fake tint"}, 0)
@@ -1300,6 +1251,61 @@ public:
                                       "On: from volume bounce 5 to 20, lerp g toward 0 and stretch "
                                       "the mean free path so σs(1−g) stays constant. Low-order "
                                       "scatters stay anisotropic. Does not change the walk when off."));
+
+        // --- Depth --------------------------------------------------------------------
+        addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 4096)
+                         .withGroup("Depth")
+                         .withTooltip("Max path bounces after the camera (surfaces + volume scatters).\n"
+                                      "Dense fog / clouds with deep multiple scattering need 1000+.\n"
+                                      "Also raise Russian Roulette Depth, or RR will kill deep paths early."));
+        addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 4096)
+                         .withGroup("Depth")
+                         .withTooltip("Start Russian roulette after this depth.\n"
+                                      "For deep volume multiple scattering, set near Max Ray Depth."));
+
+        // --- Caustics -----------------------------------------------------------------
+        addParameter(Parameter::makeBool("caustics", "Caustics", true)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
+                         .withTooltip("Enable caustic light transport (light focused through glass "
+                                      "and off mirrors).\n"
+                                      "Engine picks the estimator (MNEE / MNEE+Photon / Photon).\n"
+                                      "Per-light and per-material Contribute to Caustics can disable "
+                                      "individual sources or casters.\n"
+                                      "Off: glass casts dark shadows (soften with shadow_opacity)."));
+        addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
+                                         {"MNEE (manifolds)", "MNEE+Photon", "Photon / VCM"}, 1)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
+                         .withTooltip("MNEE: manifold next-event — best for near-delta glass + "
+                                      "area lights.\n"
+                                      "MNEE+Photon: picks one estimator for the scene — delta-only "
+                                      "glass → MNEE; if any rough refractive caster exists → "
+                                      "Photon / VCM. When Photon is active, MNEE / LT / eye-path "
+                                      "BSDF caustics are turned off (no stacking).\n"
+                                      "Photon / VCM: caustic-only photon map — rough glass and "
+                                      "black bases through refraction."));
+        // Hidden migration: legacy menu was Automatic / MNEE / Photon (0/1/2).
+        addParameter(Parameter::makeBool("_caustics_engine_menu_v2", "", true));
+        addParameter(Parameter::makeFloat("causticclamp", "Caustic Firefly Clamp", 0.0, 0.0, 1000.0, false)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
+                         .withTooltip("Extra cap on paths that look through glass/mirrors at a light "
+                                      "(the sparkle inside refractive objects).\n"
+                                      "Even at 0, a safety cap of 10 is applied to those paths — they "
+                                      "never converge with more samples when the light is small.\n"
+                                      "Raise to tighten further; the caustic on the floor is not capped."));
+        addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("caustics==1&&causticsengine==1||caustics==1&&causticsengine==2")
+                         .withTooltip("Photons emitted per progressive pass when Caustics Engine "
+                                      "is Photon / VCM or MNEE+Photon (Auto→Photon)."));
+        addParameter(Parameter::makeFloat("photonradius", "Photon Radius", 0.08, 0.001, 10.0, false)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("caustics==1&&causticsengine==1||caustics==1&&causticsengine==2")
+                         .withTooltip("Initial gather radius (scene units) for the caustic photon "
+                                      "map. Shrinks as samples accumulate."));
+
         addParameter(Parameter::makeBool("motionblur", "Enable Motion Blur", false)
                          .withGroup("Motion Blur")
                          .withTooltip("Camera and geometry motion blur across the shutter "
@@ -1314,16 +1320,16 @@ public:
                                       "the current frame). Default 0.5 ≈ 180° shutter / ~1/48 s at "
                                       "24 fps (close to 1/50). Open=-Length/2, Close=+Length/2."));
         addParameter(Parameter::makeBool("frustumcull", "Frustum Cull", true)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip("Meshes outside the dicing-camera frustum (plus padding) "
                                       "skip subdivision and only displace the cage. "
                                       "Close-ups on large faces still count as inside "
                                       "(screen-covering triangles / camera rays)."));
         addParameter(Parameter::makeFloat("frustumpadding", "Frustum Padding (%)", 10.0, 0.0, 100.0, false)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip("Screen-space margin as a percent of resolution width/height."));
         addParameter(Parameter::makeBool("screenadaptive", "Screen Adaptive", false)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip(
                              "Karma / Mantra / RenderMan-style raster dicing: split until projected "
                              "edge length ≈ 1/DicingQuality pixels (Quality 1 ≈ 1 micropolygon per "
@@ -1332,22 +1338,22 @@ public:
                              "Re-tessellates on Start; animated Alembic/USD also re-dice on frame "
                              "change while Start is armed."));
         addParameter(Parameter::makeBool("enabledisplacement", "Enable Displacement", true)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip(
                              "Master switch for geometric displacement and densify/dicing. "
                              "Off: render authored cages with no subdiv and no displace "
                              "(fast Play / lookdev). On: normal tessellation + displace."));
         addParameter(Parameter::makeInt("dicingpolylimitm", "Dicing Poly Limit (M)", 10, 1, 200)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip("Safety fuse: stop densify / Screen Adaptive once the mesh "
                                       "reaches this many million triangles (default 10)."));
         addParameter(Parameter::makeMenu("dicingcamera", "Dicing Camera",
                                          {"Render Camera", "Custom"}, 0)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip("Camera used for frustum cull and screen-space dicing. "
                                       "Custom locks density to another camera prim."));
         addParameter(Parameter::makeString("dicingcamerapath", "Dicing Camera Path", "")
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip("Stage prim path of the custom dicing camera "
                                       "(e.g. /cameras/dice). Empty falls back to the render camera."));
         addParameter(Parameter::makeMenu("workingspace", "Working Space",
