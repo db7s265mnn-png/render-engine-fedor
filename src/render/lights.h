@@ -1,6 +1,6 @@
-// Light sampling shared by the Embree integrator and the dedicated OptiX path
-// kernel. Volume NEE / light-BVH stay CPU-only (`#if !SOLSTICE_OPTIX_KERNEL`):
-// nvcc must not instantiate those helpers in optix_path.cu.
+// Light sampling shared by the Embree integrator and the OptiX shade kernels.
+// Volume NEE / light-BVH stay CPU-only (`#if !SOLSTICE_OPTIX_KERNEL`):
+// nvcc must not instantiate those helpers in the GPU shade modules.
 //
 // Conventions (matching Houdini/USD): rect and disk lights live in the XY plane
 // of their transform and emit along -Z, distant lights travel along -Z, sphere

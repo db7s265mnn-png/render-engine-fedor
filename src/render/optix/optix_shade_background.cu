@@ -1,0 +1,38 @@
+// Cycles analogue: integrator_shade_background (CUDA in Cycles; OptiX raygen here).
+#include "render/lights.h"
+#include "render/optix/optix_wavefront.cuh"
+
+namespace sol {
+
+extern "C" __global__ void __raygen__shade_background() {
+    int x = 0, y = 0;
+    const int pixel = wavefrontPixel(x, y);
+    if (pixel < 0) return;
+
+    const LaunchParams& params = launchParams();
+    GpuPath& path = params.paths[pixel];
+    if (path.queue != kQueueShadeBackground) return;
+    path.queue = kQueueDead;
+
+    const SceneView& scene = params.scene;
+    if (scene.domeLightIndex < 0) return;
+    const LightData& dome = scene.lights[scene.domeLightIndex];
+    const bool primary = path.depth == 0;
+    if (primary && (!scene.settings.envVisibleCamera || !dome.visibleCamera)) return;
+
+    Vec3 envL = domeRadiance(scene, dome, path.direction, /*nearestTexel=*/path.depth > 0);
+    if (isBlack(envL)) return;
+
+    float weight = 1.0f;
+    if (!path.specularBounce) {
+        const float lp = lightPdfDirection(scene, scene.domeLightIndex, path.origin, path.direction,
+                                           path.origin, path.direction) *
+                         lightSelectionPdfIndex(scene, path.origin, scene.domeLightIndex);
+        weight = powerHeuristic(1.0f, path.bsdfPdf, 1.0f, lp);
+    }
+    Vec3 contrib = path.throughput * envL * weight;
+    if (path.depth > 0) contrib = clampFirefly(contrib, scene.settings.clampDirect);
+    addRadiance(pixel, contrib);
+}
+
+}  // namespace sol

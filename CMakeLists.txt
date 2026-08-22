@@ -624,8 +624,7 @@ endif()
 if(SOLSTICE_HAVE_OPTIX_01)
     target_sources(solstice_lib PRIVATE
         src/render/optix/optix_device.cpp
-        ${SOLSTICE_OPTIX_EMBED_SOURCE}
-        ${SOLSTICE_OPTIX_HIT_EMBED_SOURCE})
+        ${SOLSTICE_OPTIX_EMBED_SOURCES})
     target_link_libraries(solstice_lib PUBLIC CUDA::cudart CUDA::cuda_driver)
     target_include_directories(solstice_lib PUBLIC ${OptiX_INCLUDE_DIR})
     add_dependencies(solstice_lib solstice_optix_programs)

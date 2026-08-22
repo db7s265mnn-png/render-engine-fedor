@@ -89,17 +89,13 @@ endif()
 
 message(STATUS "OptiX headers: ${OptiX_INCLUDE_DIR}")
 
-set(SOLSTICE_OPTIX_PATH_CU ${CMAKE_SOURCE_DIR}/src/render/optix/optix_path.cu)
-set(SOLSTICE_OPTIX_HIT_CU ${CMAKE_SOURCE_DIR}/src/render/optix/optix_hit_miss.cu)
-set(SOLSTICE_OPTIX_PATH_PTX ${CMAKE_BINARY_DIR}/generated/optix_path.ptx)
-set(SOLSTICE_OPTIX_HIT_PTX ${CMAKE_BINARY_DIR}/generated/optix_hit_miss.ptx)
-set(SOLSTICE_OPTIX_PTX ${SOLSTICE_OPTIX_PATH_PTX})
+set(_solstice_optix_dir ${CMAKE_SOURCE_DIR}/src/render/optix)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 
 if(NOT DEFINED SOLSTICE_OPTIX_NVCC_OPT)
     set(SOLSTICE_OPTIX_NVCC_OPT "1")
 endif()
-message(STATUS "OptiX PTX: dedicated path-tracer kernel (no integrator.h), nvcc -O${SOLSTICE_OPTIX_NVCC_OPT}")
+message(STATUS "OptiX PTX: wavefront modules (init/intersect/shade), nvcc -O${SOLSTICE_OPTIX_NVCC_OPT}")
 
 set(_solstice_nvcc_inc_flags)
 foreach(_inc IN LISTS CUDAToolkit_INCLUDE_DIRS)
@@ -134,15 +130,9 @@ if(WIN32)
         -Xcompiler=/bigobj,/nologo)
 endif()
 
-# Two PTX TUs so ninja can run hit/miss (seconds) in parallel with the path
-# kernel and the rest of the C++ compile.
-# Cycles: OptiX programs are small intersect wrappers; shade is another kernel;
-# MNEE/OSL are a second module loaded only when needed.
-# Karma XPU: render kernels vs user shaders, compiled on first use and cached.
-# Iray: MDL JIT to PTX callables per material.
-# We ship a dedicated unidirectional PT kernel that does not include integrator.h
-# (volumes / SSS / procedurals / optics stay on Embree). -O1: OptiX re-optimizes
-# at optixModuleCreate; cicc -O3 on a shared megakernel has run 3h+ on a 14900K.
+# Cycles: each integrator stage is its own kernel (intersect_closest, shade_surface,
+# …) so cicc never sees optixTrace + BSDF + lights in one megakernel. ninja compiles
+# these TUs in parallel. -O1: OptiX re-optimizes at optixModuleCreate.
 set(_solstice_nvcc_ptx_common
     ${_solstice_nvcc_ccbin}
     -ptx
@@ -161,76 +151,98 @@ set(_solstice_nvcc_ptx_common
     -I${OptiX_INCLUDE_DIR}
     ${_solstice_nvcc_inc_flags})
 
-add_custom_command(
-    OUTPUT ${SOLSTICE_OPTIX_HIT_PTX}
-    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX hit/miss start"
-    COMMAND ${CMAKE_CUDA_COMPILER}
-            ${_solstice_nvcc_ptx_common}
-            -o ${SOLSTICE_OPTIX_HIT_PTX}
-            ${SOLSTICE_OPTIX_HIT_CU}
-    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX hit/miss done"
-    DEPENDS
-        ${SOLSTICE_OPTIX_HIT_CU}
-        ${CMAKE_SOURCE_DIR}/src/render/optix/optix_common.cuh
-        ${CMAKE_SOURCE_DIR}/src/render/optix/launch_params.h
-        ${CMAKE_SOURCE_DIR}/src/scene/types.h
-        ${CMAKE_SOURCE_DIR}/src/core/math.h
-    COMMENT "nvcc OptiX PTX (hit/miss)"
-    VERBATIM
-)
+set(_solstice_optix_base
+    ${_solstice_optix_dir}/optix_common.cuh
+    ${_solstice_optix_dir}/optix_wavefront.cuh
+    ${_solstice_optix_dir}/launch_params.h
+    ${_solstice_optix_dir}/path_state.h
+    ${CMAKE_SOURCE_DIR}/src/scene/types.h
+    ${CMAKE_SOURCE_DIR}/src/core/math.h
+    ${CMAKE_SOURCE_DIR}/src/core/rng.h)
 
-add_custom_command(
-    OUTPUT ${SOLSTICE_OPTIX_PATH_PTX}
-    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX path start"
-    COMMAND ${CMAKE_CUDA_COMPILER}
-            ${_solstice_nvcc_ptx_common}
-            -DSOLSTICE_OPTIX_KERNEL=1
-            -o ${SOLSTICE_OPTIX_PATH_PTX}
-            ${SOLSTICE_OPTIX_PATH_CU}
-    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX path done"
-    DEPENDS
-        ${SOLSTICE_OPTIX_PATH_CU}
-        ${CMAKE_SOURCE_DIR}/src/render/optix/optix_common.cuh
-        ${CMAKE_SOURCE_DIR}/src/render/optix/optix_bsdf.cuh
-        ${CMAKE_SOURCE_DIR}/src/render/optix/launch_params.h
-        ${CMAKE_SOURCE_DIR}/src/render/blue_noise.h
-        ${CMAKE_SOURCE_DIR}/src/render/lights.h
-        ${CMAKE_SOURCE_DIR}/src/core/math.h
-        ${CMAKE_SOURCE_DIR}/src/core/rng.h
-        ${CMAKE_SOURCE_DIR}/src/scene/types.h
-        ${CMAKE_BINARY_DIR}/generated/solstice_config.h
-    COMMENT "nvcc OptiX PTX (path tracer)"
-    VERBATIM
-)
+set(SOLSTICE_OPTIX_EMBED_SOURCES "")
 
-# --- embed the PTX ----------------------------------------------------------
-set(SOLSTICE_OPTIX_EMBED_SOURCE ${CMAKE_BINARY_DIR}/generated/solstice_optix_ir.cpp)
-set(SOLSTICE_OPTIX_HIT_EMBED_SOURCE ${CMAKE_BINARY_DIR}/generated/solstice_optix_hit_ir.cpp)
-add_custom_command(
-    OUTPUT ${SOLSTICE_OPTIX_EMBED_SOURCE}
-    COMMAND ${CMAKE_COMMAND}
-            -DINPUT=${SOLSTICE_OPTIX_PATH_PTX}
-            -DOUTPUT=${SOLSTICE_OPTIX_EMBED_SOURCE}
-            -DSYMBOL=solsticeOptixIr
-            -P ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
-    DEPENDS ${SOLSTICE_OPTIX_PATH_PTX} ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
-    COMMENT "Embedding OptiX path PTX"
-    VERBATIM
-)
-add_custom_command(
-    OUTPUT ${SOLSTICE_OPTIX_HIT_EMBED_SOURCE}
-    COMMAND ${CMAKE_COMMAND}
-            -DINPUT=${SOLSTICE_OPTIX_HIT_PTX}
-            -DOUTPUT=${SOLSTICE_OPTIX_HIT_EMBED_SOURCE}
-            -DSYMBOL=solsticeOptixHitIr
-            -P ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
-    DEPENDS ${SOLSTICE_OPTIX_HIT_PTX} ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
-    COMMENT "Embedding OptiX hit/miss PTX"
-    VERBATIM
-)
-add_custom_target(solstice_optix_programs
-    DEPENDS ${SOLSTICE_OPTIX_EMBED_SOURCE} ${SOLSTICE_OPTIX_HIT_EMBED_SOURCE})
-set_source_files_properties(${SOLSTICE_OPTIX_EMBED_SOURCE} PROPERTIES GENERATED TRUE)
-set_source_files_properties(${SOLSTICE_OPTIX_HIT_EMBED_SOURCE} PROPERTIES GENERATED TRUE)
+function(solstice_optix_kernel name source symbol)
+    cmake_parse_arguments(K "LIGHTS" "" "DEPENDS" ${ARGN})
+    set(ptx "${CMAKE_BINARY_DIR}/generated/optix_${name}.ptx")
+    set(embed "${CMAKE_BINARY_DIR}/generated/solstice_optix_${name}_ir.cpp")
+    set(defs)
+    if(K_LIGHTS)
+        list(APPEND defs -DSOLSTICE_OPTIX_KERNEL=1)
+    endif()
+    add_custom_command(
+        OUTPUT ${ptx}
+        COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX ${name} start"
+        COMMAND ${CMAKE_CUDA_COMPILER}
+                ${_solstice_nvcc_ptx_common}
+                ${defs}
+                -o ${ptx}
+                ${source}
+        COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX ${name} done"
+        DEPENDS ${source} ${K_DEPENDS}
+        COMMENT "nvcc OptiX PTX (${name})"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT ${embed}
+        COMMAND ${CMAKE_COMMAND}
+                -DINPUT=${ptx}
+                -DOUTPUT=${embed}
+                -DSYMBOL=${symbol}
+                -P ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
+        DEPENDS ${ptx} ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
+        COMMENT "Embedding OptiX PTX (${name})"
+        VERBATIM
+    )
+    set(_acc "${SOLSTICE_OPTIX_EMBED_SOURCES}")
+    list(APPEND _acc ${embed})
+    set(SOLSTICE_OPTIX_EMBED_SOURCES "${_acc}" PARENT_SCOPE)
+    set_source_files_properties(${embed} PROPERTIES GENERATED TRUE)
+endfunction()
+
+solstice_optix_kernel(hit_miss
+    ${_solstice_optix_dir}/optix_hit_miss.cu
+    solsticeOptixHitIr
+    DEPENDS ${_solstice_optix_base})
+
+solstice_optix_kernel(init_from_camera
+    ${_solstice_optix_dir}/optix_init_from_camera.cu
+    solsticeOptixInitIr
+    DEPENDS ${_solstice_optix_base}
+            ${_solstice_optix_dir}/optix_geom.cuh
+            ${CMAKE_SOURCE_DIR}/src/render/blue_noise.h)
+
+solstice_optix_kernel(intersect_closest
+    ${_solstice_optix_dir}/optix_intersect_closest.cu
+    solsticeOptixIntersectClosestIr
+    DEPENDS ${_solstice_optix_base} ${_solstice_optix_dir}/optix_trace.cuh)
+
+solstice_optix_kernel(intersect_shadow
+    ${_solstice_optix_dir}/optix_intersect_shadow.cu
+    solsticeOptixIntersectShadowIr
+    DEPENDS ${_solstice_optix_base} ${_solstice_optix_dir}/optix_trace.cuh)
+
+solstice_optix_kernel(shade_surface
+    ${_solstice_optix_dir}/optix_shade_surface.cu
+    solsticeOptixShadeSurfaceIr
+    LIGHTS
+    DEPENDS ${_solstice_optix_base}
+            ${_solstice_optix_dir}/optix_geom.cuh
+            ${_solstice_optix_dir}/optix_bsdf.cuh
+            ${CMAKE_SOURCE_DIR}/src/render/lights.h)
+
+solstice_optix_kernel(shade_background
+    ${_solstice_optix_dir}/optix_shade_background.cu
+    solsticeOptixShadeBackgroundIr
+    LIGHTS
+    DEPENDS ${_solstice_optix_base} ${CMAKE_SOURCE_DIR}/src/render/lights.h)
+
+solstice_optix_kernel(shade_shadow
+    ${_solstice_optix_dir}/optix_shade_shadow.cu
+    solsticeOptixShadeShadowIr
+    DEPENDS ${_solstice_optix_base})
+
+add_custom_target(solstice_optix_programs DEPENDS ${SOLSTICE_OPTIX_EMBED_SOURCES})
+set_source_files_properties(${SOLSTICE_OPTIX_EMBED_SOURCES} PROPERTIES GENERATED TRUE)
 
 set(SOLSTICE_HAVE_OPTIX_01 1)

@@ -1,5 +1,5 @@
-// Shared OptiX launch-parameter blob. Declared in every device TU that reads
-// LaunchParams. Hit/miss programs do not need this file.
+// Shared OptiX launch-parameter blob. Declared in every device TU in the
+// pipeline (OptiX requires the same pipelineLaunchParamsVariableName).
 #pragma once
 
 #include <optix.h>

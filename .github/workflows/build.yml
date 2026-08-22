@@ -319,19 +319,25 @@ jobs:
       - name: Prove OptiX IR is embedded
         shell: pwsh
         run: |
-          if (-not (Test-Path build/generated/optix_path.ptx)) { throw "optix_path.ptx was not produced" }
-          if (-not (Test-Path build/generated/optix_hit_miss.ptx)) { throw "optix_hit_miss.ptx was not produced" }
-          if (-not (Test-Path build/generated/solstice_optix_ir.cpp)) { throw "solstice_optix_ir.cpp was not produced" }
-          if (-not (Test-Path build/generated/solstice_optix_hit_ir.cpp)) { throw "solstice_optix_hit_ir.cpp was not produced" }
-          if (-not (Select-String -Path build/generated/solstice_optix_ir.cpp -Pattern "solsticeOptixIr" -Quiet)) {
-            throw "embedded OptiX path IR symbol missing"
+          $modules = @(
+            @{ Ptx = 'optix_hit_miss.ptx'; Embed = 'solstice_optix_hit_miss_ir.cpp'; Sym = 'solsticeOptixHitIr' },
+            @{ Ptx = 'optix_init_from_camera.ptx'; Embed = 'solstice_optix_init_from_camera_ir.cpp'; Sym = 'solsticeOptixInitIr' },
+            @{ Ptx = 'optix_intersect_closest.ptx'; Embed = 'solstice_optix_intersect_closest_ir.cpp'; Sym = 'solsticeOptixIntersectClosestIr' },
+            @{ Ptx = 'optix_intersect_shadow.ptx'; Embed = 'solstice_optix_intersect_shadow_ir.cpp'; Sym = 'solsticeOptixIntersectShadowIr' },
+            @{ Ptx = 'optix_shade_surface.ptx'; Embed = 'solstice_optix_shade_surface_ir.cpp'; Sym = 'solsticeOptixShadeSurfaceIr' },
+            @{ Ptx = 'optix_shade_background.ptx'; Embed = 'solstice_optix_shade_background_ir.cpp'; Sym = 'solsticeOptixShadeBackgroundIr' },
+            @{ Ptx = 'optix_shade_shadow.ptx'; Embed = 'solstice_optix_shade_shadow_ir.cpp'; Sym = 'solsticeOptixShadeShadowIr' }
+          )
+          foreach ($m in $modules) {
+            $ptx = Join-Path 'build/generated' $m.Ptx
+            $embed = Join-Path 'build/generated' $m.Embed
+            if (-not (Test-Path $ptx)) { throw "$($m.Ptx) was not produced" }
+            if (-not (Test-Path $embed)) { throw "$($m.Embed) was not produced" }
+            if (-not (Select-String -Path $embed -Pattern $m.Sym -Quiet)) {
+              throw "embedded OptiX symbol $($m.Sym) missing"
+            }
+            Get-Item $ptx, $embed | ForEach-Object { Write-Host "$($_.Name) $($_.Length) bytes" }
           }
-          if (-not (Select-String -Path build/generated/solstice_optix_hit_ir.cpp -Pattern "solsticeOptixHitIr" -Quiet)) {
-            throw "embedded OptiX hit/miss IR symbol missing"
-          }
-          Get-Item build/generated/optix_path.ptx, build/generated/optix_hit_miss.ptx,
-                    build/generated/solstice_optix_ir.cpp, build/generated/solstice_optix_hit_ir.cpp |
-            ForEach-Object { Write-Host "$($_.Name) $($_.Length) bytes" }
 
       - name: Build
         timeout-minutes: 90

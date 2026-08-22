@@ -1,6 +1,5 @@
-// OptiX miss / closest-hit programs. Intentionally tiny: they only write
-// payload registers. Compiles in seconds and runs as a second nvcc job
-// alongside the path kernel and the host C++ build.
+// OptiX miss / closest-hit programs. Tiny payload writers — a separate nvcc
+// job from init / intersect / shade, like Cycles keeping CH small.
 //
 // Every module in an OptiX pipeline must declare the launch-parameter blob
 // (pipelineLaunchParamsVariableName), even if the program never reads it.

@@ -1,7 +1,8 @@
-// GPU path tracing backend built on NVIDIA OptiX.
+// GPU wavefront path tracing on NVIDIA OptiX (Cycles-style small modules).
 //
 // Geometry acceleration structures are built per mesh and instanced through a
 // top level IAS, mirroring the Embree backend so both produce the same image.
+// Each sample launches init → (intersect_closest → shade → intersect_shadow)*
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_OPTIX
@@ -22,9 +23,19 @@
 #include "render/optix/launch_params.h"
 #include "render/render_device.h"
 
-// Emitted by the build from optix_path.cu / optix_hit_miss.cu.
-extern "C" const unsigned char solsticeOptixIr[];
-extern "C" const unsigned long long solsticeOptixIrSize;
+// Emitted by the build from the wavefront OptiX modules.
+extern "C" const unsigned char solsticeOptixInitIr[];
+extern "C" const unsigned long long solsticeOptixInitIrSize;
+extern "C" const unsigned char solsticeOptixIntersectClosestIr[];
+extern "C" const unsigned long long solsticeOptixIntersectClosestIrSize;
+extern "C" const unsigned char solsticeOptixIntersectShadowIr[];
+extern "C" const unsigned long long solsticeOptixIntersectShadowIrSize;
+extern "C" const unsigned char solsticeOptixShadeSurfaceIr[];
+extern "C" const unsigned long long solsticeOptixShadeSurfaceIrSize;
+extern "C" const unsigned char solsticeOptixShadeBackgroundIr[];
+extern "C" const unsigned long long solsticeOptixShadeBackgroundIrSize;
+extern "C" const unsigned char solsticeOptixShadeShadowIr[];
+extern "C" const unsigned long long solsticeOptixShadeShadowIrSize;
 extern "C" const unsigned char solsticeOptixHitIr[];
 extern "C" const unsigned long long solsticeOptixHitIrSize;
 
@@ -131,8 +142,8 @@ private:
 };
 
 template <typename T>
-struct SbtRecord {
-    __align__(OPTIX_SBT_RECORD_ALIGNMENT) char header[OPTIX_SBT_RECORD_HEADER_SIZE];
+struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) SbtRecord {
+    char header[OPTIX_SBT_RECORD_HEADER_SIZE];
     T data;
 };
 
@@ -143,6 +154,30 @@ struct EmptyRecord {
 using RayGenRecord = SbtRecord<EmptyRecord>;
 using MissRecord = SbtRecord<EmptyRecord>;
 using HitGroupRecord = SbtRecord<EmptyRecord>;
+
+static_assert(sizeof(RayGenRecord) % OPTIX_SBT_RECORD_ALIGNMENT == 0,
+              "raygen SBT records must pack without gaps");
+
+enum RaygenId : int {
+    kRgInit = 0,
+    kRgIntersectClosest,
+    kRgIntersectShadow,
+    kRgShadeSurface,
+    kRgShadeBackground,
+    kRgShadeShadow,
+    kRgCount
+};
+
+enum ModuleId : int {
+    kModInit = 0,
+    kModIntersectClosest,
+    kModIntersectShadow,
+    kModShadeSurface,
+    kModShadeBackground,
+    kModShadeShadow,
+    kModHit,
+    kModCount
+};
 
 class OptixPathTracer final : public RenderDevice {
 public:
@@ -179,7 +214,7 @@ public:
             buildPipeline();
             initialized_ = true;
             logInfo("OptiX backend initialised on " + deviceName_ +
-                    " (path tracer only: pinhole camera, basic surface shaders)");
+                    " (wavefront path tracer: init/intersect/shade modules, pinhole, basic surfaces)");
             return true;
         } catch (const std::exception& e) {
             error = e.what();
@@ -378,11 +413,19 @@ public:
                 accumBuffer_.alloc(pixelCount * sizeof(Vec4));
                 accumBuffer_.clear();
             }
+            if (pathBuffer_.size() != pixelCount * sizeof(GpuPath)) {
+                pathBuffer_.alloc(pixelCount * sizeof(GpuPath));
+                hitBuffer_.alloc(pixelCount * sizeof(GpuHit));
+                shadowBuffer_.alloc(pixelCount * sizeof(GpuShadow));
+            }
             if (sampleIndex == 0) accumBuffer_.clear();
 
             LaunchParams launchParams{};
             launchParams.scene = deviceScene_;
             launchParams.accumBuffer = accumBuffer_.as<Vec4>();
+            launchParams.paths = pathBuffer_.as<GpuPath>();
+            launchParams.hits = hitBuffer_.as<GpuHit>();
+            launchParams.shadows = shadowBuffer_.as<GpuShadow>();
             launchParams.width = width;
             launchParams.height = height;
             launchParams.sampleIndex = sampleIndex;
@@ -394,8 +437,19 @@ public:
             CUDA_CHECK(cudaMemcpy(launchParamsBuffer_.as<void>(), &launchParams, sizeof(LaunchParams),
                                   cudaMemcpyHostToDevice));
 
-            OPTIX_CHECK(optixLaunch(pipeline_, nullptr, launchParamsBuffer_.device(), sizeof(LaunchParams), &sbt_,
-                                    unsigned(width), unsigned(height), 1));
+            const unsigned w = unsigned(width);
+            const unsigned h = unsigned(height);
+            launchKernel(kRgInit, w, h);
+            const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
+            const int maxIters = maxDepth + 18;
+            for (int i = 0; i < maxIters; ++i) {
+                if (cancel.load(std::memory_order_relaxed)) break;
+                launchKernel(kRgIntersectClosest, w, h);
+                launchKernel(kRgShadeBackground, w, h);
+                launchKernel(kRgShadeSurface, w, h);
+                launchKernel(kRgIntersectShadow, w, h);
+                launchKernel(kRgShadeShadow, w, h);
+            }
             CUDA_CHECK(cudaDeviceSynchronize());
 
             // Mirror the accumulation buffer into the host framebuffer.
@@ -418,6 +472,13 @@ public:
     void release() override { releaseScene(); }
 
 private:
+    void launchKernel(int raygenIndex, unsigned width, unsigned height) {
+        sbt_.raygenRecord =
+            raygenRecordBuffer_.device() + sizeof(RayGenRecord) * static_cast<size_t>(raygenIndex);
+        OPTIX_CHECK(optixLaunch(pipeline_, nullptr, launchParamsBuffer_.device(), sizeof(LaunchParams), &sbt_,
+                                width, height, 1));
+    }
+
     OptixTraversableHandle buildTriangleGas(const DeviceBuffer& positions, const DeviceBuffer& indices,
                                             uint32_t vertexCount, uint32_t triangleCount) {
         OptixAccelBuildOptions accelOptions{};
@@ -536,41 +597,70 @@ private:
                                                  &logSize, &out));
 #endif
         };
-        loadModule(solsticeOptixIr, solsticeOptixIrSize, raygenModule_);
-        loadModule(solsticeOptixHitIr, solsticeOptixHitIrSize, hitModule_);
+
+        const unsigned char* ir[kModCount] = {
+            solsticeOptixInitIr,
+            solsticeOptixIntersectClosestIr,
+            solsticeOptixIntersectShadowIr,
+            solsticeOptixShadeSurfaceIr,
+            solsticeOptixShadeBackgroundIr,
+            solsticeOptixShadeShadowIr,
+            solsticeOptixHitIr,
+        };
+        const unsigned long long irSize[kModCount] = {
+            solsticeOptixInitIrSize,
+            solsticeOptixIntersectClosestIrSize,
+            solsticeOptixIntersectShadowIrSize,
+            solsticeOptixShadeSurfaceIrSize,
+            solsticeOptixShadeBackgroundIrSize,
+            solsticeOptixShadeShadowIrSize,
+            solsticeOptixHitIrSize,
+        };
+        for (int i = 0; i < kModCount; ++i) loadModule(ir[i], irSize[i], modules_[i]);
 
         OptixProgramGroupOptions groupOptions{};
-
-        OptixProgramGroupDesc raygenDesc{};
-        raygenDesc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-        raygenDesc.raygen.module = raygenModule_;
-        raygenDesc.raygen.entryFunctionName = "__raygen__path";
-        logSize = sizeof(log);
-        OPTIX_CHECK(optixProgramGroupCreate(context_, &raygenDesc, 1, &groupOptions, log, &logSize, &raygenGroup_));
+        const char* raygenNames[kRgCount] = {
+            "__raygen__init_from_camera",     "__raygen__intersect_closest", "__raygen__intersect_shadow",
+            "__raygen__shade_surface",        "__raygen__shade_background",  "__raygen__shade_shadow",
+        };
+        for (int i = 0; i < kRgCount; ++i) {
+            OptixProgramGroupDesc raygenDesc{};
+            raygenDesc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
+            raygenDesc.raygen.module = modules_[i];
+            raygenDesc.raygen.entryFunctionName = raygenNames[i];
+            logSize = sizeof(log);
+            OPTIX_CHECK(optixProgramGroupCreate(context_, &raygenDesc, 1, &groupOptions, log, &logSize,
+                                                &raygenGroups_[i]));
+        }
 
         OptixProgramGroupDesc missDesc[2]{};
         missDesc[0].kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-        missDesc[0].miss.module = hitModule_;
+        missDesc[0].miss.module = modules_[kModHit];
         missDesc[0].miss.entryFunctionName = "__miss__radiance";
         missDesc[1].kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-        missDesc[1].miss.module = hitModule_;
+        missDesc[1].miss.module = modules_[kModHit];
         missDesc[1].miss.entryFunctionName = "__miss__shadow";
         logSize = sizeof(log);
         OPTIX_CHECK(optixProgramGroupCreate(context_, missDesc, 2, &groupOptions, log, &logSize, missGroups_));
 
         OptixProgramGroupDesc hitDesc[2]{};
         hitDesc[0].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-        hitDesc[0].hitgroup.moduleCH = hitModule_;
+        hitDesc[0].hitgroup.moduleCH = modules_[kModHit];
         hitDesc[0].hitgroup.entryFunctionNameCH = "__closesthit__radiance";
         hitDesc[1].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-        hitDesc[1].hitgroup.moduleCH = hitModule_;
+        hitDesc[1].hitgroup.moduleCH = modules_[kModHit];
         hitDesc[1].hitgroup.entryFunctionNameCH = "__closesthit__shadow";
         logSize = sizeof(log);
         OPTIX_CHECK(optixProgramGroupCreate(context_, hitDesc, 2, &groupOptions, log, &logSize, hitGroups_));
 
-        OptixProgramGroup groups[] = {raygenGroup_, missGroups_[0], missGroups_[1], hitGroups_[0], hitGroups_[1]};
+        OptixProgramGroup groups[kRgCount + 4];
+        for (int i = 0; i < kRgCount; ++i) groups[i] = raygenGroups_[i];
+        groups[kRgCount + 0] = missGroups_[0];
+        groups[kRgCount + 1] = missGroups_[1];
+        groups[kRgCount + 2] = hitGroups_[0];
+        groups[kRgCount + 3] = hitGroups_[1];
         OptixPipelineLinkOptions linkOptions{};
-        linkOptions.maxTraceDepth = 2;
+        linkOptions.maxTraceDepth = 1;
         logSize = sizeof(log);
         OPTIX_CHECK(optixPipelineCreate(context_, &pipelineOptions, &linkOptions, groups,
                                         unsigned(sizeof(groups) / sizeof(groups[0])), log, &logSize, &pipeline_));
@@ -588,10 +678,11 @@ private:
         OPTIX_CHECK(optixPipelineSetStackSize(pipeline_, directCallableFromTraversal, directCallableFromState,
                                               continuationStack, 1));
 
-        // Shader binding table.
-        RayGenRecord raygenRecord{};
-        OPTIX_CHECK(optixSbtRecordPackHeader(raygenGroup_, &raygenRecord));
-        raygenRecordBuffer_.upload(&raygenRecord, 1);
+        RayGenRecord raygenRecords[kRgCount]{};
+        for (int i = 0; i < kRgCount; ++i) {
+            OPTIX_CHECK(optixSbtRecordPackHeader(raygenGroups_[i], &raygenRecords[i]));
+        }
+        raygenRecordBuffer_.upload(raygenRecords, kRgCount);
 
         MissRecord missRecords[2]{};
         OPTIX_CHECK(optixSbtRecordPackHeader(missGroups_[0], &missRecords[0]));
@@ -633,12 +724,18 @@ private:
     void shutdown() {
         releaseScene();
         accumBuffer_.free();
+        pathBuffer_.free();
+        hitBuffer_.free();
+        shadowBuffer_.free();
         launchParamsBuffer_.free();
         raygenRecordBuffer_.free();
         missRecordBuffer_.free();
         hitRecordBuffer_.free();
         if (pipeline_) optixPipelineDestroy(pipeline_);
-        if (raygenGroup_) optixProgramGroupDestroy(raygenGroup_);
+        for (OptixProgramGroup& group : raygenGroups_) {
+            if (group) optixProgramGroupDestroy(group);
+            group = nullptr;
+        }
         for (OptixProgramGroup& group : missGroups_) {
             if (group) optixProgramGroupDestroy(group);
             group = nullptr;
@@ -647,13 +744,12 @@ private:
             if (group) optixProgramGroupDestroy(group);
             group = nullptr;
         }
-        if (raygenModule_) optixModuleDestroy(raygenModule_);
-        if (hitModule_) optixModuleDestroy(hitModule_);
+        for (OptixModule& module : modules_) {
+            if (module) optixModuleDestroy(module);
+            module = nullptr;
+        }
         if (context_) optixDeviceContextDestroy(context_);
         pipeline_ = nullptr;
-        raygenGroup_ = nullptr;
-        raygenModule_ = nullptr;
-        hitModule_ = nullptr;
         context_ = nullptr;
         initialized_ = false;
     }
@@ -665,9 +761,8 @@ private:
     std::string deviceName_;
 
     OptixDeviceContext context_ = nullptr;
-    OptixModule raygenModule_ = nullptr;
-    OptixModule hitModule_ = nullptr;
-    OptixProgramGroup raygenGroup_ = nullptr;
+    OptixModule modules_[kModCount] = {};
+    OptixProgramGroup raygenGroups_[kRgCount] = {};
     OptixProgramGroup missGroups_[2] = {nullptr, nullptr};
     OptixProgramGroup hitGroups_[2] = {nullptr, nullptr};
     OptixPipeline pipeline_ = nullptr;
@@ -675,6 +770,7 @@ private:
 
     DeviceBuffer raygenRecordBuffer_, missRecordBuffer_, hitRecordBuffer_;
     DeviceBuffer launchParamsBuffer_, accumBuffer_;
+    DeviceBuffer pathBuffer_, hitBuffer_, shadowBuffer_;
     DeviceBuffer meshViewBuffer_, instanceBuffer_, materialBuffer_, lightBuffer_, envViewBuffer_;
     DeviceBuffer textureViewBuffer_;
     DeviceBuffer proceduralBuffer_;

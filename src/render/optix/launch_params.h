@@ -2,6 +2,7 @@
 // code and the device programs.
 #pragma once
 
+#include "render/optix/path_state.h"
 #include "scene/types.h"
 
 namespace sol {
@@ -13,6 +14,9 @@ struct LaunchParams {
     SceneView scene;
 
     Vec4* accumBuffer = nullptr;  // width * height, rgb + sample weight
+    GpuPath* paths = nullptr;
+    GpuHit* hits = nullptr;
+    GpuShadow* shadows = nullptr;
     int width = 0;
     int height = 0;
 

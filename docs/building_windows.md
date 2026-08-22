@@ -11,12 +11,13 @@ Imath/OpenEXR/Alembic/TBB/OpenVDB/OCIO into `%LOCALAPPDATA%\grendizer-deps`.
 
 **Visual Studio 2026** (MSVC 14.50+) needs **CUDA 13.2 or newer**. CUDA 12.0 cannot
 parse that STL (`type_traits` / `aligned_storage` / `result_of` while compiling
-`optix_path.cu`). CUDA 13 dropped Pascal (`compute_60`); the script passes
+OptiX wavefront kernels). CUDA 13 dropped Pascal (`compute_60`); the script passes
 `-DSOLSTICE_OPTIX_ARCH=compute_75`.
 
-The GPU kernel is a **dedicated path tracer** (`optix_path.cu` + `optix_hit_miss.cu`).
-It does not compile `integrator.h`, volumes, SSS, MaterialX procedurals, or polynomial
-optics. Kill any old 3h `cicc` job, delete `C:\gz-build\generated`, re-run `BUILD_WINDOWS.bat`.
+GPU OptiX is a **wavefront** of small modules (`init_from_camera`, `intersect_*`, `shade_*`,
+`hit_miss`). It does not compile `integrator.h`, volumes, SSS, MaterialX procedurals, or
+polynomial optics. Kill any old 3h `cicc` job, delete `C:\gz-build\generated`, re-run
+`BUILD_WINDOWS.bat`.
 
 **Visual Studio 2022** can still use CUDA 12.x and `compute_60`.
 

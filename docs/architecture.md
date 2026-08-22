@@ -8,11 +8,10 @@
                                        ┌────────────────────────────────┴─────────┐
                                        ▼                                          ▼
                               ┌──────────────────┐                     ┌────────────────────┐
-                              │ Embree backend   │                     │ OptiX backend      │
-                              │ (CPU, tiled)     │                     │ (GPU, GAS + IAS)   │
-                              │ integrator.h     │                     │ optix_path.cu PT   │
-                              │ full features    │                     │ basic shaders,     │
-                              │                  │                     │ pinhole only       │
+                              │ Embree backend   │                     │ OptiX wavefront    │
+                              │ (CPU, tiled)     │                     │ init/intersect/    │
+                              │ integrator.h     │                     │ shade modules      │
+                              │ full features    │                     │ pinhole, basic BSDF│
                               └────────┬─────────┘                     └─────────┬──────────┘
                                        └───────────► Framebuffer ◀───────────────┘
 ```
@@ -58,9 +57,10 @@ starts a fresh one.
 
 The Embree backend implements `intersect` / `occluded` and hands them to `traceRadiance()` in
 `src/render/integrator.h` (volumes, SSS, procedurals, BDPT, MNEE, polynomial optics). OptiX does
-**not** compile that header: `optix_path.cu` is a dedicated unidirectional path tracer with a
-small surface BSDF (`optix_bsdf.cuh`). That split matches how Cycles / Karma XPU / Iray keep
-OptiX programs and user shaders out of one megakernel — without shipping an SVM or MDL JIT.
+**not** compile that header. Like Cycles, GPU path tracing is a **wavefront** of small kernels:
+`init_from_camera`, `intersect_closest`, `intersect_shadow`, `shade_surface`, `shade_background`,
+`shade_shadow`. `optixTrace` lives only in the intersect modules; the BSDF lives only in
+`shade_surface`. That is what keeps `cicc` from seeing one megakernel.
 
 * **Camera rays (CPU)** use the physical camera: focal length and sensor width define FOV, a
   non-zero f-stop is a thin lens, `opticalModel == 1` is polynomial optics. **OptiX is pinhole
@@ -87,18 +87,19 @@ Each mesh becomes a compacted GAS; instances become an IAS with `instanceId` set
 instance index. Materials, lights, instances and the environment CDF tables are uploaded once
 per scene build and referenced by a `SceneView` inside the launch parameters.
 
-Device programs are split the way production GPU path tracers split work:
+Device programs are split the way Cycles splits GPU work:
 
-* `optix_hit_miss.cu` — tiny closest-hit / miss payload writers (like Cycles keeping
-  OptiX CH small).
-* `optix_path.cu` — a **dedicated unidirectional path tracer**. It does **not** include
-  `integrator.h`. Cycles ships wavefront microkernels and only loads MNEE/OSL modules when
-  the scene needs them; Karma XPU compiles render kernels separately from user shaders and
-  caches them; Iray JITs MDL to PTX callables per material. This engine does not ship SVM
-  or MDL, so the GPU kernel is path tracing + basic surfaces (2D maps, Lambert / GGX /
-  glass, pinhole camera). Volumes, SSS, MaterialX procedurals, BDPT, MNEE, wireframe, AO,
-  and polynomial-optics cameras stay on Embree.
+* `optix_hit_miss.cu` — tiny closest-hit / miss payload writers.
+* `optix_intersect_closest.cu` / `optix_intersect_shadow.cu` — the only TUs that call
+  `optixTrace` (Cycles `__raygen__kernel_optix_integrator_intersect_*`).
+* `optix_init_from_camera.cu` — pinhole raygen (no DoF / optics).
+* `optix_shade_surface.cu` / `optix_shade_background.cu` / `optix_shade_shadow.cu` — shading.
+  Lambert / GGX / glass + 2D maps. No `optixTrace`.
 
-PTX is produced by `nvcc` at build time and embedded by `cmake/embed_binary.cmake`. Two ray
-types are used: radiance with six payload registers, and shadow rays that terminate on the
-first hit.
+Volumes, SSS, MaterialX procedurals, BDPT, MNEE, wireframe, AO, and polynomial-optics cameras
+stay on Embree. This engine does not ship SVM / MDL, so there is no on-the-fly shader JIT.
+
+Each `.cu` is a separate `nvcc -ptx` job (ninja compiles them in parallel) and a separate OptiX
+module in one pipeline. The host launches the raygen for the current wavefront stage, swapping
+the SBT raygen record like Cycles. Two ray types: radiance (six payload registers) and shadow
+rays that terminate on the first hit.
