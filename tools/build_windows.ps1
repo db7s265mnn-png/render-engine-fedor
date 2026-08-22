@@ -158,7 +158,7 @@ function Import-VcVars64 {
     $toolset = Get-ClToolsetVersion
     Info ("cl.exe toolset: " + $toolset + " (" + (Get-Command cl.exe).Source + ")")
 
-    # VS 2026 default toolset 14.51 cannot host CUDA 12. Prefer any 14.4x on disk.
+    # Side-by-side VS 2022 toolset (14.4x) can host CUDA 12. Skip if none is installed.
     if ($toolset -and ([version]$toolset -ge [version]'14.50')) {
         foreach ($ver in @('14.44', '14.43', '14.42', '14.41', '14.40', '14.39', '14.38')) {
             Info "Trying MSVC $ver with vcvars (CUDA 12 compatible) ..."
@@ -201,34 +201,6 @@ function Get-NvccRelease([string]$NvccPath) {
     return [version]'0.0'
 }
 
-function Get-CudaInstalls {
-    $hits = @()
-    $seen = @{}
-    $paths = @()
-    $base = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA'
-    if (Test-Path -LiteralPath $base) {
-        Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^v1[123]\.' } |
-            ForEach-Object { $paths += $_.FullName }
-    }
-    if ($env:CUDA_PATH) { $paths += $env:CUDA_PATH }
-    if ($env:CUDA_PATH_V13_2) { $paths += $env:CUDA_PATH_V13_2 }
-    if ($env:CUDA_PATH_V13_1) { $paths += $env:CUDA_PATH_V13_1 }
-    $paths += (Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA\v13.2')
-    foreach ($p in $paths) {
-        if (-not $p) { continue }
-        $full = $null
-        try { $full = [IO.Path]::GetFullPath($p) } catch { continue }
-        if (-not $full -or $seen.ContainsKey($full)) { continue }
-        $nvcc = Join-Path $full 'bin\nvcc.exe'
-        if (-not (Test-Path -LiteralPath $nvcc)) { continue }
-        $seen[$full] = $true
-        $ver = Get-NvccRelease $nvcc
-        $hits += [pscustomobject]@{ Path = $full; Version = $ver; Nvcc = $nvcc }
-    }
-    return ,$hits
-}
-
 function Test-NvccHostStl([string]$Nvcc, [string]$Cl, [string]$Arch) {
     $dir = Join-Path $env:TEMP 'grendizer-nvcc-probe'
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -249,25 +221,75 @@ __device__ int probe() { return (int)sizeof(std::integral_constant<int, 1>::valu
     return (($LASTEXITCODE -eq 0) -and (Test-Path -LiteralPath $ptx))
 }
 
-function Select-CudaInstall([object[]]$All) {
-    if (-not $All -or $All.Count -eq 0) { return $null }
-    $valid = @($All | Where-Object { $_ -and $_.Nvcc })
-    # Prefer CUDA 13.2+ whenever it is installed (needed for VS 2026 STL).
-    $v132 = @($valid | Where-Object { $_.Version -ge [version]'13.2' } | Sort-Object Version -Descending)
-    if ($v132.Count -gt 0) { return $v132[0] }
-    $v12 = @($valid | Where-Object { $_.Version -lt [version]'13.0' } | Sort-Object Version -Descending)
-    if ($v12.Count -gt 0) { return $v12[0] }
-    $any = @($valid | Sort-Object Version -Descending)
-    if ($any.Count -gt 0) { return $any[0] }
-    return $null
+function Add-CudaCandidate {
+    param(
+        [System.Collections.Generic.List[object]]$List,
+        [hashtable]$Seen,
+        [string]$Root
+    )
+    if ([string]::IsNullOrWhiteSpace($Root)) { return }
+    if (-not (Test-Path -LiteralPath $Root)) { return }
+    $full = $null
+    try { $full = [IO.Path]::GetFullPath($Root) } catch { return }
+    if (-not $full) { return }
+    if ($Seen.ContainsKey($full)) { return }
+    $nvcc = Join-Path $full 'bin\nvcc.exe'
+    if (-not (Test-Path -LiteralPath $nvcc)) { return }
+    $Seen[$full] = $true
+    $ver = Get-NvccRelease $nvcc
+    Info ("Found CUDA " + $ver.ToString() + "  " + $full)
+    [void]$List.Add([pscustomobject]@{ Path = $full; Version = $ver; Nvcc = $nvcc })
 }
 
 function Resolve-CudaForOptix {
     $script:OptixArch = 'compute_60'
-    $toolset = Get-ClToolsetVersion
-    $all = @(Get-CudaInstalls)
-    $pick = Select-CudaInstall $all
-    if (-not $pick) {
+    $script:CudaRelease = [version]'0.0'
+    $script:CudaRoot = $null
+
+    $list = New-Object 'System.Collections.Generic.List[object]'
+    $seen = @{}
+
+    $base = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA'
+    if (Test-Path -LiteralPath $base) {
+        foreach ($d in (Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue)) {
+            Add-CudaCandidate $list $seen $d.FullName
+        }
+    }
+    Add-CudaCandidate $list $seen $env:CUDA_PATH
+    Add-CudaCandidate $list $seen $env:CUDA_PATH_V13_2
+    Add-CudaCandidate $list $seen $env:CUDA_PATH_V13_1
+    Add-CudaCandidate $list $seen (Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA\v13.2')
+
+    $pickPath = $null
+    $pickVer = [version]'0.0'
+    $i = 0
+    while ($i -lt $list.Count) {
+        $item = $list[$i]
+        $i = $i + 1
+        $v = [version]$item.Version
+        $p = [string]$item.Path
+        if ($v -ge [version]'13.2') {
+            if (($pickVer -lt [version]'13.2') -or ($v -gt $pickVer)) {
+                $pickVer = $v
+                $pickPath = $p
+            }
+        }
+    }
+    if (-not $pickPath) {
+        $i = 0
+        while ($i -lt $list.Count) {
+            $item = $list[$i]
+            $i = $i + 1
+            $v = [version]$item.Version
+            $p = [string]$item.Path
+            if ($v -gt $pickVer) {
+                $pickVer = $v
+                $pickPath = $p
+            }
+        }
+    }
+
+    if (-not $pickPath) {
         Fail @"
 CUDA Toolkit not found (nvcc.exe).
 Visual Studio 2026 needs CUDA 13.2 at:
@@ -277,29 +299,27 @@ Close this window, open a NEW cmd, then re-run BUILD_WINDOWS.bat.
 "@
     }
 
-    if ($toolset -and ([version]$toolset -ge [version]'14.50') -and ($pick.Version -lt [version]'13.2')) {
+    $toolset = Get-ClToolsetVersion
+    $toolsetVer = [version]'0.0'
+    if ($toolset) { $toolsetVer = [version]$toolset }
+    if (($toolsetVer -ge [version]'14.50') -and ($pickVer -lt [version]'13.2')) {
         Fail @"
-MSVC $toolset (VS 2026) cannot compile OptiX PTX with CUDA $($pick.Version).
-This script found: $($pick.Path)
-
-Install CUDA 13.2 (keep 12.0 if you want) so this folder exists:
-  C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\nvcc.exe
-
-Then close this window and double-click BUILD_WINDOWS.bat again.
+MSVC $toolset (VS 2026) cannot compile OptiX PTX with CUDA $($pickVer.ToString()).
+Picked: $pickPath
+Need:   C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2\bin\nvcc.exe
 Do NOT delete %LOCALAPPDATA%\grendizer-deps
-Delete only the build-windows folder if cmake still picks CUDA 12.0.
 "@
     }
 
-    $script:CudaRelease = $pick.Version
-    if ($pick.Version -ge [version]'13.0') {
+    $script:CudaRoot = $pickPath
+    $script:CudaRelease = $pickVer
+    if ($pickVer -ge [version]'13.0') {
         $script:OptixArch = 'compute_75'
     } else {
         $script:OptixArch = 'compute_60'
     }
-    Info ("Using CUDA " + $pick.Version + " at " + $pick.Path)
+    Info ("Using CUDA " + $pickVer.ToString() + " at " + $pickPath)
     Info ("OptiX PTX arch: " + $script:OptixArch)
-    return $pick.Path
 }
 
 function Find-CMake {
@@ -686,7 +706,8 @@ $CMake = Find-CMake
 $Git = Find-Git
 $Qt = Find-QtPrefix
 $Cl = (Get-Command cl.exe).Source
-$Cuda = Resolve-CudaForOptix
+Resolve-CudaForOptix
+$Cuda = [string]$script:CudaRoot
 $env:CUDA_PATH = $Cuda
 $env:CUDA_HOME = $Cuda
 $cudaBin = Join-Path $Cuda 'bin'
