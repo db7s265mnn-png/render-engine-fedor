@@ -34,8 +34,9 @@ To skip the Embree download, put `embree-4.4.0.x64.windows.zip` in
 `BUILD_WINDOWS.bat` ([Embree 4.4.0 zip](https://github.com/RenderKit/embree/releases/download/v4.4.0/embree-4.4.0.x64.windows.zip)).
 After one successful run, compiled deps live in `%LOCALAPPDATA%\grendizer-deps`.
 
-The exe lands in `C:\gz-build\bin\Release\`. Engine → Render Backend should list
-`GPU (OptiX)` without “not in this build”.
+The exe lands in `C:\gz-build\bin\` (Ninja). A leftover `bin\Release` folder from an older
+VS tree is ignored. Engine → Render Backend should list `GPU (OptiX)` without “not in this
+build”.
 
 ## Prerequisites
 

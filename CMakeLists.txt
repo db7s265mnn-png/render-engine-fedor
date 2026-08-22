@@ -84,6 +84,11 @@ endif()
 option(SOLSTICE_MODERN_CPU "Target x86-64-v3 (AVX2+); faster, not for ancient CPUs" ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Ninja writes bin/; Visual Studio would write bin/Release. Pin every config to
+# bin/ so BUILD_WINDOWS.bat always finds Grendizer_Render*.exe next to Qt DLLs.
+foreach(_solstice_cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_solstice_cfg} ${CMAKE_BINARY_DIR}/bin)
+endforeach()
 
 if(MSVC)
     # Also true for clang-cl (MSVC-compatible driver).

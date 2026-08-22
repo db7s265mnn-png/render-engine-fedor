@@ -952,19 +952,63 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host 'Warning: deploy target failed. The exe may need Qt on PATH.' -ForegroundColor Yellow
 }
 
-$Bin = Join-Path $BuildDir (Join-Path 'bin' 'Release')
-if (-not (Test-Path -LiteralPath $Bin)) { $Bin = Join-Path $BuildDir 'bin' }
+function Find-RenderExe([string]$Dir) {
+    $binRoot = Join-Path $Dir 'bin'
+    $dirs = @(
+        $binRoot,
+        (Join-Path $binRoot 'Release'),
+        (Join-Path $binRoot 'RelWithDebInfo'),
+        (Join-Path $binRoot 'Debug')
+    )
+    foreach ($d in $dirs) {
+        if (-not (Test-Path -LiteralPath $d)) { continue }
+        foreach ($pat in @('Grendizer_Render*.exe', 'Solstice*.exe')) {
+            $hit = Get-ChildItem -LiteralPath $d -Filter $pat -File -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($hit) { return $hit }
+        }
+    }
+    if (Test-Path -LiteralPath $binRoot) {
+        foreach ($pat in @('Grendizer_Render*.exe', 'Solstice*.exe')) {
+            $hit = Get-ChildItem -LiteralPath $binRoot -Recurse -Filter $pat -File -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($hit) { return $hit }
+        }
+    }
+    return $null
+}
+
+$Exe = Find-RenderExe $BuildDir
+if (-not $Exe) {
+    $binRoot = Join-Path $BuildDir 'bin'
+    $listing = '(bin folder missing)'
+    if (Test-Path -LiteralPath $binRoot) {
+        $listing = ((Get-ChildItem -LiteralPath $binRoot -Recurse -File -ErrorAction SilentlyContinue |
+            Select-Object -First 40 |
+            ForEach-Object { $_.FullName.Replace($BuildDir, '') }) -join "`n")
+        if (-not $listing) { $listing = '(empty)' }
+    }
+    Fail @"
+exe not found under $BuildDir\bin
+Ninja puts Grendizer_Render*.exe in bin\ (not bin\Release).
+Files:
+$listing
+"@
+}
+$Bin = $Exe.DirectoryName
+Info ("Found exe: " + $Exe.FullName)
+
 $cudartDir = Join-Path $Cuda 'bin'
 if (Test-Path -LiteralPath $cudartDir) {
     $Cudart = Get-ChildItem -LiteralPath $cudartDir -Filter 'cudart64_*.dll' -ErrorAction SilentlyContinue
-    if ($Cudart -and (Test-Path -LiteralPath $Bin)) {
+    if ($Cudart) {
         $Cudart | ForEach-Object {
             Copy-Item -LiteralPath $_.FullName -Destination $Bin -Force
             Info ("Copied " + $_.Name)
         }
     }
 }
-if ($script:DepsPrefix -and (Test-Path -LiteralPath $Bin)) {
+if ($script:DepsPrefix) {
     foreach ($dir in @(
         (Join-Path $script:DepsPrefix 'bin'),
         (Join-Path $script:DepsPrefix 'embree\bin'),
@@ -979,14 +1023,6 @@ if ($script:DepsPrefix -and (Test-Path -LiteralPath $Bin)) {
         }
     }
 }
-
-$Exe = Get-ChildItem -LiteralPath $Bin -Filter 'Grendizer_Render*.exe' -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-if (-not $Exe) {
-    $Exe = Get-ChildItem -LiteralPath $Bin -Filter 'Solstice*.exe' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-}
-if (-not $Exe) { Fail "exe not found in $Bin" }
 
 Write-Host ''
 Write-Host ("DONE: " + $Exe.FullName) -ForegroundColor Green
