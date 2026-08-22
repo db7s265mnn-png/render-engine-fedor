@@ -16,7 +16,8 @@ The exe lands in `build-windows\bin\Release\`. Engine → Render Backend should 
 
 * Visual Studio 2022 with the C++ desktop workload
 * CMake 3.20+
-* Qt 6 (msvc2019_64 or msvc2022_64), e.g. from the online installer into `C:\Qt`
+* Qt 6 MSVC kit (`msvc2022_64` or `msvc2019_64`). Any 6.x is fine, including 6.11.1
+  at `C:\Qt\6.11.1\msvc2022_64`. MinGW kits cannot be used with this Visual Studio build.
 * [vcpkg](https://vcpkg.io) for Embree, Alembic and OpenEXR
 * Optional: CUDA Toolkit 12.x and the OptiX SDK 7.7 or newer for GPU rendering
 
@@ -37,7 +38,7 @@ it still resolves to Embree 3 will fail at configure time with a version error.
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
       -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
-      -DCMAKE_PREFIX_PATH=C:/Qt/6.7.2/msvc2019_64
+      -DCMAKE_PREFIX_PATH=C:/Qt/6.11.1/msvc2022_64
 cmake --build build --config Release
 ```
 
@@ -71,7 +72,7 @@ Zip `build\bin\Release` and the result runs on any Windows machine without an in
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64 ^
       -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake ^
-      -DCMAKE_PREFIX_PATH=C:/Qt/6.7.2/msvc2019_64 ^
+      -DCMAKE_PREFIX_PATH=C:/Qt/6.11.1/msvc2022_64 ^
       -DSOLSTICE_ENABLE_OPTIX=ON ^
       -DOptiX_ROOT="C:/ProgramData/NVIDIA Corporation/OptiX SDK 9.0.0"
 ```

@@ -88,30 +88,75 @@ function Find-Git {
     Fail 'Git not found. Install https://git-scm.com/download/win'
 }
 
+function Test-QtPrefix([string]$Prefix) {
+    if (-not $Prefix) { return $false }
+    $cfg = Join-Path $Prefix 'lib\cmake\Qt6\Qt6Config.cmake'
+    return (Test-Path -LiteralPath $cfg)
+}
+
+function Find-QtKitsUnder([string]$Dir) {
+    $found = @()
+    if (-not (Test-Path -LiteralPath $Dir)) { return $found }
+    if (Test-QtPrefix $Dir) {
+        $found += $Dir
+        return $found
+    }
+    Get-ChildItem -LiteralPath $Dir -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        if (Test-QtPrefix $_.FullName) {
+            $found += $_.FullName
+            return
+        }
+        Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+            if (Test-QtPrefix $_.FullName) { $found += $_.FullName }
+        }
+    }
+    return $found
+}
+
+function Select-MsvcQtKit([object]$Kits) {
+    $list = @($Kits | Where-Object { $_ })
+    if ($list.Count -eq 0) { return $null }
+    $msvc = @($list | Where-Object { $_ -match 'msvc' })
+    if ($msvc.Count -eq 0) { return $null }
+    $sorted = @($msvc | Sort-Object {
+        $ver = [version]'0.0.0'
+        if ($_ -match '\\(6\.\d+(?:\.\d+)?)\\') {
+            try { $ver = [version]$matches[1] } catch { }
+        }
+        $msvcRank = 0
+        if ($_ -match 'msvc2022') { $msvcRank = 2 }
+        elseif ($_ -match 'msvc2019') { $msvcRank = 1 }
+        '{0:D2}.{1}' -f $msvcRank, $ver
+    } -Descending)
+    return $sorted[0]
+}
+
 function Find-QtPrefix {
     foreach ($envName in @('QT_ROOT', 'QT_ROOT_DIR', 'QTDIR')) {
         $v = [Environment]::GetEnvironmentVariable($envName)
-        if ($v) {
-            $cfg = Join-Path $v 'lib\cmake\Qt6\Qt6Config.cmake'
-            if (Test-Path -LiteralPath $cfg) { return $v }
-        }
+        if (-not $v) { continue }
+        if (Test-QtPrefix $v) { return $v }
+        $fromEnv = Select-MsvcQtKit (Find-QtKitsUnder $v)
+        if ($fromEnv) { return $fromEnv }
     }
-    $roots = @('C:\Qt', 'D:\Qt', 'E:\Qt', (Join-Path $env:USERPROFILE 'Qt'))
-    $kits = @('msvc2022_64', 'msvc2019_64')
-    foreach ($root in $roots) {
-        if (-not (Test-Path -LiteralPath $root)) { continue }
-        $versions = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^6\.\d+' } |
-            Sort-Object Name -Descending
-        foreach ($ver in $versions) {
-            foreach ($kit in $kits) {
-                $p = Join-Path $ver.FullName $kit
-                $cfg = Join-Path $p 'lib\cmake\Qt6\Qt6Config.cmake'
-                if (Test-Path -LiteralPath $cfg) { return $p }
-            }
-        }
+    $all = @()
+    foreach ($root in @('C:\Qt', 'D:\Qt', 'E:\Qt', (Join-Path $env:USERPROFILE 'Qt'))) {
+        $all += Find-QtKitsUnder $root
     }
-    Fail 'Qt 6 (msvc2019_64 / msvc2022_64) not found. Install Qt 6 into C:\Qt or set QT_ROOT=C:\Qt\6.7.2\msvc2019_64'
+    $all = @($all | Select-Object -Unique)
+    $pick = Select-MsvcQtKit $all
+    if ($pick) { return $pick }
+    $hint = 'none'
+    if ($all.Count -gt 0) { $hint = ($all -join ', ') }
+    Fail @"
+Qt 6 MSVC kit not found (need lib\cmake\Qt6\Qt6Config.cmake under an msvc folder).
+Looked under C:\Qt. Kits found: $hint
+Qt 6.11.1 is fine. This build uses Visual Studio, so you need the MSVC 2022 64-bit kit, e.g.
+  C:\Qt\6.11.1\msvc2022_64
+If you only installed MinGW/llvm-mingw, open C:\Qt\MaintenanceTool.exe and add:
+  Qt 6.11.1 -> MSVC 2022 64-bit
+Or set QT_ROOT to that kit folder and re-run BUILD_WINDOWS.bat.
+"@
 }
 
 function Find-CudaPath {
