@@ -53,6 +53,8 @@ message(STATUS "Build id: ${SOLSTICE_BUILD_ID}")
 # Options
 # ---------------------------------------------------------------------------
 option(SOLSTICE_ENABLE_OPTIX "Build the OptiX GPU path tracing backend" OFF)
+set(SOLSTICE_OPTIX_NVCC_OPT "1" CACHE STRING
+    "nvcc -O level for OptiX PTX (1 = faster compile; OptiX still optimizes at module create)")
 option(SOLSTICE_ENABLE_ALEMBIC "Build with Alembic geometry import" ON)
 option(SOLSTICE_ENABLE_OPENEXR "Build with OpenEXR image support" ON)
 option(SOLSTICE_ENABLE_TIFF "Build with libtiff (.tx / .tif mipmap) support" ON)
@@ -620,7 +622,10 @@ if(SOLSTICE_HAVE_MATERIALX_01)
     endif()
 endif()
 if(SOLSTICE_HAVE_OPTIX_01)
-    target_sources(solstice_lib PRIVATE src/render/optix/optix_device.cpp ${SOLSTICE_OPTIX_EMBED_SOURCE})
+    target_sources(solstice_lib PRIVATE
+        src/render/optix/optix_device.cpp
+        ${SOLSTICE_OPTIX_EMBED_SOURCE}
+        ${SOLSTICE_OPTIX_HIT_EMBED_SOURCE})
     target_link_libraries(solstice_lib PUBLIC CUDA::cudart CUDA::cuda_driver)
     target_include_directories(solstice_lib PUBLIC ${OptiX_INCLUDE_DIR})
     add_dependencies(solstice_lib solstice_optix_programs)

@@ -89,9 +89,17 @@ endif()
 
 message(STATUS "OptiX headers: ${OptiX_INCLUDE_DIR}")
 
-set(SOLSTICE_OPTIX_CU ${CMAKE_SOURCE_DIR}/src/render/optix/optix_programs.cu)
-set(SOLSTICE_OPTIX_PTX ${CMAKE_BINARY_DIR}/generated/optix_programs.ptx)
+set(SOLSTICE_OPTIX_PATH_CU ${CMAKE_SOURCE_DIR}/src/render/optix/optix_path.cu)
+set(SOLSTICE_OPTIX_HIT_CU ${CMAKE_SOURCE_DIR}/src/render/optix/optix_hit_miss.cu)
+set(SOLSTICE_OPTIX_PATH_PTX ${CMAKE_BINARY_DIR}/generated/optix_path.ptx)
+set(SOLSTICE_OPTIX_HIT_PTX ${CMAKE_BINARY_DIR}/generated/optix_hit_miss.ptx)
+set(SOLSTICE_OPTIX_PTX ${SOLSTICE_OPTIX_PATH_PTX})
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
+
+if(NOT DEFINED SOLSTICE_OPTIX_NVCC_OPT)
+    set(SOLSTICE_OPTIX_NVCC_OPT "1")
+endif()
+message(STATUS "OptiX PTX: dedicated path-tracer kernel (no integrator.h), nvcc -O${SOLSTICE_OPTIX_NVCC_OPT}")
 
 set(_solstice_nvcc_inc_flags)
 foreach(_inc IN LISTS CUDAToolkit_INCLUDE_DIRS)
@@ -126,53 +134,103 @@ if(WIN32)
         -Xcompiler=/bigobj,/nologo)
 endif()
 
-# nvcc prints almost nothing while parsing integrator.h. Ninja stays on [0/N]
-# until PTX is done (often 10-20 min). Echo so the log shows the step started.
+# Two PTX TUs so ninja can run hit/miss (seconds) in parallel with the path
+# kernel and the rest of the C++ compile.
+# Cycles: OptiX programs are small intersect wrappers; shade is another kernel;
+# MNEE/OSL are a second module loaded only when needed.
+# Karma XPU: render kernels vs user shaders, compiled on first use and cached.
+# Iray: MDL JIT to PTX callables per material.
+# We ship a dedicated unidirectional PT kernel that does not include integrator.h
+# (volumes / SSS / procedurals / optics stay on Embree). -O1: OptiX re-optimizes
+# at optixModuleCreate; cicc -O3 on a shared megakernel has run 3h+ on a 14900K.
+set(_solstice_nvcc_ptx_common
+    ${_solstice_nvcc_ccbin}
+    -ptx
+    -std=c++17
+    -O${SOLSTICE_OPTIX_NVCC_OPT}
+    --use_fast_math
+    --disable-warnings
+    ${_solstice_nvcc_lineinfo}
+    ${_solstice_nvcc_unsupported}
+    -arch=${SOLSTICE_OPTIX_ARCH}
+    -D_USE_MATH_DEFINES
+    -DNOMINMAX
+    -DWIN32_LEAN_AND_MEAN
+    -I${CMAKE_SOURCE_DIR}/src
+    -I${CMAKE_BINARY_DIR}/generated
+    -I${OptiX_INCLUDE_DIR}
+    ${_solstice_nvcc_inc_flags})
+
 add_custom_command(
-    OUTPUT ${SOLSTICE_OPTIX_PTX}
-    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX start"
+    OUTPUT ${SOLSTICE_OPTIX_HIT_PTX}
+    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX hit/miss start"
     COMMAND ${CMAKE_CUDA_COMPILER}
-            ${_solstice_nvcc_ccbin}
-            -ptx
-            -std=c++17
-            --use_fast_math
-            ${_solstice_nvcc_lineinfo}
-            ${_solstice_nvcc_unsupported}
-            -arch=${SOLSTICE_OPTIX_ARCH}
-            -D_USE_MATH_DEFINES
-            -DNOMINMAX
-            -DWIN32_LEAN_AND_MEAN
-            -I${CMAKE_SOURCE_DIR}/src
-            -I${CMAKE_BINARY_DIR}/generated
-            -I${OptiX_INCLUDE_DIR}
-            ${_solstice_nvcc_inc_flags}
-            -o ${SOLSTICE_OPTIX_PTX}
-            ${SOLSTICE_OPTIX_CU}
-    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX done"
+            ${_solstice_nvcc_ptx_common}
+            -o ${SOLSTICE_OPTIX_HIT_PTX}
+            ${SOLSTICE_OPTIX_HIT_CU}
+    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX hit/miss done"
     DEPENDS
-        ${SOLSTICE_OPTIX_CU}
-        ${CMAKE_SOURCE_DIR}/src/render/blue_noise.h
-        ${CMAKE_SOURCE_DIR}/src/render/integrator.h
+        ${SOLSTICE_OPTIX_HIT_CU}
+        ${CMAKE_SOURCE_DIR}/src/render/optix/optix_common.cuh
         ${CMAKE_SOURCE_DIR}/src/render/optix/launch_params.h
+        ${CMAKE_SOURCE_DIR}/src/scene/types.h
+        ${CMAKE_SOURCE_DIR}/src/core/math.h
+    COMMENT "nvcc OptiX PTX (hit/miss)"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT ${SOLSTICE_OPTIX_PATH_PTX}
+    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX path start"
+    COMMAND ${CMAKE_CUDA_COMPILER}
+            ${_solstice_nvcc_ptx_common}
+            -DSOLSTICE_OPTIX_KERNEL=1
+            -o ${SOLSTICE_OPTIX_PATH_PTX}
+            ${SOLSTICE_OPTIX_PATH_CU}
+    COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX path done"
+    DEPENDS
+        ${SOLSTICE_OPTIX_PATH_CU}
+        ${CMAKE_SOURCE_DIR}/src/render/optix/optix_common.cuh
+        ${CMAKE_SOURCE_DIR}/src/render/optix/optix_bsdf.cuh
+        ${CMAKE_SOURCE_DIR}/src/render/optix/launch_params.h
+        ${CMAKE_SOURCE_DIR}/src/render/blue_noise.h
+        ${CMAKE_SOURCE_DIR}/src/render/lights.h
+        ${CMAKE_SOURCE_DIR}/src/core/math.h
+        ${CMAKE_SOURCE_DIR}/src/core/rng.h
+        ${CMAKE_SOURCE_DIR}/src/scene/types.h
         ${CMAKE_BINARY_DIR}/generated/solstice_config.h
-    COMMENT "nvcc OptiX PTX"
+    COMMENT "nvcc OptiX PTX (path tracer)"
     VERBATIM
 )
 
 # --- embed the PTX ----------------------------------------------------------
 set(SOLSTICE_OPTIX_EMBED_SOURCE ${CMAKE_BINARY_DIR}/generated/solstice_optix_ir.cpp)
+set(SOLSTICE_OPTIX_HIT_EMBED_SOURCE ${CMAKE_BINARY_DIR}/generated/solstice_optix_hit_ir.cpp)
 add_custom_command(
     OUTPUT ${SOLSTICE_OPTIX_EMBED_SOURCE}
     COMMAND ${CMAKE_COMMAND}
-            -DINPUT=${SOLSTICE_OPTIX_PTX}
+            -DINPUT=${SOLSTICE_OPTIX_PATH_PTX}
             -DOUTPUT=${SOLSTICE_OPTIX_EMBED_SOURCE}
             -DSYMBOL=solsticeOptixIr
             -P ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
-    DEPENDS ${SOLSTICE_OPTIX_PTX} ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
-    COMMENT "Embedding OptiX PTX"
+    DEPENDS ${SOLSTICE_OPTIX_PATH_PTX} ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
+    COMMENT "Embedding OptiX path PTX"
     VERBATIM
 )
-add_custom_target(solstice_optix_programs DEPENDS ${SOLSTICE_OPTIX_EMBED_SOURCE})
+add_custom_command(
+    OUTPUT ${SOLSTICE_OPTIX_HIT_EMBED_SOURCE}
+    COMMAND ${CMAKE_COMMAND}
+            -DINPUT=${SOLSTICE_OPTIX_HIT_PTX}
+            -DOUTPUT=${SOLSTICE_OPTIX_HIT_EMBED_SOURCE}
+            -DSYMBOL=solsticeOptixHitIr
+            -P ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
+    DEPENDS ${SOLSTICE_OPTIX_HIT_PTX} ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
+    COMMENT "Embedding OptiX hit/miss PTX"
+    VERBATIM
+)
+add_custom_target(solstice_optix_programs
+    DEPENDS ${SOLSTICE_OPTIX_EMBED_SOURCE} ${SOLSTICE_OPTIX_HIT_EMBED_SOURCE})
 set_source_files_properties(${SOLSTICE_OPTIX_EMBED_SOURCE} PROPERTIES GENERATED TRUE)
+set_source_files_properties(${SOLSTICE_OPTIX_HIT_EMBED_SOURCE} PROPERTIES GENERATED TRUE)
 
 set(SOLSTICE_HAVE_OPTIX_01 1)

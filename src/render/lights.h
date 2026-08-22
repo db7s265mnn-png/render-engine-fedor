@@ -1,4 +1,6 @@
-// Light sampling shared by the Embree and OptiX integrators.
+// Light sampling shared by the Embree integrator and the dedicated OptiX path
+// kernel. Volume NEE / light-BVH stay CPU-only (`#if !SOLSTICE_OPTIX_KERNEL`):
+// nvcc must not instantiate those helpers in optix_path.cu.
 //
 // Conventions (matching Houdini/USD): rect and disk lights live in the XY plane
 // of their transform and emit along -Z, distant lights travel along -Z, sphere
@@ -31,6 +33,7 @@ SR_INL SR_HD bool lightIsInfinite(const LightData& l) {
 // Pick candidate i with probability w_i / Σw; unbiased estimator is
 // vis(Y) · (Σw) / M · (rgb_Y / w_Y). See Talbot 2005 / Bitterli ReSTIR.
 constexpr int kRisCandidates = 8;
+#if !defined(SOLSTICE_OPTIX_KERNEL)
 // Volume NEE: env CDF ignores HG, so high anisotropy needs more unshadowed
 // probes (still one shadow ray). g=0 keeps M=8; g≥0.8 uses the full 64.
 constexpr int kVolumeRisMax = 64;
@@ -46,6 +49,7 @@ SR_INL SR_HD int volumeRisCandidateCount(float g) {
     if (ag < 0.80f) return 32;
     return kVolumeRisMax;
 }
+#endif
 
 SR_INL SR_HD int risPick(const float* w, int n, float u, float& wSum) {
     wSum = 0.0f;
@@ -482,6 +486,7 @@ SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
     }
 }
 
+#if !defined(SOLSTICE_OPTIX_KERNEL)
 // 4π · HG(cos, g). Equals 1 at g = 0 so flux weights are unchanged.
 SR_INL SR_HD float henyeyGreensteinFourPi(float cosTheta, float g) {
     const float g2 = g * g;
@@ -511,6 +516,7 @@ SR_INL SR_HD float volumeLightSelectionWeight(const SceneView& scene, int lightI
     const float hg4 = henyeyGreensteinFourPi(clampf(dot(wo, toL), -1.0f, 1.0f), g);
     return flux * srMax(kVolumeProductHgFloor, hg4);
 }
+#endif  // !SOLSTICE_OPTIX_KERNEL
 
 SR_INL SR_HD float lightSelectionPdf(const SceneView& scene) {
     return scene.lightCount > 0 ? 1.0f / float(scene.lightCount) : 0.0f;
@@ -560,6 +566,7 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
 // ---------------------------------------------------------------------------
 // BVH-accelerated light sampling (position-aware importance)
 // ---------------------------------------------------------------------------
+#if !defined(SOLSTICE_OPTIX_KERNEL)
 
 // Importance of a BVH node from refP. Uses distance to the AABB *center*
 // softened by the node's extent — not min-distance-to-box (that is zero under
@@ -596,6 +603,7 @@ SR_INL SR_HD bool bvhContainsLight(const LightBvhNode* nodes, int nodeCount,
     }
     return false;
 }
+#endif  // !SOLSTICE_OPTIX_KERNEL
 
 // Position-aware light selection via the prebuilt BVH (center+extent importance).
 // Infinite lights (dome/distant) are weighted by flux and kept outside the BVH.
@@ -604,6 +612,11 @@ SR_INL SR_HD bool bvhContainsLight(const LightBvhNode* nodes, int nodeCount,
 SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, float& pdf) {
     if (scene.lightCount <= 0) { pdf = 0.f; return -1; }
 
+#if defined(SOLSTICE_OPTIX_KERNEL)
+    // GPU PT: no light BVH uploaded. Flux table only.
+    (void)refP;
+    return sampleLightIndex(scene, u, pdf);
+#else
     if (!scene.lightBvh || scene.lightBvhNodeCount == 0)
         return sampleLightIndex(scene, u, pdf);
 
@@ -665,11 +678,16 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, fl
     pdf = travPdf;
     if (pdf <= 0.f) { pdf = 0.f; return -1; }
     return scene.lightBvh[nodeIdx].childOrLight;
+#endif
 }
 
 // Position-aware selection PDF for a specific light index.
 // Must be called with the same `refP` used during sampling for MIS correctness.
 SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int lightIndex) {
+#if defined(SOLSTICE_OPTIX_KERNEL)
+    (void)refP;
+    return lightSelectionPdfIndex(scene, lightIndex);
+#else
     if (!scene.lightBvh || scene.lightBvhNodeCount == 0 ||
         lightIndex < 0 || lightIndex >= scene.lightCount)
         return lightSelectionPdfIndex(scene, lightIndex);
@@ -708,8 +726,10 @@ SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int
         }
     }
     return travPdf;
+#endif
 }
 
+#if !defined(SOLSTICE_OPTIX_KERNEL)
 SR_INL SR_HD int sampleVolumeLightIndex(const SceneView& scene, Vec3 refP, Vec3 wo, float g, float u,
                                         float& pdf) {
     if (fabsf(g) < kVolumeProductGMin) return sampleLightIndex(scene, refP, u, pdf);
@@ -748,13 +768,21 @@ SR_INL SR_HD float volumeLightSelectionPdfIndex(const SceneView& scene, Vec3 ref
     if (total <= 1e-20f) return lightSelectionPdfIndex(scene, refP, lightIndex);
     return chosen / total;
 }
+#endif  // !SOLSTICE_OPTIX_KERNEL
 
 // MIS light-pick pdf: volume continuation vs volume NEE must share HG×sun weights.
 SR_INL SR_HD float lightSelectionPdfIndexMaybeVolume(const SceneView& scene, Vec3 origin, int lightIndex,
                                                      bool volumePhaseMis, Vec3 woVol, float volumeG) {
+#if defined(SOLSTICE_OPTIX_KERNEL)
+    (void)volumePhaseMis;
+    (void)woVol;
+    (void)volumeG;
+    return lightSelectionPdfIndex(scene, origin, lightIndex);
+#else
     if (volumePhaseMis)
         return volumeLightSelectionPdfIndex(scene, origin, woVol, volumeG, lightIndex);
     return lightSelectionPdfIndex(scene, origin, lightIndex);
+#endif
 }
 
 // Solar disc for Physical Sky distant lights. The baked sky map has no disc

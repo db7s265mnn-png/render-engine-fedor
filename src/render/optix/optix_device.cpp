@@ -22,9 +22,11 @@
 #include "render/optix/launch_params.h"
 #include "render/render_device.h"
 
-// Emitted by the build from optix_programs.cu.
+// Emitted by the build from optix_path.cu / optix_hit_miss.cu.
 extern "C" const unsigned char solsticeOptixIr[];
 extern "C" const unsigned long long solsticeOptixIrSize;
+extern "C" const unsigned char solsticeOptixHitIr[];
+extern "C" const unsigned long long solsticeOptixHitIrSize;
 
 namespace sol {
 namespace {
@@ -176,7 +178,8 @@ public:
 
             buildPipeline();
             initialized_ = true;
-            logInfo("OptiX backend initialised on " + deviceName_);
+            logInfo("OptiX backend initialised on " + deviceName_ +
+                    " (path tracer only: pinhole camera, basic surface shaders)");
             return true;
         } catch (const std::exception& e) {
             error = e.what();
@@ -340,6 +343,15 @@ public:
                     std::to_string(scene_->totalTriangles()) + " triangles, " +
                     std::to_string(textureViews.size()) + " textures, " +
                     std::to_string(scene_->procedurals.size()) + " procedurals");
+            if (!scene_->procedurals.empty() && !warnedProcedurals_) {
+                logWarning("GPU (OptiX) uses basic surface shaders (image maps + Lambert/GGX/glass). "
+                           "MaterialX procedurals stay on Embree.");
+                warnedProcedurals_ = true;
+            }
+            if ((hostView.camera.fStop > 1e-4f || hostView.camera.opticalModel != 0) && !warnedOptics_) {
+                logWarning("GPU (OptiX) uses a pinhole camera (no thin-lens DoF, no polynomial optics).");
+                warnedOptics_ = true;
+            }
             return true;
         } catch (const std::exception& e) {
             error = e.what();
@@ -352,6 +364,11 @@ public:
         if (!initialized_ || !scene_) return;
         if (cancel.load(std::memory_order_relaxed)) return;
         try {
+            if (scene_->settings.integrator != kIntegratorPathTracer && !warnedNonPath_) {
+                logWarning("GPU (OptiX) runs the unidirectional path tracer only. "
+                           "BDPT / spectral / AO / wireframe / MNEE / polynomial optics stay on CPU Embree.");
+                warnedNonPath_ = true;
+            }
             const int width = fb.width();
             const int height = fb.height();
             if (width <= 0 || height <= 0) return;
@@ -507,41 +524,46 @@ private:
 
         char log[4096];
         size_t logSize = sizeof(log);
+        auto loadModule = [&](const unsigned char* ir, unsigned long long irSize, OptixModule& out) {
+            logSize = sizeof(log);
 #if OPTIX_VERSION >= 70700
-        OPTIX_CHECK(optixModuleCreate(context_, &moduleOptions, &pipelineOptions,
-                                      reinterpret_cast<const char*>(solsticeOptixIr),
-                                      size_t(solsticeOptixIrSize), log, &logSize, &module_));
+            OPTIX_CHECK(optixModuleCreate(context_, &moduleOptions, &pipelineOptions,
+                                          reinterpret_cast<const char*>(ir), size_t(irSize), log,
+                                          &logSize, &out));
 #else
-        OPTIX_CHECK(optixModuleCreateFromPTX(context_, &moduleOptions, &pipelineOptions,
-                                             reinterpret_cast<const char*>(solsticeOptixIr),
-                                             size_t(solsticeOptixIrSize), log, &logSize, &module_));
+            OPTIX_CHECK(optixModuleCreateFromPTX(context_, &moduleOptions, &pipelineOptions,
+                                                 reinterpret_cast<const char*>(ir), size_t(irSize), log,
+                                                 &logSize, &out));
 #endif
+        };
+        loadModule(solsticeOptixIr, solsticeOptixIrSize, raygenModule_);
+        loadModule(solsticeOptixHitIr, solsticeOptixHitIrSize, hitModule_);
 
         OptixProgramGroupOptions groupOptions{};
 
         OptixProgramGroupDesc raygenDesc{};
         raygenDesc.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-        raygenDesc.raygen.module = module_;
+        raygenDesc.raygen.module = raygenModule_;
         raygenDesc.raygen.entryFunctionName = "__raygen__path";
         logSize = sizeof(log);
         OPTIX_CHECK(optixProgramGroupCreate(context_, &raygenDesc, 1, &groupOptions, log, &logSize, &raygenGroup_));
 
         OptixProgramGroupDesc missDesc[2]{};
         missDesc[0].kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-        missDesc[0].miss.module = module_;
+        missDesc[0].miss.module = hitModule_;
         missDesc[0].miss.entryFunctionName = "__miss__radiance";
         missDesc[1].kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-        missDesc[1].miss.module = module_;
+        missDesc[1].miss.module = hitModule_;
         missDesc[1].miss.entryFunctionName = "__miss__shadow";
         logSize = sizeof(log);
         OPTIX_CHECK(optixProgramGroupCreate(context_, missDesc, 2, &groupOptions, log, &logSize, missGroups_));
 
         OptixProgramGroupDesc hitDesc[2]{};
         hitDesc[0].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-        hitDesc[0].hitgroup.moduleCH = module_;
+        hitDesc[0].hitgroup.moduleCH = hitModule_;
         hitDesc[0].hitgroup.entryFunctionNameCH = "__closesthit__radiance";
         hitDesc[1].kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
-        hitDesc[1].hitgroup.moduleCH = module_;
+        hitDesc[1].hitgroup.moduleCH = hitModule_;
         hitDesc[1].hitgroup.entryFunctionNameCH = "__closesthit__shadow";
         logSize = sizeof(log);
         OPTIX_CHECK(optixProgramGroupCreate(context_, hitDesc, 2, &groupOptions, log, &logSize, hitGroups_));
@@ -625,20 +647,26 @@ private:
             if (group) optixProgramGroupDestroy(group);
             group = nullptr;
         }
-        if (module_) optixModuleDestroy(module_);
+        if (raygenModule_) optixModuleDestroy(raygenModule_);
+        if (hitModule_) optixModuleDestroy(hitModule_);
         if (context_) optixDeviceContextDestroy(context_);
         pipeline_ = nullptr;
         raygenGroup_ = nullptr;
-        module_ = nullptr;
+        raygenModule_ = nullptr;
+        hitModule_ = nullptr;
         context_ = nullptr;
         initialized_ = false;
     }
 
     bool initialized_ = false;
+    bool warnedNonPath_ = false;
+    bool warnedProcedurals_ = false;
+    bool warnedOptics_ = false;
     std::string deviceName_;
 
     OptixDeviceContext context_ = nullptr;
-    OptixModule module_ = nullptr;
+    OptixModule raygenModule_ = nullptr;
+    OptixModule hitModule_ = nullptr;
     OptixProgramGroup raygenGroup_ = nullptr;
     OptixProgramGroup missGroups_[2] = {nullptr, nullptr};
     OptixProgramGroup hitGroups_[2] = {nullptr, nullptr};

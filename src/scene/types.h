@@ -367,7 +367,8 @@ struct CameraData {
     float fStop = 0.0f;           // 0 disables depth of field
     float focusDistance = 5.0f;
 
-    // 0 = thin lens (default), 1 = polynomial optics (Embree only; OptiX falls back).
+    // 0 = thin lens (Embree), 1 = polynomial optics (Embree only).
+    // OptiX is pinhole only — no DoF, no Lentil/polynomial optics.
     int opticalModel = 0;
     // Index into polynomialOpticsLensNames() when opticalModel == 1.
     int lensModel = 19;  // cooke__speed_panchro__1920__50mm

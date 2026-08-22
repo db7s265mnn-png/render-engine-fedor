@@ -931,6 +931,7 @@ function Invoke-LoggedCMakeBuild([string[]]$BuildArgs) {
 
 Write-Host ''
 Info 'Building in parallel: nvcc PTX uses 1 core; MSVC compiles the rest on the other cores.'
+Info 'GPU OptiX is a small path-tracer kernel (not integrator.h). hit/miss PTX is a second job.'
 Info 'Ninja [0/N] on PTX is a timer, not a percent. cicc cpu= must grow. 3% on a 14900K = one thread at 100%.'
 $j = $env:NUMBER_OF_PROCESSORS
 if (-not $j) { $j = '8' }

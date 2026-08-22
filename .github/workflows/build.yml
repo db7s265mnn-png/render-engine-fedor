@@ -319,12 +319,18 @@ jobs:
       - name: Prove OptiX IR is embedded
         shell: pwsh
         run: |
-          if (-not (Test-Path build/generated/optix_programs.ptx)) { throw "optix_programs.ptx was not produced" }
+          if (-not (Test-Path build/generated/optix_path.ptx)) { throw "optix_path.ptx was not produced" }
+          if (-not (Test-Path build/generated/optix_hit_miss.ptx)) { throw "optix_hit_miss.ptx was not produced" }
           if (-not (Test-Path build/generated/solstice_optix_ir.cpp)) { throw "solstice_optix_ir.cpp was not produced" }
+          if (-not (Test-Path build/generated/solstice_optix_hit_ir.cpp)) { throw "solstice_optix_hit_ir.cpp was not produced" }
           if (-not (Select-String -Path build/generated/solstice_optix_ir.cpp -Pattern "solsticeOptixIr" -Quiet)) {
-            throw "embedded OptiX IR symbol missing"
+            throw "embedded OptiX path IR symbol missing"
           }
-          Get-Item build/generated/optix_programs.ptx, build/generated/solstice_optix_ir.cpp |
+          if (-not (Select-String -Path build/generated/solstice_optix_hit_ir.cpp -Pattern "solsticeOptixHitIr" -Quiet)) {
+            throw "embedded OptiX hit/miss IR symbol missing"
+          }
+          Get-Item build/generated/optix_path.ptx, build/generated/optix_hit_miss.ptx,
+                    build/generated/solstice_optix_ir.cpp, build/generated/solstice_optix_hit_ir.cpp |
             ForEach-Object { Write-Host "$($_.Name) $($_.Length) bytes" }
 
       - name: Build
