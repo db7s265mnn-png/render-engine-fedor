@@ -296,7 +296,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     session_.setUpdateCallback([this] { framePending_.store(true, std::memory_order_relaxed); });
     session_.setFinishedCallback([this] {
         framePending_.store(true, std::memory_order_relaxed);
-        QMetaObject::invokeMethod(this, [this] { maybeSaveStillFrame(); }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [this] { onRenderFinished(); }, Qt::QueuedConnection);
     });
 }
 
@@ -961,6 +961,25 @@ void MainWindow::maybeSaveStillFrame() {
         QStringLiteral("Still frame written: %1").arg(stillFramePath_), 6000);
 }
 
+void MainWindow::onRenderFinished() {
+    const RenderProgress progress = session_.progress();
+    if (!progress.message.empty()) {
+        stillFramePending_ = false;
+        setRenderArmed(false);
+        renderRequested_ = false;
+        if (renderView_) renderView_->setNavigationEnabled(false);
+        const QString text = QString::fromStdString(progress.message);
+        statusBar()->showMessage(text, 0);
+        updateStatusBar();
+        const QString title = progress.backendName.find("OptiX") != std::string::npos
+                                  ? QStringLiteral("GPU (OptiX)")
+                                  : QStringLiteral("Render");
+        appMessageBox(this, title, text);
+        return;
+    }
+    maybeSaveStillFrame();
+}
+
 // ---------------------------------------------------------------------------
 // Cook and render
 // ---------------------------------------------------------------------------
@@ -1621,6 +1640,9 @@ void MainWindow::updateStatusBar() {
         if (rs.pixelSampler == kPixelSamplerManualTest)
             overlay += QString("  mult=%1").arg(rs.manualTestMult, 0, 'f', 2);
     }
+    if (!progress.message.empty()) {
+        overlay += QStringLiteral("   %1").arg(QString::fromStdString(progress.message));
+    }
     if (!renderView_) return;
     renderView_->setStatusText(overlay);
 
@@ -1638,7 +1660,7 @@ void MainWindow::updateStatusBar() {
     if (!live.empty()) {
         if (live.find("OptiX") != std::string::npos) active = QStringLiteral("OptiX");
         else if (live.find("Embree") != std::string::npos) {
-            active = wantGpu ? QStringLiteral("Embree (fallback)") : QStringLiteral("Embree");
+            active = QStringLiteral("Embree");
         }
     } else if (wantGpu && optixRuntimeAvailable()) {
         active = QStringLiteral("OptiX");
@@ -1649,7 +1671,12 @@ void MainWindow::updateStatusBar() {
 
     QString support = QStringLiteral("OptiX not supported");
     QColor supportColor(255, 80, 80);
-    if (!optixBackendCompiledIn()) {
+    if (!progress.message.empty() && wantGpu) {
+        support = QString::fromStdString(progress.message);
+        if (support.size() > 48) support = support.left(46) + QStringLiteral("…");
+        supportColor = QColor(255, 80, 80);
+        if (active.startsWith(QLatin1String("Embree"))) active = QStringLiteral("OptiX");
+    } else if (!optixBackendCompiledIn()) {
         support = QStringLiteral("OptiX not in this build");
     } else if (optixRuntimeProbePending()) {
         support = QStringLiteral("OptiX checking…");

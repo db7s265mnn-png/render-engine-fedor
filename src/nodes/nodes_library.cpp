@@ -1145,9 +1145,12 @@ public:
                                                            "NEE/MIS, HDRI, thin-lens DoF, and VDB fog "
                                                            "baked to a dense brick.\n"
                                                            "Still CPU-only: BDPT, spectral, MNEE, SSS, "
-                                                           "MaterialX procedurals, polynomial optics.")
+                                                           "MaterialX procedurals, polynomial optics.\n"
+                                                           "If OptiX cannot start, render stops with an "
+                                                           "error — it does not switch to Embree.")
                                           : QStringLiteral("This executable was built without OptiX/CUDA. "
-                                                          "GPU (OptiX) will fall back to Embree.")));
+                                                          "GPU (OptiX) will stop with an error — it does not "
+                                                          "fall back to Embree.")));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
                                           "Ambient Occlusion", "PT Spectral", "BDPT Spectral",
@@ -1156,7 +1159,7 @@ public:
                          .withGroup("Engine")
                          .withTooltip("Path Tracer: unidirectional (+ MNEE or Photon caustics).\n"
                                       "BDPT: bidirectional + light-tracing / Photon caustics "
-                                      "(CPU only — OptiX falls back to Path Tracer).\n"
+                                      "(CPU only — GPU (OptiX) stops with an error).\n"
                                       "PT Spectral: hero-wavelength path tracer (CPU / Embree).\n"
                                       "BDPT Spectral: bidirectional + spectral transport "
                                       "(LT / MNEE / Photon + Indirect Guides; CPU / Embree).\n"

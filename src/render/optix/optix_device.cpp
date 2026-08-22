@@ -466,8 +466,7 @@ public:
         try {
             CUDA_CHECK(cudaSetDevice(0));
             if (scene_->settings.integrator != kIntegratorPathTracer && !warnedNonPath_) {
-                logWarning("GPU (OptiX) runs the unidirectional path tracer only. "
-                           "BDPT / spectral / AO / wireframe / MNEE / polynomial optics stay on CPU Embree.");
+                logWarning("GPU (OptiX) is Path Tracer only. Other integrators are rejected by the session.");
                 warnedNonPath_ = true;
             }
             const int width = fb.width();
@@ -549,6 +548,7 @@ public:
         } catch (const std::exception& e) {
             lastGpuSampleMs_ = 0.0;
             logError(std::string("OptiX render failed: ") + e.what());
+            throw;
         }
     }
 
