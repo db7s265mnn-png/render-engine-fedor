@@ -65,4 +65,8 @@ RenderDevicePtr createEmbreeDevice(int threadCount = 0);
 RenderDevicePtr createOptixDevice();
 bool optixBackendCompiledIn();
 
+// Live CUDA + optixInit probe (cached). createOptixDevice() overwrites this with
+// the real initialize() result. Compile-time optixBackendCompiledIn() is not enough.
+bool optixRuntimeAvailable(std::string* error = nullptr);
+
 }  // namespace sol

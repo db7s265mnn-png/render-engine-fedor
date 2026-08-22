@@ -42,6 +42,7 @@
 #include "nodes/node_registry.h"
 #include "nodes/node.h"
 #include "render/motion_blur.h"
+#include "render/render_device.h"
 #include "render/render_session.h"
 #include "render/scene_picker.h"
 #include "scene/types.h"
@@ -988,6 +989,7 @@ void MainWindow::enterIdlePlaceholder() {
         renderView_->showPlaceholder(true);
     }
     framePending_.store(false, std::memory_order_relaxed);
+    updateStatusBar();
 }
 
 void MainWindow::onCookTimeout() { cookNow(); }
@@ -1617,7 +1619,30 @@ void MainWindow::updateStatusBar() {
         if (rs.pixelSampler == kPixelSamplerManualTest)
             overlay += QString("  mult=%1").arg(rs.manualTestMult, 0, 'f', 2);
     }
+    if (!renderView_) return;
     renderView_->setStatusText(overlay);
+
+    const bool optixOk = optixRuntimeAvailable();
+    QString active = QStringLiteral("Embree");
+    const std::string& live = progress.backendName;
+    if (!live.empty()) {
+        if (live.find("OptiX") != std::string::npos) active = QStringLiteral("OptiX");
+        else if (live.find("Embree") != std::string::npos) active = QStringLiteral("Embree");
+    } else {
+        int backend = kBackendCpuEmbree;
+        if (scene_) {
+            backend = scene_->settings.backend;
+        } else {
+            for (const NodePtr& node : graph_.nodes()) {
+                if (node && node->typeName() == QLatin1String("rendersettings")) {
+                    backend = node->intValue("backend", 0) == 1 ? kBackendGpuOptix : kBackendCpuEmbree;
+                    break;
+                }
+            }
+        }
+        if (backend == kBackendGpuOptix && optixOk) active = QStringLiteral("OptiX");
+    }
+    renderView_->setBackendHud(active, optixOk);
 }
 
 

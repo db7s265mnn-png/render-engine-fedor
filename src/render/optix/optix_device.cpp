@@ -14,6 +14,7 @@
 #include <optix_stubs.h>
 
 #include <cstring>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -784,16 +785,69 @@ private:
     SceneView deviceScene_;
 };
 
+enum class OptixRuntimeState { Unknown, Ok, Fail };
+
+std::mutex gOptixRuntimeMutex;
+OptixRuntimeState gOptixRuntimeState = OptixRuntimeState::Unknown;
+std::string gOptixRuntimeError;
+
+void setOptixRuntime(bool ok, std::string error) {
+    gOptixRuntimeState = ok ? OptixRuntimeState::Ok : OptixRuntimeState::Fail;
+    gOptixRuntimeError = std::move(error);
+}
+
+// CUDA device enumeration + optixInit only. Do not cudaSetDevice here: the HUD
+// probe runs on the UI thread and must not bind a CUDA context there.
+bool probeOptixRuntimeUnlocked(std::string& error) {
+    int deviceCount = 0;
+    const cudaError_t status = cudaGetDeviceCount(&deviceCount);
+    if (status != cudaSuccess) {
+        error = std::string("CUDA: ") + cudaGetErrorString(status);
+        return false;
+    }
+    if (deviceCount <= 0) {
+        error = "no CUDA capable device found";
+        return false;
+    }
+    const OptixResult init = optixInit();
+    if (init != OPTIX_SUCCESS) {
+        error = "optixInit failed (" + std::to_string(int(init)) + ")";
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 bool optixBackendCompiledIn() { return true; }
+
+bool optixRuntimeAvailable(std::string* error) {
+    std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
+    if (gOptixRuntimeState == OptixRuntimeState::Unknown) {
+        std::string err;
+        const bool ok = probeOptixRuntimeUnlocked(err);
+        setOptixRuntime(ok, err);
+        if (ok) logInfo("OptiX runtime probe: available");
+        else logWarning("OptiX runtime probe: not available (" + err + ")");
+    }
+    if (error) *error = gOptixRuntimeError;
+    return gOptixRuntimeState == OptixRuntimeState::Ok;
+}
 
 RenderDevicePtr createOptixDevice() {
     auto device = std::make_shared<OptixPathTracer>();
     std::string error;
     if (!device->initialize(error)) {
+        {
+            std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
+            setOptixRuntime(false, error);
+        }
         logWarning("OptiX backend unavailable: " + error);
         return nullptr;
+    }
+    {
+        std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
+        setOptixRuntime(true, {});
     }
     return device;
 }

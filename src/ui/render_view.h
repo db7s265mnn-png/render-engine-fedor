@@ -58,6 +58,13 @@ public:
         statusTextRight_ = text;
         update();
     }
+    // Far-right HUD: live backend (Embree / OptiX) plus a real OptiX support flag.
+    void setBackendHud(const QString& activeBackend, bool optixSupported) {
+        backendActive_ = activeBackend;
+        optixSupported_ = optixSupported;
+        hasBackendHud_ = true;
+        update();
+    }
     void setResolution(int width, int height);
 
     ViewCamera& camera() { return camera_; }
@@ -173,6 +180,9 @@ private:
     int fadeDurationMs_ = 1000;
     QString statusText_;
     QString statusTextRight_;
+    QString backendActive_;
+    bool optixSupported_ = false;
+    bool hasBackendHud_ = false;
     ViewCamera camera_;
     PickCallback pickCallback_;
     ObjectPickCallback objectPickCallback_;

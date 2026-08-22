@@ -7,6 +7,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QAction>
@@ -1172,31 +1173,61 @@ void RenderView::paintEvent(QPaintEvent*) {
 
     drawGizmo(painter);
 
-    if (!statusText_.isEmpty() || !statusTextRight_.isEmpty()) {
+    const bool showBar = hasBackendHud_ || !statusText_.isEmpty() || !statusTextRight_.isEmpty() ||
+                         focusPickActive_;
+    if (showBar) {
         QFont font = painter.font();
         font.setPointSizeF(8.5);
         painter.setFont(font);
+        const QFontMetrics fm(font);
         const QRect textRect(target.left(), target.bottom() - 22, target.width(), 20);
         painter.fillRect(textRect, QColor(0, 0, 0, 130));
-        painter.setPen(QColor(235, 237, 240));
-        if (!statusText_.isEmpty()) {
-            painter.drawText(textRect.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
-                             statusText_);
+
+        const int margin = 8;
+        int rightLimit = textRect.right() - margin;
+        if (hasBackendHud_) {
+            const QString sep = QStringLiteral("  ·  ");
+            const QString supportText = optixSupported_ ? QStringLiteral("OptiX supported")
+                                                        : QStringLiteral("OptiX not supported");
+            const int activeW = fm.horizontalAdvance(backendActive_);
+            const int sepW = fm.horizontalAdvance(sep);
+            const int supportW = fm.horizontalAdvance(supportText);
+            const int hudW = activeW + sepW + supportW;
+            const int hudX = std::max(textRect.left() + margin, rightLimit - hudW);
+            painter.setPen(QColor(235, 237, 240));
+            painter.drawText(QRect(hudX, textRect.top(), activeW, textRect.height()),
+                             Qt::AlignVCenter | Qt::AlignLeft, backendActive_);
+            painter.setPen(QColor(160, 164, 170));
+            painter.drawText(QRect(hudX + activeW, textRect.top(), sepW, textRect.height()),
+                             Qt::AlignVCenter | Qt::AlignLeft, sep);
+            painter.setPen(optixSupported_ ? QColor(110, 210, 140) : QColor(255, 80, 80));
+            painter.drawText(QRect(hudX + activeW + sepW, textRect.top(), supportW, textRect.height()),
+                             Qt::AlignVCenter | Qt::AlignLeft, supportText);
+            rightLimit = hudX - margin;
+        }
+
+        QString leftText = statusText_;
+        if (leftText.isEmpty() && focusPickActive_) {
+            leftText = QStringLiteral("Focus Pick — click geometry to set DOF focus distance");
+        }
+        if (!leftText.isEmpty()) {
+            const int leftWidth = std::max(0, rightLimit - (textRect.left() + margin));
+            const QRect leftRect(textRect.left() + margin, textRect.top(), leftWidth, textRect.height());
+            painter.setPen(focusPickActive_ && statusText_.isEmpty() ? QColor(255, 210, 70)
+                                                                     : QColor(235, 237, 240));
+            painter.drawText(leftRect, Qt::AlignVCenter | Qt::AlignLeft,
+                             fm.elidedText(leftText, Qt::ElideRight, leftWidth));
         }
         if (!statusTextRight_.isEmpty()) {
-            // Slightly right of the spp strip — same bar, secondary status (dicing).
-            painter.drawText(textRect.adjusted(textRect.width() / 3, 0, -8, 0),
-                             Qt::AlignVCenter | Qt::AlignLeft, statusTextRight_);
+            const int diceLeft = textRect.left() + textRect.width() / 3;
+            const int diceWidth = std::max(0, rightLimit - diceLeft);
+            if (diceWidth > 24) {
+                painter.setPen(QColor(235, 237, 240));
+                painter.drawText(QRect(diceLeft, textRect.top(), diceWidth, textRect.height()),
+                                 Qt::AlignVCenter | Qt::AlignLeft,
+                                 fm.elidedText(statusTextRight_, Qt::ElideRight, diceWidth));
+            }
         }
-    } else if (focusPickActive_) {
-        QFont font = painter.font();
-        font.setPointSizeF(8.5);
-        painter.setFont(font);
-        const QRect textRect(target.left(), target.bottom() - 22, target.width(), 20);
-        painter.fillRect(textRect, QColor(0, 0, 0, 130));
-        painter.setPen(QColor(255, 210, 70));
-        painter.drawText(textRect.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
-                         "Focus Pick — click geometry to set DOF focus distance");
     }
 }
 
