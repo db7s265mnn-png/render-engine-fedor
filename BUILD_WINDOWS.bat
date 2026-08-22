@@ -5,7 +5,7 @@ cd /d "%~dp0"
 echo.
 echo Double-click this file to compile (Release + OptiX).
 echo Visual Studio 2026 needs CUDA 13.2. CUDA 12.0 can stay installed.
-echo After upgrading CUDA, delete only the build-windows folder.
+echo Output goes to C:\gz-build  (NOT inside Downloads - Windows path limit).
 echo Keep %%LOCALAPPDATA%%\grendizer-deps (Embree / OpenVDB cache).
 echo.
 

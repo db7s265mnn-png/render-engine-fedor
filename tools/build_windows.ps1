@@ -3,6 +3,7 @@
 # without BOM and treats Cyrillic bytes as quotes / broken tokens.
 # Override paths with env vars if auto-detect is wrong:
 #   QT_ROOT, CUDA_PATH, OptiX_ROOT, GRENDIZER_BUILD_DIR, GRENDIZER_DEPS
+# Default build dir is C:\gz-build (GitHub zip under Downloads is too long for MSVC).
 # CUDA 13.2+ is required for Visual Studio 2026 (MSVC 14.50+). CUDA 12.x is
 # enough only with VS 2022 / MSVC 14.44. If both are installed, 13.2 is used.
 $ErrorActionPreference = 'Stop'
@@ -695,9 +696,36 @@ function Find-Ninja {
     return $exe
 }
 
+function Test-WritableDir([string]$Dir) {
+    try {
+        New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+        $probe = Join-Path $Dir '.__gz_write'
+        [IO.File]::WriteAllText($probe, 'ok')
+        Remove-Item -LiteralPath $probe -Force
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-BuildDir {
+    if ($env:GRENDIZER_BUILD_DIR) {
+        $d = $env:GRENDIZER_BUILD_DIR
+        if (-not (Test-WritableDir $d)) { Fail "GRENDIZER_BUILD_DIR is not writable: $d" }
+        return $d
+    }
+    # GitHub zip in Downloads\...\name (7)\name\build-windows blows MSVC's 250-char
+    # object path (C1083 / OpenPGL CMAKE warning). Keep the build tree short.
+    foreach ($d in @('C:\gz-build', (Join-Path $env:LOCALAPPDATA 'gz-build'))) {
+        if (Test-WritableDir $d) { return $d }
+    }
+    Fail 'Cannot create C:\gz-build. Set GRENDIZER_BUILD_DIR to a short path (example C:\g).'
+}
+
 Write-Host ''
 Write-Host '=== Grendizer Render - Windows OptiX build ===' -ForegroundColor Green
 Write-Host "Repo: $Root"
+Write-Host 'Build output: C:\gz-build (short path; GitHub zip under Downloads is too long for MSVC).'
 Write-Host 'First run can take a long time (Embree zip + Imath/OpenEXR/Alembic/TBB/OpenVDB + nvcc).'
 Write-Host ''
 
@@ -722,7 +750,7 @@ nvcc:   $Nvcc
 
 Need CUDA 13.2+ with Visual Studio 2026.
 Confirm: `"$Nvcc`" --version   shows release 13.2
-Then delete the build-windows folder (keep %LOCALAPPDATA%\grendizer-deps) and re-run.
+Then delete C:\gz-build (keep %LOCALAPPDATA%\grendizer-deps) and re-run.
 "@
 }
 $OptiX = Find-OptiXRoot $Git
@@ -731,11 +759,7 @@ $ninjaDir = Split-Path $Ninja -Parent
 $env:PATH = "$ninjaDir;$env:PATH"
 Ensure-NativeDeps
 $embreeRoot = Resolve-EmbreePrefix
-if ($env:GRENDIZER_BUILD_DIR) {
-    $BuildDir = $env:GRENDIZER_BUILD_DIR
-} else {
-    $BuildDir = Join-Path $Root 'build-windows'
-}
+$BuildDir = Resolve-BuildDir
 
 $Prefix = "$Qt;$script:DepsPrefix;$embreeRoot"
 
@@ -822,7 +846,7 @@ if ($LASTEXITCODE -ne 0) {
 Build failed.
 If nvcc died on type_traits / aligned_storage / result_of:
   CUDA 12.0 was used. This script must print CUDA 13.2 and arch compute_75.
-Delete the build-windows folder, keep %LOCALAPPDATA%\grendizer-deps, re-run BUILD_WINDOWS.bat.
+Delete C:\gz-build, keep %LOCALAPPDATA%\grendizer-deps, re-run BUILD_WINDOWS.bat.
 "@
 }
 

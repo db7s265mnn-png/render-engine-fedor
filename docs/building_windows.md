@@ -14,8 +14,9 @@ parse that STL (`type_traits` / `aligned_storage` / `result_of` while compiling
 
 **Visual Studio 2022** can still use CUDA 12.x and `compute_60`.
 
-If both CUDA 12.0 and 13.2 are installed, the script **always uses 13.2**. After
-upgrading CUDA, delete only the `build-windows` folder — keep
+If both CUDA 12.0 and 13.2 are installed, the script **always uses 13.2**. The
+build tree is `C:\gz-build` (a GitHub zip under `Downloads` is too long for MSVC
+object files). After a failed or CUDA-upgraded run, delete `C:\gz-build` — keep
 `%LOCALAPPDATA%\grendizer-deps`.
 
 Override auto-detected paths with environment variables if needed: `QT_ROOT`,
@@ -26,7 +27,7 @@ To skip the Embree download, put `embree-4.4.0.x64.windows.zip` in
 `BUILD_WINDOWS.bat` ([Embree 4.4.0 zip](https://github.com/RenderKit/embree/releases/download/v4.4.0/embree-4.4.0.x64.windows.zip)).
 After one successful run, compiled deps live in `%LOCALAPPDATA%\grendizer-deps`.
 
-The exe lands in `build-windows\bin\Release\`. Engine → Render Backend should list
+The exe lands in `C:\gz-build\bin\Release\`. Engine → Render Backend should list
 `GPU (OptiX)` without “not in this build”.
 
 ## Prerequisites
@@ -111,7 +112,10 @@ PTX target.
 * **The GPU backend falls back to Embree** — check the log panel, it prints why OptiX was
   unavailable (no CUDA device, driver too old, or a build without OptiX support).
 * **nvcc fails on `type_traits` / `aligned_storage` / `result_of`** — CUDA 12.0 was used
-  with VS 2026. Install CUDA 13.2, delete `build-windows`, re-run `BUILD_WINDOWS.bat`.
+  with VS 2026. Install CUDA 13.2, delete `C:\gz-build`, re-run `BUILD_WINDOWS.bat`.
   The log must show `nvcc release 13.2` and `OptiX PTX arch: compute_75`.
 * **`Unsupported gpu architecture 'compute_60'`** — leftover CMake cache from CUDA 12.
-  Delete `build-windows` and re-run. Do not delete `%LOCALAPPDATA%\grendizer-deps`.
+  Delete `C:\gz-build` and re-run. Do not delete `%LOCALAPPDATA%\grendizer-deps`.
+* **`fatal error C1083` / OpenPGL path longer than 250 characters** — the GitHub zip
+  under `Downloads` is too deep. Current one-click builds in `C:\gz-build`. Replace
+  `BUILD_WINDOWS.bat` + `tools\build_windows.ps1` and re-run.
