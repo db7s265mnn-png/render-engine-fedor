@@ -32,16 +32,26 @@ endif()
 
 include(CheckLanguage)
 if(WIN32)
-    # CUDA 12.0 nvcc rejects VS 2026 cl.exe without this.
+    # CUDA 12.0 nvcc rejects VS 2022 17.10+ / VS 2026 during CMake compiler ID.
+    # We compile PTX via a custom nvcc command and only need CUDAToolkit for
+    # headers + cudart, so skip enable_language(CUDA) on Windows.
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
+    set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
-check_language(CUDA)
+if(NOT CMAKE_CUDA_COMPILER)
+    check_language(CUDA)
+endif()
+if(NOT CMAKE_CUDA_COMPILER)
+    find_program(CMAKE_CUDA_COMPILER NAMES nvcc nvcc.exe)
+endif()
 if(NOT CMAKE_CUDA_COMPILER)
     message(WARNING "OptiX backend requested but no CUDA compiler was found - disabling it")
     return()
 endif()
 
-enable_language(CUDA)
+if(NOT WIN32)
+    enable_language(CUDA)
+endif()
 find_package(CUDAToolkit REQUIRED)
 
 set(SOLSTICE_OPTIX_ARCH "compute_60" CACHE STRING "Virtual CUDA arch for OptiX PTX (--gpu-architecture)")

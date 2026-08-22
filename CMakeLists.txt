@@ -1,4 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
+
+# CUDA 12.0 nvcc rejects newer MSVC (VS 2022 17.10+ / VS 2026) unless this
+# flag is visible during compiler identification, which runs at enable_language.
+if(WIN32)
+    set(CMAKE_CUDA_FLAGS_INIT "${CMAKE_CUDA_FLAGS_INIT} --allow-unsupported-compiler")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")
+    set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
+endif()
+
 project(Solstice VERSION 0.9.0 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")

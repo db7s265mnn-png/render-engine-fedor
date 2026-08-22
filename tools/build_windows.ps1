@@ -515,11 +515,16 @@ if (Test-Path -LiteralPath $cache) {
     if (Select-String -Path $cache -Pattern 'vcpkg' -Quiet) { $stale = $true }
     $oldGen = Select-String -Path $cache -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' | Select-Object -First 1
     if ($oldGen -and $oldGen.Matches[0].Groups[1].Value -ne $Generator) { $stale = $true }
+    $errLog = Join-Path $BuildDir 'CMakeFiles\CMakeError.log'
+    if (Test-Path -LiteralPath $errLog) { $stale = $true }
     if ($stale) {
         Info "Clearing $BuildDir (old vcpkg / generator cache)"
         Remove-Item -LiteralPath $BuildDir -Recurse -Force
     }
 }
+
+$env:NVCC_PREPEND_FLAGS = '--allow-unsupported-compiler'
+$env:NVCC_APPEND_FLAGS = '--allow-unsupported-compiler'
 
 & $CMake -S $Root -B $BuildDir -G $Generator `
     "-DCMAKE_BUILD_TYPE=Release" `
@@ -529,7 +534,10 @@ if (Test-Path -LiteralPath $cache) {
     "-DCMAKE_PREFIX_PATH=$Prefix" `
     "-DCMAKE_CUDA_COMPILER=$Nvcc" `
     "-DCMAKE_CUDA_HOST_COMPILER=$Cl" `
+    "-DCMAKE_CUDA_COMPILER_ID=NVIDIA" `
+    "-DCMAKE_CUDA_COMPILER_FORCED=TRUE" `
     "-DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler" `
+    "-DCMAKE_CUDA_COMPILER_ID_FLAGS=--allow-unsupported-compiler" `
     "-DSOLSTICE_CUDA_HOST_COMPILER=$Cl" `
     '-DSOLSTICE_ENABLE_OPTIX=ON' `
     "-DOptiX_ROOT=$OptiX" `
