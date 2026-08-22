@@ -13,6 +13,7 @@
 #include <optix_stack_size.h>
 #include <optix_stubs.h>
 
+#include <chrono>
 #include <cstring>
 #include <mutex>
 #include <sstream>
@@ -190,6 +191,8 @@ public:
 
     bool isAvailable() const override { return initialized_; }
 
+    double lastGpuSampleMs() const override { return lastGpuSampleMs_; }
+
     bool initialize(std::string& error) {
         try {
             int deviceCount = 0;
@@ -212,10 +215,17 @@ public:
             options.logCallbackLevel = 3;
             OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
 
+            CUDA_CHECK(cudaStreamCreate(&stream_));
+            CUDA_CHECK(cudaEventCreate(&gpuStartEvent_));
+            CUDA_CHECK(cudaEventCreate(&gpuStopEvent_));
+
             buildPipeline();
+            warmupPrograms();
             initialized_ = true;
             logInfo("OptiX backend initialised on " + deviceName_ +
-                    " (wavefront path tracer: init/intersect/shade modules, pinhole, basic surfaces)");
+                    " (" + std::to_string(properties.multiProcessorCount) + " SMs, wavefront PT, pinhole, basic surfaces)");
+            logInfo("OptiX submits CUDA/Compute work. Windows Task Manager defaults to the 3D graph "
+                    "(~0% for path tracing) — switch a GPU graph to CUDA or Compute_0, or watch the HUD ms.");
             return true;
         } catch (const std::exception& e) {
             error = e.what();
@@ -379,6 +389,16 @@ public:
                     std::to_string(scene_->totalTriangles()) + " triangles, " +
                     std::to_string(textureViews.size()) + " textures, " +
                     std::to_string(scene_->procedurals.size()) + " procedurals");
+            if (!iasHandle_) {
+                logWarning("OptiX: no triangle IAS — GPU will only shade the environment "
+                           "(volumes / VDB fog are Embree-only and do not run on the GPU).");
+            }
+            if (!scene_->volumes.empty() && !warnedVolumes_) {
+                logWarning("GPU (OptiX) does not march VDB / fog volumes. "
+                           "For clouds keep Engine → Render Backend = CPU (Embree), "
+                           "or the GPU pass will skip the volume and look idle.");
+                warnedVolumes_ = true;
+            }
             if (!scene_->procedurals.empty() && !warnedProcedurals_) {
                 logWarning("GPU (OptiX) uses basic surface shaders (image maps + Lambert/GGX/glass). "
                            "MaterialX procedurals stay on Embree.");
@@ -388,6 +408,7 @@ public:
                 logWarning("GPU (OptiX) uses a pinhole camera (no thin-lens DoF, no polynomial optics).");
                 warnedOptics_ = true;
             }
+            CUDA_CHECK(cudaDeviceSynchronize());
             return true;
         } catch (const std::exception& e) {
             error = e.what();
@@ -397,9 +418,10 @@ public:
 
     void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
                       const RenderMidProgressFn& midProgress) override {
-        if (!initialized_ || !scene_) return;
+        if (!initialized_ || !scene_ || !stream_) return;
         if (cancel.load(std::memory_order_relaxed)) return;
         try {
+            CUDA_CHECK(cudaSetDevice(0));
             if (scene_->settings.integrator != kIntegratorPathTracer && !warnedNonPath_) {
                 logWarning("GPU (OptiX) runs the unidirectional path tracer only. "
                            "BDPT / spectral / AO / wireframe / MNEE / polynomial optics stay on CPU Embree.");
@@ -411,15 +433,19 @@ public:
 
             const size_t pixelCount = size_t(width) * size_t(height);
             if (accumBuffer_.size() != pixelCount * sizeof(Vec4)) {
+                destroyGraph();
                 accumBuffer_.alloc(pixelCount * sizeof(Vec4));
-                accumBuffer_.clear();
+                CUDA_CHECK(cudaMemsetAsync(accumBuffer_.as<void>(), 0, accumBuffer_.size(), stream_));
             }
             if (pathBuffer_.size() != pixelCount * sizeof(GpuPath)) {
+                destroyGraph();
                 pathBuffer_.alloc(pixelCount * sizeof(GpuPath));
                 hitBuffer_.alloc(pixelCount * sizeof(GpuHit));
                 shadowBuffer_.alloc(pixelCount * sizeof(GpuShadow));
             }
-            if (sampleIndex == 0) accumBuffer_.clear();
+            if (sampleIndex == 0) {
+                CUDA_CHECK(cudaMemsetAsync(accumBuffer_.as<void>(), 0, accumBuffer_.size(), stream_));
+            }
 
             LaunchParams launchParams{};
             launchParams.scene = deviceScene_;
@@ -435,29 +461,46 @@ public:
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
 
             if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
-            CUDA_CHECK(cudaMemcpy(launchParamsBuffer_.as<void>(), &launchParams, sizeof(LaunchParams),
-                                  cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpyAsync(launchParamsBuffer_.as<void>(), &launchParams, sizeof(LaunchParams),
+                                       cudaMemcpyHostToDevice, stream_));
 
             const unsigned w = unsigned(width);
             const unsigned h = unsigned(height);
-            launchKernel(kRgInit, w, h);
             const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
             const int maxIters = maxDepth + 18;
-            for (int i = 0; i < maxIters; ++i) {
-                if (cancel.load(std::memory_order_relaxed)) break;
-                launchKernel(kRgIntersectClosest, w, h);
-                launchKernel(kRgShadeBackground, w, h);
-                launchKernel(kRgShadeSurface, w, h);
-                launchKernel(kRgIntersectShadow, w, h);
-                launchKernel(kRgShadeShadow, w, h);
-            }
-            CUDA_CHECK(cudaDeviceSynchronize());
+            ensureGraph(w, h, maxIters);
 
-            // Mirror the accumulation buffer into the host framebuffer.
-            accumBuffer_.download(fb.data(), pixelCount);
+            const auto wall0 = std::chrono::steady_clock::now();
+            CUDA_CHECK(cudaEventRecord(gpuStartEvent_, stream_));
+            if (graphExec_) {
+                CUDA_CHECK(cudaGraphLaunch(graphExec_, stream_));
+            } else {
+                launchBounceLoop(w, h, maxIters);
+            }
+            CUDA_CHECK(cudaEventRecord(gpuStopEvent_, stream_));
+            CUDA_CHECK(cudaMemcpyAsync(fb.data(), accumBuffer_.as<Vec4>(), pixelCount * sizeof(Vec4),
+                                       cudaMemcpyDeviceToHost, stream_));
+            CUDA_CHECK(cudaEventSynchronize(gpuStopEvent_));
+            float gpuMs = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&gpuMs, gpuStartEvent_, gpuStopEvent_));
+            lastGpuSampleMs_ = double(gpuMs);
+            CUDA_CHECK(cudaStreamSynchronize(stream_));
+            const double wallMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
+
+            if (sampleIndex < 2 || sampleIndex % 32 == 0) {
+                std::ostringstream msg;
+                msg.setf(std::ios::fixed);
+                msg.precision(2);
+                msg << "OptiX GPU " << lastGpuSampleMs_ << " ms  wall " << wallMs << " ms  " << deviceName_
+                    << "  " << width << "x" << height << (graphExec_ ? "  graph=yes" : "  graph=no");
+                logInfo(msg.str());
+            }
+
             fb.markHasData();
             if (midProgress) midProgress();
         } catch (const std::exception& e) {
+            lastGpuSampleMs_ = 0.0;
             logError(std::string("OptiX render failed: ") + e.what());
         }
     }
@@ -476,8 +519,90 @@ private:
     void launchKernel(int raygenIndex, unsigned width, unsigned height) {
         sbt_.raygenRecord =
             raygenRecordBuffer_.device() + sizeof(RayGenRecord) * static_cast<size_t>(raygenIndex);
-        OPTIX_CHECK(optixLaunch(pipeline_, nullptr, launchParamsBuffer_.device(), sizeof(LaunchParams), &sbt_,
+        OPTIX_CHECK(optixLaunch(pipeline_, stream_, launchParamsBuffer_.device(), sizeof(LaunchParams), &sbt_,
                                 width, height, 1));
+    }
+
+    void launchBounceLoop(unsigned width, unsigned height, int maxIters) {
+        launchKernel(kRgInit, width, height);
+        for (int i = 0; i < maxIters; ++i) {
+            launchKernel(kRgIntersectClosest, width, height);
+            launchKernel(kRgShadeBackground, width, height);
+            launchKernel(kRgShadeSurface, width, height);
+            launchKernel(kRgIntersectShadow, width, height);
+            launchKernel(kRgShadeShadow, width, height);
+        }
+    }
+
+    void destroyGraph() {
+        if (graphExec_) {
+            cudaGraphExecDestroy(graphExec_);
+            graphExec_ = nullptr;
+        }
+        graphW_ = 0;
+        graphH_ = 0;
+        graphIters_ = 0;
+    }
+
+    bool captureGraph(unsigned width, unsigned height, int maxIters) {
+        destroyGraph();
+        const cudaError_t begin = cudaStreamBeginCapture(stream_, cudaStreamCaptureModeGlobal);
+        if (begin != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+        cudaGraph_t graph = nullptr;
+        try {
+            launchBounceLoop(width, height, maxIters);
+            const cudaError_t end = cudaStreamEndCapture(stream_, &graph);
+            if (end != cudaSuccess || !graph) {
+                cudaGetLastError();
+                if (graph) cudaGraphDestroy(graph);
+                return false;
+            }
+        } catch (...) {
+            cudaGraph_t dumped = nullptr;
+            cudaStreamEndCapture(stream_, &dumped);
+            if (dumped) cudaGraphDestroy(dumped);
+            throw;
+        }
+        const cudaError_t inst = cudaGraphInstantiate(&graphExec_, graph, nullptr, nullptr, 0);
+        cudaGraphDestroy(graph);
+        if (inst != cudaSuccess) {
+            graphExec_ = nullptr;
+            cudaGetLastError();
+            return false;
+        }
+        graphW_ = int(width);
+        graphH_ = int(height);
+        graphIters_ = maxIters;
+        return true;
+    }
+
+    void ensureGraph(unsigned width, unsigned height, int maxIters) {
+        if (graphExec_ && graphW_ == int(width) && graphH_ == int(height) && graphIters_ == maxIters) return;
+        if (graphFailed_) return;
+        // Capture requires an idle stream (no pending memcpy / events).
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+        if (captureGraph(width, height, maxIters)) {
+            logInfo("OptiX: CUDA graph captured (" + std::to_string(1 + 5 * maxIters) +
+                    " launches/spp) so the GPU stays busy instead of waiting on CPU optixLaunch");
+            return;
+        }
+        graphFailed_ = true;
+        logWarning("OptiX: CUDA graph capture failed — falling back to one optixLaunch per kernel. "
+                   "GPU load in Task Manager 3D will look near zero; watch the HUD ms / CUDA graph.");
+    }
+
+    void warmupPrograms() {
+        if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
+        LaunchParams dummy{};
+        dummy.width = 1;
+        dummy.height = 1;
+        CUDA_CHECK(cudaMemcpyAsync(launchParamsBuffer_.as<void>(), &dummy, sizeof(LaunchParams),
+                                   cudaMemcpyHostToDevice, stream_));
+        for (int i = 0; i < kRgCount; ++i) launchKernel(i, 1, 1);
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
 
     OptixTraversableHandle buildTriangleGas(const DeviceBuffer& positions, const DeviceBuffer& indices,
@@ -724,6 +849,19 @@ private:
 
     void shutdown() {
         releaseScene();
+        destroyGraph();
+        if (gpuStartEvent_) {
+            cudaEventDestroy(gpuStartEvent_);
+            gpuStartEvent_ = nullptr;
+        }
+        if (gpuStopEvent_) {
+            cudaEventDestroy(gpuStopEvent_);
+            gpuStopEvent_ = nullptr;
+        }
+        if (stream_) {
+            cudaStreamDestroy(stream_);
+            stream_ = nullptr;
+        }
         accumBuffer_.free();
         pathBuffer_.free();
         hitBuffer_.free();
@@ -759,6 +897,9 @@ private:
     bool warnedNonPath_ = false;
     bool warnedProcedurals_ = false;
     bool warnedOptics_ = false;
+    bool warnedVolumes_ = false;
+    bool graphFailed_ = false;
+    double lastGpuSampleMs_ = 0.0;
     std::string deviceName_;
 
     OptixDeviceContext context_ = nullptr;
@@ -768,6 +909,14 @@ private:
     OptixProgramGroup hitGroups_[2] = {nullptr, nullptr};
     OptixPipeline pipeline_ = nullptr;
     OptixShaderBindingTable sbt_{};
+
+    cudaStream_t stream_ = nullptr;
+    cudaEvent_t gpuStartEvent_ = nullptr;
+    cudaEvent_t gpuStopEvent_ = nullptr;
+    cudaGraphExec_t graphExec_ = nullptr;
+    int graphW_ = 0;
+    int graphH_ = 0;
+    int graphIters_ = 0;
 
     DeviceBuffer raygenRecordBuffer_, missRecordBuffer_, hitRecordBuffer_;
     DeviceBuffer launchParamsBuffer_, accumBuffer_;

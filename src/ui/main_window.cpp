@@ -1642,6 +1642,9 @@ void MainWindow::updateStatusBar() {
         }
         if (backend == kBackendGpuOptix && optixOk) active = QStringLiteral("OptiX");
     }
+    if (active.startsWith(QLatin1String("OptiX")) && progress.backendGpuMs > 0.0) {
+        active = QStringLiteral("OptiX %1 ms").arg(progress.backendGpuMs, 0, 'f', 1);
+    }
     renderView_->setBackendHud(active, optixOk);
 }
 

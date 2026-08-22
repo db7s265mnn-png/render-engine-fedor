@@ -275,6 +275,7 @@ void RenderSession::threadMain() {
         progress_.message.clear();
         progress_.elapsedSeconds = 0.0;
         progress_.samplesPerSecond = 0.0;
+        progress_.backendGpuMs = 0.0;
     }
 
     const auto startTime = std::chrono::steady_clock::now();
@@ -311,6 +312,7 @@ void RenderSession::threadMain() {
                 progress_.samplesTarget = targetSamples;
                 progress_.elapsedSeconds = 0.0;
                 progress_.samplesPerSecond = 0.0;
+                progress_.backendGpuMs = 0.0;
             }
             notifyUi(true);
             continue;
@@ -340,6 +342,7 @@ void RenderSession::threadMain() {
             progress_.samplesDone = sample + 1;
             progress_.elapsedSeconds = elapsed;
             progress_.samplesPerSecond = elapsed > 0.0 ? double(sample + 1) / elapsed : 0.0;
+            progress_.backendGpuMs = device_ ? device_->lastGpuSampleMs() : 0.0;
         }
 
         // Throttle UI notifications: early samples update immediately, later
