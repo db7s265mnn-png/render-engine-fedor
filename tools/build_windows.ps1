@@ -930,22 +930,17 @@ function Invoke-LoggedCMakeBuild([string[]]$BuildArgs) {
 }
 
 Write-Host ''
-Info '1/2 nvcc OptiX PTX. Timer will climb; ninja stays at [0/N] until nvcc exits.'
-$code = Invoke-LoggedCMakeBuild @('--build', $BuildDir, '--target', 'solstice_optix_programs', '--parallel')
+Info 'Building in parallel: nvcc PTX uses 1 core; MSVC compiles the rest on the other cores.'
+Info 'Ninja [0/N] on PTX is a timer, not a percent. cicc cpu= must grow. 3% on a 14900K = one thread at 100%.'
+$j = $env:NUMBER_OF_PROCESSORS
+if (-not $j) { $j = '8' }
+$code = Invoke-LoggedCMakeBuild @('--build', $BuildDir, '--parallel', "$j")
 if ($code -ne 0) {
     Fail @"
-OptiX PTX failed (nvcc).
+Build failed.
 If type_traits / aligned_storage: CUDA 12.0 was used, need 13.2 + compute_75.
-If it sat idle with no nvcc.exe in Task Manager: close the window and re-run.
+If cicc cpu= stopped growing: hung. Otherwise wait it out.
 Keep %LOCALAPPDATA%\grendizer-deps. Delete C:\gz-build only if CUDA version changed.
-"@
-}
-Info '2/2 building the rest of the app ...'
-$code = Invoke-LoggedCMakeBuild @('--build', $BuildDir, '--parallel')
-if ($code -ne 0) {
-    Fail @"
-Build failed after PTX.
-Keep %LOCALAPPDATA%\grendizer-deps.
 "@
 }
 
