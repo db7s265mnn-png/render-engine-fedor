@@ -28,6 +28,29 @@
 namespace sol {
 namespace {
 
+QString chromeToolButtonStyle(int minWidth) {
+    return QStringLiteral(
+               "QToolButton {"
+               "  color: #e8eaed;"
+               "  background: #3a3e44;"
+               "  border: 1px solid #4a4f57;"
+               "  border-radius: 6px;"
+               "  min-width: %1px;"
+               "  min-height: 24px;"
+               "  font-weight: 600;"
+               "  font-size: 11px;"
+               "  padding: 0 8px;"
+               "}"
+               "QToolButton:checked {"
+               "  background: rgba(255, 190, 90, 90);"
+               "  border-color: #ffbe5a;"
+               "  color: #ffffff;"
+               "}"
+               "QToolButton:hover { background: #474c54; }"
+               "QToolButton:checked:hover { background: rgba(255, 190, 90, 120); }")
+        .arg(minWidth);
+}
+
 QString findPlaceholderAsset() {
     QStringList roots = {
         QDir::currentPath() + "/examples",
@@ -244,6 +267,29 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         "  border-bottom: 1px solid #22242a;"
         "}");
 
+    renderControlStrip_ = new QWidget(chromeBar_);
+    renderControlStrip_->setObjectName("viewportRenderControls");
+    renderControlStrip_->setStyleSheet(
+        "QWidget#viewportRenderControls { background: transparent; border: none; }");
+    auto* renderLayout = new QHBoxLayout(renderControlStrip_);
+    renderLayout->setContentsMargins(8, 3, 4, 3);
+    renderLayout->setSpacing(4);
+    startButton_ = new QToolButton(renderControlStrip_);
+    startButton_->setText(QStringLiteral("Start"));
+    startButton_->setCheckable(true);
+    startButton_->setAutoRaise(true);
+    startButton_->setFocusPolicy(Qt::NoFocus);
+    startButton_->setStyleSheet(chromeToolButtonStyle(48));
+    stopButton_ = new QToolButton(renderControlStrip_);
+    stopButton_->setText(QStringLiteral("Stop"));
+    stopButton_->setCheckable(true);
+    stopButton_->setChecked(true);
+    stopButton_->setAutoRaise(true);
+    stopButton_->setFocusPolicy(Qt::NoFocus);
+    stopButton_->setStyleSheet(chromeToolButtonStyle(48));
+    renderLayout->addWidget(startButton_);
+    renderLayout->addWidget(stopButton_);
+
     toolStrip_ = new QWidget(chromeBar_);
     toolStrip_->setObjectName("viewportTransformStrip");
     toolStrip_->setStyleSheet(
@@ -326,7 +372,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         stripLayout->addWidget(button);
         return button;
     };
-    selectButton_ = makeButton("Sel", "Select (Q) — click objects in the viewport");
+    selectButton_ = makeButton("Q", "Select (Q) — click objects in the viewport");
     translateButton_ = makeButton("T", "Translate (T)");
     rotateButton_ = makeButton("R", "Rotate (R)");
     scaleButton_ = makeButton("S", "Scale (S)");
@@ -379,11 +425,11 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
 
     colorManagementCombo_ = new QComboBox(toolStrip_);
     colorManagementCombo_->addItem(QStringLiteral("Classic"), 0);
-    colorManagementCombo_->addItem(QStringLiteral("OCIO"), 1);
+    colorManagementCombo_->addItem(QStringLiteral("ACES"), 1);
     colorManagementCombo_->setCurrentIndex(1);
     colorManagementCombo_->setToolTip(
         QStringLiteral("Classic: linear → sRGB (no OCIO, no tone map; Houdini-style).\n"
-                       "OCIO: OpenColorIO Display/View from the config."));
+                       "ACES: OpenColorIO Display/View from the ACES config."));
     colorManagementCombo_->setStyleSheet(comboStyle + QStringLiteral(" QComboBox { max-width: 90px; }"));
     stripLayout->addWidget(colorManagementCombo_);
     connect(colorManagementCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
@@ -610,12 +656,38 @@ void RenderView::layoutToolStrip() {
     if (!chromeBar_ || !toolStrip_) return;
     const int chromeH = theme::chromeBarHeight();
     chromeBar_->setGeometry(0, 0, width(), chromeH);
+    int left = 0;
+    if (renderControlStrip_) {
+        renderControlStrip_->adjustSize();
+        const int y = std::max(0, (chromeH - renderControlStrip_->height()) / 2);
+        renderControlStrip_->move(0, y);
+        renderControlStrip_->raise();
+        left = renderControlStrip_->width() + 4;
+    }
     toolStrip_->adjustSize();
-    const int x = std::max(8, (chromeBar_->width() - toolStrip_->width()) / 2);
+    const int x = std::max(left, (chromeBar_->width() - toolStrip_->width()) / 2);
     const int y = std::max(0, (chromeH - toolStrip_->height()) / 2);
     toolStrip_->move(x, y);
     toolStrip_->raise();
     chromeBar_->raise();
+}
+
+void RenderView::attachRenderActions(QAction* start, QAction* stop) {
+    if (startButton_ && start) {
+        startButton_->setDefaultAction(start);
+        startButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        startButton_->setAutoRaise(true);
+        startButton_->setFocusPolicy(Qt::NoFocus);
+        startButton_->setStyleSheet(chromeToolButtonStyle(48));
+    }
+    if (stopButton_ && stop) {
+        stopButton_->setDefaultAction(stop);
+        stopButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        stopButton_->setAutoRaise(true);
+        stopButton_->setFocusPolicy(Qt::NoFocus);
+        stopButton_->setStyleSheet(chromeToolButtonStyle(48));
+    }
+    layoutToolStrip();
 }
 
 void RenderView::setCameraMenu(const QStringList& cameraNames, const QString& activeName) {

@@ -10,6 +10,8 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
+#include <QFont>
+#include <QFontMetrics>
 #include <QFormLayout>
 #include <QFrame>
 #include <QGridLayout>
@@ -76,19 +78,24 @@ public:
     QSize sizeHint() const override { return minimumSize(); }
     QSize minimumSize() const override {
         QSize size;
-        for (QLayoutItem* item : items_) size = size.expandedTo(item->minimumSize());
+        for (QLayoutItem* item : items_) size = size.expandedTo(hintFor(item));
         const QMargins m = contentsMargins();
         size += QSize(m.left() + m.right(), m.top() + m.bottom());
         return size;
     }
 
 private:
+    static QSize hintFor(QLayoutItem* item) {
+        if (QWidget* widget = item->widget()) return widget->sizeHint();
+        return item->sizeHint();
+    }
+
     int doLayout(const QRect& rect, bool testOnly) const {
         int x = rect.x();
         int y = rect.y();
         int lineHeight = 0;
         for (QLayoutItem* item : items_) {
-            const QSize hint = item->sizeHint();
+            const QSize hint = hintFor(item);
             if (x + hint.width() > rect.right() + 1 && lineHeight > 0) {
                 x = rect.x();
                 y += lineHeight + vSpacing_;
@@ -104,6 +111,29 @@ private:
     QList<QLayoutItem*> items_;
     int hSpacing_ = 4;
     int vSpacing_ = 4;
+};
+
+// Folder tabs must size to the checked (orange) state. Fusion + stylesheet
+// padding otherwise clips glyphs when the label becomes the current folder.
+class FolderTabButton final : public QPushButton {
+public:
+    explicit FolderTabButton(const QString& text, QWidget* parent = nullptr) : QPushButton(text, parent) {
+        setCheckable(true);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::NoFocus);
+        setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+        setAttribute(Qt::WA_LayoutUsesWidgetRect);
+    }
+
+    QSize sizeHint() const override {
+        QFont f = font();
+        f.setBold(true);
+        const QFontMetrics metrics(f);
+        const QSize textSize = metrics.size(Qt::TextSingleLine, text());
+        return QSize(textSize.width() + 28, qMax(28, textSize.height() + 14));
+    }
+
+    QSize minimumSizeHint() const override { return sizeHint(); }
 };
 
 QComboBox* makeColorSpaceCombo(const QString& current, const std::function<void(const QString&)>& commit) {
@@ -670,7 +700,7 @@ void ParameterPanel::rebuildLop() {
 
     auto* strip = new QWidget();
     strip->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-    auto* flow = new FlowLayout(strip, 4, 4);
+    auto* flow = new FlowLayout(strip, 4, 6);
     flow->setContentsMargins(0, 2, 0, 2);
     auto* buttons = new QButtonGroup(strip);
     buttons->setExclusive(true);
@@ -679,20 +709,16 @@ void ParameterPanel::rebuildLop() {
 
     const QString folderBtnCss = QStringLiteral(
         "QPushButton { background:#2a2e33; color:#d0d4da; border:1px solid #666b73;"
-        " border-radius:2px; padding:4px 10px; min-height:22px; }"
+        " border-radius:2px; padding:6px 14px; min-height:26px; }"
         "QPushButton:hover { background:#3a3f46; color:#f0f2f5; }"
-        "QPushButton:checked { background:#ffa82e; color:#1a1c20; font-weight:bold;"
-        " border-color:#ffa82e; }");
+        "QPushButton:checked { background:#ffa82e; color:#1a1c20; border-color:#ffa82e; }");
 
     int restore = 0;
     const QString previous = lastFolderByType_.value(node_->typeName());
     for (int i = 0; i < static_cast<int>(pages.size()); ++i) {
         const FolderPage& folder = pages[static_cast<size_t>(i)];
         const QString title = folder.name.isEmpty() ? QStringLiteral("Parameters") : folder.name;
-        auto* btn = new QPushButton(title);
-        btn->setCheckable(true);
-        btn->setCursor(Qt::PointingHandCursor);
-        btn->setFocusPolicy(Qt::NoFocus);
+        auto* btn = new FolderTabButton(title);
         btn->setStyleSheet(folderBtnCss);
         flow->addWidget(btn);
         buttons->addButton(btn, i);

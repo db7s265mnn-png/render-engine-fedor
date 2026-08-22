@@ -14,6 +14,7 @@
 
 class QToolButton;
 class QComboBox;
+class QAction;
 
 namespace sol {
 
@@ -117,6 +118,9 @@ public:
     // Look-through camera menu (Houdini-style). empty activeName → free view.
     void setCameraMenu(const QStringList& cameraNames, const QString& activeName);
 
+    // Start / Stop live on the viewport chrome (left of camera / transform tools).
+    void attachRenderActions(QAction* start, QAction* stop);
+
 signals:
     void cameraMoved();
     // Fired while dragging (values already written quietly — do not cook/IPR).
@@ -217,7 +221,10 @@ private:
     bool gizmoDidEdit_ = false;
 
     QWidget* chromeBar_ = nullptr;
+    QWidget* renderControlStrip_ = nullptr;
     QWidget* toolStrip_ = nullptr;
+    QToolButton* startButton_ = nullptr;
+    QToolButton* stopButton_ = nullptr;
     QToolButton* cameraMenuButton_ = nullptr;
     QToolButton* homeButton_ = nullptr;
     QToolButton* selectButton_ = nullptr;

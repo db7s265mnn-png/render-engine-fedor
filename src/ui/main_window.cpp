@@ -23,7 +23,6 @@
 #include <QShortcut>
 #include <QSignalBlocker>
 #include <QTimer>
-#include <QToolBar>
 #include <QVector3D>
 #include <QEventLoop>
 #include <algorithm>
@@ -133,6 +132,16 @@ QImage toQImage(const Image& image) {
         }
     }
     return result;
+}
+
+bool isTypingFocus(QWidget* widget) {
+    while (widget) {
+        if (widget->inherits("QLineEdit") || widget->inherits("QAbstractSpinBox") ||
+            widget->inherits("QPlainTextEdit") || widget->inherits("QTextEdit"))
+            return true;
+        widget = widget->parentWidget();
+    }
+    return false;
 }
 
 }  // namespace
@@ -331,26 +340,22 @@ void MainWindow::createActions() {
     selectToolAction_ = new QAction("Select", this);
     selectToolAction_->setCheckable(true);
     selectToolAction_->setChecked(true);
-    selectToolAction_->setShortcut(QKeySequence("Q"));
     selectToolAction_->setToolTip("Select (Q)");
     transformGroup->addAction(selectToolAction_);
 
     translateToolAction_ = new QAction("T", this);
     translateToolAction_->setCheckable(true);
     translateToolAction_->setChecked(true);
-    translateToolAction_->setShortcut(QKeySequence("T"));
     translateToolAction_->setToolTip("Translate (T)");
     transformGroup->addAction(translateToolAction_);
 
     rotateToolAction_ = new QAction("R", this);
     rotateToolAction_->setCheckable(true);
-    rotateToolAction_->setShortcut(QKeySequence("R"));
     rotateToolAction_->setToolTip("Rotate (R)");
     transformGroup->addAction(rotateToolAction_);
 
     scaleToolAction_ = new QAction("S", this);
     scaleToolAction_->setCheckable(true);
-    scaleToolAction_->setShortcut(QKeySequence("S"));
     scaleToolAction_->setToolTip("Scale (S)");
     transformGroup->addAction(scaleToolAction_);
 
@@ -411,31 +416,28 @@ void MainWindow::createMenus() {
 }
 
 void MainWindow::createToolBar() {
-    QToolBar* toolBar = addToolBar("Render");
-    toolBar->setMovable(false);
-    // Same 6px radius as viewport Local/World / T/R/S.
-    toolBar->setStyleSheet(
-        "QToolButton {"
-        "  min-width: 48px;"
-        "  min-height: 24px;"
-        "  font-size: 11px;"
-        "  font-weight: 600;"
-        "  background: #3a3e44;"
-        "  border: 1px solid #4a4f57;"
-        "  border-radius: 6px;"
-        "  color: #e8eaed;"
-        "  padding: 3px 8px;"
-        "}"
-        "QToolButton:checked {"
-        "  background: rgba(255, 190, 90, 90);"
-        "  border-color: #ffbe5a;"
-        "  color: #ffffff;"
-        "}"
-        "QToolButton:hover { background: #474c54; }"
-        "QToolButton:checked:hover { background: rgba(255, 190, 90, 120); }");
-    // T/R/S live on the viewport chrome bar above the framebuffer.
-    toolBar->addAction(renderAction_);
-    toolBar->addAction(stopAction_);
+    // Start / Stop sit on the viewport chrome, styled like Home / Q / T / R / S.
+    addAction(renderAction_);
+    addAction(stopAction_);
+    addAction(selectToolAction_);
+    addAction(translateToolAction_);
+    addAction(rotateToolAction_);
+    addAction(scaleToolAction_);
+    renderView_->attachRenderActions(renderAction_, stopAction_);
+
+    auto bindToolKey = [this](Qt::Key key, QAction* action) {
+        auto* shortcut = new QShortcut(QKeySequence(key), this);
+        shortcut->setContext(Qt::WindowShortcut);
+        shortcut->setAutoRepeat(false);
+        connect(shortcut, &QShortcut::activated, this, [action] {
+            if (!action || isTypingFocus(QApplication::focusWidget())) return;
+            action->trigger();
+        });
+    };
+    bindToolKey(Qt::Key_Q, selectToolAction_);
+    bindToolKey(Qt::Key_T, translateToolAction_);
+    bindToolKey(Qt::Key_R, rotateToolAction_);
+    bindToolKey(Qt::Key_S, scaleToolAction_);
 }
 
 void MainWindow::createTimeline() {
@@ -1790,7 +1792,7 @@ void MainWindow::onShowShortcuts() {
                              "Render view (Houdini style)\n"
                              "  F             frame selected object\n"
                              "  H / Home      frame all\n"
-                             "  Sel / Q       select — LMB click geometry (Select tool only)\n"
+                             "  Q             select — LMB click geometry (Select tool only)\n"
                              "  T / R / S     translate / rotate / scale\n"
                              "  LMB on gizmo  transform (restarts render on release while Start)\n"
                              "  Focus Pick    camera Lens → click geo to set DOF focus\n"
