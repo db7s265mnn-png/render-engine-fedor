@@ -26,7 +26,6 @@
 #include "core/log.h"
 #include "render/optix/launch_params.h"
 #include "render/render_device.h"
-#include "render/xpu_split.h"
 #include "scene/volume_grid.h"
 
 // Emitted by the build from the wavefront OptiX modules.
@@ -535,6 +534,7 @@ public:
             if (width <= 0 || height <= 0) return;
 
             const size_t pixelCount = size_t(width) * size_t(height);
+            const RenderSampleOptions opt = options ? *options : RenderSampleOptions{};
             if (accumBuffer_.size() != pixelCount * sizeof(Vec4)) {
                 destroyGraph();
                 accumBuffer_.alloc(pixelCount * sizeof(Vec4));
@@ -551,7 +551,7 @@ public:
                 CUDA_CHECK(cudaMemsetAsync(hitBuffer_.as<void>(), 0, hitBuffer_.size(), stream_));
                 CUDA_CHECK(cudaMemsetAsync(shadowBuffer_.as<void>(), 0, shadowBuffer_.size(), stream_));
             }
-            if (sampleIndex == 0) {
+            if (sampleIndex == 0 || opt.resetAccum) {
                 CUDA_CHECK(cudaMemsetAsync(accumBuffer_.as<void>(), 0, accumBuffer_.size(), stream_));
             }
 
@@ -567,10 +567,6 @@ public:
             launchParams.frameSeed = unsigned(scene_->settings.seed) * 9781u + unsigned(sampleIndex) * 6271u;
             launchParams.pixelSampler = scene_->settings.pixelSampler;
             launchParams.manualTestMult = scene_->settings.manualTestMult;
-            const RenderSampleOptions opt = options ? *options : RenderSampleOptions{};
-            launchParams.xpuSplit = opt.xpuTileRole == 1 ? 1 : 0;
-            launchParams.xpuTileSize = xpuTileSizeOrDefault(opt.xpuTileSize);
-            launchParams.xpuGpuParity = opt.xpuGpuParity;
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
             launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();
             launchParams.volumeCount = gpuVolumeCount_;

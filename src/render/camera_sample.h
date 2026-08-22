@@ -1,4 +1,4 @@
-// Camera AA / DoF pixel+lens samples shared by Embree and OptiX so XPU tiles
+// Camera AA / DoF pixel+lens samples shared by Embree and OptiX so XPU spp
 // (and GPU-only) use the same generator as CPU.
 #pragma once
 

@@ -4,7 +4,6 @@
 #include "render/camera_sample.h"
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_volume.cuh"
-#include "render/xpu_split.h"
 
 namespace sol {
 
@@ -17,14 +16,6 @@ extern "C" __global__ void __raygen__init_from_camera() {
     GpuPath& path = params.paths[pixel];
     GpuHit& hit = params.hits[pixel];
     GpuShadow& shadow = params.shadows[pixel];
-
-    if (params.xpuSplit && !xpuGpuOwnsPixel(x, y, params.xpuTileSize, params.xpuGpuParity)) {
-        path.queue = kQueueDead;
-        path.throughput = Vec3(0.0f);
-        hit = GpuHit{};
-        shadow = GpuShadow{};
-        return;
-    }
 
     path.rng = makePixelRng(x, y, params.sampleIndex, params.frameSeed);
     float jitterX = 0.5f, jitterY = 0.5f, lensU = 0.5f, lensV = 0.5f;

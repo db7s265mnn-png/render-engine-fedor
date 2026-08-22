@@ -129,5 +129,9 @@ parameters, and *Look Through Camera Node* goes back to the authored camera.
 
 Folders are Houdini-style tabs in the parameter panel: click a tab to show only that group.
 
+XPU (`Render Device` = Embree+OptiX) is Path Tracer only. Even samples run on the GPU, odd
+samples on the CPU, both full-frame. If OptiX cannot start, rendering stops with an error
+(no Embree fallback). Non-PT integrators also stop on GPU/XPU.
+
 Film settings are applied when the framebuffer is displayed or written to an LDR file; `.exr`
 and `.hdr` outputs stay linear.

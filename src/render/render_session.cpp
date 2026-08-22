@@ -192,7 +192,6 @@ bool RenderSession::prepareDevice(std::string& error) {
     }
     const int backend = scene->settings.backend;
     const int threads = scene->settings.threads;
-    if (backend == kBackendXpu) applyXpuDeviceMatch(*scene);
     if (!device_ || backend != deviceBackend_ || threads != deviceThreads_) {
         device_.reset();
         if (backend == kBackendGpuOptix || backend == kBackendXpu) {
@@ -371,8 +370,13 @@ void RenderSession::threadMain() {
             };
         }
 
+        RenderSampleOptions xpuOpt;
+        const bool xpu = scene->settings.backend == kBackendXpu;
+        const bool xpuPair = xpu && sample + 1 < targetSamples;
+        if (xpuPair) xpuOpt.xpuPartnerSample = sample + 1;
+
         try {
-            device_->renderSample(framebuffer_, sample, cancel_, midProgress);
+            device_->renderSample(framebuffer_, sample, cancel_, midProgress, xpu ? &xpuOpt : nullptr);
         } catch (const std::exception& ex) {
             const int backend = scene->settings.backend;
             const std::string prefix = backend == kBackendXpu
@@ -387,24 +391,25 @@ void RenderSession::threadMain() {
         if (softRestart_.load(std::memory_order_relaxed)) continue;  // handled at loop top
         if (cancel_.load(std::memory_order_relaxed)) break;
 
-        framebuffer_.setSampleCount(sample + 1);
+        const int sampleStep = xpuPair ? 2 : 1;
+        framebuffer_.setSampleCount(sample + sampleStep);
         const auto now = std::chrono::steady_clock::now();
         const double elapsed = std::chrono::duration<double>(now - sampleStartTime).count();
         {
             std::lock_guard<std::mutex> lock(progressMutex_);
-            progress_.samplesDone = sample + 1;
+            progress_.samplesDone = sample + sampleStep;
             progress_.elapsedSeconds = elapsed;
-            progress_.samplesPerSecond = elapsed > 0.0 ? double(sample + 1) / elapsed : 0.0;
+            progress_.samplesPerSecond = elapsed > 0.0 ? double(sample + sampleStep) / elapsed : 0.0;
             progress_.backendGpuMs = device_ ? device_->lastGpuSampleMs() : 0.0;
         }
 
         // Throttle UI notifications: early samples update immediately, later
         // ones at roughly 10 Hz.
         const double sinceNotify = std::chrono::duration<double>(now - lastNotify).count();
-        if (sample < 4 || sinceNotify > 0.1 || sample + 1 == targetSamples) {
+        if (sample < 4 || sinceNotify > 0.1 || sample + sampleStep >= targetSamples) {
             notifyUi(true);
         }
-        ++sample;
+        sample += sampleStep;
     }
 
     {

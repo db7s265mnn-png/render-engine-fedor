@@ -15,7 +15,6 @@
 #include "render/pixel_filter.h"
 #include "render/rsequence.h"
 #include "render/sobol.h"
-#include "render/xpu_split.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
 #include "render/integrator_base.h"
@@ -239,15 +238,11 @@ public:
         const int width = fb.width();
         const int height = fb.height();
         if (width <= 0 || height <= 0) return;
+        (void)options;
 
-        const RenderSampleOptions opt = options ? *options : RenderSampleOptions{};
-        const bool xpuSplit = opt.xpuTileRole >= 0;
-        const bool xpuMatch = renderDeviceIsXpu(settings.backend) || xpuSplit;
-
-        const int tileSize = xpuSplit ? xpuTileSizeOrDefault(opt.xpuTileSize)
-                                      : (settings.tileSize <= 0
-                                             ? chooseFilmTileSize(width, height, pool_->threadCount())
-                                             : std::clamp(settings.tileSize, 8, 256));
+        const int tileSize = settings.tileSize <= 0
+                                 ? chooseFilmTileSize(width, height, pool_->threadCount())
+                                 : std::clamp(settings.tileSize, 8, 256);
         const int tilesX = (width + tileSize - 1) / tileSize;
         const int tilesY = (height + tileSize - 1) / tileSize;
         const int tileCount = tilesX * tilesY;
@@ -274,16 +269,16 @@ public:
             settings.integrator == kIntegratorWireframe;
         // MNEE+Photon routes rough refractive casters to Photon, delta-only to MNEE.
         // PT Spectral has no MNEE/photon; BDPT Spectral keeps BDPT caustic estimators.
-        const bool usePhoton = !xpuMatch && !diagnosticIntegrator && !hasVolumes && !useSpectralPt &&
+        const bool usePhoton = !diagnosticIntegrator && !hasVolumes && !useSpectralPt &&
                                causticsUsePhotonMap(settings, &scene);
-        const bool useMnee = !xpuMatch && pathTracer && !hasVolumes && causticsUseMnee(settings, &scene);
-        const bool useBdptPath = !xpuMatch && useBdpt && !hasVolumes;
+        const bool useMnee = pathTracer && !hasVolumes && causticsUseMnee(settings, &scene);
+        const bool useBdptPath = useBdpt && !hasVolumes;
 #if SOLSTICE_HAVE_OPENPGL
         // OpenPGL guides eye-path diffuse sampling on PT and BDPT (RGB + Spectral).
         // Specular / near-spec vertices are recorded as delta (radiance propagates for
         // caustic training) but never guide-sampled; MNEE/photon energy trains
         // diffuse receivers when Indirect Guides is on.
-        const bool useGuiding = !xpuMatch && settings.pathGuiding != 0 && pathGuiding_ &&
+        const bool useGuiding = settings.pathGuiding != 0 && pathGuiding_ &&
                                 pathGuiding_->available() && (pathTracer || useBdpt);
 #else
         const bool useGuiding = false;
@@ -340,8 +335,6 @@ public:
                 logInfo(std::string("Caustics: MNEE (manifold next-event, refractive)") +
                         (settings.causticsEngine == kCausticsEngineAuto ? " [MNEE+Photon→delta]" : "") +
                         (useGuiding ? " + OpenPGL guiding" : ""));
-            else if (xpuMatch)
-                logInfo("XPU: GPU-matching path tracer (1 NEE, checkerboard buckets, no MNEE/SSS/OpenPGL)");
             else if (pathTracer)
                 logInfo("Caustics: off (dark shadows through glass; shadow_opacity fakes)");
             else if (settings.integrator == kIntegratorWireframe)
@@ -382,7 +375,7 @@ public:
 
         const int samplingEngine = std::clamp(settings.samplingEngine, 0, 1);
         constexpr bool kPathSobolDefault = true;
-        const bool usePathSobol = kPathSobolDefault && !xpuMatch;
+        const bool usePathSobol = kPathSobolDefault;
         const int pixelFilter = std::clamp(settings.pixelFilter, 0, 3);
         const float filterRadius = settings.filterRadius > 0.0f
                                        ? settings.filterRadius
@@ -450,7 +443,7 @@ public:
             // Light-tracing splats assume the pinhole/thin-lens projection —
             // polynomial optics rays and camera motion blur bypass it.
             const bool allowSplats =
-                !xpuMatch && !polyOptics_.active && scene.settings.motionBlur == 0;
+                !polyOptics_.active && scene.settings.motionBlur == 0;
             auto splatFbFor = [&](DispersionContext*) -> Framebuffer* {
                 return allowSplats ? &fb : nullptr;
             };
@@ -536,7 +529,7 @@ public:
                                    float shutterTime) -> bool {
                 tau = 1.0f;
                 tracer.time = shutterTime;
-                if (!xpuMatch && polyOptics_.active) {
+                if (polyOptics_.active) {
                     float wavelengthNm = -1.0f;
                     if (chromaticChannel >= 0 && scene.camera.chromaticAberration != 0)
                         wavelengthNm = chromaticWavelengthNm(chromaticChannel);
@@ -636,19 +629,8 @@ public:
         // Progressive: no buckets — parallel scanlines, strong seed.
         constexpr int kBootstrapStep = 2;
 
-        auto cpuOwnsTile = [&](int tx, int ty) -> bool {
-            if (!xpuSplit) return true;
-            const bool gpuTile = xpuGpuOwnsTile(tx, ty, opt.xpuGpuParity);
-            return opt.xpuTileRole == 0 ? !gpuTile : gpuTile;
-        };
-        auto cpuOwnsPixel = [&](int x, int y) -> bool {
-            if (!xpuSplit) return true;
-            const bool gpuPx = xpuGpuOwnsPixel(x, y, tileSize, opt.xpuGpuParity);
-            return opt.xpuTileRole == 0 ? !gpuPx : gpuPx;
-        };
-
         auto runBootstrapOrFull = [&](auto&& renderPass) {
-            if (sampleIndex == 0 && !xpuSplit) {
+            if (sampleIndex == 0) {
                 const int phaseCount = kBootstrapStep * kBootstrapStep;
                 for (int phase = 0; phase < phaseCount; ++phase) {
                     if (cancel.load(std::memory_order_relaxed)) break;
@@ -668,7 +650,6 @@ public:
                     if (cancel.load(std::memory_order_relaxed)) return;
                     if (trivialBox) {
                         for (int x = 0; x < width; ++x) {
-                            if (!cpuOwnsPixel(x, y)) continue;
                             if (useBootstrap) {
                                 if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
                                     bootstrapPhase)
@@ -680,7 +661,6 @@ public:
                     } else {
                         FilmTile tile(0, y, width, y + 1, filterBorder);
                         for (int x = 0; x < width; ++x) {
-                            if (!cpuOwnsPixel(x, y)) continue;
                             if (useBootstrap) {
                                 if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
                                     bootstrapPhase)
@@ -698,7 +678,6 @@ public:
                 if (cancel.load(std::memory_order_relaxed)) return;
                 const int tx = tileIndex % tilesX;
                 const int ty = tileIndex / tilesX;
-                if (!cpuOwnsTile(tx, ty)) return;
                 const int x0 = tx * tileSize;
                 const int y0 = ty * tileSize;
                 const int x1 = std::min(x0 + tileSize, width);

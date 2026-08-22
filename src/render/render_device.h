@@ -27,12 +27,12 @@ struct RenderProgress {
 // Optional mid-sample preview hook (e.g. after each bootstrap phase).
 using RenderMidProgressFn = std::function<void()>;
 
-// XPU work split: checkerboard tiles. GPU-only / CPU-only leave xpuTileRole < 0.
+// XPU: GPU renders `sampleIndex`; CPU renders `xpuPartnerSample` in parallel
+// when >= 0. Standalone devices leave partner < 0.
 struct RenderSampleOptions {
-    int xpuTileRole = -1;   // -1 = all pixels, 0 = CPU tiles, 1 = GPU tiles
-    int xpuTileSize = 32;
-    int xpuGpuParity = 0;   // GPU owns (tx+ty)%2 == parity
-    bool skipFramebufferStore = false;  // OptiX: keep accum internal (XPU merge)
+    int xpuPartnerSample = -1;  // Embree sample index, or -1 for GPU-only leftover
+    bool skipFramebufferStore = false;  // OptiX: keep this sample internal (XPU add)
+    bool resetAccum = false;            // OptiX: memset accum before this sample
 };
 
 class RenderDevice {
@@ -80,10 +80,6 @@ RenderDevicePtr createEmbreeDevice(int threadCount = 0);
 RenderDevicePtr createOptixDevice();
 RenderDevicePtr createXpuDevice(int threadCount = 0);
 bool optixBackendCompiledIn();
-
-// Align CPU Path Tracer with the OptiX wavefront estimator (1 NEE, box filter,
-// no MNEE/SSS/OpenPGL/motion blur / polynomial optics).
-void applyXpuDeviceMatch(Scene& scene);
 
 // Live CUDA + optixInit probe (cached, never on the Qt UI thread).
 // createOptixDevice() overwrites this with the real initialize() result.

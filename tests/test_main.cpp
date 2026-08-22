@@ -505,12 +505,10 @@ void testGraphCook() {
 
 void testXpuDevice() {
     std::printf("xpu device\n");
-    check(xpuGpuOwnsPixel(0, 0, 32, 0), "GPU owns tile (0,0) at parity 0");
-    check(!xpuGpuOwnsPixel(32, 0, 32, 0), "CPU owns tile (1,0) at parity 0");
-    check(!xpuGpuOwnsPixel(0, 32, 32, 0), "CPU owns tile (0,1) at parity 0");
-    check(xpuGpuOwnsPixel(32, 32, 32, 0), "GPU owns tile (1,1) at parity 0");
-    check(xpuTileSizeOrDefault(0) == 32, "auto tile size is 32 for XPU");
-    check(xpuTileSizeOrDefault(64) == 64, "explicit tile size kept");
+    check(xpuGpuOwnsSample(0), "GPU owns even spp 0");
+    check(!xpuGpuOwnsSample(1), "CPU owns odd spp 1");
+    check(xpuGpuOwnsSample(2), "GPU owns even spp 2");
+    check(!xpuGpuOwnsSample(3), "CPU owns odd spp 3");
 
     Scene scene;
     scene.settings.backend = kBackendXpu;
@@ -524,15 +522,14 @@ void testXpuDevice() {
     Material sss;
     sss.subsurface = 0.7f;
     scene.materials.push_back(sss);
-    applyXpuDeviceMatch(scene);
-    check(scene.settings.lightSamples == 1, "XPU match uses 1 NEE sample");
-    check(scene.settings.pathGuiding == 0, "XPU match disables OpenPGL");
-    check(scene.settings.motionBlur == 0, "XPU match disables motion blur");
-    check(scene.settings.pixelFilter == kPixelFilterBox, "XPU match uses box filter");
-    check(scene.settings.filterRadius == 0.5f, "XPU match box radius 0.5");
-    check(scene.settings.samplingEngine == kSamplingEngineBuckets, "XPU match uses buckets");
-    check(scene.camera.opticalModel == 0, "XPU match uses thin-lens camera");
-    check(scene.materials[0].subsurface == 0.0f, "XPU match disables SSS");
+    check(scene.settings.lightSamples == 8, "XPU keeps light samples");
+    check(scene.settings.pathGuiding == 1, "XPU keeps OpenPGL on CPU samples");
+    check(scene.settings.motionBlur == 1, "XPU does not strip motion blur from settings");
+    check(scene.settings.pixelFilter == 2, "XPU keeps pixel filter");
+    check(scene.settings.filterRadius == 2.0f, "XPU keeps filter radius");
+    check(scene.settings.samplingEngine == kSamplingEngineProgressive, "XPU keeps sampling type");
+    check(scene.camera.opticalModel == 1, "XPU keeps authored camera model");
+    check(scene.materials[0].subsurface == 0.7f, "XPU keeps SSS on CPU samples");
 
     registerBuiltinNodes();
     NodeGraph graph;

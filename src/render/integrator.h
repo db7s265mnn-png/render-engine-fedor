@@ -14,10 +14,6 @@
 #include "solstice_config.h"
 
 #if !defined(__CUDACC__)
-#include "render/optix/optix_bsdf.cuh"
-#endif
-
-#if !defined(__CUDACC__)
 #include "render/volume_vdb.h"
 #include "scene/volume_grid.h"
 #endif
@@ -648,42 +644,6 @@ SR_INL SR_HD Vec3 clampContribution(Vec3 contrib, float clampValue) {
     return contrib;
 }
 
-SR_INL SR_HD bool xpuEstimatorMatch(const RenderSettingsData& s) { return renderDeviceIsXpu(s.backend); }
-
-SR_INL SR_HD BsdfEval evalBsdfDevice(const RenderSettingsData& s, const Material& mat, Vec3 wo, Vec3 wi) {
-#if !defined(__CUDACC__)
-    if (xpuEstimatorMatch(s)) {
-        const optixpt::BsdfEval e = optixpt::bsdfEvalLocal(mat, wo, wi);
-        BsdfEval o;
-        o.f = e.f;
-        o.pdf = e.pdf;
-        return o;
-    }
-#else
-    (void)s;
-#endif
-    return bsdfEvalLocal(mat, wo, wi);
-}
-
-SR_INL SR_HD BsdfSample sampleBsdfDevice(const RenderSettingsData& s, const Material& mat, Vec3 wo, float uLobe,
-                                        float u1, float u2, float u3) {
-#if !defined(__CUDACC__)
-    if (xpuEstimatorMatch(s)) {
-        const optixpt::BsdfSample e = optixpt::bsdfSampleLocal(mat, wo, uLobe, u1, u2, u3);
-        BsdfSample o;
-        o.weight = e.weight;
-        o.wi = e.wi;
-        o.pdf = e.pdf;
-        o.specular = e.specular;
-        o.transmitted = e.transmitted;
-        return o;
-    }
-#else
-    (void)s;
-#endif
-    return bsdfSampleLocal(mat, wo, uLobe, u1, u2, u3);
-}
-
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
 // a safety floor of 10 still applies — otherwise `clampContribution(..., 0)` is a
 // no-op and roughness-0 glass / BDPT near-spec NEE keep permanent sparkles.
@@ -778,40 +738,6 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
                                           int mediumIndex = -1) {
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
-
-#if !defined(__CUDACC__)
-    if (xpuEstimatorMatch(scene.settings)) {
-        float selectPdf = 0.0f;
-        const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
-        LightSample ls;
-        if (lightIndex < 0 || selectPdf <= 0.0f) return result;
-        if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) return result;
-        if (ls.pdf <= 0.0f || isBlack(ls.radiance)) return result;
-        if (!optixpt::shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) return result;
-        const Vec3 woLocal = frame.toLocal(wo);
-        const Vec3 wiLocal = frame.toLocal(ls.wi);
-        const optixpt::BsdfEval be = optixpt::bsdfEvalLocal(mat, woLocal, wiLocal);
-        if (be.pdf <= 0.0f || isBlack(be.f)) return result;
-        const float lightPdf = ls.pdf * selectPdf;
-        const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
-        result = ls.radiance * be.f * (fabsf(wiLocal.z) / lightPdf) * mis;
-        float visibility = 1.0f;
-        Vec3 shadowOrigin = si.p;
-        float tMax = 1.0e8f;
-        if (scene.lights[lightIndex].shadowEnable) {
-            shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
-            if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-            visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax);
-            if (visibility <= 1e-5f) return Vec3(0.0f);
-            result = result * visibility;
-            result = result * shadowTransmittanceFogVolumes(scene, shadowOrigin, ls.wi, tMax, rng);
-        }
-        if (const MediumData* med = getMedium(scene, mediumIndex)) {
-            if (med->type != 2 && ls.distance < 1.0e7f) result = result * mediumShadowTr(*med, ls.distance);
-        }
-        return result;
-    }
-#endif
 
     const Vec3 woLocal = frame.toLocal(wo);
     LightSample cands[kRisCandidates];
@@ -1108,36 +1034,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     const float pNee = volumeNeeRouletteP(depth);
                     const bool takeNee = pNee >= 1.0f || rng.nextFloat() < pNee;
                     if (takeNee) {
-                        if (xpuEstimatorMatch(settings)) {
-                            float selectPdf = 0.0f;
-                            const int lightIndex =
-                                sampleLightIndex(scene, origin, rng.nextFloat(), selectPdf);
-                            LightSample ls;
-                            if (lightIndex >= 0 && selectPdf > 0.0f &&
-                                sampleLight(scene, lightIndex, origin, rng.nextFloat(), rng.nextFloat(),
-                                            ls) &&
-                                ls.pdf > 0.0f && !isBlack(ls.radiance)) {
-                                const float phase = henyeyGreenstein(dot(woVol, ls.wi), medWalk.g);
-                                const float lightPdf = ls.pdf * selectPdf;
-                                const float mis =
-                                    ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phase);
-                                Vec3 contrib = throughput * ls.radiance *
-                                               (phase / srMax(1e-8f, lightPdf)) * mis * (1.0f / pNee);
-                                contrib = clampContribution(contrib, settings.clampDirect);
-                                if (scene.lights[lightIndex].shadowEnable) {
-                                    float tSh = 1.0e8f;
-                                    if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
-                                    contrib = contrib * shadowVisibility(scene, tracer, origin, ls.wi, tSh);
-#if !defined(__CUDACC__)
-                                    contrib = contrib * shadowTransmittanceFogVolumes(scene, origin, ls.wi,
-                                                                                      tSh, rng);
-#endif
-                                }
-                                if (medWalk.type != 2 && ls.distance < 1.0e7f)
-                                    contrib = contrib * mediumShadowTr(medWalk, ls.distance);
-                                radiance += contrib;
-                            }
-                        } else {
                             int nLight = srMax(1, settings.lightSamples);
                             if (depth >= 4) nLight = 1;
                             Vec3 volDirect(0.0f);
@@ -1150,7 +1046,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #if !defined(__CUDACC__)
                             if (guiding && guiding->active()) guiding->addScattered(volDirect);
 #endif
-                        }
                     }
                 }
 
@@ -1380,12 +1275,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         // Arnold ray_switch: shade with the port matching the *incoming* ray type.
         // Camera rays never use the Solstice caustics port.
         Material mat;
-#if !defined(__CUDACC__)
-        if (xpuEstimatorMatch(settings) && si.materialIndex >= 0 && si.materialIndex < scene.materialCount &&
-            scene.materials) {
-            mat = optixpt::evaluateMaps(scene, scene.materials[si.materialIndex], si.uv, si.ns);
-        } else
-#endif
         {
             Material baseMat = materialForRay(scene, si.materialIndex, rayKind);
             mat = evaluateTexturedMaterial(scene, baseMat, si.uv, si.ns, si.pObject, si.nObject,
@@ -1450,7 +1339,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         //
         // Spectral walk: hero RGB channel, MFP = scale * radius[ch], Chiang α.
         const float sssWeight = saturatef(mat.subsurface);
-        if (!xpuEstimatorMatch(settings) && materialSupportsSss(mat) && rng.nextFloat() < sssWeight) {
+        if (materialSupportsSss(mat) && rng.nextFloat() < sssWeight) {
             // Specular-only material at the ENTRY (dielectric F0 / metal base).
             Material specMat = sssSpecularEntryMaterial(mat);
 
@@ -1588,7 +1477,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         }
 #endif
         if (!gotSample) {
-            bs = sampleBsdfDevice(settings, mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+            bs = bsdfSampleLocal(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
                                  rng.nextFloat());
 #if !defined(__CUDACC__)
             if (bs.pdf > 0.0f && guideReady && !bs.specular) {
@@ -1622,7 +1511,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #endif
 
         throughput *= weight;
-        if (bs.transmitted && !xpuEstimatorMatch(settings))
+        if (bs.transmitted)
             throughput = applyFakeDispersionThroughput(throughput, mat, dispersion);
         if (!isFinite(throughput) || isBlack(throughput)) break;
 

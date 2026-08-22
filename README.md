@@ -20,10 +20,10 @@ Intel Embree CPU device, the NVIDIA OptiX GPU device, or XPU (both together).
 * **Path guiding** — Intel OpenPGL on the CPU backend (enabled by default in Render Settings)
   learns incident radiance while rendering and guides BSDF samples with MIS.
 * **Render Device** — `CPU (Embree)` uses Embree 4 with a tiled thread pool; `GPU (OptiX)` uses
-  OptiX wavefront path tracing; `XPU (Embree+OptiX)` splits the frame across checkerboard
-  buckets so CPU and GPU render together with the GPU estimator (matching sampling, lights
-  and shaders). GPU and XPU are Path Tracer only; if OptiX cannot start they stop with an
-  error instead of falling back to Embree.
+  OptiX wavefront path tracing; `XPU (Embree+OptiX)` alternates samples per pixel (even spp on
+  GPU, odd on CPU) so both devices render the full frame together. CPU keeps its full Path Tracer
+  (MNEE, SSS, OpenPGL, N light samples, filters). GPU and XPU are Path Tracer only; if OptiX
+  cannot start they stop with an error instead of falling back to Embree.
 * **Node network** — a Solaris-like network where every node edits the stage flowing through
   it: geometry sources, transforms, material assignment by prim pattern, lights, camera and
   render settings. Display flags, bypass flags, a Tab menu and a scene graph tree included.
