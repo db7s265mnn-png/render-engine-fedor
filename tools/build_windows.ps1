@@ -1,16 +1,16 @@
-# One-click Windows Release build with OptiX.
-# Invoked by BUILD_WINDOWS.bat at the repo root. Do not require the user to
-# pass flags; override paths with env vars if auto-detect is wrong:
+﻿# One-click Windows Release build with OptiX.
+# ASCII-only: Windows PowerShell 5.1 on a Russian locale mis-parses UTF-8
+# without BOM and treats Cyrillic bytes as quotes / broken tokens.
+# Override paths with env vars if auto-detect is wrong:
 #   QT_ROOT, VCPKG_ROOT, CUDA_PATH, OptiX_ROOT, GRENDIZER_BUILD_DIR
-$ErrorActionPreference = "Stop"
-[Console]::OutputEncoding = [Text.UTF8Encoding]::new()
+$ErrorActionPreference = 'Stop'
 
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$Root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $Root
 
 function Fail([string]$Message) {
-    Write-Host ""
-    Write-Host "ОШИБКА: $Message" -ForegroundColor Red
+    Write-Host ''
+    Write-Host "ERROR: $Message" -ForegroundColor Red
     exit 1
 }
 
@@ -19,40 +19,41 @@ function Info([string]$Message) {
 }
 
 function Find-VsWhere {
-    $p = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-    if (Test-Path $p) { return $p }
+    $pf86 = ${env:ProgramFiles(x86)}
+    $p = Join-Path $pf86 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path -LiteralPath $p) { return $p }
     return $null
 }
 
 function Import-VcVars64 {
     $vswhere = Find-VsWhere
     if (-not $vswhere) {
-        Fail "Не найден Visual Studio Installer (vswhere). Поставь VS 2022 с workload «Desktop development with C++»."
+        Fail 'Visual Studio Installer (vswhere) not found. Install VS 2022 with Desktop development with C++.'
     }
     $vsRoot = & $vswhere -latest -products * `
         -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
         -property installationPath
     if (-not $vsRoot) {
-        Fail "Visual Studio найдена, но нет C++ toolset. В VS Installer включи «Desktop development with C++»."
+        Fail 'Visual Studio found, but the C++ toolset is missing. Enable Desktop development with C++.'
     }
-    $script:VsYear = "2022"
+    $script:VsYear = '2022'
     $year = & $vswhere -latest -products * -property catalog_productLineVersion | Select-Object -First 1
-    if ($year) { $script:VsYear = "$year".Trim() }
-    $vcvars = Join-Path $vsRoot "VC\Auxiliary\Build\vcvars64.bat"
-    if (-not (Test-Path $vcvars)) {
-        Fail "Нет vcvars64.bat в $vsRoot"
+    if ($year) { $script:VsYear = ("$year").Trim() }
+    $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
+    if (-not (Test-Path -LiteralPath $vcvars)) {
+        Fail "vcvars64.bat missing under $vsRoot"
     }
     Info "Visual Studio: $vsRoot ($script:VsYear)"
     $tmp = [IO.Path]::GetTempFileName()
     cmd.exe /c "`"$vcvars`" >nul && set" | Set-Content -Path $tmp -Encoding ascii
-    Get-Content $tmp | ForEach-Object {
+    Get-Content -Path $tmp | ForEach-Object {
         if ($_ -match '^(.*?)=(.*)$') {
-            Set-Item -LiteralPath "Env:$($matches[1])" -Value $matches[2]
+            Set-Item -LiteralPath ("Env:" + $matches[1]) -Value $matches[2]
         }
     }
-    Remove-Item $tmp -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
     if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
-        Fail "После vcvars64 не найден cl.exe"
+        Fail 'cl.exe not on PATH after vcvars64'
     }
 }
 
@@ -60,138 +61,145 @@ function Find-CMake {
     $cmd = Get-Command cmake.exe -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     $guess = @(
-        "${env:ProgramFiles}\CMake\bin\cmake.exe",
-        "${env:ProgramFiles(x86)}\CMake\bin\cmake.exe"
+        (Join-Path $env:ProgramFiles 'CMake\bin\cmake.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'CMake\bin\cmake.exe')
     )
     foreach ($g in $guess) {
-        if (Test-Path $g) { return $g }
+        if ($g -and (Test-Path -LiteralPath $g)) { return $g }
     }
     $vswhere = Find-VsWhere
     if ($vswhere) {
-        $fromVs = & $vswhere -latest -products * -find "Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" |
+        $fromVs = & $vswhere -latest -products * -find 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' |
             Select-Object -First 1
-        if ($fromVs -and (Test-Path $fromVs)) { return $fromVs }
+        if ($fromVs -and (Test-Path -LiteralPath $fromVs)) { return $fromVs }
     }
-    Fail "CMake не найден. Поставь https://cmake.org/download/ (и галку Add CMake to PATH) либо компонент CMake в VS."
+    Fail 'CMake not found. Install https://cmake.org/download/ (Add CMake to PATH) or the VS CMake component.'
 }
 
 function Find-Git {
     $cmd = Get-Command git.exe -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     foreach ($g in @(
-        "${env:ProgramFiles}\Git\cmd\git.exe",
-        "${env:LocalAppData}\Programs\Git\cmd\git.exe"
+        (Join-Path $env:ProgramFiles 'Git\cmd\git.exe'),
+        (Join-Path $env:LocalAppData 'Programs\Git\cmd\git.exe')
     )) {
-        if (Test-Path $g) { return $g }
+        if (Test-Path -LiteralPath $g) { return $g }
     }
-    Fail "Git не найден. Поставь https://git-scm.com/download/win"
+    Fail 'Git not found. Install https://git-scm.com/download/win'
 }
 
 function Find-QtPrefix {
-    foreach ($envName in @("QT_ROOT", "QT_ROOT_DIR", "QTDIR")) {
+    foreach ($envName in @('QT_ROOT', 'QT_ROOT_DIR', 'QTDIR')) {
         $v = [Environment]::GetEnvironmentVariable($envName)
-        if ($v -and (Test-Path (Join-Path $v "lib\cmake\Qt6\Qt6Config.cmake"))) { return $v }
+        if ($v) {
+            $cfg = Join-Path $v 'lib\cmake\Qt6\Qt6Config.cmake'
+            if (Test-Path -LiteralPath $cfg) { return $v }
+        }
     }
-    $roots = @("C:\Qt", "D:\Qt", "E:\Qt", (Join-Path $env:USERPROFILE "Qt"))
-    $kits = @("msvc2022_64", "msvc2019_64")
+    $roots = @('C:\Qt', 'D:\Qt', 'E:\Qt', (Join-Path $env:USERPROFILE 'Qt'))
+    $kits = @('msvc2022_64', 'msvc2019_64')
     foreach ($root in $roots) {
-        if (-not (Test-Path $root)) { continue }
-        $versions = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        $versions = Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^6\.\d+' } |
-            Sort-Object { [version]($_.Name -replace '[^\d.].*$','') } -Descending
+            Sort-Object Name -Descending
         foreach ($ver in $versions) {
             foreach ($kit in $kits) {
                 $p = Join-Path $ver.FullName $kit
-                if (Test-Path (Join-Path $p "lib\cmake\Qt6\Qt6Config.cmake")) { return $p }
+                $cfg = Join-Path $p 'lib\cmake\Qt6\Qt6Config.cmake'
+                if (Test-Path -LiteralPath $cfg) { return $p }
             }
         }
     }
-    Fail @"
-Qt 6 (msvc2019_64 / msvc2022_64) не найден.
-Поставь Qt 6 через https://www.qt.io/download-qt-installer в C:\Qt
-или задай переменную QT_ROOT, например:
-  set QT_ROOT=C:\Qt\6.7.2\msvc2019_64
-"@
+    Fail 'Qt 6 (msvc2019_64 / msvc2022_64) not found. Install Qt 6 into C:\Qt or set QT_ROOT=C:\Qt\6.7.2\msvc2019_64'
 }
 
 function Find-CudaPath {
-    if ($env:CUDA_PATH -and (Test-Path (Join-Path $env:CUDA_PATH "bin\nvcc.exe"))) {
-        return $env:CUDA_PATH
+    if ($env:CUDA_PATH) {
+        $nvcc = Join-Path $env:CUDA_PATH (Join-Path 'bin' 'nvcc.exe')
+        if (Test-Path -LiteralPath $nvcc) { return $env:CUDA_PATH }
     }
-    $base = "${env:ProgramFiles}\NVIDIA GPU Computing Toolkit\CUDA"
-    if (Test-Path $base) {
-        $vers = Get-ChildItem $base -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^v12\.' -or $_.Name -match '^v13\.' } |
+    $base = Join-Path $env:ProgramFiles 'NVIDIA GPU Computing Toolkit\CUDA'
+    if (Test-Path -LiteralPath $base) {
+        $vers = Get-ChildItem -LiteralPath $base -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^v1[23]\.' } |
             Sort-Object Name -Descending
         foreach ($v in $vers) {
-            if (Test-Path (Join-Path $v.FullName "bin\nvcc.exe")) { return $v.FullName }
+            $nvcc = Join-Path $v.FullName (Join-Path 'bin' 'nvcc.exe')
+            if (Test-Path -LiteralPath $nvcc) { return $v.FullName }
         }
     }
-    Fail @"
-CUDA Toolkit не найден (нужен nvcc).
-Поставь CUDA 12.x: https://developer.nvidia.com/cuda-downloads
-После установки закрой это окно и запусти BUILD_WINDOWS.bat снова.
-"@
+    Fail 'CUDA Toolkit not found (need nvcc). Install CUDA 12.x from https://developer.nvidia.com/cuda-downloads then re-run BUILD_WINDOWS.bat'
 }
 
-function Find-OptiXRoot([string]$Git) {
-    foreach ($envName in @("OptiX_ROOT", "OptiX_INSTALL_DIR")) {
+function Find-OptiXRoot([string]$GitExe) {
+    foreach ($envName in @('OptiX_ROOT', 'OptiX_INSTALL_DIR')) {
         $v = [Environment]::GetEnvironmentVariable($envName)
-        if ($v -and (Test-Path (Join-Path $v "include\optix.h"))) { return $v }
+        if ($v) {
+            $hdr = Join-Path $v (Join-Path 'include' 'optix.h')
+            if (Test-Path -LiteralPath $hdr) { return $v }
+        }
     }
-    $nvidia = Join-Path $env:ProgramData "NVIDIA Corporation"
-    if (Test-Path $nvidia) {
-        $sdks = Get-ChildItem $nvidia -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -like "OptiX SDK*" } |
+    $nvidia = Join-Path $env:ProgramData 'NVIDIA Corporation'
+    if (Test-Path -LiteralPath $nvidia) {
+        $sdks = Get-ChildItem -LiteralPath $nvidia -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -like 'OptiX SDK*' } |
             Sort-Object Name -Descending
         foreach ($s in $sdks) {
-            if (Test-Path (Join-Path $s.FullName "include\optix.h")) { return $s.FullName }
+            $hdr = Join-Path $s.FullName (Join-Path 'include' 'optix.h')
+            if (Test-Path -LiteralPath $hdr) { return $s.FullName }
         }
     }
-    foreach ($p in @("C:\optix-dev", (Join-Path $Root "third_party\optix-dev"))) {
-        if (Test-Path (Join-Path $p "include\optix.h")) { return $p }
+    foreach ($p in @('C:\optix-dev', (Join-Path $Root 'third_party\optix-dev'))) {
+        $hdr = Join-Path $p (Join-Path 'include' 'optix.h')
+        if (Test-Path -LiteralPath $hdr) { return $p }
     }
-    $local = Join-Path $env:LOCALAPPDATA "grendizer-optix-dev"
-    if (Test-Path (Join-Path $local "include\optix.h")) { return $local }
-    Info "OptiX SDK не найден — качаю публичные заголовки NVIDIA/optix-dev v7.7.0 ..."
-    if (Test-Path $local) { Remove-Item -Recurse -Force $local }
-    & $Git clone --depth 1 --branch v7.7.0 https://github.com/NVIDIA/optix-dev.git $local
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $local "include\optix.h"))) {
-        Fail "Не удалось скачать OptiX headers. Поставь OptiX SDK 7.7+ с NVIDIA Developer или проверь сеть."
+    $local = Join-Path $env:LOCALAPPDATA 'grendizer-optix-dev'
+    $hdrLocal = Join-Path $local (Join-Path 'include' 'optix.h')
+    if (Test-Path -LiteralPath $hdrLocal) { return $local }
+    Info 'OptiX SDK not found - cloning NVIDIA/optix-dev v7.7.0 headers ...'
+    if (Test-Path -LiteralPath $local) { Remove-Item -LiteralPath $local -Recurse -Force }
+    & $GitExe clone --depth 1 --branch v7.7.0 https://github.com/NVIDIA/optix-dev.git $local
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hdrLocal)) {
+        Fail 'Failed to fetch OptiX headers. Install OptiX SDK 7.7+ or check the network.'
     }
     return $local
 }
 
-function Find-VcpkgRoot([string]$Git) {
-    if ($env:VCPKG_ROOT -and (Test-Path (Join-Path $env:VCPKG_ROOT "scripts\buildsystems\vcpkg.cmake"))) {
-        return $env:VCPKG_ROOT
+function Find-VcpkgRoot([string]$GitExe) {
+    if ($env:VCPKG_ROOT) {
+        $tc = Join-Path $env:VCPKG_ROOT 'scripts\buildsystems\vcpkg.cmake'
+        if (Test-Path -LiteralPath $tc) { return $env:VCPKG_ROOT }
     }
     foreach ($p in @(
-        "C:\vcpkg",
-        "D:\vcpkg",
-        (Join-Path $Root "vcpkg"),
-        (Join-Path (Split-Path $Root -Parent) "vcpkg")
+        'C:\vcpkg',
+        'D:\vcpkg',
+        (Join-Path $Root 'vcpkg'),
+        (Join-Path (Split-Path $Root -Parent) 'vcpkg')
     )) {
-        if (Test-Path (Join-Path $p "scripts\buildsystems\vcpkg.cmake")) { return $p }
+        $tc = Join-Path $p 'scripts\buildsystems\vcpkg.cmake'
+        if (Test-Path -LiteralPath $tc) { return $p }
     }
-    $local = Join-Path $env:LOCALAPPDATA "grendizer-vcpkg"
-    if (Test-Path (Join-Path $local "scripts\buildsystems\vcpkg.cmake")) { return $local }
-    Info "vcpkg не найден — клонирую в $local (первый раз долго) ..."
-    & $Git clone --depth 1 https://github.com/microsoft/vcpkg.git $local
-    if ($LASTEXITCODE -ne 0) { Fail "Не удалось клонировать vcpkg. Проверь сеть / GitHub." }
-    $boot = Join-Path $local "bootstrap-vcpkg.bat"
+    $local = Join-Path $env:LOCALAPPDATA 'grendizer-vcpkg'
+    $tcLocal = Join-Path $local 'scripts\buildsystems\vcpkg.cmake'
+    if (Test-Path -LiteralPath $tcLocal) { return $local }
+    Info "vcpkg not found - cloning into $local (first run is slow) ..."
+    & $GitExe clone --depth 1 https://github.com/microsoft/vcpkg.git $local
+    if ($LASTEXITCODE -ne 0) { Fail 'Failed to clone vcpkg. Check network / GitHub.' }
+    $boot = Join-Path $local 'bootstrap-vcpkg.bat'
     cmd.exe /c "`"$boot`" -disableMetrics"
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $local "vcpkg.exe"))) {
-        Fail "bootstrap-vcpkg.bat не удался"
+    $vcpkgExe = Join-Path $local 'vcpkg.exe'
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $vcpkgExe)) {
+        Fail 'bootstrap-vcpkg.bat failed'
     }
     return $local
 }
 
-Write-Host ""
-Write-Host "=== Grendizer Render — Windows сборка с OptiX ===" -ForegroundColor Green
-Write-Host "Репозиторий: $Root"
-Write-Host "Первый запуск может занять долго (vcpkg + nvcc PTX + Release)."
-Write-Host ""
+Write-Host ''
+Write-Host '=== Grendizer Render - Windows OptiX build ===' -ForegroundColor Green
+Write-Host "Repo: $Root"
+Write-Host 'First run can take a long time (vcpkg + nvcc PTX + Release).'
+Write-Host ''
 
 Import-VcVars64
 $CMake = Find-CMake
@@ -199,12 +207,17 @@ $Git = Find-Git
 $Qt = Find-QtPrefix
 $Cuda = Find-CudaPath
 $env:CUDA_PATH = $Cuda
-$env:PATH = "$(Join-Path $Cuda 'bin');$env:PATH"
+$cudaBin = Join-Path $Cuda 'bin'
+$env:PATH = "$cudaBin;$env:PATH"
 $OptiX = Find-OptiXRoot $Git
 $Vcpkg = Find-VcpkgRoot $Git
 $Cl = (Get-Command cl.exe).Source
-$Nvcc = Join-Path $Cuda "bin\nvcc.exe"
-$BuildDir = if ($env:GRENDIZER_BUILD_DIR) { $env:GRENDIZER_BUILD_DIR } else { Join-Path $Root "build-windows" }
+$Nvcc = Join-Path $cudaBin 'nvcc.exe'
+if ($env:GRENDIZER_BUILD_DIR) {
+    $BuildDir = $env:GRENDIZER_BUILD_DIR
+} else {
+    $BuildDir = Join-Path $Root 'build-windows'
+}
 
 Info "CMake:  $CMake"
 Info "Qt:     $Qt"
@@ -214,68 +227,75 @@ Info "cl.exe: $Cl"
 Info "OptiX:  $OptiX"
 Info "vcpkg:  $Vcpkg"
 Info "Build:  $BuildDir"
-Write-Host ""
+Write-Host ''
 
-if (-not (Test-Path $Nvcc)) { Fail "nvcc.exe нет по пути $Nvcc" }
+if (-not (Test-Path -LiteralPath $Nvcc)) { Fail "nvcc.exe missing: $Nvcc" }
 
-$Generator = "Visual Studio 17 2022"
-if ($script:VsYear -eq "2019") { $Generator = "Visual Studio 16 2019" }
+$Generator = 'Visual Studio 17 2022'
+if ($script:VsYear -eq '2019') { $Generator = 'Visual Studio 16 2019' }
 Info "CMake generator: $Generator"
 
-$Toolchain = Join-Path $Vcpkg "scripts\buildsystems\vcpkg.cmake"
+$Toolchain = Join-Path $Vcpkg 'scripts\buildsystems\vcpkg.cmake'
 & $CMake -S $Root -B $BuildDir -G $Generator -A x64 `
     "-DCMAKE_TOOLCHAIN_FILE=$Toolchain" `
     "-DCMAKE_PREFIX_PATH=$Qt" `
     "-DCMAKE_CUDA_COMPILER=$Nvcc" `
     "-DCMAKE_CUDA_HOST_COMPILER=$Cl" `
     "-DSOLSTICE_CUDA_HOST_COMPILER=$Cl" `
-    "-DSOLSTICE_ENABLE_OPTIX=ON" `
+    '-DSOLSTICE_ENABLE_OPTIX=ON' `
     "-DOptiX_ROOT=$OptiX" `
-    "-DSOLSTICE_ENABLE_OCIO=ON" `
-    "-DSOLSTICE_ENABLE_OPENVDB=ON" `
-    "-DSOLSTICE_MODERN_CPU=ON"
-if ($LASTEXITCODE -ne 0) { Fail "cmake configure не удался. Смотри лог выше (Qt / CUDA / OptiX / vcpkg)." }
+    '-DSOLSTICE_ENABLE_OCIO=ON' `
+    '-DSOLSTICE_ENABLE_OPENVDB=ON' `
+    '-DSOLSTICE_MODERN_CPU=ON'
+if ($LASTEXITCODE -ne 0) { Fail 'cmake configure failed. Check Qt / CUDA / OptiX / vcpkg in the log above.' }
 
-$Cfg = Join-Path $BuildDir "generated\solstice_config.h"
-if (-not (Test-Path $Cfg) -or -not (Select-String -Path $Cfg -Pattern "SOLSTICE_HAVE_OPTIX 1" -Quiet)) {
-    Fail "OptiX не включился (SOLSTICE_HAVE_OPTIX != 1). Проверь, что nvcc и OptiX_ROOT видны в логе cmake."
+$Cfg = Join-Path $BuildDir 'generated\solstice_config.h'
+if (-not (Test-Path -LiteralPath $Cfg)) {
+    Fail "missing $Cfg after configure"
 }
-Info "OptiX вшит в эту сборку (SOLSTICE_HAVE_OPTIX 1)."
+if (-not (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_OPTIX 1' -Quiet)) {
+    Fail 'OptiX did not enable (SOLSTICE_HAVE_OPTIX != 1). Check nvcc and OptiX_ROOT in the cmake log.'
+}
+Info 'OptiX is compiled into this build (SOLSTICE_HAVE_OPTIX 1).'
 
-Write-Host ""
-Info "Компиляция Release (PTX через nvcc может занять несколько минут) ..."
+Write-Host ''
+Info 'Building Release (nvcc PTX can take several minutes) ...'
 & $CMake --build $BuildDir --config Release --parallel
-if ($LASTEXITCODE -ne 0) { Fail "Сборка не удалась." }
+if ($LASTEXITCODE -ne 0) { Fail 'Build failed.' }
 
-Write-Host ""
-Info "Копирую Qt DLL рядом с exe (deploy) ..."
+Write-Host ''
+Info 'Deploying Qt DLLs next to the exe ...'
 & $CMake --build $BuildDir --config Release --target deploy
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Предупреждение: target deploy не собрался. exe может требовать Qt в PATH." -ForegroundColor Yellow
+    Write-Host 'Warning: deploy target failed. The exe may need Qt on PATH.' -ForegroundColor Yellow
 }
 
-$Bin = Join-Path $BuildDir "bin\Release"
-if (-not (Test-Path $Bin)) { $Bin = Join-Path $BuildDir "bin" }
-$Cudart = Get-ChildItem (Join-Path $Cuda "bin") -Filter "cudart64_*.dll" -ErrorAction SilentlyContinue
-if ($Cudart -and (Test-Path $Bin)) {
-    $Cudart | ForEach-Object {
-        Copy-Item $_.FullName $Bin -Force
-        Info "Скопирован $($_.Name)"
+$Bin = Join-Path $BuildDir (Join-Path 'bin' 'Release')
+if (-not (Test-Path -LiteralPath $Bin)) { $Bin = Join-Path $BuildDir 'bin' }
+$cudartDir = Join-Path $Cuda 'bin'
+if (Test-Path -LiteralPath $cudartDir) {
+    $Cudart = Get-ChildItem -LiteralPath $cudartDir -Filter 'cudart64_*.dll' -ErrorAction SilentlyContinue
+    if ($Cudart -and (Test-Path -LiteralPath $Bin)) {
+        $Cudart | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $Bin -Force
+            Info ("Copied " + $_.Name)
+        }
     }
 }
 
-$Exe = Get-ChildItem $Bin -Filter "Grendizer_Render*.exe" -ErrorAction SilentlyContinue |
+$Exe = Get-ChildItem -LiteralPath $Bin -Filter 'Grendizer_Render*.exe' -ErrorAction SilentlyContinue |
     Select-Object -First 1
 if (-not $Exe) {
-    $Exe = Get-ChildItem $Bin -Filter "Solstice*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    $Exe = Get-ChildItem -LiteralPath $Bin -Filter 'Solstice*.exe' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
 }
-if (-not $Exe) { Fail "exe не найден в $Bin" }
+if (-not $Exe) { Fail "exe not found in $Bin" }
 
-Write-Host ""
-Write-Host "ГОТОВО: $($Exe.FullName)" -ForegroundColor Green
-Write-Host "В приложении: Engine → Render Backend → GPU (OptiX)"
-Write-Host "Без хвоста «not in this build». Нужна NVIDIA-видеокарта и свежий драйвер."
-Write-Host ""
+Write-Host ''
+Write-Host ("DONE: " + $Exe.FullName) -ForegroundColor Green
+Write-Host 'In the app: Engine -> Render Backend -> GPU (OptiX)'
+Write-Host 'It must NOT say "not in this build". Needs an NVIDIA GPU + current driver.'
+Write-Host ''
 
 try { Invoke-Item $Bin } catch { }
 exit 0
