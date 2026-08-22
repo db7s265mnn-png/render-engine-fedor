@@ -892,15 +892,41 @@ if (-not (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_OPTIX 1' -Quiet)) {
 }
 Info 'OptiX is compiled into this build (SOLSTICE_HAVE_OPTIX 1).'
 
+function Invoke-LoggedCMakeBuild([string[]]$BuildArgs) {
+    Info 'Ninja PTX step has NO percent bar. nvcc/cicc/cl should be busy in Task Manager.'
+    $p = Start-Process -FilePath $CMake -ArgumentList $BuildArgs -NoNewWindow -PassThru
+    $t0 = Get-Date
+    while (-not $p.HasExited) {
+        Start-Sleep -Seconds 20
+        $alive = Get-Process -Name nvcc,cicc,cudafe++,ptxas,cl -ErrorAction SilentlyContinue
+        $sec = [int]((Get-Date) - $t0).TotalSeconds
+        if ($alive) {
+            $names = @($alive | ForEach-Object { $_.ProcessName } | Select-Object -Unique)
+            Info ("  still compiling  ${sec}s   " + ($names -join ', '))
+        } else {
+            Info ("  still building  ${sec}s   (no nvcc/cl this tick - link or wait)")
+        }
+    }
+    return [int]$p.ExitCode
+}
+
 Write-Host ''
-Info 'Building Release (nvcc PTX can take several minutes) ...'
-& $CMake --build $BuildDir --parallel
-if ($LASTEXITCODE -ne 0) {
+Info '1/2 nvcc OptiX PTX (often 10-20 min at [0/N], this is normal) ...'
+$code = Invoke-LoggedCMakeBuild @('--build', $BuildDir, '--target', 'solstice_optix_programs', '--parallel')
+if ($code -ne 0) {
     Fail @"
-Build failed.
-If nvcc died on type_traits / aligned_storage / result_of:
-  CUDA 12.0 was used. This script must print CUDA 13.2 and arch compute_75.
-Delete C:\gz-build, keep %LOCALAPPDATA%\grendizer-deps, re-run BUILD_WINDOWS.bat.
+OptiX PTX failed (nvcc).
+If type_traits / aligned_storage: CUDA 12.0 was used, need 13.2 + compute_75.
+If it sat idle with no nvcc.exe in Task Manager: close the window and re-run.
+Keep %LOCALAPPDATA%\grendizer-deps. Delete C:\gz-build only if CUDA version changed.
+"@
+}
+Info '2/2 building the rest of the app ...'
+$code = Invoke-LoggedCMakeBuild @('--build', $BuildDir, '--parallel')
+if ($code -ne 0) {
+    Fail @"
+Build failed after PTX.
+Keep %LOCALAPPDATA%\grendizer-deps.
 "@
 }
 
