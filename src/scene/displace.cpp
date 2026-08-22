@@ -300,6 +300,22 @@ void displaceVertices(Mesh& mesh, const Material& mat, const SceneView& scene) {
     offsets.clear();
     offsets.shrink_to_fit();
 
+    // Displace cage wire overlay with the same height field (cage-sized only).
+    if (!mesh.wirePositions.empty()) {
+        const size_t wn = mesh.wirePositions.size();
+        if (mesh.wireNormals.size() != wn) {
+            mesh.wireNormals.assign(wn, Vec3(0.0f, 1.0f, 0.0f));
+        }
+        for (size_t i = 0; i < wn; ++i) {
+            Vec3 nrm = mesh.wireNormals[i];
+            const float nlen = length(nrm);
+            nrm = nlen > 1e-8f ? nrm / nlen : Vec3(0.0f, 1.0f, 0.0f);
+            const Vec3 sample =
+                sampleDisplacementVector(scene, mat, Vec2(0.0f, 0.0f), mesh.wirePositions[i], nrm);
+            mesh.wirePositions[i] += mat.displacementVector ? sample : nrm * sample.x;
+        }
+    }
+
     // Rebuild smooth normals on the displaced surface, then flip any that ended
     // up on the opposite hemisphere from the pre-displace reference.
     mesh.normals.clear();

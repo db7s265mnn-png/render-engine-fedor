@@ -4,6 +4,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QColor>
 #include <QDir>
 #include <QDockWidget>
 #include <QFileDialog>
@@ -30,6 +31,7 @@
 #include <cstring>
 #include <exception>
 #include <new>
+#include <string>
 
 #include "app/default_scene.h"
 #include "app/document.h"
@@ -42,6 +44,7 @@
 #include "nodes/node_registry.h"
 #include "nodes/node.h"
 #include "render/motion_blur.h"
+#include "render/render_device.h"
 #include "render/render_session.h"
 #include "render/scene_picker.h"
 #include "scene/types.h"
@@ -293,7 +296,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     session_.setUpdateCallback([this] { framePending_.store(true, std::memory_order_relaxed); });
     session_.setFinishedCallback([this] {
         framePending_.store(true, std::memory_order_relaxed);
-        QMetaObject::invokeMethod(this, [this] { maybeSaveStillFrame(); }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [this] { onRenderFinished(); }, Qt::QueuedConnection);
     });
 }
 
@@ -958,6 +961,25 @@ void MainWindow::maybeSaveStillFrame() {
         QStringLiteral("Still frame written: %1").arg(stillFramePath_), 6000);
 }
 
+void MainWindow::onRenderFinished() {
+    const RenderProgress progress = session_.progress();
+    if (!progress.message.empty()) {
+        stillFramePending_ = false;
+        setRenderArmed(false);
+        renderRequested_ = false;
+        if (renderView_) renderView_->setNavigationEnabled(false);
+        const QString text = QString::fromStdString(progress.message);
+        statusBar()->showMessage(text, 0);
+        updateStatusBar();
+        const QString title = progress.backendName.find("OptiX") != std::string::npos
+                                  ? QStringLiteral("GPU (OptiX)")
+                                  : QStringLiteral("Render");
+        appMessageBox(this, title, text);
+        return;
+    }
+    maybeSaveStillFrame();
+}
+
 // ---------------------------------------------------------------------------
 // Cook and render
 // ---------------------------------------------------------------------------
@@ -988,6 +1010,7 @@ void MainWindow::enterIdlePlaceholder() {
         renderView_->showPlaceholder(true);
     }
     framePending_.store(false, std::memory_order_relaxed);
+    updateStatusBar();
 }
 
 void MainWindow::onCookTimeout() { cookNow(); }
@@ -1617,7 +1640,58 @@ void MainWindow::updateStatusBar() {
         if (rs.pixelSampler == kPixelSamplerManualTest)
             overlay += QString("  mult=%1").arg(rs.manualTestMult, 0, 'f', 2);
     }
+    if (!progress.message.empty()) {
+        overlay += QStringLiteral("   %1").arg(QString::fromStdString(progress.message));
+    }
+    if (!renderView_) return;
     renderView_->setStatusText(overlay);
+
+    const bool wantGpu = [&] {
+        if (scene_) return scene_->settings.backend == kBackendGpuOptix;
+        for (const NodePtr& node : graph_.nodes()) {
+            if (node && node->typeName() == QLatin1String("rendersettings"))
+                return node->intValue("backend", 0) == 1;
+        }
+        return false;
+    }();
+
+    QString active = QStringLiteral("Embree");
+    const std::string& live = progress.backendName;
+    if (!live.empty()) {
+        if (live.find("OptiX") != std::string::npos) active = QStringLiteral("OptiX");
+        else if (live.find("Embree") != std::string::npos) {
+            active = QStringLiteral("Embree");
+        }
+    } else if (wantGpu && optixRuntimeAvailable()) {
+        active = QStringLiteral("OptiX");
+    }
+    if (active.startsWith(QLatin1String("OptiX")) && progress.backendGpuMs > 0.0) {
+        active = QStringLiteral("OptiX %1 ms").arg(progress.backendGpuMs, 0, 'f', 1);
+    }
+
+    QString support = QStringLiteral("OptiX not supported");
+    QColor supportColor(255, 80, 80);
+    if (!progress.message.empty() && wantGpu) {
+        support = QString::fromStdString(progress.message);
+        if (support.size() > 48) support = support.left(46) + QStringLiteral("…");
+        supportColor = QColor(255, 80, 80);
+        if (active.startsWith(QLatin1String("Embree"))) active = QStringLiteral("OptiX");
+    } else if (!optixBackendCompiledIn()) {
+        support = QStringLiteral("OptiX not in this build");
+    } else if (optixRuntimeProbePending()) {
+        support = QStringLiteral("OptiX checking…");
+        supportColor = QColor(255, 210, 70);
+    } else {
+        std::string err;
+        if (optixRuntimeAvailable(&err)) {
+            support = QStringLiteral("OptiX supported");
+            supportColor = QColor(110, 210, 140);
+        } else if (!err.empty()) {
+            support = QString::fromStdString(err);
+            if (support.size() > 42) support = support.left(40) + QStringLiteral("…");
+        }
+    }
+    renderView_->setBackendHud(active, support, supportColor);
 }
 
 

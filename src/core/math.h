@@ -4,7 +4,13 @@
 
 #if defined(__CUDACC__)
 #  define SR_HD __host__ __device__
-#  define SR_INL __forceinline__
+// __forceinline__ on the whole integrator makes cicc optimize one megakernel
+// for hours (seen: 3h+ on a 14900K). Keep it optional.
+#  if defined(SOLSTICE_CUDA_FORCEINLINE)
+#    define SR_INL __forceinline__
+#  else
+#    define SR_INL inline
+#  endif
 #else
 #  define SR_HD
 #  define SR_INL inline
@@ -385,6 +391,12 @@ SR_INL SR_HD float srgbToLinear(float c) {
     return c <= 0.04045f ? c / 12.92f : powf((c + 0.055f) / 1.055f, 2.4f);
 }
 
+// Same EOTF without the 0–1 clamp so HDR sRGB-encoded values can convert to ACEScg.
+SR_INL SR_HD float srgbToLinearUnclamped(float c) {
+    if (c <= 0.04045f) return c / 12.92f;
+    return powf((c + 0.055f) / 1.055f, 2.4f);
+}
+
 // Narkowicz's ACES filmic approximation (good stand-in for ACES Output → sRGB).
 SR_INL SR_HD Vec3 acesFilmic(Vec3 c) {
     const Vec3 a = c * 2.51f + Vec3(0.03f);
@@ -407,6 +419,13 @@ SR_INL SR_HD Vec3 acescgToLinearSrgb(Vec3 c) {
     return Vec3(1.7050509927f * c.x + -0.6217921207f * c.y + -0.0832588720f * c.z,
                 -0.1302564175f * c.x + 1.1408047365f * c.y + -0.0105483191f * c.z,
                 -0.0240033472f * c.x + -0.1289689761f * c.y + 1.1529723230f * c.z);
+}
+
+// Linear Rec.709 / sRGB primaries → ACEScg (AP1). Inverse of acescgToLinearSrgb.
+SR_INL SR_HD Vec3 linearSrgbToAcescg(Vec3 c) {
+    return Vec3(0.6130974024f * c.x + 0.3395231462f * c.y + 0.0473794515f * c.z,
+                0.0701937225f * c.x + 0.9163538791f * c.y + 0.0134523985f * c.z,
+                0.0206155929f * c.x + 0.1095697729f * c.y + 0.8698146342f * c.z);
 }
 
 // Quantize a display-referred channel to the configured output bit depth.

@@ -64,6 +64,7 @@ private slots:
     void onTimelineFrameChanged(int frame);
     void onParameterAction(sol::Node* node, const QString& parameterName);
     void maybeSaveStillFrame();
+    void onRenderFinished();
 
 private:
     void createActions();

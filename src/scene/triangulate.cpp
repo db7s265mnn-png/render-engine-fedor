@@ -93,16 +93,44 @@ bool triangulatePolygon(const std::vector<Vec3>& positions, const uint32_t* face
 }
 
 bool triangulateMeshFaces(const std::vector<Vec3>& positions, const std::vector<uint32_t>& faceVertexCounts,
-                          const std::vector<uint32_t>& faceVertexIndices, std::vector<uint32_t>& outIndices) {
+                          const std::vector<uint32_t>& faceVertexIndices, std::vector<uint32_t>& outIndices,
+                          std::vector<uint8_t>* outEdgeMask) {
     outIndices.clear();
+    if (outEdgeMask) outEdgeMask->clear();
     if (faceVertexCounts.empty() || faceVertexIndices.empty()) return false;
+
+    auto isBoundaryEdge = [](uint32_t a, uint32_t b, const uint32_t* face, size_t n) -> bool {
+        for (size_t i = 0; i < n; ++i) {
+            const uint32_t u = face[i];
+            const uint32_t v = face[(i + 1) % n];
+            if ((u == a && v == b) || (u == b && v == a)) return true;
+        }
+        return false;
+    };
+
     size_t cursor = 0;
     for (uint32_t count : faceVertexCounts) {
         if (count < 3 || cursor + size_t(count) > faceVertexIndices.size()) {
             cursor += size_t(count);
             continue;
         }
-        triangulatePolygon(positions, faceVertexIndices.data() + cursor, size_t(count), outIndices);
+        const uint32_t* face = faceVertexIndices.data() + cursor;
+        const size_t before = outIndices.size();
+        triangulatePolygon(positions, face, size_t(count), outIndices);
+        if (outEdgeMask) {
+            for (size_t t = before; t + 2 < outIndices.size(); t += 3) {
+                const uint32_t i0 = outIndices[t + 0];
+                const uint32_t i1 = outIndices[t + 1];
+                const uint32_t i2 = outIndices[t + 2];
+                uint8_t mask = 0;
+                if (isBoundaryEdge(i0, i1, face, size_t(count))) mask |= 1u;
+                if (isBoundaryEdge(i1, i2, face, size_t(count))) mask |= 2u;
+                if (isBoundaryEdge(i2, i0, face, size_t(count))) mask |= 4u;
+                // Degenerate: if somehow no boundary bits (shouldn't happen), keep all.
+                if (mask == 0) mask = 7u;
+                outEdgeMask->push_back(mask);
+            }
+        }
         cursor += size_t(count);
     }
     return !outIndices.empty();

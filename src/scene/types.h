@@ -127,8 +127,8 @@ struct Material {
     int hasVolumeShader = 0;
     float volumeDensity = 1.0f;
     float volumeAnisotropy = 0.0f;  // HG g
-    Vec3 volumeAbsorption{0.5f, 0.5f, 0.5f};
-    Vec3 volumeScattering{0.5f, 0.5f, 0.5f};
+    Vec3 volumeAbsorption{0.0f, 0.0f, 0.0f};
+    Vec3 volumeScattering{1.0f, 1.0f, 1.0f};
     Vec3 volumeEmission{0.0f, 0.0f, 0.0f};
     float volumeEmissionStrength = 0.0f;
 
@@ -242,6 +242,14 @@ struct MeshView {
     // Key 0 usually aliases `positions`. Null / count 1 = static mesh.
     const Vec3* motionPositions = nullptr;
     int motionKeyCount = 1;
+    // Optional per-triangle edge mask (see Mesh::triEdgeMask). Null = draw all edges.
+    const uint8_t* triEdgeMask = nullptr;
+    // Optional cage wire overlay (authored n-gon edges). Null = unused.
+    const uint32_t* wireIndices = nullptr;
+    const Vec3* wirePositions = nullptr;
+    const Vec3* wireNormals = nullptr;
+    uint32_t wireEdgeCount = 0;     // number of edges (== wireIndices pairs)
+    uint32_t wireVertexCount = 0;
 };
 
 // Visibility bits for primary vs shadow rays (Embree mask / OptiX visibilityMask).
@@ -327,6 +335,9 @@ struct LightData {
     // participate in caustic transport (MNEE / BDPT light-tracing delta chains /
     // BSDF specular→light after a diffuse bounce).
     int contributeCaustics = 1;
+    // Physical Sky distant sun: draw the solar disc on camera / reflection misses.
+    // Regular distant lights stay invisible (NEE only). The sky env map has no disc.
+    int cameraSunDisc = 0;
 
     SR_HD Vec3 emittedRadiance() const { return color * (intensity * exp2f(exposure)); }
 };
@@ -356,7 +367,7 @@ struct CameraData {
     float fStop = 0.0f;           // 0 disables depth of field
     float focusDistance = 5.0f;
 
-    // 0 = thin lens (default), 1 = polynomial optics (Embree only; OptiX falls back).
+    // 0 = thin lens (Embree + OptiX). 1 = polynomial optics (Embree only).
     int opticalModel = 0;
     // Index into polynomialOpticsLensNames() when opticalModel == 1.
     int lensModel = 19;  // cooke__speed_panchro__1920__50mm
@@ -493,9 +504,8 @@ struct RenderSettingsData {
     int resolutionX = 960;
     int resolutionY = 540;
     int samplesPerPixel = 64;
-    int maxDepth = 8;
-
-    int rrStartDepth = 3;
+    int maxDepth = 8;       // surfaces + volume scatters; UI up to 4096 for dense MS
+    int rrStartDepth = 3;   // raise near maxDepth for deep volume multiple scattering
     int lightSamples = 2;          // NEE samples per bounce (MIS with BSDF)
     int seed = 0;
     int integrator = kIntegratorPathTracer;
@@ -530,6 +540,9 @@ struct RenderSettingsData {
     // Wireframe integrator: edge half-width in screen pixels (anti-aliased).
     float wireframeThickness = 1.0f;
     int pathGuiding = 0;           // OpenPGL indirect guides (CPU / Embree); PT + BDPT
+    // Opt-in, biased: Hyperion similarity on deep volume MS (Engine checkbox).
+    // Off (default) keeps authored g / σs. On: lerp g→0 from volume bounce 5..20.
+    int volumeSimilarity = 0;
     // Enable caustic light transport (specular→diffuse). Off = dark glass shadows
     // (soften per-material with shadow_opacity / contribute_caustics).
     int caustics = 1;
@@ -604,6 +617,7 @@ struct SceneView {
     const ProceduralNode* procedurals = nullptr;
     const MediumData* media = nullptr;
     // Host CPU only — OpenVDB grids (indexed by InstanceData::volumeIndex).
+    // OptiX path tracing uses LaunchParams::volumes (dense bricks), not these pointers.
     const VolumeGrid* const* volumes = nullptr;
 
     int meshCount = 0;

@@ -1,5 +1,6 @@
-// Homogeneous / null-scattering volume helpers (PBRT Ch.11 style).
+// Homogeneous / null-scattering volume helpers (PBRT 4ed Ch.11).
 // Media are authored on geometry (InstanceData::mediumIndex).
+// Heterogeneous VDB fog free-flight + ratio-tracking shadow Tr: see volume_vdb.h.
 #pragma once
 
 #include "core/math.h"
@@ -38,6 +39,23 @@ SR_INL SR_HD Vec3 sampleHenyeyGreenstein(Vec3 wo, float g, float u1, float u2, f
     return wi;
 }
 
+// Disney / Hyperion similarity (opt-in, biased): lerp g → 0 between volume
+// scatters 5 and 20, keeping σs(1−g) so the mean free path grows. Low-order
+// bounces stay anisotropic. scatterIndex is 0-based (0 = first scatter).
+SR_INL SR_HD MediumData mediumWithVolumeSimilarity(const MediumData& m, int scatterIndex) {
+    MediumData out = m;
+    const float g0 = clampf(m.g, -0.999f, 0.999f);
+    float t = 0.0f;
+    if (scatterIndex >= 20) t = 1.0f;
+    else if (scatterIndex > 5) t = float(scatterIndex - 5) / 15.0f;
+    const float gStar = g0 * (1.0f - t);
+    const float denom = srMax(1e-3f, 1.0f - gStar);
+    const float scale = (1.0f - g0) / denom;
+    out.g = gStar;
+    out.sigmaS = m.sigmaS * srMax(0.0f, scale);
+    return out;
+}
+
 SR_INL SR_HD Vec3 mediumSigmaA(const MediumData& m) {
     return m.sigmaA * srMax(0.0f, m.density);
 }
@@ -54,6 +72,15 @@ SR_INL SR_HD Vec3 mediumSigmaT(const MediumData& m) {
 SR_INL SR_HD float mediumMajorant(const MediumData& m) {
     const Vec3 st = mediumSigmaT(m);
     return srMax(st.x, srMax(st.y, st.z));
+}
+
+// Fog AABBs are larger than the visible cloud. Occupancy above this fraction of
+// the grid majorant counts as "inside the cloud": the path may enter the medium
+// and infinite-light NEE / env MIS are allowed. Below it is vacuum / halo.
+constexpr float kVolumeOccupancyEnterMin = 1e-3f;
+
+SR_INL SR_HD bool volumeOccupancyIsDense(float occupancy, float gridMajorant) {
+    return occupancy > kVolumeOccupancyEnterMin * srMax(gridMajorant, 1e-6f);
 }
 
 SR_INL SR_HD bool mediumIsActive(const SceneView& scene, int mediumIndex) {
@@ -78,8 +105,10 @@ SR_INL SR_HD Vec3 mediumTr(const MediumData& m, float t) {
 // returns false with t = tMax.
 struct MediumSample {
     float t = 0.0f;
+    float occupancy = 0.0f;
     bool scattered = false;
     bool absorbed = false;
+    bool dense = false;  // occupancy above kVolumeOccupancyEnterMin · majorant
 };
 
 SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMax, Rng& rng,
@@ -96,7 +125,8 @@ SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMa
     // Analytical free-flight with max-channel majorant + null collisions so the
     // same control flow works for heterogeneous (VDB) majorant tracking later.
     float t = 0.0f;
-    for (int iter = 0; iter < 64; ++iter) {
+    constexpr int kNullCollisionMaxIters = 1 << 20;
+    for (int iter = 0; iter < kNullCollisionMaxIters; ++iter) {
         const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
         t += -logf(u) / majorant;
         if (t >= tMax) {
@@ -104,14 +134,10 @@ SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMa
             out.t = tMax;
             return out;
         }
-        // Real collision probability σt/Λ (per channel via max → null leftover).
-        const float stMax = majorant;
-        const float stX = sigmaT.x / stMax;
-        const float stY = sigmaT.y / stMax;
-        const float stZ = sigmaT.z / stMax;
-        const float stAvg = (stX + stY + stZ) * (1.0f / 3.0f);
+        // Real collision probability: densest channel vs max-channel majorant.
+        const float stHero = srMax(sigmaT.x, srMax(sigmaT.y, sigmaT.z)) / srMax(majorant, 1e-12f);
         const float xi = rng.nextFloat();
-        if (xi >= stAvg) {
+        if (xi >= stHero) {
             // Null collision — continue.
             continue;
         }
@@ -122,6 +148,8 @@ SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMa
         if (rng.nextFloat() < saAvg / stSum) {
             throughput = Vec3(0.0f);
             out.t = t;
+            out.occupancy = 1.0f;
+            out.dense = true;
             out.absorbed = true;
             return out;
         }
@@ -130,6 +158,8 @@ SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMa
                           sigmaT.z > 1e-8f ? sigmaS.z / sigmaT.z : 0.0f);
         throughput = throughput * albedo;
         out.t = t;
+        out.occupancy = 1.0f;
+        out.dense = true;
         out.scattered = true;
         return out;
     }

@@ -18,6 +18,7 @@ struct RenderProgress {
     int samplesTarget = 0;
     double elapsedSeconds = 0.0;
     double samplesPerSecond = 0.0;
+    double backendGpuMs = 0.0;  // CUDA time of last sample; 0 on Embree
     bool running = false;
     std::string backendName;
     std::string message;
@@ -32,6 +33,8 @@ public:
 
     virtual std::string name() const = 0;
     virtual bool isAvailable() const = 0;
+    // CUDA event time of the last renderSample(); 0 on CPU backends.
+    virtual double lastGpuSampleMs() const { return 0.0; }
 
     // Uploads/builds acceleration structures. Returns false and fills `error`
     // when the scene cannot be prepared.
@@ -64,5 +67,10 @@ using RenderDevicePtr = std::shared_ptr<RenderDevice>;
 RenderDevicePtr createEmbreeDevice(int threadCount = 0);
 RenderDevicePtr createOptixDevice();
 bool optixBackendCompiledIn();
+
+// Live CUDA + optixInit probe (cached, never on the Qt UI thread).
+// createOptixDevice() overwrites this with the real initialize() result.
+bool optixRuntimeAvailable(std::string* error = nullptr);
+bool optixRuntimeProbePending();
 
 }  // namespace sol

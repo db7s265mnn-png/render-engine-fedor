@@ -218,7 +218,7 @@ public:
 #if SOLSTICE_HAVE_OPENPGL
         if (pathGuiding_) {
             const int threads = pool_ ? pool_->threadCount() : threadCount_;
-            pathGuiding_->reset(view_.worldBounds, threads);
+            pathGuiding_->reset(view_.worldBounds, threads, view_.settings.maxDepth);
         }
 #endif
 
@@ -254,6 +254,10 @@ public:
         const bool useBdpt = settings.integrator == kIntegratorBdpt || useSpectralBdpt;
         const bool useSpectralPt = settings.integrator == kIntegratorSpectralPath;
         const bool useSpectral = useSpectralPt || useSpectralBdpt;
+        // OpenVDB SDF/fog walks live in PathIntegrator only. When the scene has
+        // volumes, keep PT (even with Caustics on / BDPT selected) so we don't
+        // shade the opaque AABB proxy in MNEE/Photon/BDPT.
+        const bool hasVolumes = scene.volumeCount > 0 && scene.volumes != nullptr;
         // Diagnostic integrators (AO / Direct / Wireframe) must stay on the plain
         // PathIntegrator path — never Photon/MNEE/BDPT — otherwise Wireframe never
         // hits shadeWireframe and can crash/misbehave under default caustics-on.
@@ -264,8 +268,9 @@ public:
         // MNEE+Photon routes rough refractive casters to Photon, delta-only to MNEE.
         // PT Spectral has no MNEE/photon; BDPT Spectral keeps BDPT caustic estimators.
         const bool usePhoton =
-            !diagnosticIntegrator && !useSpectralPt && causticsUsePhotonMap(settings, &scene);
-        const bool useMnee = pathTracer && causticsUseMnee(settings, &scene);
+            !diagnosticIntegrator && !hasVolumes && !useSpectralPt && causticsUsePhotonMap(settings, &scene);
+        const bool useMnee = pathTracer && !hasVolumes && causticsUseMnee(settings, &scene);
+        const bool useBdptPath = useBdpt && !hasVolumes;
 #if SOLSTICE_HAVE_OPENPGL
         // OpenPGL guides eye-path diffuse sampling on PT and BDPT (RGB + Spectral).
         // Specular / near-spec vertices are recorded as delta (radiance propagates for
@@ -311,11 +316,14 @@ public:
                 logInfo(std::string("Integrator: PT Spectral (hero λ=") +
                         std::to_string(std::clamp(settings.spectralSamples, 2, 16)) + ", bins=" +
                         std::to_string(std::clamp(settings.spectralBins, 8, 32)) + ")");
-            else if (usePhoton)
+            if (usePhoton)
                 logInfo(std::string("Caustics: Photon map (VCM-style gather, ") +
                         std::to_string(photonMap_.size()) + " photons, r=" +
                         std::to_string(settings.photonRadius) +
                         (settings.causticsEngine == kCausticsEngineAuto ? ", MNEE+Photon→rough)" : ")"));
+            else if (useBdpt && hasVolumes)
+                logInfo("BDPT skipped: scene has VDB volumes — using Path Tracer "
+                        "(no light subpath from sky/sun; fog walk is PT-only)");
             else if (useBdpt)
                 logInfo(std::string("Caustics: BDPT (bidirectional + light-tracing splats)") +
                         (settings.caustics == 0 ? " [caustics flag off — specular chains suppressed]"
@@ -351,6 +359,8 @@ public:
             }
             logInfo(std::string("Sampling Type: ") + engineDetail +
                     "; Pixel Sampler: " + samplerName + "; Path: OwenSobol");
+            if (useGuiding && hasVolumes)
+                logInfo("OpenPGL: volume phase mixed with HG product (Indirect Guides)");
             if (settings.samplingDebug != kSamplingDebugOff) {
                 static const char* kDiagNames[] = {"Off", "PixelJitter", "PathRng", "Bucket", "PixelHash"};
                 const int d = std::clamp(settings.samplingDebug, 0, 4);
@@ -504,13 +514,13 @@ public:
                 }
                 ctx.guiding = guidingPtr;
                 Vec3 radiance(0.0f);
-                if (useSpectralBdpt) {
+                if (useSpectralBdpt && !hasVolumes) {
                     SpectralBdptIntegrator<EmbreeTracer> integ;
                     radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
                 } else if (useSpectralPt) {
                     SpectralPathIntegrator<EmbreeTracer> integ;
                     radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
-                } else if (useBdpt) {
+                } else if (useBdptPath) {
                     radiance = BdptIntegrator<EmbreeTracer>{}.Li(ctx);
                 } else if (useMnee || usePhoton) {
                     radiance = PathMneeIntegrator<EmbreeTracer>{}.Li(ctx);
@@ -522,13 +532,13 @@ public:
                 (void)threadId;
                 (void)useGuiding;
                 Vec3 radiance(0.0f);
-                if (useSpectralBdpt) {
+                if (useSpectralBdpt && !hasVolumes) {
                     SpectralBdptIntegrator<EmbreeTracer> integ;
                     radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
                 } else if (useSpectralPt) {
                     SpectralPathIntegrator<EmbreeTracer> integ;
                     radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
-                } else if (useBdpt) {
+                } else if (useBdptPath) {
                     radiance = BdptIntegrator<EmbreeTracer>{}.Li(ctx);
                 } else if (useMnee || usePhoton) {
                     radiance = PathMneeIntegrator<EmbreeTracer>{}.Li(ctx);

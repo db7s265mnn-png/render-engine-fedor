@@ -1202,6 +1202,11 @@ MeshPtr tessellateOne(Mesh cage, const Material& mat, const Scene& scene,
     const float aspect = float(resX) / float(resY);
     const size_t polyBudget = tessTriangleBudget(rs);
 
+    // Wireframe overlay stays at the authored cage — capture before densify/displace.
+    if (cage.wireIndices.empty()) cage.captureWireCage();
+    // Densify rebuilds triangle indices; the cage edge mask would go stale.
+    cage.triEdgeMask.clear();
+
     const bool needDisp = materialHasGeometricDisplacement(mat);
     // Master switch: skip subdiv + displace entirely (cages only).
     if (rs.enableDisplacement == 0 || !needDisp) {

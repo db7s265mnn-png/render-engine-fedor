@@ -32,6 +32,7 @@
 
 #include "nodes/node_registry.h"
 #include "core/expr_eval.h"
+#include "io/tx_convert.h"
 #include "render/pixel_filter.h"
 #include "ui/numeric_editors.h"
 #include "ui/texture_file_dialog.h"
@@ -39,6 +40,33 @@
 
 namespace sol {
 namespace {
+
+QComboBox* makeColorSpaceCombo(const QString& current, const std::function<void(const QString&)>& commit) {
+    auto* combo = new QComboBox();
+    combo->setEditable(true);
+    combo->blockSignals(true);
+    QStringList curated;
+    for (const std::string& name : txCuratedColorSpaces()) curated << QString::fromStdString(name);
+    combo->addItems(curated);
+    const int idx = combo->findText(current);
+    if (idx >= 0) combo->setCurrentIndex(idx);
+    else combo->setEditText(current.isEmpty() ? QStringLiteral("auto") : current);
+    combo->blockSignals(false);
+    combo->setToolTip(QStringLiteral(
+        "Arnold-style input colour space. Cook converts textures to ACEScg.\n"
+        "auto: HDR/EXR \u2192 Linear sRGB, 8-bit \u2192 sRGB Texture, data \u2192 Raw.\n"
+        "ACEScg / Raw: no convert. Linear sRGB: Rec.709 primaries \u2192 AP1."));
+    QObject::connect(combo, &QComboBox::textActivated, combo, [commit](const QString& text) {
+        if (!text.isEmpty()) commit(text);
+    });
+    if (QLineEdit* edit = combo->lineEdit()) {
+        QObject::connect(edit, &QLineEdit::editingFinished, combo, [combo, commit] {
+            const QString text = combo->currentText();
+            if (!text.isEmpty()) commit(text);
+        });
+    }
+    return combo;
+}
 
 void applyExpressionFieldStyle(QWidget* widget, bool isExpression) {
     if (!widget) return;
@@ -738,28 +766,9 @@ void ParameterPanel::rebuildMaterialX() {
             continue;
         }
 
-        // Arnold-style texture colour space (drives TX → ACEScg).
+        // Arnold-style texture colour space (drives TX / OCIO → ACEScg).
         if (inputName == QLatin1String("colorspace")) {
-            auto* combo = new QComboBox();
-            combo->setEditable(true);
-            const QStringList curated = {
-                QStringLiteral("ACES - ACEScg"),
-                QStringLiteral("Utility - sRGB - Texture"),
-                QStringLiteral("Utility - Linear - sRGB"),
-                QStringLiteral("Utility - Raw"),
-                QStringLiteral("Utility - Rec.709 - Texture"),
-                QStringLiteral("Output - sRGB"),
-            };
-            combo->addItems(curated);
-            const int idx = combo->findText(input.value);
-            if (idx >= 0) combo->setCurrentIndex(idx);
-            else combo->setEditText(input.value.isEmpty() ? curated.front() : input.value);
-            combo->setToolTip("Input colour space for this texture. TX conversion always "
-                              "targets ACEScg (skip when ACEScg / Raw).");
-            connect(combo, &QComboBox::currentTextChanged, this, [commit](const QString& text) {
-                if (!text.isEmpty()) commit(text);
-            });
-            form->addRow(label, combo);
+            form->addRow(label, makeColorSpaceCombo(input.value, commit));
             continue;
         }
 
@@ -1106,6 +1115,10 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             return container;
         }
         case ParamType::String: {
+            if (parameter.name == QLatin1String("colorspace"))
+                return makeColorSpaceCombo(parameter.hasExpression() ? parameter.expression
+                                                                     : parameter.toString(),
+                                           notifyText);
             auto* edit = new PathLineEdit(parameter.hasExpression() ? parameter.expression
                                                                     : parameter.toString());
             edit->setAcceptDrops(true);

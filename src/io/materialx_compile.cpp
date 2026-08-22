@@ -214,11 +214,15 @@ int compileConnected(const mx::NodePtr& node, const std::string& inputName, Comp
     return compileNode(child, state, depth + 1);
 }
 
-int loadImageIndex(CompileState& state, const std::string& file) {
+int loadImageIndex(CompileState& state, const std::string& file, const std::string& colorspace = {},
+                   const std::string& nodeType = {}) {
     if (file.empty()) return -1;
-    // Separate cache entries for colour (sRGB) vs data (linear) so a shared
-    // triplanar feeding albedo + displacement does not reuse the wrong decode.
-    const std::string cacheKey = (state.dataTextures ? std::string("data:") : std::string("color:")) + file;
+    const bool colorType = nodeType.empty() || nodeType == "color3" || nodeType == "color4";
+    const bool srgbColor = !state.dataTextures && colorType;
+    const std::string cs =
+        colorspace.empty() ? (srgbColor ? std::string("auto") : std::string("Utility - Raw")) : colorspace;
+    const std::string cacheKey =
+        (srgbColor ? std::string("color:") : std::string("data:")) + cs + ":" + file;
     auto it = state.imageFileCache.find(cacheKey);
     if (it != state.imageFileCache.end()) return it->second;
     std::string error;
@@ -226,12 +230,11 @@ int loadImageIndex(CompileState& state, const std::string& file) {
     QString pattern;
     std::vector<int> discovered;
     const QString fileQ = QString::fromStdString(file);
-    const bool srgbColor = !state.dataTextures;
     if (resolveUdimPattern(fileQ, state.searchDirectory, pattern, discovered)) {
         std::vector<int> tiles = state.udimSet.empty() ? discovered : state.udimSet;
-        image = loadImageOrUdim(pattern, state.searchDirectory, error, tiles, srgbColor);
+        image = loadImageOrUdim(pattern, state.searchDirectory, error, tiles, srgbColor, cs);
     } else {
-        image = loadImageOrUdim(fileQ, state.searchDirectory, error, state.udimSet, srgbColor);
+        image = loadImageOrUdim(fileQ, state.searchDirectory, error, state.udimSet, srgbColor, cs);
     }
     if (!image) {
         if (!error.empty()) logWarning("MaterialX procedural image: " + error);
@@ -289,7 +292,8 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
         result = pushNode(state, n);
     } else if (cat == "image" || cat == "tiledimage") {
         n.op = kProcImage;
-        n.in0 = loadImageIndex(state, inputValueString(node, "file"));
+        n.in0 = loadImageIndex(state, inputValueString(node, "file"), inputValueString(node, "colorspace"),
+                               node->getType());
         n.in1 = compileConnected(node, "texcoord", state, depth);
         n.p0 = readVec4(node, "default", Vec4(0.0f, 0.0f, 0.0f, 1.0f));
         // p1 = uvtiling, p2 = uvoffset (applied after texcoord graph).
@@ -398,9 +402,11 @@ int compileNode(const mx::NodePtr& node, CompileState& state, int depth) {
             if (fy.empty()) fy = !shared.empty() ? shared : fx;
             if (fz.empty()) fz = !shared.empty() ? shared : fx;
         }
-        n.in0 = loadImageIndex(state, fx);
-        n.in1 = loadImageIndex(state, fy);
-        n.in2 = loadImageIndex(state, fz);
+        const std::string triCs = inputValueString(node, "colorspace");
+        const std::string triType = node->getType();
+        n.in0 = loadImageIndex(state, fx, triCs, triType);
+        n.in1 = loadImageIndex(state, fy, triCs, triType);
+        n.in2 = loadImageIndex(state, fz, triCs, triType);
         n.p0 = readVec4(node, "default", Vec4(0.2f, 0.5f, 0.8f, 1.0f));
         n.p1 = readVec4(node, "scale", Vec4(1.0f, 1.0f, 1.0f, 1.0f));
         n.p2 = readVec4(node, "offset", Vec4(0.0f, 0.0f, 0.0f, 0.0f));

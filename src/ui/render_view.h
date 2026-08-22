@@ -10,6 +10,8 @@
 #include "core/math.h"
 #include "nodes/node.h"
 
+#include <QColor>
+
 class QToolButton;
 class QComboBox;
 
@@ -56,6 +58,15 @@ public:
     // Right side of the same bottom strip (e.g. dicing progress next to spp).
     void setStatusTextRight(const QString& text) {
         statusTextRight_ = text;
+        update();
+    }
+    // Far-right HUD: live backend (Embree / OptiX) plus OptiX support text.
+    void setBackendHud(const QString& activeBackend, const QString& supportText,
+                       const QColor& supportColor) {
+        backendActive_ = activeBackend;
+        optixSupportText_ = supportText;
+        optixSupportColor_ = supportColor;
+        hasBackendHud_ = true;
         update();
     }
     void setResolution(int width, int height);
@@ -173,6 +184,10 @@ private:
     int fadeDurationMs_ = 1000;
     QString statusText_;
     QString statusTextRight_;
+    QString backendActive_;
+    QString optixSupportText_;
+    QColor optixSupportColor_{255, 80, 80};
+    bool hasBackendHud_ = false;
     ViewCamera camera_;
     PickCallback pickCallback_;
     ObjectPickCallback objectPickCallback_;

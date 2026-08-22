@@ -196,16 +196,30 @@ bool RenderSession::prepareDevice(std::string& error) {
         device_.reset();
         if (backend == kBackendGpuOptix) {
             if (!optixBackendCompiledIn()) {
-                logWarning("GPU (OptiX) selected, but this build has no OptiX backend "
-                           "(configure with -DSOLSTICE_ENABLE_OPTIX=ON). Falling back to Embree.");
+                error = "GPU (OptiX) is selected, but this build has no OptiX/CUDA backend. "
+                        "Rebuild with BUILD_WINDOWS.bat.";
+                return false;
+            }
+            if (scene->settings.integrator != kIntegratorPathTracer) {
+                error = "GPU (OptiX) only supports Path Tracer. Switch Integrator to Path Tracer, "
+                        "or set Render Backend to CPU (Embree).";
+                return false;
             }
             device_ = createOptixDevice();
             if (!device_) {
-                logWarning("OptiX backend is unavailable, falling back to Embree");
-                device_ = createEmbreeDevice(threads);
+                std::string err;
+                optixRuntimeAvailable(&err);
+                error = "GPU (OptiX) cannot start";
+                if (!err.empty()) error += ": " + err;
+                else error += ": NVIDIA GPU / driver / CUDA runtime unavailable";
+                return false;
             }
         } else {
             device_ = createEmbreeDevice(threads);
+        }
+        if (!device_) {
+            error = "no render device available";
+            return false;
         }
         deviceBackend_ = backend;
         deviceThreads_ = threads;
@@ -216,7 +230,13 @@ bool RenderSession::prepareDevice(std::string& error) {
         return false;
     }
     if (sceneDirty_.exchange(false, std::memory_order_relaxed)) {
-        if (!device_->buildScene(scene, error)) return false;
+        if (!device_->buildScene(scene, error)) {
+            if (backend == kBackendGpuOptix) {
+                error = std::string("GPU (OptiX) failed to build the scene") +
+                        (error.empty() ? std::string() : ": " + error);
+            }
+            return false;
+        }
     }
     return true;
 }
@@ -229,11 +249,15 @@ void RenderSession::threadMain() {
     }
 
     auto fail = [&](const std::string& error) {
-        logError("Render failed: " + error);
+        logError(error);
         {
             std::lock_guard<std::mutex> lock(progressMutex_);
             progress_.running = false;
             progress_.message = error;
+            if (scene && scene->settings.backend == kBackendGpuOptix)
+                progress_.backendName = "GPU / OptiX";
+            else if (device_)
+                progress_.backendName = device_->name();
         }
         rendering_.store(false, std::memory_order_relaxed);
         std::function<void()> finished;
@@ -247,7 +271,7 @@ void RenderSession::threadMain() {
     std::string error;
     try {
         if (!prepareDevice(error)) {
-            fail(error.empty() ? std::string("device prepare failed") : error);
+            fail(error.empty() ? std::string("Render failed: no device") : error);
             return;
         }
     } catch (const std::bad_alloc&) {
@@ -275,6 +299,7 @@ void RenderSession::threadMain() {
         progress_.message.clear();
         progress_.elapsedSeconds = 0.0;
         progress_.samplesPerSecond = 0.0;
+        progress_.backendGpuMs = 0.0;
     }
 
     const auto startTime = std::chrono::steady_clock::now();
@@ -311,6 +336,7 @@ void RenderSession::threadMain() {
                 progress_.samplesTarget = targetSamples;
                 progress_.elapsedSeconds = 0.0;
                 progress_.samplesPerSecond = 0.0;
+                progress_.backendGpuMs = 0.0;
             }
             notifyUi(true);
             continue;
@@ -326,7 +352,15 @@ void RenderSession::threadMain() {
             };
         }
 
-        device_->renderSample(framebuffer_, sample, cancel_, midProgress);
+        try {
+            device_->renderSample(framebuffer_, sample, cancel_, midProgress);
+        } catch (const std::exception& ex) {
+            const std::string prefix = (scene->settings.backend == kBackendGpuOptix)
+                                           ? "GPU (OptiX) render failed: "
+                                           : "Render failed: ";
+            fail(prefix + ex.what());
+            return;
+        }
 
         if (hardStop_.load(std::memory_order_relaxed)) break;
         if (softRestart_.load(std::memory_order_relaxed)) continue;  // handled at loop top
@@ -340,6 +374,7 @@ void RenderSession::threadMain() {
             progress_.samplesDone = sample + 1;
             progress_.elapsedSeconds = elapsed;
             progress_.samplesPerSecond = elapsed > 0.0 ? double(sample + 1) / elapsed : 0.0;
+            progress_.backendGpuMs = device_ ? device_->lastGpuSampleMs() : 0.0;
         }
 
         // Throttle UI notifications: early samples update immediately, later

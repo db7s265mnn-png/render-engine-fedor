@@ -317,6 +317,7 @@ bool maketxWrite(const QString& src, const QString& dst, const TxConvertRequest&
 
 std::vector<std::string> txCuratedColorSpaces() {
     return {
+        "auto",
         "ACES - ACEScg",
         "Utility - sRGB - Texture",
         "Utility - Linear - sRGB",
@@ -363,6 +364,8 @@ std::vector<std::string> txColorSpacesFromConfig(const std::string& ocioConfigPa
     if (spaces.empty()) return txCuratedColorSpaces();
     std::sort(spaces.begin(), spaces.end());
     spaces.erase(std::unique(spaces.begin(), spaces.end()), spaces.end());
+    if (std::find(spaces.begin(), spaces.end(), "auto") == spaces.end())
+        spaces.insert(spaces.begin(), "auto");
     return spaces;
 }
 
@@ -389,11 +392,25 @@ bool txSkipColorConvert(const std::string& inputColorSpace) {
     QString s = QString::fromStdString(inputColorSpace).trimmed();
     if (s.isEmpty()) return true;
     const QString lower = s.toLower();
+    if (lower == QLatin1String("auto")) return false;
     if (lower == QLatin1String("aces - acescg") || lower == QLatin1String("acescg") ||
         lower == QLatin1String("utility - raw") || lower == QLatin1String("raw") ||
         lower == QLatin1String("role_data") || lower == QLatin1String("data"))
         return true;
     return false;
+}
+
+std::string txResolveInputColorSpace(const std::string& authored, const std::string& sourcePath,
+                                     bool colorMap) {
+    QString s = QString::fromStdString(authored).trimmed();
+    const QString lower = s.toLower();
+    if (!s.isEmpty() && lower != QLatin1String("auto")) return s.toStdString();
+    if (!colorMap) return "Utility - Raw";
+    const QString ext = QFileInfo(QString::fromStdString(sourcePath)).suffix().toLower();
+    if (ext == QLatin1String("hdr") || ext == QLatin1String("exr") || ext == QLatin1String("rgbe") ||
+        ext == QLatin1String("pic") || ext == QLatin1String("tx"))
+        return "Utility - Linear - sRGB";
+    return "Utility - sRGB - Texture";
 }
 
 std::string txPixelTypeOiiArg(TxPixelType type) {
@@ -707,9 +724,17 @@ std::vector<std::string> txExpandFrameSources(const std::string& sourcePathOrPat
 }
 
 std::string txAllocateOutputPath(const std::string& sourcePath, const std::string& outputDir,
-                                 TxOutputFormat format) {
+                                 TxOutputFormat format, const std::string& colorSpaceTag) {
     const QFileInfo src(QString::fromStdString(sourcePath));
-    const QString baseName = src.completeBaseName();
+    QString baseName = src.completeBaseName();
+    if (!colorSpaceTag.empty()) {
+        QString tag = QString::fromStdString(colorSpaceTag).trimmed();
+        tag.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9]+")), QStringLiteral("-"));
+        while (tag.startsWith(QLatin1Char('-'))) tag.remove(0, 1);
+        while (tag.endsWith(QLatin1Char('-'))) tag.chop(1);
+        if (tag.size() > 48) tag = tag.left(48);
+        if (!tag.isEmpty()) baseName += QLatin1Char('_') + tag;
+    }
     const TxOutputFormat resolved = txResolveFormat(format, sourcePath);
     const QString ext = QString::fromStdString(
         format == TxOutputFormat::Original ? txOutputExtension(TxOutputFormat::Original, sourcePath)
@@ -739,11 +764,20 @@ std::string txAllocateOutputPath(const std::string& sourcePath, const std::strin
 TxConvertResult txConvertOne(const TxConvertRequest& reqIn) {
     TxConvertResult result;
     TxConvertRequest req = reqIn;
+    req.inputColorSpace = txResolveInputColorSpace(req.inputColorSpace, req.sourcePath, true);
     // Original is resolved to a concrete format before writing.
     if (req.format == TxOutputFormat::Original)
         req.format = txResolveFormat(TxOutputFormat::Original, req.sourcePath);
     req.pixelType = txResolvePixelType(req.pixelType, req.sourcePath, req.format);
     req.channels = txResolveChannelMode(req.channels, req.sourcePath, req.format);
+    // Radiance RGBE is 3-channel; forcing --ch R,G,B through oiiotool produced
+    // unusable TX for dome lights. Keep RGBA so maketx reads the HDR directly.
+    {
+        const QString ext = QFileInfo(QString::fromStdString(req.sourcePath)).suffix().toLower();
+        if ((ext == QLatin1String("hdr") || ext == QLatin1String("rgbe") || ext == QLatin1String("pic")) &&
+            req.channels == TxChannelMode::RGB)
+            req.channels = TxChannelMode::RGBA;
+    }
     result.outputPath = req.outputPath;
     initTools();
     if (g_maketxPath.empty() && g_oiiotoolPath.empty()) {
@@ -888,10 +922,11 @@ bool txConvertPattern(const std::string& sourcePathOrPattern, const std::string&
             if (i >= total) return;
 
             const std::string& src = sources[size_t(i)];
+            const std::string cs = txResolveInputColorSpace(options.inputColorSpace, src, true);
             TxConvertRequest req;
             req.sourcePath = src;
-            req.outputPath = txAllocateOutputPath(src, outputDir, options.format);
-            req.inputColorSpace = options.inputColorSpace;
+            req.outputPath = txAllocateOutputPath(src, outputDir, options.format, cs);
+            req.inputColorSpace = cs;
             req.ocioConfigPath = options.ocioConfigPath;
             req.updateOnly = options.updateOnly;
             req.format = options.format;

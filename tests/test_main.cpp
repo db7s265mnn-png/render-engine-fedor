@@ -23,6 +23,8 @@
 #include "io/alembic_loader.h"
 #include "io/image_io.h"
 #include "io/materialx_graph.h"
+#include "io/tx_cache.h"
+#include "io/tx_convert.h"
 #include "io/usd_loader.h"
 #include "nodes/node_graph.h"
 #include "nodes/node_registry.h"
@@ -34,9 +36,11 @@
 #include "render/pixel_filter.h"
 #include "render/metal_spectra.h"
 #include "render/photon_map.h"
+#include "render/physical_sky.h"
 #include "render/rsequence.h"
 #include "render/render_session.h"
 #include "render/shading.h"
+#include "render/volume_vdb.h"
 #include "render/spectrum.h"
 #include "render/spectrum_rgb.h"
 #include "render/spectrum_types.h"
@@ -282,6 +286,27 @@ void testSampling() {
             const float jClamp = std::min(0.999999f, std::max(0.0f, 0.5f + 1.0f * 2.0f));
             check(jClamp <= 0.999999f && jClamp >= 0.0f, "Manual-Test clamps outside pixel");
         }
+    }
+
+    // RIS: pick i ∝ w_i. Zero-weight slots are never chosen.
+    {
+        check(kRisCandidates == 8, "RIS uses 8 light candidates");
+        const float w[3] = {1.0f, 3.0f, 0.0f};
+        int counts[3] = {0, 0, 0};
+        Rng rngRis(3u, 5u);
+        constexpr int kN = 20000;
+        int badPick = 0;
+        for (int i = 0; i < kN; ++i) {
+            float wSum = 0.0f;
+            const int p = risPick(w, 3, rngRis.nextFloat(), wSum);
+            if (p < 0 || p > 1 || std::fabs(wSum - 4.0f) > 1e-5f) ++badPick;
+            else ++counts[p];
+        }
+        check(badPick == 0, "risPick skips the zero-weight slot");
+        checkNear(float(counts[0]) / float(kN), 0.25f, 0.03f, "risPick P(w=1) ≈ 1/4");
+        checkNear(float(counts[1]) / float(kN), 0.75f, 0.03f, "risPick P(w=3) ≈ 3/4");
+        float emptySum = 1.0f;
+        check(risPick(w, 0, 0.5f, emptySum) < 0, "risPick empty set");
     }
 }
 
@@ -591,6 +616,554 @@ void testEnvironment() {
         checkNear(envPdf(view, dir), pdf, std::max(1e-3f, pdf * 0.02f), "envPdf matches envSample");
     }
     check(nearBrightTexel > 3000, "environment sampling concentrates on the bright texel");
+
+    // Dark texel next to the sun: bilinear mixes in 2000 nit, nearest stays dark
+    // (the PDF texel). That mismatch is the volume lit-side HDRI firefly.
+    {
+        const Vec3 darkDir = equirectToDirection((10.0f - 0.05f) / float(w), (4.5f) / float(h));
+        const Vec3 nearest = envLookupNearest(view, darkDir);
+        const Vec3 bilinear = envLookup(view, darkDir);
+        check(luminance(nearest) < 2.0f, "nearest lookup of a dark neighbour stays dark");
+        check(luminance(bilinear) > luminance(nearest) * 10.0f,
+              "bilinear lookup bleeds the neighbouring sun texel");
+        const float pdfDark = envPdf(view, darkDir);
+        if (pdfDark > 1e-12f) {
+            check(luminance(nearest) / pdfDark < luminance(bilinear) / pdfDark,
+                  "NEE Le/pdf is smaller with nearest than with bilinear bleed");
+        }
+    }
+}
+
+void testDomeHdrLoad() {
+    std::printf("dome-hdr\n");
+    registerBuiltinNodes();
+
+    QString hdrPath;
+    const QStringList candidates = {
+        QStringLiteral("/workspace/examples/sky.hdr"),
+        QDir::currentPath() + "/examples/sky.hdr",
+        QDir::currentPath() + "/../examples/sky.hdr",
+    };
+    for (const QString& candidate : candidates) {
+        if (QFileInfo::exists(candidate)) {
+            hdrPath = QFileInfo(candidate).absoluteFilePath();
+            break;
+        }
+    }
+    check(!hdrPath.isEmpty(), "bundled sky.hdr is present");
+    if (hdrPath.isEmpty()) return;
+
+    auto maxLum = [](const Image& img) {
+        float m = 0.0f;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) m = std::max(m, luminance(img.rgb(x, y)));
+        }
+        return m;
+    };
+
+    Image direct;
+    std::string err;
+    check(loadImage(hdrPath.toStdString(), direct, err, true, "Utility - Raw"),
+          "load sky.hdr as Raw");
+    if (!err.empty() && direct.empty()) std::printf("  load error: %s\n", err.c_str());
+    check(direct.width() == 1024 && direct.height() == 512, "sky.hdr is 1024x512");
+    check(maxLum(direct) > 1.0f, "native HDR has values above 1");
+    {
+        QTemporaryDir dir;
+        check(dir.isValid(), "temp dir for exposure hdr");
+        const QString expHdr = dir.path() + "/exp.hdr";
+        std::FILE* f = std::fopen(expHdr.toUtf8().constData(), "wb");
+        check(f != nullptr, "write EXPOSURE hdr");
+        if (f) {
+            std::fputs("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\nEXPOSURE=16.0\n\n-Y 1 +X 1\n", f);
+            const unsigned char rgbe[4] = {128, 128, 128, 128};  // linear ~0.5
+            std::fwrite(rgbe, 1, 4, f);
+            std::fclose(f);
+            Image img;
+            std::string e;
+            check(loadImage(expHdr.toStdString(), img, e, true, "Utility - Raw"), "load EXPOSURE hdr");
+            check(!img.empty(), "EXPOSURE hdr has a pixel");
+            if (!img.empty()) {
+                const float y = luminance(img.rgb(0, 0));
+                check(y > 0.2f && y < 2.0f, "EXPOSURE=16 does not crush RGBE values");
+            }
+        }
+    }
+
+    {
+        QTemporaryDir dir;
+        check(dir.isValid(), "temp dir for red hdr");
+        const QString redHdr = dir.path() + "/red.hdr";
+        Image src(1, 1);
+        src.setRgb(0, 0, Vec3(1.0f, 0.0f, 0.0f));
+        std::string we;
+        check(saveImageHdr(redHdr.toStdString(), src, we), "write 1x1 red HDR");
+        Image raw;
+        Image lin;
+        std::string e1;
+        std::string e2;
+        check(loadImage(redHdr.toStdString(), raw, e1, true, "Utility - Raw"), "load red HDR Raw");
+        check(loadImage(redHdr.toStdString(), lin, e2, true, "Utility - Linear - sRGB"),
+              "load red HDR Linear sRGB → ACEScg");
+        checkNear(raw.rgb(0, 0).x, 1.0f, 0.08f, "Raw red stays ~1");
+        checkNear(raw.rgb(0, 0).y, 0.0f, 0.08f, "Raw red G stays ~0");
+        const Vec3 expect = linearSrgbToAcescg(Vec3(1.0f, 0.0f, 0.0f));
+        checkNear(lin.rgb(0, 0).x, expect.x, 0.06f, "Linear sRGB red → ACEScg R");
+        checkNear(lin.rgb(0, 0).y, expect.y, 0.06f, "Linear sRGB red → ACEScg G");
+        checkNear(lin.rgb(0, 0).z, expect.z, 0.06f, "Linear sRGB red → ACEScg B");
+        check(std::fabs(lin.rgb(0, 0).x - raw.rgb(0, 0).x) > 0.05f, "ACEScg convert changes Rec.709 red");
+    }
+
+    // +Y orientation used to be rejected ("unsupported HDR resolution line").
+    {
+        QTemporaryDir dir;
+        check(dir.isValid(), "temp dir for +Y hdr");
+        const QString plusY = dir.path() + "/plusy.hdr";
+        std::FILE* f = std::fopen(plusY.toUtf8().constData(), "wb");
+        check(f != nullptr, "write +Y hdr");
+        if (f) {
+            std::fputs("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n+Y 2 +X 1\n", f);
+            const unsigned char blue[4] = {0, 0, 128, 129};
+            const unsigned char red[4] = {128, 0, 0, 129};
+            std::fwrite(blue, 1, 4, f);
+            std::fwrite(red, 1, 4, f);
+            std::fclose(f);
+            Image img;
+            std::string e;
+            check(loadImage(plusY.toStdString(), img, e, true, "Utility - Raw"), "load +Y hdr");
+            check(img.width() == 1 && img.height() == 2, "+Y hdr is 1x2");
+            if (!img.empty()) {
+                check(img.rgb(0, 0).x > 0.5f && img.rgb(0, 0).z < 0.25f,
+                      "+Y: top row is the second scanline (red)");
+                check(img.rgb(0, 1).z > 0.5f && img.rgb(0, 1).x < 0.25f,
+                      "+Y: bottom row is the first scanline (blue)");
+            }
+        }
+    }
+
+    QTemporaryDir cacheDir;
+    check(cacheDir.isValid(), "temp dir for tx cache");
+    RenderSettingsData arm{};
+    arm.enableTxCache = 1;
+    const QByteArray cachePath = cacheDir.path().toUtf8();
+    std::snprintf(arm.txCacheDir, sizeof(arm.txCacheDir), "%s", cachePath.constData());
+
+    const std::string prevCs = txDefaultInputColorSpace();
+    setTxDefaultInputColorSpace("Utility - sRGB - Texture");
+    setActiveTxCacheSettings(&arm);
+    Image viaCache;
+    std::string err2;
+    const bool loaded = loadImage(hdrPath.toStdString(), viaCache, err2, /*srgbColor=*/true);
+    setActiveTxCacheSettings(nullptr);
+    setTxDefaultInputColorSpace(prevCs);
+    check(loaded, "load sky.hdr with TX cache armed and sticky sRGB CS");
+    if (!err2.empty() && viaCache.empty()) std::printf("  tx-armed load error: %s\n", err2.c_str());
+    check(maxLum(viaCache) > 1.0f, "TX-armed HDR load keeps values above 1");
+    check(viaCache.width() == direct.width() && viaCache.height() == direct.height(),
+          "TX-armed HDR keeps resolution");
+
+    NodeGraph graph;
+    Node* dome = graph.createNode("domelight", "domelight1");
+    check(dome != nullptr, "create domelight");
+    if (dome) {
+        dome->setParameterValue("texture", hdrPath);
+        dome->setParameterValue("colorspace", QStringLiteral("auto"));
+        dome->setParameterValue("intensity", 1.0);
+    }
+    Node* settings = graph.createNode("rendersettings", "rendersettings1");
+    check(settings != nullptr, "create rendersettings");
+    if (settings) {
+        settings->setParameterValue("enabletxcache", true);
+        settings->setParameterValue("txcachedir", cacheDir.path());
+    }
+    if (dome && settings) graph.connectNodes(dome, settings, 0);
+    graph.setDisplayNode(settings);
+
+    setTxDefaultInputColorSpace("Utility - sRGB - Texture");
+    setActiveTxCacheSettings(&arm);
+    CookContext context;
+    StagePtr stage = graph.cookDisplay(context);
+    setActiveTxCacheSettings(nullptr);
+    setTxDefaultInputColorSpace(prevCs);
+
+    check(stage != nullptr, "dome graph cooks");
+    check(context.errors.isEmpty(), "dome HDR cook has no errors");
+    for (const QString& e : context.errors) std::printf("  cook error: %s\n", qPrintable(e));
+
+    ScenePtr scene = stage ? stage->toScene() : nullptr;
+    check(scene != nullptr, "dome toScene");
+    if (!scene) return;
+    check(!scene->lights.empty() && scene->lights[0].type == kLightDome, "scene has a dome light");
+    check(!scene->lights.empty() && scene->lights[0].envIndex >= 0, "dome has an env map index");
+    bool foundEnv = false;
+    float envMax = 0.0f;
+    for (const auto& env : scene->envMaps) {
+        if (!env || env->image.empty()) continue;
+        foundEnv = true;
+        envMax = std::max(envMax, maxLum(env->image));
+    }
+    check(foundEnv, "dome attached an environment map");
+    check(envMax > 1.0f, "cooked dome HDR keeps values above 1");
+}
+
+void testPhysicalSkyLight() {
+    std::printf("physical-sky\n");
+
+    PhysicalSkyParams params;
+    Vec3 zenithSun = physicalSkySunDirection(params);
+    checkNear(zenithSun.x, 0.7071f, 0.02f, "default azimuth 90 elevation 45 → +X");
+    checkNear(zenithSun.y, 0.7071f, 0.02f, "default elevation 45");
+    checkNear(zenithSun.z, 0.0f, 0.02f, "default azimuth 90 has no Z");
+
+    params.elevationDeg = 90.0f;
+    params.azimuthDeg = 0.0f;
+    const Vec3 up = physicalSkySunDirection(params);
+    checkNear(up.x, 0.0f, 0.02f, "zenith sun X");
+    checkNear(up.y, 1.0f, 0.02f, "zenith sun +Y");
+    checkNear(up.z, 0.0f, 0.02f, "zenith sun Z");
+
+    params.elevationDeg = 0.0f;
+    params.azimuthDeg = 0.0f;
+    const Vec3 horizon = physicalSkySunDirection(params);
+    checkNear(horizon.x, 0.0f, 0.02f, "azimuth 0 horizon X");
+    checkNear(horizon.y, 0.0f, 0.02f, "azimuth 0 horizon Y");
+    checkNear(horizon.z, -1.0f, 0.02f, "azimuth 0 is −Z");
+
+    const Mat4 sunXform = physicalSkySunLookAt(params);
+    const Vec3 axis = normalize(transformVector(sunXform, Vec3(0.0f, 0.0f, 1.0f)));
+    checkNear(dot(axis, horizon), 1.0f, 0.02f, "distant +Z points at the sun");
+
+    params = PhysicalSkyParams{};
+    {
+        const float e0 = physicalSkySunIntensity(params);
+        check(std::isfinite(e0) && e0 > 1e-3f, "default sun irradiance is finite and usable");
+        const float Lz = luminance(physicalSkyRadianceAceScg(params, Vec3(0.0f, 1.0f, 0.0f)));
+        check(e0 > kPi * Lz * 0.25f, "default sun irradiance dominates the zenith sky");
+        PhysicalSkyParams skyOnly = params;
+        skyOnly.skyIntensity = 4.0f;
+        checkNear(physicalSkySunIntensity(skyOnly), e0, 1e-4f * (1.0f + e0),
+                  "sky intensity does not scale the sun");
+        PhysicalSkyParams scaled = params;
+        scaled.intensity = 2.0f;
+        scaled.sunIntensity = 3.0f;
+        checkNear(physicalSkySunIntensity(scaled), e0 * 6.0f, 1e-3f * (1.0f + e0 * 6.0f),
+                  "overall intensity and sun intensity scale the sun");
+        PhysicalSkyParams off = params;
+        off.sunIntensity = 0.0f;
+        checkNear(physicalSkySunIntensity(off), 0.0f, 1e-6f, "sun intensity 0 → no sun energy");
+    }
+    Image baked;
+    bakePhysicalSkyEnv(baked, params, 64, 32);
+    check(baked.width() == 64 && baked.height() == 32, "bake writes the requested size");
+    const Vec3 zenith = physicalSkyRadianceAceScg(params, Vec3(0.0f, 1.0f, 0.0f));
+    const Vec3 ground = physicalSkyRadianceAceScg(params, Vec3(0.0f, -1.0f, 0.0f));
+    check(luminance(zenith) > luminance(ground), "zenith is brighter than the ground");
+    check(isFinite(zenith) && isFinite(ground), "sky samples are finite");
+    const Vec3 zenithSrgb = acescgToLinearSrgb(zenith);
+    check(zenithSrgb.z > zenithSrgb.x * 0.9f, "clear zenith is bluish in Rec.709");
+    float bakeMax = 0.0f;
+    for (int y = 0; y < baked.height(); ++y)
+        for (int x = 0; x < baked.width(); ++x)
+            bakeMax = std::max(bakeMax, luminance(baked.rgb(x, y)));
+    check(bakeMax > luminance(zenith) * 0.5f, "sky bake has energy around zenith");
+    check(bakeMax < luminance(zenith) * 40.0f, "sky bake has no solar disc");
+    {
+        Image cookSize;
+        const auto t0 = std::chrono::steady_clock::now();
+        bakePhysicalSkyEnv(cookSize, params, 1024, 512);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+        check(cookSize.width() == 1024 && cookSize.height() == 512, "cook-size bake writes 1024x512");
+        check(ms < 15000, "1024x512 physical sky bake stays interactive");
+        float cookMax = 0.0f;
+        for (int y = 0; y < cookSize.height(); ++y)
+            for (int x = 0; x < cookSize.width(); ++x)
+                cookMax = std::max(cookMax, luminance(cookSize.rgb(x, y)));
+        check(cookMax < luminance(zenith) * 40.0f, "cook-size bake has no solar disc");
+    }
+    const Vec3 sunDirRad = physicalSkyRadianceAceScg(params, physicalSkySunDirection(params));
+    check(luminance(sunDirRad) < luminance(zenith) * 40.0f, "sky radiance toward the sun has no disc");
+    {
+        const float half = 0.5f * radians(params.sunSizeDeg);
+        const float omega = kTwoPi * (1.0f - std::cos(half));
+        const float discL = physicalSkySunIntensity(params) / srMax(omega, 1e-12f);
+        check(discL > luminance(acescgToLinearSrgb(sunDirRad)) * 10.0f,
+              "distant sun radiance dominates sky in the disc");
+        PhysicalSkyParams noSun = params;
+        noSun.enableSun = false;
+        checkNear(physicalSkySunIntensity(noSun), 0.0f, 1e-6f, "enable sun off zeros distant intensity");
+        const Vec3 noSunSky = physicalSkyRadianceAceScg(noSun, physicalSkySunDirection(noSun));
+        checkNear(luminance(noSunSky), luminance(sunDirRad), 0.05f * (1.0f + luminance(sunDirRad)),
+                  "enable sun off does not change the sky bake");
+        PhysicalSkyParams skyBoost = params;
+        skyBoost.skyIntensity = 4.0f;
+        const Vec3 zBoost = physicalSkyRadianceAceScg(skyBoost, Vec3(0.0f, 1.0f, 0.0f));
+        checkNear(luminance(zBoost), luminance(zenith) * 4.0f, 0.15f * luminance(zenith) * 4.0f,
+                  "sky intensity scales the sky not the sun");
+    }
+
+    {
+        PhysicalSkyParams sunset;
+        sunset.elevationDeg = 4.0f;
+        sunset.azimuthDeg = 0.0f;
+        const Vec3 towardSun =
+            acescgToLinearSrgb(physicalSkyRadianceAceScg(sunset, normalize(Vec3(0.0f, 0.08f, -1.0f))));
+        const Vec3 sunsetZenith = acescgToLinearSrgb(physicalSkyRadianceAceScg(sunset, Vec3(0.0f, 1.0f, 0.0f)));
+        const float sunRB = towardSun.x / srMax(1e-6f, towardSun.z);
+        const float zenRB = sunsetZenith.x / srMax(1e-6f, sunsetZenith.z);
+        check(sunRB > zenRB * 1.05f, "Hosek sunset toward the sun is redder than zenith");
+    }
+    {
+        PhysicalSkyParams groundP;
+        groundP.computeGroundColor = false;
+        groundP.groundColor = Vec3(0.05f, 0.8f, 0.05f);
+        groundP.horizonBlurDeg = 0.1f;
+        const Vec3 nadir = acescgToLinearSrgb(physicalSkyRadianceAceScg(groundP, Vec3(0.0f, -1.0f, 0.0f)));
+        check(nadir.y > nadir.x * 2.0f && nadir.y > nadir.z * 2.0f, "authored ground colour shows below the horizon");
+    }
+
+    registerBuiltinNodes();
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        check(sky != nullptr, "create physicalskylight");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        check(settings != nullptr, "create rendersettings for sky");
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage != nullptr, "physical sky cooks");
+        check(context.errors.isEmpty(), "physical sky cook has no errors");
+        for (const QString& e : context.errors) std::printf("  cook error: %s\n", qPrintable(e));
+        check(stage && stage->countOfType(PrimType::Light) == 2, "one node emits sky dome + distant sun");
+
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene != nullptr, "physical sky toScene");
+        if (scene) {
+            check(scene->lights.size() == 2, "scene has sky + sun");
+            int domeN = 0, sunN = 0, sunIdx = -1;
+            for (int i = 0; i < int(scene->lights.size()); ++i) {
+                if (scene->lights[size_t(i)].type == kLightDome) ++domeN;
+                if (scene->lights[size_t(i)].type == kLightDistant) {
+                    ++sunN;
+                    sunIdx = i;
+                }
+            }
+            check(domeN == 1 && sunN == 1, "physical sky is a dome plus a distant sun");
+            const LightData* dome = nullptr;
+            const LightData* sun = nullptr;
+            for (const LightData& l : scene->lights) {
+                if (l.type == kLightDome) dome = &l;
+                if (l.type == kLightDistant) sun = &l;
+            }
+            check(dome && sun, "both physical sky lights are present");
+            if (dome) {
+                checkNear(dome->intensity, 1.0f, 1e-4f, "overall intensity is on the dome");
+                check(!scene->envMaps.empty() && scene->envMaps[0] && !scene->envMaps[0]->image.empty(),
+                      "dome has a baked sky map");
+                if (!scene->envMaps.empty() && scene->envMaps[0]) {
+                    float envMax = 0.0f;
+                    const Image& img = scene->envMaps[0]->image;
+                    for (int y = 0; y < img.height(); ++y)
+                        for (int x = 0; x < img.width(); ++x)
+                            envMax = std::max(envMax, luminance(img.rgb(x, y)));
+                    check(envMax > 0.01f, "cooked sky map has energy");
+                    check(envMax < 200.0f, "cooked sky map has no baked solar disc");
+                }
+            }
+            if (sun) {
+                check(sun->normalize == 1, "sun irradiance is normalized");
+                check(sun->cameraSunDisc == 1, "sun disc is visible to camera");
+                checkNear(sun->angle, 0.53f, 1e-4f, "sun angular size is 0.53°");
+                checkNear(sun->intensity, physicalSkySunIntensity(PhysicalSkyParams{}),
+                          1e-3f * (1.0f + sun->intensity), "distant intensity is Hosek sun irradiance");
+                const Vec3 axis = normalize(transformVector(sun->xform, Vec3(0.0f, 0.0f, 1.0f)));
+                checkNear(dot(axis, physicalSkySunDirection(PhysicalSkyParams{})), 1.0f, 0.02f,
+                          "distant +Z matches solar altitude/azimuth");
+            }
+            if (sunIdx >= 0) {
+                SceneView view = scene->view();
+                LightSample ls;
+                check(sampleLight(view, sunIdx, Vec3(0.0f, 1.0f, 0.0f), 0.2f, 0.3f, ls),
+                      "distant sun NEE samples");
+                const Vec3 axis = normalize(transformVector(scene->lights[size_t(sunIdx)].xform,
+                                                            Vec3(0.0f, 0.0f, 1.0f)));
+                const float cosMax = std::cos(0.5f * radians(0.53f));
+                check(dot(ls.wi, axis) >= cosMax - 1e-4f, "sun NEE lands inside the disc cone");
+                check(ls.delta == false, "0.53° sun is a finite cone, not a Dirac");
+                const float pdfCone = 1.0f / (kTwoPi * (1.0f - cosMax));
+                checkNear(ls.pdf, pdfCone, 0.02f * pdfCone, "sun NEE pdf is 1/ω");
+            }
+        }
+    }
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (sky) sky->setParameterValue("enablesun", false);
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage && stage->countOfType(PrimType::Light) == 1, "enable sun off → dome only");
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene && scene->lights.size() == 1 && scene->lights[0].type == kLightDome,
+              "sun disabled leaves only the sky");
+    }
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (sky) sky->setParameterValue("enablesky", false);
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage && stage->countOfType(PrimType::Light) == 1, "enable sky off → sun only");
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene && scene->lights.size() == 1 && scene->lights[0].type == kLightDistant,
+              "sky disabled leaves a distant sun");
+        if (scene && !scene->lights.empty()) {
+            check(scene->lights[0].cameraSunDisc == 1, "sun-only still draws the camera disc");
+            check(scene->envMaps.empty(), "sun-only does not bake a sky map");
+        }
+    }
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (sky) {
+            sky->setParameterValue("intensity", 2.0);
+            sky->setParameterValue("skyintensity", 3.0);
+            sky->setParameterValue("sunintensity", 4.0);
+        }
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene && scene->lights.size() == 2, "overall/sky/sun intensity cooks sky + sun");
+        if (scene && scene->lights.size() == 2) {
+            const LightData* dome = nullptr;
+            const LightData* sun = nullptr;
+            for (const LightData& l : scene->lights) {
+                if (l.type == kLightDome) dome = &l;
+                if (l.type == kLightDistant) sun = &l;
+            }
+            check(dome && sun, "intensity cook has both lights");
+            if (dome) checkNear(dome->intensity, 2.0f, 1e-4f, "dome intensity is the overall scale");
+            PhysicalSkyParams expect;
+            expect.intensity = 2.0f;
+            expect.sunIntensity = 4.0f;
+            PhysicalSkyParams skyOnly;
+            skyOnly.intensity = 2.0f;
+            skyOnly.skyIntensity = 3.0f;
+            skyOnly.sunIntensity = 4.0f;
+            checkNear(physicalSkySunIntensity(skyOnly), physicalSkySunIntensity(expect), 1e-4f,
+                      "sky intensity is not folded into the sun irradiance");
+            if (sun) {
+                checkNear(sun->intensity, physicalSkySunIntensity(expect),
+                          1e-3f * (1.0f + sun->intensity),
+                          "distant intensity folds overall × sun intensity");
+            }
+        }
+    }
+    {
+        NodeGraph graph;
+        Node* grid = graph.createNode("grid", "grid1");
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* cam = graph.createNode("camera", "camera1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (grid) {
+            grid->setParameterValue("sizex", 8.0);
+            grid->setParameterValue("sizez", 8.0);
+            grid->setParameterValue("subdivtype", 0);
+        }
+        if (cam) {
+            cam->setParameterValue("eye", QVariant::fromValue(QVector3D(0.0f, 6.0f, 0.2f)));
+            cam->setParameterValue("target", QVariant::fromValue(QVector3D(0.0f, 0.0f, 0.0f)));
+        }
+        if (grid && sky) graph.connectNodes(grid, sky, 0);
+        if (sky && cam) graph.connectNodes(sky, cam, 0);
+        if (cam && settings) graph.connectNodes(cam, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene != nullptr, "physical sky render scene");
+        if (scene) {
+            scene->settings.resolutionX = 32;
+            scene->settings.resolutionY = 24;
+            scene->settings.samplesPerPixel = 4;
+            scene->settings.backend = kBackendCpuEmbree;
+            RenderSession session;
+            session.setScene(scene);
+            session.start();
+            session.waitForCompletion();
+            const Image image = session.linearImage();
+            double sum = 0.0;
+            int nonBlack = 0;
+            bool finite = true;
+            for (int y = 0; y < image.height(); ++y) {
+                for (int x = 0; x < image.width(); ++x) {
+                    const Vec3 c = image.rgb(x, y);
+                    if (!isFinite(c)) finite = false;
+                    const double l = double(luminance(c));
+                    sum += l;
+                    if (l > 1e-4) ++nonBlack;
+                }
+            }
+            check(finite, "physical sky render is finite");
+            check(nonBlack > image.width() * image.height() / 4, "physical sky lights the ground");
+            check(sum > 0.0, "physical sky render has energy");
+        }
+    }
+}
+
+void testAcesTextureConvert() {
+    std::printf("aces-texture-convert\n");
+    check(txResolveInputColorSpace("auto", "foo.png", true) == "Utility - sRGB - Texture",
+          "auto 8-bit colour → sRGB Texture");
+    check(txResolveInputColorSpace("auto", "foo.hdr", true) == "Utility - Linear - sRGB",
+          "auto HDR colour → Linear sRGB");
+    check(txResolveInputColorSpace("auto", "foo.exr", true) == "Utility - Linear - sRGB",
+          "auto EXR colour → Linear sRGB");
+    check(txResolveInputColorSpace({}, "disp.exr", false) == "Utility - Raw",
+          "data maps → Raw");
+    check(txResolveInputColorSpace("ACES - ACEScg", "foo.png", true) == "ACES - ACEScg",
+          "authored ACEScg is kept");
+    check(txSkipColorConvert("ACES - ACEScg"), "ACEScg skips convert");
+    check(txSkipColorConvert("Utility - Raw"), "Raw skips convert");
+    check(!txSkipColorConvert("Utility - Linear - sRGB"), "Linear sRGB converts");
+    check(!txSkipColorConvert("Utility - sRGB - Texture"), "sRGB Texture converts");
+
+    QTemporaryDir dir;
+    check(dir.isValid(), "temp dir for aces png");
+    const QString pngPath = dir.path() + "/red.png";
+    {
+        QImage img(1, 1, QImage::Format_RGB888);
+        img.fill(QColor(255, 0, 0));
+        check(img.save(pngPath), "write 1x1 sRGB red PNG");
+    }
+
+    Image raw;
+    Image aces;
+    Image taggedAces;
+    std::string e1, e2, e3;
+    check(loadImage(pngPath.toStdString(), raw, e1, true, "Utility - Raw"), "load PNG Raw");
+    check(loadImage(pngPath.toStdString(), aces, e2, true, "auto"), "load PNG auto → ACEScg");
+    check(loadImage(pngPath.toStdString(), taggedAces, e3, true, "ACES - ACEScg"), "load PNG as ACEScg");
+    checkNear(raw.rgb(0, 0).x, 1.0f, 0.02f, "Raw red R ~1");
+    checkNear(raw.rgb(0, 0).y, 0.0f, 0.02f, "Raw red G ~0");
+    const Vec3 expect = linearSrgbToAcescg(Vec3(1.0f, 0.0f, 0.0f));
+    checkNear(aces.rgb(0, 0).x, expect.x, 0.05f, "auto PNG red → ACEScg R");
+    checkNear(aces.rgb(0, 0).y, expect.y, 0.05f, "auto PNG red → ACEScg G");
+    checkNear(aces.rgb(0, 0).z, expect.z, 0.05f, "auto PNG red → ACEScg B");
+    checkNear(taggedAces.rgb(0, 0).x, 1.0f, 0.02f, "tagged ACEScg skips matrix");
+    check(std::fabs(aces.rgb(0, 0).x - raw.rgb(0, 0).x) > 0.05f, "ACEScg convert changes Rec.709 red");
 }
 
 // Glass sphere over a floor lit by a small rect light: PT+MNEE and BDPT are
@@ -1514,7 +2087,7 @@ void testUdimMaterialX() {
     check(tiles.size() == 3, "discovers three UDIM tiles on disk");
 
     std::string error;
-    auto atlas = loadImageOrUdim(root + "/grid.1001.png", QString(), error, {});
+    auto atlas = loadImageOrUdim(root + "/grid.1001.png", QString(), error, {}, true, "Utility - Raw");
     check(atlas != nullptr, "loads udim atlas from concrete tile path");
     check(atlas && atlas->isUdimAtlas(), "atlas marked as UDIM");
     check(atlas && atlas->udimGridU() == 2 && atlas->udimGridV() == 2, "atlas grid covers U0..1 V0..1");
@@ -4109,7 +4682,7 @@ void testMaterialXUdimCubeAsset() {
     }
     std::string error;
     auto atlas = loadImageOrUdim(root + "/grid.<UDIM>.png", QString(), error,
-                                 {1001, 1002, 1003, 1011, 1012, 1013});
+                                 {1001, 1002, 1003, 1011, 1012, 1013}, true, "Utility - Raw");
     check(atlas != nullptr, "MaterialX grid_udim tiles load");
     check(atlas && atlas->udimGridU() == 3 && atlas->udimGridV() == 2, "MaterialX set is 3x2 atlas");
     if (!atlas) return;
@@ -4332,7 +4905,8 @@ void testTxMipmaps() {
 
     Image image;
     std::string error;
-    check(loadImage(txPath.toStdString(), image, error), "load .tx with mips");
+    check(loadImage(txPath.toStdString(), image, error, /*srgbColor=*/true, "Utility - Raw"),
+          "load .tx with mips");
     if (!error.empty() && image.empty()) std::printf("  load error: %s\n", error.c_str());
     check(image.mipCount() >= 4, "loaded or rebuilt mip pyramid");
     check(image.width() == 8 && image.height() == 8, "level 0 is 8x8");
@@ -4562,6 +5136,118 @@ void testNgonTriangulateAndVdb() {
     }
     check(area > 1.0f, "concave triangulation area is sane");
 
+    // Quad fan → 2 tris; diagonal must NOT be marked as a cage boundary.
+    Mesh quad;
+    quad.positions = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 1, 0), Vec3(0, 1, 0)};
+    quad.faceVertexCounts = {4};
+    quad.faceVertexIndices = {0, 1, 2, 3};
+    quad.ensureRenderTriangles();
+    check(quad.indices.size() == 6, "quad → 2 triangles");
+    check(quad.triEdgeMask.size() == 2, "quad edge mask per triangle");
+    if (quad.triEdgeMask.size() == 2) {
+        // Each tri has one diagonal edge unmarked; total boundary bits across both = 4 (quad sides).
+        int boundaryBits = 0;
+        for (uint8_t m : quad.triEdgeMask) {
+            boundaryBits += (m & 1) ? 1 : 0;
+            boundaryBits += (m & 2) ? 1 : 0;
+            boundaryBits += (m & 4) ? 1 : 0;
+            check(m != 7, "quad triangulation hides the diagonal (mask != 7)");
+        }
+        check(boundaryBits == 4, "quad has exactly 4 authored boundary edges");
+    }
+    quad.captureWireCage();
+    check(quad.wireIndices.size() == 8, "wire cage: 4 edges × 2 indices");
+    check(quad.wirePositions.size() == 4, "wire cage verts stay cage-sized");
+
+    // MaterialX volume → standard_volume coefficients for Fog routing.
+    // Accepts Solstice short ports (surface/volume) and MaterialX long names.
+    {
+        const QString volXmlShort =
+            QStringLiteral(
+                "<materialx version=\"1.38\">"
+                "  <standard_surface name=\"ss\" type=\"surfaceshader\">"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.2, 0.1\" />"
+                "  </standard_surface>"
+                "  <standard_volume name=\"sv\" type=\"volumeshader\">"
+                "    <input name=\"density\" type=\"float\" value=\"2.5\" />"
+                "    <input name=\"anisotropy\" type=\"float\" value=\"0.3\" />"
+                "    <input name=\"absorption\" type=\"color3\" value=\"0.1, 0.2, 0.3\" />"
+                "    <input name=\"scattering\" type=\"color3\" value=\"0.7, 0.6, 0.5\" />"
+                "    <input name=\"emission\" type=\"float\" value=\"1.5\" />"
+                "    <input name=\"emission_color\" type=\"color3\" value=\"0.2, 0.4, 0.8\" />"
+                "  </standard_volume>"
+                "  <surfacematerial name=\"surface\" type=\"material\">"
+                "    <input name=\"surface\" type=\"surfaceshader\" nodename=\"ss\" />"
+                "    <input name=\"displacement\" type=\"displacementshader\" />"
+                "    <input name=\"volume\" type=\"volumeshader\" nodename=\"sv\" />"
+                "  </surfacematerial>"
+                "</materialx>");
+        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXmlShort, QString());
+        check(volEval.ok, "MaterialX volume (short ports) evaluates");
+        check(volEval.material.hasVolumeShader == 1, "volume port sets hasVolumeShader");
+        check(std::fabs(volEval.material.volumeDensity - 2.5f) < 1e-4f, "volume density from MTLX");
+        check(std::fabs(volEval.material.volumeAnisotropy - 0.3f) < 1e-4f, "volume anisotropy from MTLX");
+        check(std::fabs(volEval.material.volumeAbsorption.x - 0.1f) < 1e-3f, "volume absorption R");
+        check(std::fabs(volEval.material.volumeScattering.x - 0.7f) < 1e-3f, "volume scattering R");
+        check(std::fabs(volEval.material.volumeEmissionStrength - 1.5f) < 1e-4f, "volume emission strength");
+        check(std::fabs(volEval.material.volumeEmission.z - 0.8f) < 1e-3f, "volume emission_color B");
+    }
+    {
+        const QString volXmlLong =
+            QStringLiteral(
+                "<materialx version=\"1.38\">"
+                "  <standard_surface name=\"ss\" type=\"surfaceshader\">"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.1, 0.1, 0.1\" />"
+                "  </standard_surface>"
+                "  <standard_volume name=\"sv\" type=\"volumeshader\">"
+                "    <input name=\"density\" type=\"float\" value=\"4.0\" />"
+                "    <input name=\"anisotropy\" type=\"float\" value=\"-0.2\" />"
+                "    <input name=\"scattering\" type=\"color3\" value=\"0.9, 0.8, 0.7\" />"
+                "  </standard_volume>"
+                "  <surfacematerial name=\"surface\" type=\"material\">"
+                "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\" />"
+                "    <input name=\"volumeshader\" type=\"volumeshader\" nodename=\"sv\" />"
+                "  </surfacematerial>"
+                "</materialx>");
+        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXmlLong, QString());
+        check(volEval.ok, "MaterialX volume (long ports) evaluates");
+        check(volEval.material.hasVolumeShader == 1, "volumeshader alias sets hasVolumeShader");
+        check(std::fabs(volEval.material.volumeDensity - 4.0f) < 1e-4f, "long-port volume density");
+        check(std::fabs(volEval.material.volumeAnisotropy + 0.2f) < 1e-4f, "long-port volume anisotropy");
+        check(std::fabs(volEval.material.volumeAbsorption.x) < 1e-4f,
+              "omitted absorption defaults to 0 (not 0.5)");
+        check(std::fabs(volEval.material.volumeScattering.x - 0.9f) < 1e-3f, "authored scattering kept");
+    }
+    {
+        // Default standard_volume (no absorption/scattering) must not be darker than
+        // the implicit fog fallback: absorption 0, scattering 1 (white, no extra σa).
+        const QString volXmlDefaults =
+            QStringLiteral(
+                "<materialx version=\"1.38\">"
+                "  <standard_surface name=\"ss\" type=\"surfaceshader\">"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />"
+                "  </standard_surface>"
+                "  <standard_volume name=\"sv\" type=\"volumeshader\">"
+                "    <input name=\"density\" type=\"float\" value=\"1\" />"
+                "  </standard_volume>"
+                "  <surfacematerial name=\"surface\" type=\"material\">"
+                "    <input name=\"surface\" type=\"surfaceshader\" nodename=\"ss\" />"
+                "    <input name=\"volume\" type=\"volumeshader\" nodename=\"sv\" />"
+                "  </surfacematerial>"
+                "</materialx>");
+        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXmlDefaults, QString());
+        check(volEval.ok, "MaterialX volume (default abs/scatter) evaluates");
+        check(volEval.material.hasVolumeShader == 1, "default volume still sets hasVolumeShader");
+        check(std::fabs(volEval.material.volumeAbsorption.x) < 1e-4f &&
+                  std::fabs(volEval.material.volumeAbsorption.y) < 1e-4f &&
+                  std::fabs(volEval.material.volumeAbsorption.z) < 1e-4f,
+              "default standard_volume absorption is 0");
+        check(std::fabs(volEval.material.volumeScattering.x - 1.0f) < 1e-4f &&
+                  std::fabs(volEval.material.volumeScattering.y - 1.0f) < 1e-4f &&
+                  std::fabs(volEval.material.volumeScattering.z - 1.0f) < 1e-4f,
+              "default standard_volume scattering is 1");
+    }
+
 #if SOLSTICE_HAVE_OPENVDB
     MeshPtr box = makeBoxMesh(Vec3(1, 1, 1));
     check(box && !box->indices.empty(), "box mesh for VDB");
@@ -4570,6 +5256,7 @@ void testNgonTriangulateAndVdb() {
     settings.voxelSize = 0.1f;
     settings.exteriorBand = 3.0f;
     settings.interiorBand = 3.0f;
+    settings.filter = VolumeSampleFilter::Linear;
     std::string err;
     VolumeGridPtr sdf = VolumeGrid::fromPolygons(*box, Mat4::identity(), settings, &err);
     check(sdf && sdf->valid(), std::string("vdbfrompolygons SDF: ") + err);
@@ -4580,6 +5267,639 @@ void testNgonTriangulateAndVdb() {
         check(meshed && meshed->triangleCount() > 0, "sdftopolygons_vdb produces mesh");
         MeshPtr dcsdd = dcsddContourVolume(*sdf, 0.15f, {}, &err);
         check(dcsdd && dcsdd->triangleCount() > 0, std::string("sdftopolygons_dcsdd: ") + err);
+
+        float tHit = 0.0f;
+        Vec3 nSdf;
+        const bool hitSdf =
+            intersectSdfVolume(*sdf, Vec3(-3, 0, 0), Vec3(1, 0, 0), 0.0f, 10.0f, tHit, nSdf);
+        check(hitSdf, "SDF sphere-trace hits the box");
+        check(std::fabs(tHit - 2.5f) < 0.35f, "SDF hit near the box face at x=-0.5");
+        check(sdf->sampleFilter() == VolumeSampleFilter::Linear, "SDF keeps Linear filter");
+        sdf->setSampleFilter(VolumeSampleFilter::Quadratic);
+        check(sdf->sampleWorld(Vec3(0, 0, 0)) < 0.0f, "Quadratic filter still inside-negative");
+        sdf->setSampleFilter(VolumeSampleFilter::Nearest);
+        check(sdf->sampleWorld(Vec3(0, 0, 0)) < 0.0f, "Nearest filter still inside-negative");
+    }
+
+    // Fill Density is a runtime multiplier — voxel bake stays normalized (~1 majorant).
+    {
+        VolumeFromPolygonsSettings a = settings;
+        a.kind = VolumeGridKind::Fog;
+        a.fillDensity = 1.0f;
+        VolumeFromPolygonsSettings b = settings;
+        b.kind = VolumeGridKind::Fog;
+        b.fillDensity = 25.0f;  // must NOT bake into voxels anymore
+        std::string eA, eB;
+        VolumeGridPtr fogA = VolumeGrid::fromPolygons(*box, Mat4::identity(), a, &eA);
+        VolumeGridPtr fogB = VolumeGrid::fromPolygons(*box, Mat4::identity(), b, &eB);
+        check(fogA && fogA->valid() && fogB && fogB->valid(), "fog unit-bake grids");
+        if (fogA && fogB) {
+            check(std::fabs(fogA->majorant() - fogB->majorant()) < 0.25f,
+                  "Fill Density does not change baked fog majorant");
+            // Fog must fill the closed mesh interior (not a hollow narrow-band shell).
+            const float densCenter = fogA->sampleWorld(Vec3(0, 0, 0));
+            const float densOutside = fogA->sampleWorld(Vec3(3, 0, 0));
+            check(densCenter > 0.85f, "fog interior at center is filled (~1)");
+            check(densOutside < 0.05f, "fog exterior outside the box is empty");
+            check(fogA->majorant() < 1.5f, "baked fog occupancy majorant is ~1");
+            int interiorHits = 0;
+            int interiorCount = 0;
+            for (int z = -2; z <= 2; ++z) {
+                for (int y = -2; y <= 2; ++y) {
+                    for (int x = -2; x <= 2; ++x) {
+                        const Vec3 p(x * 0.1f, y * 0.1f, z * 0.1f); // well inside ±0.5 box
+                        ++interiorCount;
+                        if (fogA->sampleWorld(p) > 0.85f) ++interiorHits;
+                    }
+                }
+            }
+            check(interiorHits == interiorCount, "fog lattice inside unit box is filled");
+            std::printf("  fog fill: center=%.3f outside=%.3f lattice=%d/%d\n", densCenter,
+                        densOutside, interiorHits, interiorCount);
+            check(fogA->hasMajorantGrid(), "fog builds supervoxel majorant grid");
+            check(fogA->hasMajorantBricks(), "fog builds empty-skip bricks");
+            check(fogA->majorantDimX() > 0 && fogA->majorantDimY() > 0 && fogA->majorantDimZ() > 0,
+                  "supervoxel grid is non-empty");
+            float majMin = 0.0f, majMax = 0.0f;
+            fogA->majorantOccupancy(Vec3(0, 0, 0), majMin, majMax);
+            std::printf("  majorant: dim=%dx%dx%d cell=%.4f center min=%.4f max=%.4f\n",
+                        fogA->majorantDimX(), fogA->majorantDimY(), fogA->majorantDimZ(),
+                        fogA->majorantCellSize(), majMin, majMax);
+            check(majMin > 0.85f, "interior supervoxel min occupancy ~1");
+            check(majMax > 0.85f && majMax < 1.6f, "interior supervoxel max occupancy ~1");
+            fogA->majorantOccupancy(Vec3(3, 0, 0), majMin, majMax);
+            check(majMax < 0.05f, "outside supervoxel is empty");
+            fogA->majorantOccupancy(Vec3(-0.45f, 0, 0), majMin, majMax);
+            check(majMin < 0.05f, "boundary supervoxel min occupancy is 0 (linear halo)");
+            check(fogA->majorantBrickEmpty(Vec3(3, 0, 0)), "outside brick is empty");
+            check(!fogA->majorantBrickEmpty(Vec3(0, 0, 0)), "interior brick is occupied");
+            {
+                MediumData trackMed;
+                trackMed.type = 2;
+                trackMed.sigmaA = Vec3(0.0f);
+                trackMed.sigmaS = Vec3(1.0f);
+                trackMed.density = 1.0f;
+                Rng rngWalk(3u, 5u);
+                int scatters = 0;
+                const auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < 4000; ++i) {
+                    Vec3 thru(1.0f);
+                    const MediumSample ms = sampleMediumVdbFog(
+                        *fogA, trackMed, Vec3(0, 0, 0), Vec3(1, 0, 0), 4.0f, rngWalk, thru);
+                    if (ms.scattered) ++scatters;
+                }
+                const auto msWalk = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - t0)
+                                        .count();
+                check(scatters > 200, "analytical interior walk produces real scatters");
+                check(msWalk < 2000.0, "4000 free-flights stay cheap with local majorants");
+                std::printf("  majorant walk: scatters=%d in %.1f ms\n", scatters, msWalk);
+                check(!volumeOccupancyIsDense(0.0f, fogA->majorant()), "zero occupancy is not dense");
+                check(!volumeOccupancyIsDense(1e-4f, 1.0f), "1e-4 of unit majorant is halo");
+                check(volumeOccupancyIsDense(0.05f, 1.0f), "5% occupancy is dense enough to enter");
+                {
+                    float tDense = 0.0f;
+                    float tExit = 0.0f;
+                    check(fogRayFirstDenseT(*fogA, Vec3(-3, 0, 0), Vec3(1, 0, 0), 0.0f, 10.0f, tDense,
+                                            tExit),
+                          "ray through the filled box finds dense occupancy");
+                    check(tDense > 1.8f && tDense < 3.5f, "dense entry is near the box face");
+                    check(!fogRayFirstDenseT(*fogA, Vec3(8, 0, 0), Vec3(1, 0, 0), 0.0f, 10.0f, tDense,
+                                            tExit),
+                          "ray that misses the cloud does not enter the AABB");
+                }
+
+                Rng rngTr(11u, 13u);
+                Vec3 trAcc(0.0f);
+                constexpr int kN = 128;
+                float trPeak = 0.0f;
+                for (int i = 0; i < kN; ++i) {
+                    const Vec3 tr = mediumShadowTrVdb(*fogA, trackMed, Vec3(-2, 0, 0), Vec3(1, 0, 0),
+                                                      4.0f, rngTr);
+                    trAcc = trAcc + tr;
+                    trPeak = srMax(trPeak, srMax(tr.x, srMax(tr.y, tr.z)));
+                    check(tr.x <= 1.02f && tr.y <= 1.02f && tr.z <= 1.02f,
+                          "residual-ratio Tr sample does not exceed 1");
+                }
+                const Vec3 trMean = trAcc * (1.0f / float(kN));
+                check(trMean.x > 0.15f && trMean.x < 0.85f,
+                      "residual-ratio Tr through unit fog is between vacuum and opaque");
+                check(trPeak <= 1.02f, "residual-ratio Tr peak stays ≤ 1");
+            }
+            RenderSettingsData deepMs;
+            deepMs.maxDepth = 1024;
+            deepMs.rrStartDepth = 1024;
+            check(deepMs.maxDepth == 1024 && deepMs.rrStartDepth == 1024,
+                  "settings accept 1000+ depth for volume multiple scattering");
+            check(deepMs.volumeSimilarity == 0, "Volume Similarity defaults off");
+
+            {
+                MediumData simMed;
+                simMed.sigmaS = Vec3(2.0f);
+                simMed.g = 0.9f;
+                const MediumData s0 = mediumWithVolumeSimilarity(simMed, 0);
+                const MediumData s5 = mediumWithVolumeSimilarity(simMed, 5);
+                const MediumData s20 = mediumWithVolumeSimilarity(simMed, 20);
+                check(std::fabs(s0.g - 0.9f) < 1e-5f && std::fabs(s0.sigmaS.x - 2.0f) < 1e-5f,
+                      "similarity leaves low-order g and σs unchanged");
+                check(std::fabs(s5.g - 0.9f) < 1e-5f, "similarity still full g at bounce 5");
+                check(std::fabs(s20.g) < 1e-5f, "similarity is isotropic by bounce 20");
+                const float red0 = s0.sigmaS.x * (1.0f - s0.g);
+                const float red20 = s20.sigmaS.x * (1.0f - s20.g);
+                check(std::fabs(red0 - red20) < 1e-4f, "similarity conserves σs(1−g)");
+            }
+
+            {
+                LightData lights[2];
+                lights[0].type = kLightDome;
+                lights[0].intensity = 1.0f;
+                lights[0].color = Vec3(1.0f);
+                lights[1].type = kLightDistant;
+                lights[1].intensity = 1.0f;
+                lights[1].color = Vec3(1.0f);
+                lights[1].normalize = 1;
+                lights[1].angle = 0.53f;
+                lights[1].xform = lookAtMatrix(Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 0.0f, 0.0f),
+                                               Vec3(0.0f, 0.0f, 1.0f));
+                lights[1].xformInv = inverse(lights[1].xform);
+                SceneView sv{};
+                sv.lights = lights;
+                sv.lightCount = 2;
+                sv.domeLightIndex = 0;
+                const Vec3 sunDir = normalize(lightAxisZ(lights[1]));
+                const Vec3 p(0.0f);
+                const float fDome = lightFluxWeight(sv, 0);
+                const float fSun = lightFluxWeight(sv, 1);
+                check(std::fabs(volumeLightSelectionWeight(sv, 0, p, sunDir, 0.0f) - fDome) < 1e-5f,
+                      "g=0 volume weight equals flux (dome)");
+                check(std::fabs(volumeLightSelectionWeight(sv, 1, p, sunDir, 0.0f) - fSun) < 1e-5f,
+                      "g=0 volume weight equals flux (sun)");
+                const float wSunFwd = volumeLightSelectionWeight(sv, 1, p, sunDir, 0.9f);
+                const float wDomeFwd = volumeLightSelectionWeight(sv, 0, p, sunDir, 0.9f);
+                const float fluxRatio = fSun / srMax(fDome, 1e-8f);
+                const float prodRatio = wSunFwd / srMax(wDomeFwd, 1e-8f);
+                check(prodRatio > fluxRatio * 10.0f,
+                      "HG×sun selection upweights the sun when wo is aligned at g=0.9");
+                const float wSunBack = volumeLightSelectionWeight(sv, 1, p, sunDir * -1.0f, 0.9f);
+                check(wSunBack < wSunFwd * 0.1f, "HG×sun selection downweights the sun in the HG tail");
+                float pdfSel = 0.0f;
+                const int picked = sampleVolumeLightIndex(sv, p, sunDir, 0.9f, 0.5f, pdfSel);
+                check(picked >= 0 && pdfSel > 0.0f, "volume light pick at g=0.9 succeeds");
+                check(std::fabs(pdfSel - volumeLightSelectionPdfIndex(sv, p, sunDir, 0.9f, picked)) <
+                          1e-5f,
+                      "volume light pick pdf matches selection pdf");
+            }
+        }
+    }
+
+    // End-to-end: Volume prim through Embree must produce light for SDF and Fog,
+    // including the default caustics-on path (MNEE) and Direct Lighting.
+    auto renderVolumeSum = [&](VolumeGridKind kind, int integrator, int caustics) -> double {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = kind;
+        vs.voxelSize = 0.08f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        vs.fillDensity = 1.0f;
+        std::string e2;
+        VolumeGridPtr grid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e2);
+        check(grid && grid->valid(), std::string("volume grid: ") + e2);
+
+        ScenePtr scene = std::make_shared<Scene>();
+        const int volumeIndex = scene->addVolume(grid);
+        const Bounds3 bb = grid->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int meshIndex = scene->addMesh(proxy);
+        Material mat;
+        mat.baseColor = Vec3(0.85f, 0.75f, 0.65f);
+        mat.roughness = 0.45f;
+        const int materialIndex = scene->addMaterial(mat);
+        InstanceData inst;
+        inst.meshIndex = meshIndex;
+        inst.materialIndex = materialIndex;
+        inst.volumeIndex = volumeIndex;
+        inst.visibilityMask = kVisPrimary;  // proxy must not cast shadows onto the SDF/fog
+        MediumData med;
+        med.type = (kind == VolumeGridKind::Sdf) ? 3 : 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 1.0f;
+        med.sigmaA = Vec3(0.05f);
+        med.sigmaS = Vec3(1.2f);
+        inst.mediumIndex = scene->addMedium(med);
+        scene->instances.push_back(inst);
+
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 4.0f;
+        light.xform = lookAtMatrix(Vec3(3, 5, 4), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 48;
+        scene->settings.resolutionY = 36;
+        scene->settings.samplesPerPixel = 12;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.integrator = integrator;
+        scene->settings.caustics = caustics;
+        scene->settings.pathGuiding = 0;
+        scene->settings.maxDepth = 6;
+        scene->finalize();
+        scene->frameCameraOnContents();
+
+        RenderSession session;
+        session.setScene(scene);
+        session.start();
+        session.waitForCompletion();
+        const Image image = session.linearImage();
+        double sum = 0.0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x) sum += double(luminance(image.rgb(x, y)));
+        return sum;
+    };
+
+    const double sdfPtOff = renderVolumeSum(VolumeGridKind::Sdf, kIntegratorPathTracer, 0);
+    const double sdfPtOn = renderVolumeSum(VolumeGridKind::Sdf, kIntegratorPathTracer, 1);
+    const double sdfDl = renderVolumeSum(VolumeGridKind::Sdf, kIntegratorDirectLighting, 0);
+    const double fogPtOff = renderVolumeSum(VolumeGridKind::Fog, kIntegratorPathTracer, 0);
+    const double fogDl = renderVolumeSum(VolumeGridKind::Fog, kIntegratorDirectLighting, 0);
+    const double fogBdpt = renderVolumeSum(VolumeGridKind::Fog, kIntegratorBdpt, 0);
+    std::printf("  VDB render sums: SDF PT-off=%.3f PT-on=%.3f DL=%.3f | Fog PT-off=%.3f DL=%.3f BDPT=%.3f\n",
+                sdfPtOff, sdfPtOn, sdfDl, fogPtOff, fogDl, fogBdpt);
+    check(sdfPtOff > 1.0, "SDF PathTracer (caustics off) renders the volume");
+    check(sdfPtOn > 1.0, "SDF PathTracer (caustics on / MNEE) renders the volume");
+    check(sdfDl > 1.0, "SDF Direct Lighting renders the volume");
+    check(fogPtOff > 0.5, "Fog PathTracer renders the volume");
+    check(fogDl > 0.5, "Fog Direct Lighting renders the volume");
+    check(fogBdpt > 0.5, "Fog with BDPT selected still renders (falls back to PT)");
+    {
+        const float ratio = float(fogBdpt / srMax(fogPtOff, 1e-8));
+        check(ratio > 0.5f && ratio < 2.0f, "Fog BDPT fallback energy matches Path Tracer");
+    }
+    check(volumeRisCandidateCount(0.0f) == kRisCandidates, "isotropic volume RIS keeps M=8");
+    check(volumeRisCandidateCount(0.9f) == kVolumeRisMax, "g=0.9 volume RIS uses 64 unshadowed probes");
+    check(volumeRisCandidateCount(-0.9f) == kVolumeRisMax, "|g| drives volume RIS count");
+
+    // Indirect Guides + dense fog: OpenPGL used to Reserve(128) path segments.
+    // A walk past that (Windows ACCESS_VIOLATION at 0xFFFFFFFFFFFFFFFF) plus
+    // Init×HG product on a half-baked volume field. Deep maxDepth + no RR
+    // forces the overflow; extra spp trains the volume field.
+    {
+        VolumeFromPolygonsSettings vsG;
+        vsG.kind = VolumeGridKind::Fog;
+        vsG.voxelSize = 0.08f;
+        vsG.exteriorBand = 3.0f;
+        vsG.interiorBand = 3.0f;
+        vsG.fillDensity = 1.0f;
+        std::string eGuide;
+        VolumeGridPtr gridG = VolumeGrid::fromPolygons(*box, Mat4::identity(), vsG, &eGuide);
+        check(gridG && gridG->valid(), std::string("guiding fog grid: ") + eGuide);
+        ScenePtr sceneG = std::make_shared<Scene>();
+        const int volumeIndex = sceneG->addVolume(gridG);
+        const Bounds3 bb = gridG->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int meshIndex = sceneG->addMesh(proxy);
+        Material mat;
+        mat.baseColor = Vec3(0.8f);
+        mat.roughness = 0.5f;
+        const int materialIndex = sceneG->addMaterial(mat);
+        InstanceData inst;
+        inst.meshIndex = meshIndex;
+        inst.materialIndex = materialIndex;
+        inst.volumeIndex = volumeIndex;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 200.0f;
+        med.sigmaA = Vec3(0.0f);
+        med.sigmaS = Vec3(1.0f);
+        med.g = 0.9f;
+        inst.mediumIndex = sceneG->addMedium(med);
+        sceneG->instances.push_back(inst);
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 4.0f;
+        light.xform = lookAtMatrix(Vec3(3, 5, 4), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        sceneG->lights.push_back(light);
+        sceneG->settings.resolutionX = 12;
+        sceneG->settings.resolutionY = 10;
+        sceneG->settings.samplesPerPixel = 4;
+        sceneG->settings.backend = kBackendCpuEmbree;
+        sceneG->settings.integrator = kIntegratorPathTracer;
+        sceneG->settings.caustics = 0;
+        sceneG->settings.pathGuiding = 1;
+        sceneG->settings.maxDepth = 160;
+        sceneG->settings.rrStartDepth = 10000;
+        sceneG->finalize();
+        sceneG->frameCameraOnContents();
+        RenderSession sessionG;
+        sessionG.setScene(sceneG);
+        sessionG.start();
+        sessionG.waitForCompletion();
+        const Image imageG = sessionG.linearImage();
+        double sumG = 0.0;
+        bool finiteG = true;
+        for (int y = 0; y < imageG.height(); ++y) {
+            for (int x = 0; x < imageG.width(); ++x) {
+                const Vec3 c = imageG.rgb(x, y);
+                if (!isFinite(c)) finiteG = false;
+                sumG += double(luminance(c));
+            }
+        }
+        check(finiteG, "Fog + Indirect Guides stays finite");
+        check(sumG > 0.0, "Fog + Indirect Guides produces light");
+        std::printf("  Fog + Indirect Guides sum=%.3f (maxDepth=160)\n", sumG);
+    }
+
+    {
+        VolumeFromPolygonsSettings vsS;
+        vsS.kind = VolumeGridKind::Fog;
+        vsS.voxelSize = 0.08f;
+        vsS.exteriorBand = 3.0f;
+        vsS.interiorBand = 3.0f;
+        vsS.fillDensity = 1.0f;
+        std::string eSim;
+        VolumeGridPtr gridS = VolumeGrid::fromPolygons(*box, Mat4::identity(), vsS, &eSim);
+        check(gridS && gridS->valid(), std::string("similarity fog grid: ") + eSim);
+        ScenePtr sceneS = std::make_shared<Scene>();
+        const int volumeIndex = sceneS->addVolume(gridS);
+        const Bounds3 bb = gridS->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int meshIndex = sceneS->addMesh(proxy);
+        Material mat;
+        mat.baseColor = Vec3(0.8f);
+        mat.roughness = 0.5f;
+        const int materialIndex = sceneS->addMaterial(mat);
+        InstanceData inst;
+        inst.meshIndex = meshIndex;
+        inst.materialIndex = materialIndex;
+        inst.volumeIndex = volumeIndex;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 8.0f;
+        med.sigmaA = Vec3(0.0f);
+        med.sigmaS = Vec3(1.0f);
+        med.g = 0.9f;
+        inst.mediumIndex = sceneS->addMedium(med);
+        sceneS->instances.push_back(inst);
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 4.0f;
+        light.xform = lookAtMatrix(Vec3(3, 5, 4), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        sceneS->lights.push_back(light);
+        sceneS->settings.resolutionX = 12;
+        sceneS->settings.resolutionY = 10;
+        sceneS->settings.samplesPerPixel = 4;
+        sceneS->settings.backend = kBackendCpuEmbree;
+        sceneS->settings.integrator = kIntegratorPathTracer;
+        sceneS->settings.caustics = 0;
+        sceneS->settings.pathGuiding = 0;
+        sceneS->settings.volumeSimilarity = 1;
+        sceneS->settings.maxDepth = 40;
+        sceneS->settings.rrStartDepth = 40;
+        sceneS->finalize();
+        sceneS->frameCameraOnContents();
+        RenderSession sessionS;
+        sessionS.setScene(sceneS);
+        sessionS.start();
+        sessionS.waitForCompletion();
+        const Image imageS = sessionS.linearImage();
+        double sumS = 0.0;
+        bool finiteS = true;
+        for (int y = 0; y < imageS.height(); ++y) {
+            for (int x = 0; x < imageS.width(); ++x) {
+                const Vec3 c = imageS.rgb(x, y);
+                if (!isFinite(c)) finiteS = false;
+                sumS += double(luminance(c));
+            }
+        }
+        check(finiteS, "Fog + Volume Similarity stays finite");
+        check(sumS > 0.0, "Fog + Volume Similarity produces light");
+        std::printf("  Fog + Volume Similarity sum=%.3f (maxDepth=40)\n", sumS);
+    }
+
+    // Cast-shadow regression: volume above a ground plane, light from an angle.
+    // Lit side of the plane must be brighter than the shadowed side.
+    auto castShadowContrast = [&](VolumeGridKind kind) -> double {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = kind;
+        vs.voxelSize = 0.08f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        vs.fillDensity = 1.0f;
+        std::string e2;
+        VolumeGridPtr grid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e2);
+        check(grid && grid->valid(), std::string("cast-shadow grid: ") + e2);
+
+        ScenePtr scene = std::make_shared<Scene>();
+        const int volumeIndex = scene->addVolume(grid);
+        const Bounds3 bb = grid->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int volMesh = scene->addMesh(proxy);
+
+        // Ground plane under the volume (y = -1.2), larger than the box shadow.
+        MeshPtr ground = makeBoxMesh(Vec3(6.0f, 0.05f, 6.0f));
+        for (Vec3& p : ground->positions) p.y -= 1.2f;
+        ground->ensureRenderTriangles();
+        ground->computeBounds();
+        const int groundMesh = scene->addMesh(ground);
+
+        Material volMat;
+        volMat.baseColor = Vec3(0.85f, 0.75f, 0.65f);
+        volMat.roughness = 0.4f;
+        volMat.hasVolumeShader = 1;
+        volMat.volumeDensity = 1.0f;
+        volMat.volumeAbsorption = Vec3(0.05f);
+        volMat.volumeScattering = Vec3(1.5f);
+        const int volMatIdx = scene->addMaterial(volMat);
+        Material gMat;
+        gMat.baseColor = Vec3(0.7f);
+        gMat.roughness = 0.6f;
+        const int gMatIdx = scene->addMaterial(gMat);
+
+        InstanceData volInst;
+        volInst.meshIndex = volMesh;
+        volInst.materialIndex = volMatIdx;
+        volInst.volumeIndex = volumeIndex;
+        volInst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = (kind == VolumeGridKind::Sdf) ? 3 : 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 1.0f;
+        med.sigmaA = Vec3(0.05f);
+        med.sigmaS = Vec3(1.5f);
+        volInst.mediumIndex = scene->addMedium(med);
+        scene->instances.push_back(volInst);
+
+        InstanceData gInst;
+        gInst.meshIndex = groundMesh;
+        gInst.materialIndex = gMatIdx;
+        scene->instances.push_back(gInst);
+
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 6.0f;
+        // Light from +X/+Y so the shadow falls toward -X on the ground.
+        light.xform = lookAtMatrix(Vec3(4, 6, 0), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 64;
+        scene->settings.resolutionY = 48;
+        scene->settings.samplesPerPixel = 24;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.caustics = 0;
+        scene->settings.pathGuiding = 0;
+        scene->settings.maxDepth = 4;
+        scene->finalize();
+        // Look down at the ground / volume from above.
+        scene->camera.cameraToWorld = lookAtMatrix(Vec3(0, 5, 0.01f), Vec3(0, -1, 0), Vec3(0, 0, -1));
+        scene->camera.focalLength = 35.0f;
+        scene->cameraAuthored = true;
+
+        RenderSession session;
+        session.setScene(scene);
+        session.start();
+        session.waitForCompletion();
+        const Image image = session.linearImage();
+        // Compare left half (toward shadow) vs right half (lit).
+        double left = 0.0, right = 0.0;
+        int nL = 0, nR = 0;
+        const int mid = image.width() / 2;
+        const int y0 = image.height() / 3;
+        const int y1 = (image.height() * 2) / 3;
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                const double L = double(luminance(image.rgb(x, y)));
+                if (x < mid) {
+                    left += L;
+                    ++nL;
+                } else {
+                    right += L;
+                    ++nR;
+                }
+            }
+        }
+        const double meanL = nL ? left / nL : 0.0;
+        const double meanR = nR ? right / nR : 0.0;
+        std::printf("  cast-shadow %s: left=%.4f right=%.4f ratio=%.3f\n",
+                    kind == VolumeGridKind::Sdf ? "SDF" : "Fog", meanL, meanR,
+                    meanR > 1e-8 ? meanL / meanR : 0.0);
+        // Shadowed side must be darker. Soft fog still needs a clear ratio.
+        check(meanR > 1e-4, "cast-shadow lit side has light");
+        check(meanL < meanR * 0.92, "cast-shadow: shadowed side darker than lit");
+        return meanR > 1e-8 ? meanL / meanR : 0.0;
+    };
+    (void)castShadowContrast(VolumeGridKind::Sdf);
+    (void)castShadowContrast(VolumeGridKind::Fog);
+
+    // Field-level unit checks (no Embree): SDF occludes, fog attenuates.
+    {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = VolumeGridKind::Sdf;
+        vs.voxelSize = 0.1f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        std::string e3;
+        VolumeGridPtr sdfGrid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e3);
+        check(sdfGrid && sdfGrid->valid(), "unit sdf grid");
+        ScenePtr s = std::make_shared<Scene>();
+        const int vi = s->addVolume(sdfGrid);
+        MeshPtr proxy = makeBoxMesh(Vec3(1.2f));
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        InstanceData inst;
+        inst.meshIndex = s->addMesh(proxy);
+        inst.volumeIndex = vi;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 3;
+        med.volumeIndex = vi;
+        inst.mediumIndex = s->addMedium(med);
+        s->instances.push_back(inst);
+        s->finalize();
+        const SceneView view = s->view();
+        check(shadowOccludedBySdfVolumes(view, Vec3(-3, 0, 0), Vec3(1, 0, 0), 10.0f),
+              "SDF occludes a ray through the box");
+        check(!shadowOccludedBySdfVolumes(view, Vec3(-3, 0, 0), Vec3(0, 1, 0), 10.0f),
+              "SDF misses a ray that misses the box");
+    }
+    {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = VolumeGridKind::Fog;
+        vs.voxelSize = 0.1f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        vs.fillDensity = 1.0f;
+        std::string e3;
+        VolumeGridPtr fogGrid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e3);
+        check(fogGrid && fogGrid->valid(), "unit fog grid");
+        ScenePtr s = std::make_shared<Scene>();
+        const int vi = s->addVolume(fogGrid);
+        MeshPtr proxy = makeBoxMesh(Vec3(1.2f));
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        InstanceData inst;
+        inst.meshIndex = s->addMesh(proxy);
+        inst.volumeIndex = vi;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 2;
+        med.volumeIndex = vi;
+        med.density = 1.0f;
+        med.sigmaA = Vec3(0.2f);
+        med.sigmaS = Vec3(1.0f);
+        inst.mediumIndex = s->addMedium(med);
+        s->instances.push_back(inst);
+        s->finalize();
+        const SceneView view = s->view();
+        Rng rngTr(42u, 7u);
+        Vec3 TrAcc(0.0f);
+        constexpr int kTrSamples = 256;
+        for (int i = 0; i < kTrSamples; ++i) {
+            const Vec3 sample =
+                shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(1, 0, 0), 10.0f, rngTr);
+            TrAcc = TrAcc + sample;
+            check(sample.x <= 1.02f && sample.y <= 1.02f && sample.z <= 1.02f,
+                  "Fog ratio-tracking Tr sample does not exceed 1");
+        }
+        const Vec3 Tr = TrAcc * (1.0f / float(kTrSamples));
+        check(Tr.x < 0.95f && Tr.y < 0.95f && Tr.z < 0.95f,
+              "Fog ratio-tracking Tr attenuates through the volume");
+        check(Tr.x > 0.0f, "Fog Tr mean is not fully opaque for this density");
+        Rng rngMiss(99u, 3u);
+        Vec3 missAcc(0.0f);
+        for (int i = 0; i < 64; ++i)
+            missAcc =
+                missAcc + shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(0, 1, 0), 10.0f, rngMiss);
+        const Vec3 TrMiss = missAcc * (1.0f / 64.0f);
+        check(TrMiss.x > 0.99f && TrMiss.y > 0.99f && TrMiss.z > 0.99f,
+              "Fog Tr ~1 when the ray misses the AABB");
     }
 #else
     std::printf("  (OpenVDB disabled in this build — skipping volume checks)\n");
@@ -4647,6 +5967,13 @@ int main() {
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
+    if (getenv("SOL_ONLY_DOME")) {
+        registerBuiltinNodes();
+        testDomeHdrLoad();
+        testAcesTextureConvert();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (getenv("SOL_ONLY_VDB")) {
         registerBuiltinNodes();
         testNgonTriangulateAndVdb();
@@ -4691,6 +6018,9 @@ int main() {
     testPolyOpticsApertureSpread();
     testPolynomialOpticsCamera();
     testEnvironment();
+    testDomeHdrLoad();
+    testPhysicalSkyLight();
+    testAcesTextureConvert();
     testRender();
     testCausticsGlassSphere();
     testBdptCausticThroughRefraction();

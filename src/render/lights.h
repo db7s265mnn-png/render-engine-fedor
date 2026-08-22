@@ -1,4 +1,6 @@
-// Light sampling shared by the Embree and OptiX integrators.
+// Light sampling shared by the Embree integrator and the OptiX shade kernels.
+// Volume NEE / light-BVH stay CPU-only (`#if !SOLSTICE_OPTIX_KERNEL`):
+// nvcc must not instantiate those helpers in the GPU shade modules.
 //
 // Conventions (matching Houdini/USD): rect and disk lights live in the XY plane
 // of their transform and emit along -Z, distant lights travel along -Z, sphere
@@ -11,6 +13,10 @@
 
 namespace sol {
 
+// Half-angle (radians) below this is a Dirac distant light: pdf 1, Le = irradiance.
+// Physical Sky Angular Size 0.01° is 8.7e-5 rad and must stay a finite cone.
+constexpr float kDistantDeltaHalfRad = 1e-8f;
+
 struct LightSample {
     Vec3 wi{0.0f, 1.0f, 0.0f};       // direction from the shading point to the light
     Vec3 radiance{0.0f, 0.0f, 0.0f}; // incident radiance
@@ -18,6 +24,44 @@ struct LightSample {
     float pdf = 0.0f;                // solid angle pdf of this light (light choice excluded)
     bool delta = false;
 };
+
+SR_INL SR_HD bool lightIsInfinite(const LightData& l) {
+    return l.type == kLightDome || l.type == kLightDistant;
+}
+
+// Resampled importance sampling (RIS): M cheap light candidates, one shadow ray.
+// Pick candidate i with probability w_i / Σw; unbiased estimator is
+// vis(Y) · (Σw) / M · (rgb_Y / w_Y). See Talbot 2005 / Bitterli ReSTIR.
+constexpr int kRisCandidates = 8;
+#if !defined(SOLSTICE_OPTIX_KERNEL)
+// Volume NEE: env CDF ignores HG, so high anisotropy needs more unshadowed
+// probes (still one shadow ray). g=0 keeps M=8; g≥0.8 uses the full 64.
+constexpr int kVolumeRisMax = 64;
+// Below this |g|, volume light picking is flux-only (matches surface NEE / BVH).
+constexpr float kVolumeProductGMin = 0.01f;
+// Floor on 4π·HG so the sun stays sampleable in the HG tail (at most 20× underweight).
+constexpr float kVolumeProductHgFloor = 0.05f;
+
+SR_INL SR_HD int volumeRisCandidateCount(float g) {
+    const float ag = fabsf(g);
+    if (ag < 0.25f) return kRisCandidates;
+    if (ag < 0.55f) return 16;
+    if (ag < 0.80f) return 32;
+    return kVolumeRisMax;
+}
+#endif
+
+SR_INL SR_HD int risPick(const float* w, int n, float u, float& wSum) {
+    wSum = 0.0f;
+    for (int i = 0; i < n; ++i) wSum += w[i];
+    if (wSum <= 1e-20f || n <= 0) return -1;
+    float x = u * wSum;
+    for (int i = 0; i < n; ++i) {
+        x -= w[i];
+        if (x <= 0.0f) return i;
+    }
+    return n - 1;
+}
 
 SR_INL SR_HD bool lightContributesCaustics(const LightData& l) { return l.contributeCaustics != 0; }
 
@@ -31,6 +75,14 @@ SR_INL SR_HD Vec3 envTexel(const EnvMapView& env, int x, int y) {
     y = y < 0 ? 0 : (y >= env.height ? env.height - 1 : y);
     const float* p = env.pixels + (size_t(y) * size_t(env.width) + size_t(x)) * 4;
     return Vec3(p[0], p[1], p[2]);
+}
+
+SR_INL SR_HD void envDirectionToTexel(const EnvMapView& env, Vec3 dirLocal, int& x, int& y) {
+    const Vec2 uv = directionToEquirect(normalize(dirLocal));
+    x = int(uv.x * float(env.width));
+    y = int(uv.y * float(env.height));
+    x = x < 0 ? 0 : (x >= env.width ? env.width - 1 : x);
+    y = y < 0 ? 0 : (y >= env.height ? env.height - 1 : y);
 }
 
 SR_INL SR_HD Vec3 envLookup(const EnvMapView& env, Vec3 dirLocal) {
@@ -51,6 +103,15 @@ SR_INL SR_HD Vec3 envLookup(const EnvMapView& env, Vec3 dirLocal) {
     const Vec3 c01 = envTexel(env, xa, y0 + 1);
     const Vec3 c11 = envTexel(env, xb, y0 + 1);
     return lerp(lerp(c00, c10, tx), lerp(c01, c11, tx), ty);
+}
+
+// Discrete texel that owns `envPdf` — NEE must use this, not bilinear. Mixing a
+// dark sampled texel with a neighbouring sun texel is the classic HDRI firefly.
+SR_INL SR_HD Vec3 envLookupNearest(const EnvMapView& env, Vec3 dirLocal) {
+    if (!env.valid()) return Vec3(0.0f);
+    int x = 0, y = 0;
+    envDirectionToTexel(env, dirLocal, x, y);
+    return envTexel(env, x, y);
 }
 
 SR_INL SR_HD int cdfFindInterval(const float* cdf, int size, float u) {
@@ -78,10 +139,8 @@ SR_INL SR_HD float envPdf(const EnvMapView& env, Vec3 dirLocal) {
     const Vec2 uv = directionToEquirect(normalize(dirLocal));
     const float sinTheta = sinf(clampf(uv.y, 0.0f, 1.0f) * kPi);
     if (sinTheta <= 0.0f) return 0.0f;
-    int x = int(uv.x * float(env.width));
-    int y = int(uv.y * float(env.height));
-    x = x < 0 ? 0 : (x >= env.width ? env.width - 1 : x);
-    y = y < 0 ? 0 : (y >= env.height ? env.height - 1 : y);
+    int x = 0, y = 0;
+    envDirectionToTexel(env, dirLocal, x, y);
     const float funcValue = env.func[size_t(y) * size_t(env.width) + size_t(x)];
     const float pdfUv = funcValue / env.integral;
     return pdfUv / (kTwoPi * kPi * sinTheta);
@@ -181,13 +240,16 @@ SR_INL SR_HD Vec3 areaLightNormal(const LightData& l) {
 }
 
 // Radiance of the dome light for a world space direction.
-SR_INL SR_HD Vec3 domeRadiance(const SceneView& scene, const LightData& l, Vec3 dirWorld) {
+// `nearestTexel`: must match `envPdf` (NEE / MIS after a bounce). Camera rays
+// keep bilinear so a 1-pixel sun disc does not look like a stair.
+SR_INL SR_HD Vec3 domeRadiance(const SceneView& scene, const LightData& l, Vec3 dirWorld,
+                               bool nearestTexel = false) {
     Vec3 tint = l.emittedRadiance();
     if (l.envIndex >= 0 && l.envIndex < scene.envMapCount) {
         const EnvMapView& env = scene.envMaps[l.envIndex];
         if (env.valid()) {
             const Vec3 dirLocal = normalize(transformVector(l.xformInv, dirWorld));
-            return tint * envLookup(env, dirLocal);
+            return tint * (nearestTexel ? envLookupNearest(env, dirLocal) : envLookup(env, dirLocal));
         }
     }
     return tint;
@@ -212,7 +274,7 @@ SR_INL SR_HD bool sampleLight(const SceneView& scene, int lightIndex, Vec3 refP,
             const Vec3 axis = normalize(lightAxisZ(l));
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
             out.distance = kFloatMax;
-            if (halfAngle < 1e-4f) {
+            if (halfAngle < kDistantDeltaHalfRad) {
                 out.wi = axis;
                 out.pdf = 1.0f;
                 out.delta = true;
@@ -328,7 +390,14 @@ SR_INL SR_HD bool sampleLight(const SceneView& scene, int lightIndex, Vec3 refP,
             out.distance = kFloatMax;
             out.pdf = pdf;
             out.delta = false;
-            out.radiance = domeRadiance(scene, l, dirWorld);
+            // Camera rays keep bilinear domeRadiance; NEE uses the discrete PDF texel.
+            Vec3 tint = l.emittedRadiance();
+            if (l.envIndex >= 0 && l.envIndex < scene.envMapCount &&
+                scene.envMaps[l.envIndex].valid()) {
+                out.radiance = tint * envLookupNearest(scene.envMaps[l.envIndex], dirLocal);
+            } else {
+                out.radiance = tint;
+            }
             return true;
         }
         default: return false;
@@ -368,7 +437,7 @@ SR_INL SR_HD float lightPdfDirection(const SceneView& scene, int lightIndex, Vec
         }
         case kLightDistant: {
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
-            if (halfAngle < 1e-4f) return 0.0f;
+            if (halfAngle < kDistantDeltaHalfRad) return 0.0f;
             const float cosThetaMax = cosf(halfAngle);
             if (dot(normalize(lightAxisZ(l)), wi) < cosThetaMax) return 0.0f;
             return 1.0f / (kTwoPi * (1.0f - cosThetaMax));
@@ -404,7 +473,10 @@ SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
         }
         case kLightDistant: {
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
-            if (halfAngle < 1e-4f) return intens;
+            if (halfAngle < kDistantDeltaHalfRad) return intens;
+            // normalize=1: intensity is irradiance (Karma / Physical Sky). Multiplying
+            // by the disc solid angle underweights the sun vs a dome by ~1/ω (~15000×).
+            if (l.normalize) return intens;
             return intens * srMax(1e-6f, kTwoPi * (1.0f - cosf(halfAngle)));
         }
         case kLightPoint:
@@ -413,6 +485,38 @@ SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
             return intens;
     }
 }
+
+#if !defined(SOLSTICE_OPTIX_KERNEL)
+// 4π · HG(cos, g). Equals 1 at g = 0 so flux weights are unchanged.
+SR_INL SR_HD float henyeyGreensteinFourPi(float cosTheta, float g) {
+    const float g2 = g * g;
+    const float denom = 1.0f + g2 - 2.0f * g * cosTheta;
+    return (1.0f - g2) / srMax(1e-6f, denom * sqrtf(srMax(1e-6f, denom)));
+}
+
+// Volume NEE light pick: flux × 4π·HG(wo, lightDir). Dome stays flux (HG averages
+// to 1/4π). Walk / continuation phase is unchanged — this is proposal only.
+SR_INL SR_HD float volumeLightSelectionWeight(const SceneView& scene, int lightIndex, Vec3 refP, Vec3 wo,
+                                              float g) {
+    const float flux = lightFluxWeight(scene, lightIndex);
+    if (flux <= 0.0f) return 0.0f;
+    if (fabsf(g) < kVolumeProductGMin) return flux;
+    if (lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
+    const LightData& l = scene.lights[lightIndex];
+    if (l.type == kLightDome) return flux;
+    Vec3 toL(0.0f);
+    if (l.type == kLightDistant) {
+        toL = normalize(lightAxisZ(l));
+    } else {
+        toL = lightOrigin(l) - refP;
+        const float d2 = lengthSquared(toL);
+        if (d2 <= 1e-12f) return flux;
+        toL = toL * (1.0f / sqrtf(d2));
+    }
+    const float hg4 = henyeyGreensteinFourPi(clampf(dot(wo, toL), -1.0f, 1.0f), g);
+    return flux * srMax(kVolumeProductHgFloor, hg4);
+}
+#endif  // !SOLSTICE_OPTIX_KERNEL
 
 SR_INL SR_HD float lightSelectionPdf(const SceneView& scene) {
     return scene.lightCount > 0 ? 1.0f / float(scene.lightCount) : 0.0f;
@@ -462,6 +566,7 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
 // ---------------------------------------------------------------------------
 // BVH-accelerated light sampling (position-aware importance)
 // ---------------------------------------------------------------------------
+#if !defined(SOLSTICE_OPTIX_KERNEL)
 
 // Importance of a BVH node from refP. Uses distance to the AABB *center*
 // softened by the node's extent — not min-distance-to-box (that is zero under
@@ -498,6 +603,7 @@ SR_INL SR_HD bool bvhContainsLight(const LightBvhNode* nodes, int nodeCount,
     }
     return false;
 }
+#endif  // !SOLSTICE_OPTIX_KERNEL
 
 // Position-aware light selection via the prebuilt BVH (center+extent importance).
 // Infinite lights (dome/distant) are weighted by flux and kept outside the BVH.
@@ -506,6 +612,11 @@ SR_INL SR_HD bool bvhContainsLight(const LightBvhNode* nodes, int nodeCount,
 SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, float& pdf) {
     if (scene.lightCount <= 0) { pdf = 0.f; return -1; }
 
+#if defined(SOLSTICE_OPTIX_KERNEL)
+    // GPU PT: no light BVH uploaded. Flux table only.
+    (void)refP;
+    return sampleLightIndex(scene, u, pdf);
+#else
     if (!scene.lightBvh || scene.lightBvhNodeCount == 0)
         return sampleLightIndex(scene, u, pdf);
 
@@ -567,11 +678,16 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, fl
     pdf = travPdf;
     if (pdf <= 0.f) { pdf = 0.f; return -1; }
     return scene.lightBvh[nodeIdx].childOrLight;
+#endif
 }
 
 // Position-aware selection PDF for a specific light index.
 // Must be called with the same `refP` used during sampling for MIS correctness.
 SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int lightIndex) {
+#if defined(SOLSTICE_OPTIX_KERNEL)
+    (void)refP;
+    return lightSelectionPdfIndex(scene, lightIndex);
+#else
     if (!scene.lightBvh || scene.lightBvhNodeCount == 0 ||
         lightIndex < 0 || lightIndex >= scene.lightCount)
         return lightSelectionPdfIndex(scene, lightIndex);
@@ -610,6 +726,99 @@ SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int
         }
     }
     return travPdf;
+#endif
+}
+
+#if !defined(SOLSTICE_OPTIX_KERNEL)
+SR_INL SR_HD int sampleVolumeLightIndex(const SceneView& scene, Vec3 refP, Vec3 wo, float g, float u,
+                                        float& pdf) {
+    if (fabsf(g) < kVolumeProductGMin) return sampleLightIndex(scene, refP, u, pdf);
+    if (scene.lightCount <= 0) {
+        pdf = 0.0f;
+        return -1;
+    }
+    float total = 0.0f;
+    for (int i = 0; i < scene.lightCount; ++i)
+        total += volumeLightSelectionWeight(scene, i, refP, wo, g);
+    if (total <= 1e-20f) return sampleLightIndex(scene, refP, u, pdf);
+    float r = clampf(u, 0.0f, 0.999999f) * total;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        const float w = volumeLightSelectionWeight(scene, i, refP, wo, g);
+        if (r < w) {
+            pdf = w / total;
+            return i;
+        }
+        r -= w;
+    }
+    pdf = volumeLightSelectionWeight(scene, scene.lightCount - 1, refP, wo, g) / total;
+    return scene.lightCount - 1;
+}
+
+SR_INL SR_HD float volumeLightSelectionPdfIndex(const SceneView& scene, Vec3 refP, Vec3 wo, float g,
+                                                int lightIndex) {
+    if (fabsf(g) < kVolumeProductGMin) return lightSelectionPdfIndex(scene, refP, lightIndex);
+    if (scene.lightCount <= 0 || lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
+    float total = 0.0f;
+    float chosen = 0.0f;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        const float w = volumeLightSelectionWeight(scene, i, refP, wo, g);
+        total += w;
+        if (i == lightIndex) chosen = w;
+    }
+    if (total <= 1e-20f) return lightSelectionPdfIndex(scene, refP, lightIndex);
+    return chosen / total;
+}
+#endif  // !SOLSTICE_OPTIX_KERNEL
+
+// MIS light-pick pdf: volume continuation vs volume NEE must share HG×sun weights.
+SR_INL SR_HD float lightSelectionPdfIndexMaybeVolume(const SceneView& scene, Vec3 origin, int lightIndex,
+                                                     bool volumePhaseMis, Vec3 woVol, float volumeG) {
+#if defined(SOLSTICE_OPTIX_KERNEL)
+    (void)volumePhaseMis;
+    (void)woVol;
+    (void)volumeG;
+    return lightSelectionPdfIndex(scene, origin, lightIndex);
+#else
+    if (volumePhaseMis)
+        return volumeLightSelectionPdfIndex(scene, origin, woVol, volumeG, lightIndex);
+    return lightSelectionPdfIndex(scene, origin, lightIndex);
+#endif
+}
+
+// Solar disc for Physical Sky distant lights. The baked sky map has no disc
+// (avoids double lighting / HDRI fireflies); camera and glossy rays see this.
+SR_INL SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec3 dirWorld, float bsdfPdf,
+                                        bool specularBounce, bool primary, bool skipNonCausticLights,
+                                        bool volumePhaseMis, Vec3 volumeWo, float volumeG) {
+    Vec3 sum(0.0f);
+    const Vec3 wi = normalize(dirWorld);
+    for (int i = 0; i < scene.lightCount; ++i) {
+        const LightData& l = scene.lights[i];
+        if (l.type != kLightDistant || l.cameraSunDisc == 0) continue;
+        if (primary && l.visibleCamera == 0) continue;
+        if (skipNonCausticLights && !lightContributesCaustics(l)) continue;
+        const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
+        if (halfAngle < kDistantDeltaHalfRad) continue;
+        const Vec3 axis = normalize(lightAxisZ(l));
+        const float cosThetaMax = cosf(halfAngle);
+        if (dot(axis, wi) < cosThetaMax) continue;
+        const Vec3 Le = lightRadiance(l);
+        float weight = 1.0f;
+        if (!specularBounce) {
+            const float lp = lightPdfDirection(scene, i, origin, wi, origin, wi) *
+                             lightSelectionPdfIndexMaybeVolume(scene, origin, i, volumePhaseMis, volumeWo,
+                                                               volumeG);
+            weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
+        }
+        sum += Le * weight;
+    }
+    return sum;
+}
+
+SR_INL SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec3 dirWorld, float bsdfPdf,
+                                        bool specularBounce, bool primary, bool skipNonCausticLights) {
+    return cameraSunDiscRadiance(scene, origin, dirWorld, bsdfPdf, specularBounce, primary,
+                                 skipNonCausticLights, false, Vec3(0.0f, 1.0f, 0.0f), 0.0f);
 }
 
 }  // namespace sol

@@ -216,7 +216,8 @@ SR_INL SR_HD float distancePointToSegment(Vec3 p, Vec3 a, Vec3 b) {
     return length(p - (a + ab * t));
 }
 
-// Screen-space wireframe from triangle edges. Thickness is half-width in pixels.
+// Screen-space wireframe. Prefers the authored cage overlay (n-gon boundaries only);
+// otherwise uses the hit triangle's edges, honoring triEdgeMask to hide diagonals.
 SR_INL SR_HD Vec3 shadeWireframe(const SceneView& scene, const RayHit& hit, const SurfaceInteraction& si,
                                  Vec3 direction) {
     const float thicknessPx = srMax(0.25f, scene.settings.wireframeThickness);
@@ -232,22 +233,6 @@ SR_INL SR_HD Vec3 shadeWireframe(const SceneView& scene, const RayHit& hit, cons
     Mat4 xform, xformInv;
     instanceXformAtTime(scene, inst, hit.time, xform, xformInv);
 
-    const uint32_t i0 = mesh.indices[hit.primIndex * 3 + 0];
-    const uint32_t i1 = mesh.indices[hit.primIndex * 3 + 1];
-    const uint32_t i2 = mesh.indices[hit.primIndex * 3 + 2];
-    if (i0 >= mesh.vertexCount || i1 >= mesh.vertexCount || i2 >= mesh.vertexCount)
-        return Vec3(0.05f);
-    const Vec3 p0 =
-        transformPoint(xform, meshPositionAtTime(mesh, i0, hit.time));
-    const Vec3 p1 =
-        transformPoint(xform, meshPositionAtTime(mesh, i1, hit.time));
-    const Vec3 p2 =
-        transformPoint(xform, meshPositionAtTime(mesh, i2, hit.time));
-
-    const float dEdge = srMin(distancePointToSegment(si.p, p0, p1),
-                              srMin(distancePointToSegment(si.p, p1, p2),
-                                    distancePointToSegment(si.p, p2, p0)));
-
     const float resX = float(srMax(1, scene.settings.resolutionX));
     const float resY = float(srMax(1, scene.settings.resolutionY));
     const float sensorH = scene.camera.sensorWidth * (resY / resX);
@@ -255,9 +240,66 @@ SR_INL SR_HD Vec3 shadeWireframe(const SceneView& scene, const RayHit& hit, cons
     const float pixelWorld = srMax(1e-8f, hit.t) * pixelAngle;
     const float halfW = thicknessPx * pixelWorld;
     const float aa = 0.5f * pixelWorld;
+    const float searchR = halfW + aa + pixelWorld;
+
+    float dEdge = 1.0e30f;
+    bool haveEdge = false;
+
+    // Cage overlay: authored face boundaries only (never triangulation diagonals /
+    // micropolygon edges). Cage-sized — safe to scan near the hit.
+    if (mesh.wireEdgeCount > 0 && mesh.wireIndices && mesh.wirePositions && mesh.wireVertexCount > 0) {
+        for (uint32_t e = 0; e < mesh.wireEdgeCount; ++e) {
+            const uint32_t a = mesh.wireIndices[e * 2 + 0];
+            const uint32_t b = mesh.wireIndices[e * 2 + 1];
+            if (a >= mesh.wireVertexCount || b >= mesh.wireVertexCount) continue;
+            const Vec3 wa = transformPoint(xform, mesh.wirePositions[a]);
+            const Vec3 wb = transformPoint(xform, mesh.wirePositions[b]);
+            // Cheap reject: skip edges whose endpoints are both far from the hit.
+            const float da = lengthSquared(si.p - wa);
+            const float db = lengthSquared(si.p - wb);
+            const float r2 = searchR * searchR;
+            if (da > r2 && db > r2) {
+                // Still check if the segment passes near the hit (midpoint / projection).
+                const float dSeg = distancePointToSegment(si.p, wa, wb);
+                if (dSeg > searchR) continue;
+                dEdge = srMin(dEdge, dSeg);
+                haveEdge = true;
+                continue;
+            }
+            dEdge = srMin(dEdge, distancePointToSegment(si.p, wa, wb));
+            haveEdge = true;
+        }
+    }
+
+    if (!haveEdge) {
+        // Fallback: edges of the hit triangle, filtered by authored-boundary mask.
+        const uint32_t i0 = mesh.indices[hit.primIndex * 3 + 0];
+        const uint32_t i1 = mesh.indices[hit.primIndex * 3 + 1];
+        const uint32_t i2 = mesh.indices[hit.primIndex * 3 + 2];
+        if (i0 >= mesh.vertexCount || i1 >= mesh.vertexCount || i2 >= mesh.vertexCount)
+            return Vec3(0.05f);
+        const Vec3 p0 = transformPoint(xform, meshPositionAtTime(mesh, i0, hit.time));
+        const Vec3 p1 = transformPoint(xform, meshPositionAtTime(mesh, i1, hit.time));
+        const Vec3 p2 = transformPoint(xform, meshPositionAtTime(mesh, i2, hit.time));
+        uint8_t mask = 7u;
+        if (mesh.triEdgeMask) mask = mesh.triEdgeMask[hit.primIndex];
+        if (mask & 1u) {
+            dEdge = srMin(dEdge, distancePointToSegment(si.p, p0, p1));
+            haveEdge = true;
+        }
+        if (mask & 2u) {
+            dEdge = srMin(dEdge, distancePointToSegment(si.p, p1, p2));
+            haveEdge = true;
+        }
+        if (mask & 4u) {
+            dEdge = srMin(dEdge, distancePointToSegment(si.p, p2, p0));
+            haveEdge = true;
+        }
+    }
+
     // 1 on the edge centerline → 0 outside the stroke (+AA).
     float edge = 0.0f;
-    {
+    if (haveEdge) {
         const float lo = srMax(0.0f, halfW - aa);
         const float hi = halfW + aa;
         if (dEdge <= lo) {
@@ -577,13 +619,18 @@ struct NullGuiding {
     SR_INL SR_HD bool active() const { return false; }
     SR_INL SR_HD float guideProbability() const { return 0.0f; }
     SR_INL SR_HD bool prepared() const { return false; }
+    SR_INL SR_HD bool preparedVolume() const { return false; }
     SR_INL SR_HD bool prepare(Vec3, Vec3, Rng&) { return false; }
     SR_INL SR_HD float pdf(Vec3) const { return 0.0f; }
     SR_INL SR_HD bool sample(float, float, Vec3&, float&) const { return false; }
+    SR_INL SR_HD bool prepareVolume(Vec3, Vec3, float, Rng&) { return false; }
+    SR_INL SR_HD float pdfVolume(Vec3) const { return 0.0f; }
+    SR_INL SR_HD bool sampleVolume(float, float, Vec3&, float&) const { return false; }
     SR_INL SR_HD void beginSegment(Vec3, Vec3) {}
+    SR_INL SR_HD void beginVolumeSegment(Vec3, Vec3) {}
     SR_INL SR_HD void recordEmission(Vec3, float) {}
     SR_INL SR_HD void addScattered(Vec3) {}
-    SR_INL SR_HD void recordBounce(Vec3, Vec3, float, Vec3, bool, float, float, float) {}
+    SR_INL SR_HD void recordBounce(Vec3, Vec3, float, Vec3, bool, float, float, float, bool = false) {}
     SR_INL SR_HD void setRussianRoulette(float) {}
     SR_INL SR_HD void recordBackground(Vec3, Vec3, Vec3, float) {}
     SR_INL SR_HD void recordLightHit(Vec3, Vec3, Vec3, float) {}
@@ -618,9 +665,17 @@ SR_INL SR_HD float lightTraceSplatClamp(const RenderSettingsData& settings) {
 // Multi-hit shadow visibility (Embree filter-function style): opaque surfaces
 // block fully; transmissive surfaces attenuate by Material::shadowOpacity when
 // refractive caustics are enabled (MaterialX / Arnold fake-caustics control).
+// VDB: SDF level sets are hard occluders (tested against the field, not the AABB
+// proxy). Fog AABBs are skipped here — soft Tr is applied via ratio tracking
+// (shadowTransmittanceFogVolumes, PBRT §11.2.1 / VolPath §14.2.2).
 template <typename Tracer>
 SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 dir,
                                     float tMax) {
+#if !defined(__CUDACC__)
+    // Field-based SDF cast / self shadow (works from inside the AABB too).
+    if (shadowOccludedBySdfVolumes(scene, origin, dir, tMax)) return 0.0f;
+#endif
+
     float visibility = 1.0f;
     Vec3 o = origin;
     float remaining = tMax;
@@ -634,6 +689,22 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
 
         // Reached light proxy geometry along the shadow segment — connection ok.
         if (si.lightIndex >= 0) return visibility;
+
+        // Volume AABB proxies exist only to enter SDF/fog on camera rays. They must
+        // not occlude NEE / shadow connections (shadowVisibility uses primary-mask
+        // intersect, so Embree visibilityMask alone cannot skip them).
+        // SDF occlusion is handled by shadowOccludedBySdfVolumes above; fog Tr is
+        // applied separately in NEE via shadowTransmittanceFogVolumes.
+        if (si.instanceIndex >= 0 && si.instanceIndex < scene.instanceCount) {
+            const InstanceData& hitInst = scene.instances[si.instanceIndex];
+            if (hitInst.volumeIndex >= 0) {
+                const Vec3 p = o + dir * hit.t;
+                o = offsetRayOrigin(p, si.ng, dir);
+                remaining -= hit.t;
+                if (remaining <= 1e-4f) return visibility;
+                continue;
+            }
+        }
 
         Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Shadow);
         // Opaque-glass when caustics estimators own transport (caustics / specular_transmission slot).
@@ -668,54 +739,169 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
-    float selectPdf = 0.0f;
-    const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
-    if (lightIndex < 0 || selectPdf <= 0.0f) return result;
-
-    LightSample ls;
-    if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) return result;
-    if (ls.pdf <= 0.0f || isBlack(ls.radiance)) return result;
-    // The shading normal may claim the light is visible from a side the geometry
-    // does not expose; such a shadow ray starts inside the surface.
-    if (!shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) return result;
+    const Vec3 woLocal = frame.toLocal(wo);
+    LightSample cands[kRisCandidates];
+    int lis[kRisCandidates];
+    float selPdfs[kRisCandidates];
+    Vec3 rgb[kRisCandidates];
+    float scatterPdfs[kRisCandidates];
+    float ws[kRisCandidates];
+    int nOk = 0;
+    for (int i = 0; i < kRisCandidates; ++i) {
+        float selectPdf = 0.0f;
+        const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
+        if (lightIndex < 0 || selectPdf <= 0.0f) continue;
+        LightSample ls;
+        if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) continue;
+        if (ls.pdf <= 0.0f || isBlack(ls.radiance)) continue;
+        if (!shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) continue;
+        const Vec3 wiLocal = frame.toLocal(ls.wi);
+        const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
+        if (be.pdf <= 0.0f || isBlack(be.f)) continue;
+        float scatterPdf = be.pdf;
+#if !defined(__CUDACC__)
+        if (guiding && guiding->active() && guiding->prepared()) {
+            const float pg = guiding->guideProbability();
+            const float gPdf = guiding->pdf(ls.wi);
+            scatterPdf = pg * gPdf + (1.0f - pg) * be.pdf;
+        }
+#else
+        (void)guiding;
+#endif
+        const float lightPdf = ls.pdf * selectPdf;
+        const Vec3 unshadowed = ls.radiance * be.f * (fabsf(wiLocal.z) / lightPdf);
+        const float w = luminance(vmax(unshadowed, Vec3(0.0f)));
+        if (w <= 1e-20f) continue;
+        cands[nOk] = ls;
+        lis[nOk] = lightIndex;
+        selPdfs[nOk] = selectPdf;
+        rgb[nOk] = unshadowed;
+        scatterPdfs[nOk] = scatterPdf;
+        ws[nOk] = w;
+        ++nOk;
+    }
+    float wSum = 0.0f;
+    const int pick = risPick(ws, nOk, rng.nextFloat(), wSum);
+    if (pick < 0) return result;
+    const LightSample& ls = cands[pick];
+    const int lightIndex = lis[pick];
 
     float visibility = 1.0f;
+    Vec3 shadowOrigin = si.p;
+    float tMax = 1.0e8f;
     if (scene.lights[lightIndex].shadowEnable) {
-        const Vec3 shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
-        // Use a large finite tMax for distant/dome lights — Embree is more stable
-        // with that than with FLT_MAX, and it still reaches any scene geometry.
-        float tMax = 1.0e8f;
+        shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
         if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-        // Transparent / fake-caustic shadows: walk interfaces with shadow_opacity
-        // (Embree-style multi-hit visibility instead of binary rtcOccluded).
         visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax);
         if (visibility <= 1e-5f) return result;
     }
 
-    const Vec3 woLocal = frame.toLocal(wo);
-    const Vec3 wiLocal = frame.toLocal(ls.wi);
-    const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
-    if (be.pdf <= 0.0f || isBlack(be.f)) return result;
+    const float lightPdf = ls.pdf * selPdfs[pick];
+    const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdfs[pick]);
+    // RIS: vis * rgb_pick * (Σw) / (M * w_pick). Failed candidates are zeros in the M slots.
+    result = rgb[pick] * (visibility * misWeight * wSum / (float(kRisCandidates) * ws[pick]));
 
-    float scatterPdf = be.pdf;
 #if !defined(__CUDACC__)
-    if (guiding && guiding->active() && guiding->prepared()) {
+    if (scene.lights[lightIndex].shadowEnable)
+        result = result * shadowTransmittanceFogVolumes(scene, shadowOrigin, ls.wi, tMax, rng);
+#endif
+    if (const MediumData* med = getMedium(scene, mediumIndex)) {
+        if (med->type != 2 && ls.distance < 1.0e7f) result = result * mediumShadowTr(*med, ls.distance);
+    }
+    return result;
+}
+
+// Continuation pdf at a volume vertex: HG, mixed with OpenPGL volume×HG when
+// Indirect Guides is on and the volume field has trained.
+template <typename Guiding>
+SR_INL SR_HD float volumeScatterPdf(Vec3 woVol, Vec3 wi, const MediumData& med, Guiding* guiding) {
+    const float phasePdf = henyeyGreenstein(clampf(dot(woVol, wi), -1.0f, 1.0f), med.g);
+#if !defined(__CUDACC__)
+    if (guiding && guiding->active() && guiding->preparedVolume()) {
         const float pg = guiding->guideProbability();
-        const float gPdf = guiding->pdf(ls.wi);
-        scatterPdf = pg * gPdf + (1.0f - pg) * be.pdf;
+        return pg * guiding->pdfVolume(wi) + (1.0f - pg) * phasePdf;
     }
 #else
     (void)guiding;
 #endif
+    return phasePdf;
+}
 
-    const float lightPdf = ls.pdf * selectPdf;
-    const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
-    result = ls.radiance * be.f * (fabsf(wiLocal.z) * misWeight / lightPdf) * visibility;
-    // Homogeneous medium transmittance along the shadow segment (finite lights).
-    if (const MediumData* med = getMedium(scene, mediumIndex)) {
-        if (ls.distance < 1.0e7f) result = result * mediumShadowTr(*med, ls.distance);
+// Volume NEE: M light candidates scored by phase·Le/pdf (product via RIS), one
+// shadow ray. M grows with |g| because the env CDF does not see the HG peak.
+// Light *selection* is flux × 4π·HG(wo, sun) so the sun is proposed when it
+// sits in the HG lobe. Continuation / walk phase stays vanilla HG.
+template <typename Tracer, typename Guiding>
+SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
+                                                Vec3 woVol, const MediumData& med, Rng& rng,
+                                                Guiding* guiding, bool allowInfiniteLights = true) {
+    Vec3 result(0.0f);
+    if (scene.lightCount <= 0) return result;
+
+    const int nCand = volumeRisCandidateCount(med.g);
+    LightSample cands[kVolumeRisMax];
+    int lis[kVolumeRisMax];
+    float selPdfs[kVolumeRisMax];
+    Vec3 rgb[kVolumeRisMax];
+    float scatterPdfs[kVolumeRisMax];
+    float ws[kVolumeRisMax];
+    int nOk = 0;
+    for (int i = 0; i < nCand; ++i) {
+        float selectPdf = 0.0f;
+        const int li = sampleVolumeLightIndex(scene, origin, woVol, med.g, rng.nextFloat(), selectPdf);
+        if (li < 0 || selectPdf <= 0.0f) continue;
+        if (!allowInfiniteLights && lightIsInfinite(scene.lights[li])) continue;
+        LightSample ls;
+        if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
+            isBlack(ls.radiance))
+            continue;
+        const float cosTheta = clampf(dot(woVol, ls.wi), -1.0f, 1.0f);
+        const float phasePdfL = henyeyGreenstein(cosTheta, med.g);
+        if (phasePdfL <= 0.0f) continue;
+        const float lightPdf = ls.pdf * selectPdf;
+        const Vec3 unshadowed = ls.radiance * (phasePdfL / lightPdf);
+        const float w = luminance(vmax(unshadowed, Vec3(0.0f)));
+        if (w <= 1e-20f) continue;
+        cands[nOk] = ls;
+        lis[nOk] = li;
+        selPdfs[nOk] = selectPdf;
+        rgb[nOk] = unshadowed;
+        scatterPdfs[nOk] = volumeScatterPdf(woVol, ls.wi, med, guiding);
+        ws[nOk] = w;
+        ++nOk;
     }
+    float wSum = 0.0f;
+    const int pick = risPick(ws, nOk, rng.nextFloat(), wSum);
+    if (pick < 0) return result;
+    const LightSample& ls = cands[pick];
+    const int li = lis[pick];
+
+    float vis = 1.0f;
+    float tShadow = 1.0e8f;
+    if (scene.lights[li].shadowEnable) {
+        if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
+        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
+        if (vis <= 1e-5f) return result;
+    }
+
+    const float lightPdf = ls.pdf * selPdfs[pick];
+    const float misW = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdfs[pick]);
+    result = rgb[pick] * (vis * misW * wSum / (float(nCand) * ws[pick]));
+
+#if !defined(__CUDACC__)
+    if (scene.lights[li].shadowEnable)
+        result = result * shadowTransmittanceFogVolumes(scene, origin, ls.wi, tShadow, rng);
+#endif
+    if (med.type != 2 && ls.distance < 1.0e7f) result = result * mediumShadowTr(med, ls.distance);
     return result;
+}
+
+template <typename Tracer>
+SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
+                                                Vec3 woVol, const MediumData& med, Rng& rng,
+                                                bool allowInfiniteLights = true) {
+    return nextEventEstimationVolumeOnce<Tracer, NullGuiding>(scene, tracer, origin, woVol, med, rng,
+                                                              nullptr, allowInfiniteLights);
 }
 
 template <typename Tracer, typename Guiding>
@@ -752,6 +938,13 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     bool causticSuffix = false;
     int depth = 0;
     int passThrough = 0;
+    int volumeScatterCount = 0;
+    // Last volume scatter (for MIS vs HG×sun volume NEE). Cleared on surface BSDF.
+    bool volumePhaseMis = false;
+    Vec3 volumeMisWo{0.0f, 1.0f, 0.0f};
+    float volumeMisG = 0.0f;
+    // Infinite-light NEE / env MIS wait until a scatter in dense occupancy.
+    bool hadRealVolumeScatter = false;
     // Homogeneous medium currently surrounding the ray (-1 = vacuum).
     int currentMedium = -1;
     // Arnold ray_switch: incoming ray type selects the surfaceshader port.
@@ -765,18 +958,57 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 
         // Null-scattering / delta tracking through the active medium (homogeneous or VDB fog).
         if (const MediumData* med = getMedium(scene, currentMedium)) {
-            const float tMax = didHit ? hit.t : 1.0e6f;
+            float tMax = didHit ? hit.t : 1.0e6f;
             MediumSample ms;
+            MediumData medWalk = *med;
+            if (settings.volumeSimilarity != 0)
+                medWalk = mediumWithVolumeSimilarity(*med, volumeScatterCount);
 #if !defined(__CUDACC__)
-            if (med->type == 2 && med->volumeIndex >= 0 && med->volumeIndex < scene.volumeCount &&
-                scene.volumes && scene.volumes[med->volumeIndex]) {
-                ms = sampleMediumVdbFog(*scene.volumes[med->volumeIndex], *med, origin, direction, tMax, rng,
-                                        throughput);
+            if (medWalk.type == 2 && medWalk.volumeIndex >= 0 && medWalk.volumeIndex < scene.volumeCount &&
+                scene.volumes && scene.volumes[medWalk.volumeIndex]) {
+                // Prefer analytical AABB exit over Embree proxy (exit face is easy to miss).
+                const VolumeGrid& fogVol = *scene.volumes[medWalk.volumeIndex];
+                const Bounds3 bb = fogVol.worldBounds();
+                if (bb.valid()) {
+                    float tEnter = 0.0f;
+                    float tExit = tMax;
+                    const float* o = &origin.x;
+                    const float* d = &direction.x;
+                    const float* lo = &bb.lo.x;
+                    const float* hi = &bb.hi.x;
+                    bool hitAabb = true;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        const float od = d[axis];
+                        if (fabsf(od) < 1e-20f) {
+                            if (o[axis] < lo[axis] || o[axis] > hi[axis]) {
+                                hitAabb = false;
+                                break;
+                            }
+                            continue;
+                        }
+                        float inv = 1.0f / od;
+                        float ta = (lo[axis] - o[axis]) * inv;
+                        float tb = (hi[axis] - o[axis]) * inv;
+                        if (ta > tb) {
+                            const float tmp = ta;
+                            ta = tb;
+                            tb = tmp;
+                        }
+                        tEnter = srMax(tEnter, ta);
+                        tExit = srMin(tExit, tb);
+                        if (tEnter > tExit) {
+                            hitAabb = false;
+                            break;
+                        }
+                    }
+                    if (hitAabb && tExit >= 0.0f) tMax = srMin(tMax, tExit);
+                }
+                ms = sampleMediumVdbFog(fogVol, medWalk, origin, direction, tMax, rng, throughput);
             } else {
-                ms = sampleMediumHomogeneous(*med, tMax, rng, throughput);
+                ms = sampleMediumHomogeneous(medWalk, tMax, rng, throughput);
             }
 #else
-            ms = sampleMediumHomogeneous(*med, tMax, rng, throughput);
+            ms = sampleMediumHomogeneous(medWalk, tMax, rng, throughput);
 #endif
             if (ms.absorbed || isBlack(throughput)) break;
             if (ms.scattered) {
@@ -784,75 +1016,159 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #if !defined(__CUDACC__)
                 if (!isBlack(med->emission)) radiance += throughput * med->emission;
 #endif
-                float phasePdf = 0.0f;
+                // Incident direction toward the previous vertex (phase frame).
                 const Vec3 woVol = -direction;
-                direction = sampleHenyeyGreenstein(woVol, med->g, rng.nextFloat(), rng.nextFloat(),
-                                                   phasePdf);
-                // Volume next-event: sample a light and apply phase * Tr * MIS-free estimate.
+                volumePhaseMis = true;
+                volumeMisWo = woVol;
+                volumeMisG = medWalk.g;
+
+#if !defined(__CUDACC__)
+                if (guiding && guiding->active()) {
+                    guiding->beginVolumeSegment(origin, woVol);
+                    guiding->prepareVolume(origin, woVol, medWalk.g, rng);
+                }
+#endif
+
+                if (ms.dense) hadRealVolumeScatter = true;
+
+                // Volume next-event estimation with MIS vs phase sampling (PBRT VolPath).
+                // Unbiased: light strategy weight = powerHeuristic(pdf_light, pdf_phase);
+                // the phase→light strategy is the continuing path (MIS on light hits below).
+                // No extra firefly clamp beyond the user-authored clampDirect (0 = off).
                 if (scene.lightCount > 0 && depth < maxDepth) {
-                    float selectPdf = 0.0f;
-                    const int li = sampleLightIndex(scene, origin, rng.nextFloat(), selectPdf);
-                    if (li >= 0 && selectPdf > 0.0f) {
-                        LightSample ls;
-                        if (sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) &&
-                            ls.pdf > 0.0f && !isBlack(ls.radiance)) {
-                            float vis = 1.0f;
-                            if (scene.lights[li].shadowEnable) {
-                                float tShadow = 1.0e8f;
-                                if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
-                                vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
-                            }
-                            if (vis > 1e-5f) {
-                                const float cosTheta = clampf(dot(woVol, ls.wi), -1.0f, 1.0f);
-                                const float p = henyeyGreenstein(cosTheta, med->g);
-                                Vec3 contrib =
-                                    throughput * ls.radiance * (p * vis / (ls.pdf * selectPdf));
-                                if (ls.distance < 1.0e7f)
-                                    contrib = contrib * mediumShadowTr(*med, ls.distance);
-                                if (depth > 0)
-                                    contrib = clampContribution(contrib, settings.clampDirect);
-                                radiance += contrib;
+                    // Unbiased: RIS NEE after each scatter; Russian roulette from the
+                    // 5th volume bounce so deep walks are not 1000 shadow tracks.
+                    // Weight 1/pNee when a connection is taken.
+                    int nLight = srMax(1, settings.lightSamples);
+                    if (depth >= 4) nLight = 1;
+                    float pNee = 1.0f;
+                    bool takeNee = true;
+                    if (depth >= 4) {
+                        pNee = clampf(4.0f / float(depth + 1), 0.05f, 1.0f);
+                        takeNee = rng.nextFloat() < pNee;
+                    }
+                    if (takeNee) {
+                        Vec3 volDirect(0.0f);
+                        for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
+                            Vec3 contrib = nextEventEstimationVolumeOnce(
+                                scene, tracer, origin, woVol, medWalk, rng, guiding,
+                                /*allowInfiniteLights=*/hadRealVolumeScatter);
+                            contrib = clampContribution(contrib, settings.clampDirect);
+                            volDirect += contrib;
+                        }
+                        volDirect = volDirect * (1.0f / (float(nLight) * pNee));
+                        radiance += throughput * volDirect;
+#if !defined(__CUDACC__)
+                        if (guiding && guiding->active()) guiding->addScattered(volDirect);
+#endif
+                    }
+                }
+
+                // Continue: HG, mixed with OpenPGL volume×HG when Indirect Guides is on.
+                float phasePdf = 0.0f;
+                bool gotGuide = false;
+#if !defined(__CUDACC__)
+                if (guiding && guiding->active() && guiding->preparedVolume()) {
+                    const float pg = guiding->guideProbability();
+                    if (rng.nextFloat() < pg) {
+                        Vec3 wiWorld;
+                        float gPdf = 0.0f;
+                        if (guiding->sampleVolume(rng.nextFloat(), rng.nextFloat(), wiWorld, gPdf) &&
+                            gPdf > 0.0f) {
+                            phasePdf = henyeyGreenstein(clampf(dot(woVol, wiWorld), -1.0f, 1.0f), medWalk.g);
+                            const float mixPdf = pg * gPdf + (1.0f - pg) * phasePdf;
+                            if (mixPdf > 0.0f && phasePdf > 0.0f) {
+                                direction = wiWorld;
+                                bsdfPdf = mixPdf;
+                                throughput = throughput * (phasePdf / mixPdf);
+                                gotGuide = true;
                             }
                         }
                     }
                 }
-                bsdfPdf = phasePdf;
+#endif
+                if (!gotGuide) {
+                    direction = sampleHenyeyGreenstein(woVol, medWalk.g, rng.nextFloat(), rng.nextFloat(),
+                                                       phasePdf);
+                    bsdfPdf = phasePdf;
+#if !defined(__CUDACC__)
+                    if (guiding && guiding->active() && guiding->preparedVolume() && phasePdf > 0.0f) {
+                        const float pg = guiding->guideProbability();
+                        const float gPdf = guiding->pdfVolume(direction);
+                        const float mixPdf = pg * gPdf + (1.0f - pg) * phasePdf;
+                        if (mixPdf > 0.0f) {
+                            throughput = throughput * (phasePdf / mixPdf);
+                            bsdfPdf = mixPdf;
+                        }
+                    }
+#endif
+                }
+#if !defined(__CUDACC__)
+                if (guiding && guiding->active()) {
+                    const float phaseNow =
+                        henyeyGreenstein(clampf(dot(woVol, direction), -1.0f, 1.0f), medWalk.g);
+                    const Vec3 weight = bsdfPdf > 0.0f ? Vec3(phaseNow / bsdfPdf) : Vec3(1.0f);
+                    guiding->recordBounce(woVol, direction, bsdfPdf, weight, false, 1.0f, 1.0f, 1.0f,
+                                          true);
+                }
+#endif
                 specularBounce = false;
                 sawNonSpecular = true;
                 rayKind = RayShadeKind::DiffuseReflection;
                 ++depth;
+                ++volumeScatterCount;
                 if (depth >= settings.rrStartDepth) {
                     const float lum = luminance(throughput);
                     const float q = clampf(lum, 0.05f, 0.95f);
                     if (rng.nextFloat() > q) break;
+#if !defined(__CUDACC__)
+                    if (guiding && guiding->active()) guiding->setRussianRoulette(q);
+#endif
                     throughput = throughput / q;
                 }
                 continue;
             }
+#if !defined(__CUDACC__)
+            // Exited the fog AABB (analytical) before hitting any surface — leave the medium.
+            if (medWalk.type == 2 && (!didHit || ms.t + 1e-4f < hit.t)) {
+                origin = origin + direction * ms.t;
+                currentMedium = -1;
+                ++passThrough;
+                if (passThrough > 32) break;
+                continue;
+            }
+#endif
             // Reached the surface (or infinity) with Tr already in throughput.
         }
 
         if (!didHit) {
             // Wireframe diagnostic: empty background (no env).
             if (settings.integrator == kIntegratorWireframe) break;
-            if (scene.domeLightIndex >= 0) {
+            // Halo / vacuum volume scatters must not NEE or MIS the dome — that is
+            // the empty-sky sparkle. Wait for a dense ("real") scatter.
+            const bool skipInfiniteAfterHalo = volumePhaseMis && !hadRealVolumeScatter;
+            if (scene.domeLightIndex >= 0 && !skipInfiniteAfterHalo) {
                 if (!suppressCausticLight) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
                 if (!(causticSuffix && !lightContributesCaustics(dome))) {
                 const bool primary = depth == 0 && passThrough == 0;
                 if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
-                    Vec3 envL = domeRadiance(scene, dome, direction);
+                    Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
                         if (!isBlack(envL)) {
                         float weight = 1.0f;
                         if (!specularBounce) {
                             const float lp = lightPdfDirection(scene, scene.domeLightIndex, origin, direction,
                                                                origin, direction) *
-                                             lightSelectionPdfIndex(scene, origin, scene.domeLightIndex);
+                                             lightSelectionPdfIndexMaybeVolume(
+                                                 scene, origin, scene.domeLightIndex, volumePhaseMis,
+                                                 volumeMisWo, volumeMisG);
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         Vec3 contrib = throughput * envL * weight;
-                        if (depth > 0 && !specularBounce)
-                            contrib = clampContribution(contrib, settings.clampDirect);
+                        // Primary miss keeps the full sun. After a bounce (including
+                        // volume phase→sky) bilinear-vs-PDF mismatch is a firefly —
+                        // nearest Le + Direct Clamp, same as surface NEE.
+                        if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
                         radiance += contrib;
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active())
@@ -865,6 +1181,18 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 }
                 }
             }
+            if (!suppressCausticLight && !skipInfiniteAfterHalo) {
+                const bool primarySun = depth == 0 && passThrough == 0;
+                if (!(primarySun && !settings.envVisibleCamera)) {
+                    const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, bsdfPdf,
+                                                            specularBounce, primarySun, causticSuffix,
+                                                            volumePhaseMis, volumeMisWo, volumeMisG);
+                    if (!isBlack(sunL)) {
+                        Vec3 contrib = throughput * sunL;
+                        radiance += contrib;
+                    }
+                }
+            }
             break;
         }
 
@@ -874,25 +1202,40 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         const InstanceData& inst = scene.instances[si.instanceIndex];
 
 #if !defined(__CUDACC__)
-        // Direct VDB rendering: SDF level-set surface or fog volume entry.
-        // Wireframe / AO / Direct stay on the triangle proxy — no volume walk.
-        if (settings.integrator != kIntegratorWireframe &&
-            settings.integrator != kIntegratorAmbientOcclusion &&
-            settings.integrator != kIntegratorDirectLighting && inst.volumeIndex >= 0 &&
+        // Direct VDB rendering: SDF level-set surface or fog volume entry/exit.
+        // Wireframe stays on the triangle proxy (bounds silhouette).
+        if (settings.integrator != kIntegratorWireframe && inst.volumeIndex >= 0 &&
             inst.volumeIndex < scene.volumeCount && scene.volumes && scene.volumes[inst.volumeIndex]) {
             const VolumeGrid& vol = *scene.volumes[inst.volumeIndex];
             if (vol.kind() == VolumeGridKind::Fog) {
-                currentMedium = inst.mediumIndex;
-                origin = offsetRayOrigin(si.p, -si.ng, direction);
-                ++passThrough;
+                if (currentMedium == inst.mediumIndex) {
+                    // Second hit on the AABB proxy = leaving the volume.
+                    currentMedium = -1;
+                    origin = offsetRayOrigin(si.p, si.ng, direction);
+                    ++passThrough;
+                } else {
+                    // Enter only where occupancy is actually the cloud — empty AABB
+                    // corners stay camera rays (smooth primary env, no volume NEE).
+                    float tDense = hit.t;
+                    float tAabbExit = hit.t;
+                    if (fogRayFirstDenseT(vol, origin, direction, hit.t, 1.0e6f, tDense, tAabbExit)) {
+                        currentMedium = inst.mediumIndex;
+                        origin = origin + direction * (tDense + 1e-4f);
+                        ++passThrough;
+                    } else {
+                        origin = origin + direction * srMax(hit.t, tAabbExit);
+                        origin = offsetRayOrigin(origin, si.ng, direction);
+                    }
+                }
                 if (passThrough > 32) break;
                 continue;
             }
             if (vol.kind() == VolumeGridKind::Sdf) {
                 float tSdf = hit.t;
                 Vec3 nSdf;
-                const float diag = length(vol.worldBounds().hi - vol.worldBounds().lo);
-                if (intersectSdfVolume(vol, origin, direction, 0.0f, hit.t + diag, tSdf, nSdf)) {
+                // Sphere-trace from near the AABB entry; far bound is analytical AABB exit.
+                const float tNear = srMax(0.0f, hit.t - vol.voxelSize());
+                if (intersectSdfVolume(vol, origin, direction, tNear, hit.t + 1.0e6f, tSdf, nSdf)) {
                     hit.t = tSdf;
                     si.p = origin + direction * tSdf;
                     si.ng = nSdf;
@@ -937,7 +1280,9 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 float weight = 1.0f;
                 if (!specularBounce) {
                     const float lp = lightPdfDirection(scene, si.lightIndex, origin, direction, si.p, lightN) *
-                                     lightSelectionPdfIndex(scene, origin, si.lightIndex);
+                                     lightSelectionPdfIndexMaybeVolume(scene, origin, si.lightIndex,
+                                                                        volumePhaseMis, volumeMisWo,
+                                                                        volumeMisG);
                     weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                 }
                 Vec3 contrib = throughput * emitted * weight;
@@ -1197,6 +1542,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         direction = wiWorld;
         bsdfPdf = bs.pdf;
         specularBounce = bs.specular;
+        volumePhaseMis = false;
         // Homogeneous volume interior: transmission across a geo-authored medium
         // boundary enters/exits the medium (PBRT MediumInterface on the prim).
         if (bs.transmitted && inst.mediumIndex >= 0 && mediumIsActive(scene, inst.mediumIndex)) {

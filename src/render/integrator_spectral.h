@@ -53,7 +53,7 @@ public:
                     const LightData& dome = scene.lights[scene.domeLightIndex];
                     const bool primary = depth == 0 && passThrough == 0;
                     if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
-                        Vec3 envL = domeRadiance(scene, dome, direction);
+                        Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
                         if (!isBlack(envL)) {
                             float weight = 1.0f;
                             if (!specularBounce) {
@@ -73,6 +73,18 @@ public:
                             SampledSpectrum contrib = throughput * envS * weight;
                             if (depth > 0 && !specularBounce)
                                 contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                            radiance += contrib;
+                        }
+                    }
+                }
+                {
+                    const bool primarySun = depth == 0 && passThrough == 0;
+                    if (!(primarySun && !settings.envVisibleCamera)) {
+                        const Vec3 sunL =
+                            cameraSunDiscRadiance(scene, origin, direction, bsdfPdf, specularBounce,
+                                                  primarySun, false);
+                        if (!isBlack(sunL)) {
+                            SampledSpectrum contrib = throughput * upsampleEmission(sunL, waves);
                             radiance += contrib;
                         }
                     }

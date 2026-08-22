@@ -1,4 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
+
+# CUDA 12.0 nvcc rejects newer MSVC (VS 2022 17.10+ / VS 2026) unless this
+# flag is visible during compiler identification, which runs at enable_language.
+if(WIN32)
+    set(CMAKE_CUDA_FLAGS_INIT "${CMAKE_CUDA_FLAGS_INIT} --allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+    set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
+endif()
+
 project(Solstice VERSION 0.9.0 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
@@ -44,6 +53,8 @@ message(STATUS "Build id: ${SOLSTICE_BUILD_ID}")
 # Options
 # ---------------------------------------------------------------------------
 option(SOLSTICE_ENABLE_OPTIX "Build the OptiX GPU path tracing backend" OFF)
+set(SOLSTICE_OPTIX_NVCC_OPT "1" CACHE STRING
+    "nvcc -O level for OptiX PTX (1 = faster compile; OptiX still optimizes at module create)")
 option(SOLSTICE_ENABLE_ALEMBIC "Build with Alembic geometry import" ON)
 option(SOLSTICE_ENABLE_OPENEXR "Build with OpenEXR image support" ON)
 option(SOLSTICE_ENABLE_TIFF "Build with libtiff (.tx / .tif mipmap) support" ON)
@@ -73,6 +84,11 @@ endif()
 option(SOLSTICE_MODERN_CPU "Target x86-64-v3 (AVX2+); faster, not for ancient CPUs" ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+# Ninja writes bin/; Visual Studio would write bin/Release. Pin every config to
+# bin/ so BUILD_WINDOWS.bat always finds Grendizer_Render*.exe next to Qt DLLs.
+foreach(_solstice_cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${_solstice_cfg} ${CMAKE_BINARY_DIR}/bin)
+endforeach()
 
 if(MSVC)
     # Also true for clang-cl (MSVC-compatible driver).
@@ -81,6 +97,10 @@ if(MSVC)
         add_compile_options(/MP)
     endif()
     add_compile_definitions(_USE_MATH_DEFINES NOMINMAX WIN32_LEAN_AND_MEAN)
+    # TinyUSDZ ships the same template instantiations in two .cc files; MSVC then
+    # prints thousands of LNK4006 lines and the link looks hung in cmd.exe.
+    add_link_options(/IGNORE:4006)
+    set(CMAKE_STATIC_LINKER_FLAGS "${CMAKE_STATIC_LINKER_FLAGS} /IGNORE:4006")
     if(SOLSTICE_MODERN_CPU)
         if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
             # clang-cl: forward -march to the Clang CC1.
@@ -218,14 +238,33 @@ endif()
 # OpenVDB — optional heterogeneous volumes (falls back to homogeneous σ when absent).
 set(SOLSTICE_HAVE_OPENVDB_01 0)
 if(SOLSTICE_ENABLE_OPENVDB)
-    list(APPEND CMAKE_MODULE_PATH "/usr/lib/x86_64-linux-gnu/cmake/OpenVDB")
-    find_package(OpenVDB QUIET)
+    # Windows CI installs OpenVDB into DEPS_PREFIX; Embree's TBB lives under embree/.
+    if(DEFINED ENV{DEPS_PREFIX} AND EXISTS "$ENV{DEPS_PREFIX}")
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{DEPS_PREFIX}" "$ENV{DEPS_PREFIX}/embree")
+    endif()
+    # Prefer Config package from CMAKE_PREFIX_PATH (Windows deps prefix / vcpkg).
+    find_package(OpenVDB CONFIG QUIET)
+    if(NOT OpenVDB_FOUND)
+        list(APPEND CMAKE_MODULE_PATH "/usr/lib/x86_64-linux-gnu/cmake/OpenVDB")
+        find_package(OpenVDB QUIET)
+    endif()
     if(OpenVDB_FOUND)
         set(SOLSTICE_HAVE_OPENVDB_01 1)
+        message(STATUS "OpenVDB found (package)")
     else()
-        # Debian/Ubuntu often ships FindOpenVDB without a Config package.
-        find_library(OPENVDB_LIBRARY openvdb)
-        find_path(OPENVDB_INCLUDE_DIR openvdb/openvdb.h)
+        # Debian/Ubuntu / manual prefix: FindOpenVDB may be missing; probe libs directly.
+        find_library(OPENVDB_LIBRARY NAMES openvdb openvdb_d
+            PATHS "$ENV{DEPS_PREFIX}/lib" "$ENV{DEPS_PREFIX}/lib64"
+            NO_DEFAULT_PATH)
+        if(NOT OPENVDB_LIBRARY)
+            find_library(OPENVDB_LIBRARY NAMES openvdb openvdb_d)
+        endif()
+        find_path(OPENVDB_INCLUDE_DIR openvdb/openvdb.h
+            PATHS "$ENV{DEPS_PREFIX}/include"
+            NO_DEFAULT_PATH)
+        if(NOT OPENVDB_INCLUDE_DIR)
+            find_path(OPENVDB_INCLUDE_DIR openvdb/openvdb.h)
+        endif()
         if(OPENVDB_LIBRARY AND OPENVDB_INCLUDE_DIR)
             set(SOLSTICE_HAVE_OPENVDB_01 1)
             if(NOT TARGET OpenVDB::openvdb)
@@ -235,6 +274,7 @@ if(SOLSTICE_ENABLE_OPENVDB)
                     INTERFACE_INCLUDE_DIRECTORIES "${OPENVDB_INCLUDE_DIR}")
             endif()
             set(OpenVDB_FOUND TRUE)
+            message(STATUS "OpenVDB found: ${OPENVDB_LIBRARY}")
         else()
             message(STATUS "OpenVDB not found — VDB media use homogeneous σa/σs fallback")
         endif()
@@ -447,6 +487,9 @@ if(SOLSTICE_ENABLE_TINYUSDZ)
         set(SOLSTICE_HAVE_TINYUSDZ_01 1)
         FetchContent_GetProperties(tinyusdz SOURCE_DIR _solstice_tinyusdz_src)
         set_target_properties(tinyusdz_static PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+        if(MSVC)
+            target_compile_options(tinyusdz_static PRIVATE /W0)
+        endif()
     else()
         message(WARNING "TinyUSDZ target missing — binary USD import disabled")
     endif()
@@ -483,6 +526,8 @@ set(SOLSTICE_LIB_SOURCES
     src/render/scene_picker.cpp
     src/render/motion_blur.cpp
     src/render/volume_vdb.cpp
+    src/render/physical_sky.cpp
+    third_party/hosek_wilkie/ArHosekSkyModel.cc
     src/render/cpu/embree_device.cpp
     src/render/cpu/polynomial_optics.cpp
     src/render/cpu/path_guiding.cpp
@@ -526,6 +571,7 @@ set(SOLSTICE_LIB_HEADERS
     src/render/procedural.h
     src/render/shading.h
     src/render/lights.h
+    src/render/physical_sky.h
     src/render/integrator.h
     src/render/photon_map.h
     src/render/framebuffer.h
@@ -546,6 +592,7 @@ add_library(solstice_lib STATIC ${SOLSTICE_LIB_SOURCES} ${SOLSTICE_LIB_HEADERS})
 target_include_directories(solstice_lib PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_BINARY_DIR}/generated)
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lentil)
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/earcut)
+target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/hosek_wilkie)
 target_link_libraries(solstice_lib PUBLIC Qt6::Core Qt6::Gui embree)
 
 if(SOLSTICE_HAVE_ALEMBIC_01)
@@ -580,7 +627,9 @@ if(SOLSTICE_HAVE_MATERIALX_01)
     endif()
 endif()
 if(SOLSTICE_HAVE_OPTIX_01)
-    target_sources(solstice_lib PRIVATE src/render/optix/optix_device.cpp ${SOLSTICE_OPTIX_EMBED_SOURCE})
+    target_sources(solstice_lib PRIVATE
+        src/render/optix/optix_device.cpp
+        ${SOLSTICE_OPTIX_EMBED_SOURCES})
     target_link_libraries(solstice_lib PUBLIC CUDA::cudart CUDA::cuda_driver)
     target_include_directories(solstice_lib PUBLIC ${OptiX_INCLUDE_DIR})
     add_dependencies(solstice_lib solstice_optix_programs)

@@ -25,8 +25,9 @@ jobs:
       - run: echo "Linux OptiX builds are disabled"
 
   windows:
-    name: Windows (Clang, standalone exe)
+    name: Windows (Clang, OptiX exe)
     runs-on: windows-2022
+    timeout-minutes: 240
     env:
       EMBREE_VERSION: "4.4.0"
       IMATH_VERSION: "v3.1.12"
@@ -34,6 +35,7 @@ jobs:
       OPENEXR_VERSION: "v3.2.4"
       OCIO_VERSION: "v2.3.2"
       OIIO_VERSION: "v3.0.21.0"
+      OPENVDB_VERSION: "v12.0.1"
       DEPS_PREFIX: "C:/solstice-deps"
     steps:
       - uses: actions/checkout@v4
@@ -75,15 +77,45 @@ jobs:
           Write-Host "clang-cl: $($clangCl.Source)"
           & clang-cl --version
 
-      # OptiX/CUDA disabled on Windows CI: nvcc hangs the Build step for 30–80+ min.
-      # GPU OptiX is still available when building locally with -DSOLSTICE_ENABLE_OPTIX=ON.
+      # Windows OptiX: nvcc + OptiX headers. Linux OptiX stays off (jobs above are if: false).
+      # Do NOT install visual_studio_integration / Nsight — those hang the CUDA installer
+      # on windows-2022. nvcc must use MSVC cl.exe, not clang-cl (that hung CI 30–80+ min).
+      - name: Install CUDA toolkit
+        timeout-minutes: 40
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "12.6.3"
+          method: network
+          sub-packages: '["nvcc","cudart","thrust"]'
+          use-github-cache: true
+
+      - name: Put nvcc on PATH
+        shell: pwsh
+        run: |
+          if (-not $env:CUDA_PATH) { throw "CUDA_PATH was not set by cuda-toolkit" }
+          $bin = Join-Path $env:CUDA_PATH "bin"
+          $nvcc = Join-Path $bin "nvcc.exe"
+          if (-not (Test-Path $nvcc)) { throw "nvcc.exe missing at $nvcc" }
+          echo $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+          & $nvcc --version
+
+      - name: Fetch the OptiX headers
+        shell: pwsh
+        run: |
+          $dst = Join-Path $env:RUNNER_TEMP "optix-dev"
+          if (-not (Test-Path "$dst/include/optix.h")) {
+            git clone --depth 1 --branch v7.7.0 https://github.com/NVIDIA/optix-dev.git $dst
+          }
+          if (-not (Test-Path "$dst/include/optix.h")) { throw "optix.h missing after clone" }
+          Write-Host "OptiX headers: $dst/include"
 
       - name: Cache the third party dependencies
         id: deps-cache
         uses: actions/cache@v4
         with:
           path: ${{ env.DEPS_PREFIX }}
-          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}-ocio${{ env.OCIO_VERSION }}-oiio${{ env.OIIO_VERSION }}-mtlx1.39.4
+          key: winvdeps-embree${{ env.EMBREE_VERSION }}-imath${{ env.IMATH_VERSION }}-alembic${{ env.ALEMBIC_VERSION }}-openexr${{ env.OPENEXR_VERSION }}-ocio${{ env.OCIO_VERSION }}-oiio${{ env.OIIO_VERSION }}-onetbb2021.12-openvdb${{ env.OPENVDB_VERSION }}-mtlx1.39.4
 
       - name: Fetch Embree
         if: steps.deps-cache.outputs.cache-hit != 'true'
@@ -187,22 +219,128 @@ jobs:
           Write-Host "Installed oiiotool: $env:DEPS_PREFIX/bin/oiiotool.exe"
           Get-ChildItem "$env:DEPS_PREFIX/bin" -Filter "OpenImageIO*" | ForEach-Object { Write-Host $_.Name }
 
-      - name: Configure (Clang + Ninja)
+      # oneTBB headers+libs for OpenVDB (Embree ships only tbb*.dll/.lib, no headers).
+      - name: Build oneTBB
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch v2021.12.0 https://github.com/oneapi-src/oneTBB.git onetbb-src
+          cmake -S onetbb-src -B onetbb-src/build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:DEPS_PREFIX" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DTBB_TEST=OFF `
+            -DTBB_STRICT=OFF `
+            -DBUILD_SHARED_LIBS=ON
+          if ($LASTEXITCODE -ne 0) { throw "oneTBB cmake configure failed" }
+          cmake --build onetbb-src/build --config Release --target install --parallel
+          if ($LASTEXITCODE -ne 0) { throw "oneTBB build/install failed" }
+          if (-not (Test-Path "$env:DEPS_PREFIX/include/tbb/tbb.h") -and
+              -not (Test-Path "$env:DEPS_PREFIX/include/oneapi/tbb.h")) {
+            throw "oneTBB headers missing after install"
+          }
+          Write-Host "Installed oneTBB under $env:DEPS_PREFIX"
+
+      # OpenVDB core (SDF / fog volumes). oneTBB is installed above; Blosc/zlib off
+      # keeps the dep graph small. Delayed loading off removes the Boost requirement.
+      - name: Build OpenVDB
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch $env:OPENVDB_VERSION https://github.com/AcademySoftwareFoundation/openvdb.git openvdb-src
+          cmake -S openvdb-src -B openvdb-src/build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_INSTALL_PREFIX="$env:DEPS_PREFIX" `
+            -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX" `
+            -DTBB_ROOT="$env:DEPS_PREFIX" `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DOPENVDB_BUILD_CORE=ON `
+            -DOPENVDB_BUILD_BINARIES=OFF `
+            -DOPENVDB_BUILD_VDB_PRINT=OFF `
+            -DOPENVDB_BUILD_VDB_LOD=OFF `
+            -DOPENVDB_BUILD_VDB_RENDER=OFF `
+            -DOPENVDB_BUILD_VDB_VIEW=OFF `
+            -DOPENVDB_BUILD_PYTHON_MODULE=OFF `
+            -DOPENVDB_BUILD_UNITTESTS=OFF `
+            -DOPENVDB_BUILD_NANOVDB=OFF `
+            -DOPENVDB_CORE_SHARED=ON `
+            -DOPENVDB_CORE_STATIC=OFF `
+            -DUSE_BLOSC=OFF `
+            -DUSE_ZLIB=OFF `
+            -DUSE_EXR=OFF `
+            -DUSE_IMATH_HALF=OFF `
+            -DOPENVDB_USE_DELAYED_LOADING=OFF `
+            -DDISABLE_CMAKE_SEARCH_PATHS=OFF
+          if ($LASTEXITCODE -ne 0) { throw "OpenVDB cmake configure failed" }
+          cmake --build openvdb-src/build --config Release --target install --parallel
+          if ($LASTEXITCODE -ne 0) { throw "OpenVDB build/install failed" }
+          $vdbLib = Get-ChildItem -Path "$env:DEPS_PREFIX" -Recurse -Filter "openvdb*.lib" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $vdbLib) { throw "openvdb.lib missing after install" }
+          Write-Host "Installed OpenVDB: $($vdbLib.FullName)"
+          Get-ChildItem "$env:DEPS_PREFIX/bin" -Filter "openvdb*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host $_.Name }
+
+      - name: Configure (Clang + Ninja, OptiX ON)
         shell: pwsh
         run: |
+          $cl = (Get-Command cl.exe -ErrorAction Stop).Source
+          $nvcc = Join-Path $env:CUDA_PATH "bin/nvcc.exe"
+          if (-not (Test-Path $nvcc)) { throw "nvcc.exe missing at $nvcc" }
+          $optixRoot = Join-Path $env:RUNNER_TEMP "optix-dev"
+          Write-Host "cl.exe (nvcc host): $cl"
+          Write-Host "nvcc: $nvcc"
+          Write-Host "OptiX_ROOT: $optixRoot"
           cmake -S . -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER=clang-cl `
             -DCMAKE_CXX_COMPILER=clang-cl `
+            -DCMAKE_CUDA_COMPILER="$nvcc" `
+            -DCMAKE_CUDA_HOST_COMPILER="$cl" `
             -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX;$env:DEPS_PREFIX/embree" `
             -DSOLSTICE_MATERIALX_LIBRARIES="$env:DEPS_PREFIX/libraries" `
-            -DSOLSTICE_ENABLE_OPTIX=OFF `
+            -DSOLSTICE_ENABLE_OPTIX=ON `
+            -DOptiX_ROOT="$optixRoot" `
+            -DSOLSTICE_CUDA_HOST_COMPILER="$cl" `
             -DSOLSTICE_ENABLE_OCIO=ON `
+            -DSOLSTICE_ENABLE_OPENVDB=ON `
             -DSOLSTICE_MODERN_CPU=ON `
             -DSOLSTICE_BUILD_TX_TOOLS_ALPHA=ON `
             -DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
+          $cfg = Get-Content build/CMakeCache.txt | Select-String "SOLSTICE_HAVE_OPENVDB|SOLSTICE_HAVE_OPTIX"
+          Write-Host $cfg
+          if (-not (Select-String -Path build/generated/solstice_config.h -Pattern "SOLSTICE_HAVE_OPENVDB 1" -Quiet)) {
+            throw "OpenVDB was not detected — VDB from Polygons would be a no-op"
+          }
+          if (-not (Select-String -Path build/generated/solstice_config.h -Pattern "SOLSTICE_HAVE_OPTIX 1" -Quiet)) {
+            throw "OptiX was requested but not enabled — this Windows build would ship Embree-only"
+          }
+
+      - name: Compile OptiX PTX
+        timeout-minutes: 45
+        run: cmake --build build --target solstice_optix_programs --verbose
+
+      - name: Prove OptiX IR is embedded
+        shell: pwsh
+        run: |
+          $modules = @(
+            @{ Ptx = 'optix_hit_miss.ptx'; Embed = 'solstice_optix_hit_miss_ir.cpp'; Sym = 'solsticeOptixHitIr' },
+            @{ Ptx = 'optix_init_from_camera.ptx'; Embed = 'solstice_optix_init_from_camera_ir.cpp'; Sym = 'solsticeOptixInitIr' },
+            @{ Ptx = 'optix_intersect_closest.ptx'; Embed = 'solstice_optix_intersect_closest_ir.cpp'; Sym = 'solsticeOptixIntersectClosestIr' },
+            @{ Ptx = 'optix_intersect_shadow.ptx'; Embed = 'solstice_optix_intersect_shadow_ir.cpp'; Sym = 'solsticeOptixIntersectShadowIr' },
+            @{ Ptx = 'optix_shade_surface.ptx'; Embed = 'solstice_optix_shade_surface_ir.cpp'; Sym = 'solsticeOptixShadeSurfaceIr' },
+            @{ Ptx = 'optix_shade_background.ptx'; Embed = 'solstice_optix_shade_background_ir.cpp'; Sym = 'solsticeOptixShadeBackgroundIr' },
+            @{ Ptx = 'optix_shade_shadow.ptx'; Embed = 'solstice_optix_shade_shadow_ir.cpp'; Sym = 'solsticeOptixShadeShadowIr' }
+          )
+          foreach ($m in $modules) {
+            $ptx = Join-Path 'build/generated' $m.Ptx
+            $embed = Join-Path 'build/generated' $m.Embed
+            if (-not (Test-Path $ptx)) { throw "$($m.Ptx) was not produced" }
+            if (-not (Test-Path $embed)) { throw "$($m.Embed) was not produced" }
+            if (-not (Select-String -Path $embed -Pattern $m.Sym -Quiet)) {
+              throw "embedded OptiX symbol $($m.Sym) missing"
+            }
+            Get-Item $ptx, $embed | ForEach-Object { Write-Host "$($_.Name) $($_.Length) bytes" }
+          }
 
       - name: Build
+        timeout-minutes: 90
         run: cmake --build build --parallel
 
       - name: Run the tests
@@ -216,6 +354,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item build/bin/* dist/ -Recurse -Force
           Copy-Item "$env:DEPS_PREFIX/embree/bin/*.dll" dist/ -Force
+          # CUDA runtime for the OptiX backend (nvcuda.dll comes from the user's NVIDIA driver).
+          if (-not $env:CUDA_PATH) { throw "CUDA_PATH missing while packaging OptiX build" }
+          $cudaBin = Join-Path $env:CUDA_PATH "bin"
+          $cudart = Get-ChildItem -Path $cudaBin -Filter "cudart64_*.dll" -ErrorAction SilentlyContinue
+          if (-not $cudart) { throw "cudart64_*.dll missing under $cudaBin — GPU backend would fail to load" }
+          $cudart | ForEach-Object { Copy-Item $_.FullName dist/ -Force; Write-Host "Copied $($_.Name)" }
           # Ensure Qt image format plugins are present (windeployqt may omit some).
           # Note: official Qt 6.7 often builds PNG into Qt6Gui (no qpng.dll) — still copy
           # whatever is in plugins/imageformats for jpeg/gif/webp/etc.
@@ -256,6 +400,7 @@ jobs:
             }
             foreach ($pat in @(
               "OpenImageIO*.dll",
+              "openvdb*.dll",
               "jpeg*.dll", "libjpeg*.dll", "turbojpeg*.dll",
               "tiff*.dll", "libtiff*.dll",
               "zlib*.dll", "libzlib*.dll", "zdll*.dll",
@@ -273,6 +418,11 @@ jobs:
             ForEach-Object { Copy-Item $_.FullName dist/ -Force }
           Get-ChildItem -Path build -Recurse -Filter "tiff*.dll" -ErrorAction SilentlyContinue |
             ForEach-Object { Copy-Item $_.FullName dist/ -Force; Write-Host "Copied $($_.Name)" }
+          Get-ChildItem -Path build -Recurse -Filter "openvdb*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_.FullName dist/ -Force; Write-Host "Copied $($_.Name)" }
+          if (-not (Get-ChildItem dist -Filter "openvdb*.dll" -ErrorAction SilentlyContinue)) {
+            throw "openvdb.dll missing from dist — VDB from Polygons would be a no-op"
+          }
           if (Test-Path "$env:DEPS_PREFIX/libraries") {
             New-Item -ItemType Directory -Force -Path dist/materialx | Out-Null
             Copy-Item -Recurse "$env:DEPS_PREFIX/libraries" dist/materialx/libraries
@@ -295,6 +445,9 @@ jobs:
             throw "OpenColorIO.dll missing from dist — Windows Display/View would be a no-op"
           }
           Write-Host "Packaged OCIO runtime: $($ocioDll.Name)"
+          if (-not (Get-ChildItem dist -Filter "cudart64_*.dll" -ErrorAction SilentlyContinue)) {
+            throw "cudart64_*.dll missing from dist — OptiX would fail to load on the user's PC"
+          }
           if (-not (Test-Path "dist/maketx.exe")) {
             throw "maketx.exe missing from dist — TX Converter would fail"
           }
@@ -332,6 +485,7 @@ jobs:
             foreach ($pat in @(
               "OpenColorIO*.dll",
               "OpenImageIO*.dll",
+              "openvdb*.dll",
               "maketx.exe", "oiiotool.exe",
               "jpeg*.dll", "libjpeg*.dll", "turbojpeg*.dll",
               "tiff*.dll", "libtiff*.dll",
