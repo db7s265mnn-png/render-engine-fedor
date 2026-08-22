@@ -27,6 +27,7 @@
 #include <QEventLoop>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <new>
@@ -132,6 +133,18 @@ QImage toQImage(const Image& image) {
         }
     }
     return result;
+}
+
+QString formatElapsedHms(double seconds) {
+    if (seconds < 0.0) seconds = 0.0;
+    const int total = int(std::lround(seconds));
+    const int h = total / 3600;
+    const int m = (total % 3600) / 60;
+    const int s = total % 60;
+    return QStringLiteral("%1h:%2m:%3s")
+        .arg(h, 2, 10, QChar('0'))
+        .arg(m, 2, 10, QChar('0'))
+        .arg(s, 2, 10, QChar('0'));
 }
 
 bool isTypingFocus(QWidget* widget) {
@@ -1628,7 +1641,7 @@ void MainWindow::updateWindowTitle() {
 void MainWindow::updateStatusBar() {
     const RenderProgress progress = session_.progress();
     QString overlay = QString("%1 / %2 spp").arg(progress.samplesDone).arg(progress.samplesTarget);
-    if (progress.elapsedSeconds > 0.0) overlay += QString("   %1 s").arg(progress.elapsedSeconds, 0, 'f', 1);
+    if (progress.elapsedSeconds > 0.0) overlay += QStringLiteral("   %1").arg(formatElapsedHms(progress.elapsedSeconds));
     // Always show which camera sampler / engine is live — catches "I swear I
     // switched to White but still see BN tiles" mismatches.
     if (scene_) {

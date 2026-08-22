@@ -235,6 +235,7 @@ void SceneGraphPanel::setStage(const StagePtr& stage, const QStringList& materia
     };
 
     long long triangles = 0;
+    long long polygons = 0;
     long long points = 0;
     int primCount = 0;
     if (stage) {
@@ -251,10 +252,14 @@ void SceneGraphPanel::setStage(const StagePtr& stage, const QStringList& materia
             item->setToolTip(0, prim.path + "\nauthored by " + prim.sourceNode +
                                     "\nCtrl+C or drag into Material → Assign To");
             if (prim.type == PrimType::Mesh && prim.mesh) {
-                item->setText(2, QString("%1 pts / %2 tris")
+                const auto tris = prim.mesh->triangleCount();
+                const auto faces = prim.mesh->faceCount();
+                item->setText(2, QString("%1 pts / %2 tris / %3 polys")
                                      .arg(prim.mesh->positions.size())
-                                     .arg(prim.mesh->triangleCount()));
-                triangles += static_cast<long long>(prim.mesh->triangleCount());
+                                     .arg(tris)
+                                     .arg(faces));
+                triangles += static_cast<long long>(tris);
+                polygons += static_cast<long long>(faces);
                 points += static_cast<long long>(prim.mesh->positions.size());
             } else if (prim.type == PrimType::Light) {
                 item->setText(2, QString("intensity %1").arg(double(prim.light.intensity), 0, 'g', 3));
@@ -287,12 +292,13 @@ void SceneGraphPanel::setStage(const StagePtr& stage, const QStringList& materia
 
     tree_->expandAll();
     tree_->resizeColumnToContents(0);
-    summary_->setText(QString("%1 prims  |  %2 meshes  |  %3 lights  |  %4 materials  |  %5 triangles")
+    summary_->setText(QString("%1 prims  |  %2 meshes  |  %3 lights  |  %4 materials  |  %5 triangles  |  %6 polygons")
                           .arg(primCount)
                           .arg(stage ? stage->countOfType(PrimType::Mesh) : 0)
                           .arg(stage ? stage->countOfType(PrimType::Light) : 0)
                           .arg(materialContainers.size())
-                          .arg(triangles));
+                          .arg(triangles)
+                          .arg(polygons));
 
     if (!keepPath.isEmpty()) {
         if (QTreeWidgetItem* item = findItemByPath(tree_, keepPath)) {
