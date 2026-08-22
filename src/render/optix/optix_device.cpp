@@ -747,6 +747,7 @@ private:
 
         OptixPipelineCompileOptions pipelineOptions{};
         pipelineOptions.usesMotionBlur = 0;
+        // IAS of triangle GAS — one instance level. Depth 2 (IAS + GAS).
         pipelineOptions.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
         pipelineOptions.numPayloadValues = 6;
         pipelineOptions.numAttributeValues = 2;
@@ -852,8 +853,12 @@ private:
         OPTIX_CHECK(optixUtilComputeStackSizes(&stackSizes, linkOptions.maxTraceDepth, 0, 0,
                                                &directCallableFromTraversal, &directCallableFromState,
                                                &continuationStack));
+        // IAS→GAS is two traversables. Depth 1 is OPTIX_ERROR_INVALID_VALUE (7001)
+        // with ALLOW_SINGLE_LEVEL_INSTANCING.
+        constexpr unsigned int kTraversableGraphDepth = 2;
+        if (continuationStack < 1024u) continuationStack = 1024u;
         OPTIX_CHECK(optixPipelineSetStackSize(pipeline_, directCallableFromTraversal, directCallableFromState,
-                                              continuationStack, 1));
+                                              continuationStack, kTraversableGraphDepth));
 
         RayGenRecord raygenRecords[kRgCount]{};
         for (int i = 0; i < kRgCount; ++i) {
