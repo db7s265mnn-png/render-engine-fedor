@@ -33,14 +33,21 @@ function Import-VcVars64 {
     if (-not $vswhere) {
         Fail 'Visual Studio Installer (vswhere) not found. Install VS 2022 with Desktop development with C++.'
     }
-    $vsRoot = & $vswhere -latest -products * `
+    $vsRoot = & $vswhere -latest -version "[17.0,18.0)" -products * `
         -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
         -property installationPath
+    if ($vsRoot) {
+        Info 'Using Visual Studio 2022 (CUDA 12.0 cannot host-compile VS 2026 STL).'
+    } else {
+        $vsRoot = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+    }
     if (-not $vsRoot) {
         Fail 'Visual Studio found, but the C++ toolset is missing. Enable Desktop development with C++.'
     }
     $script:VsYear = '2022'
-    $year = & $vswhere -latest -products * -property catalog_productLineVersion | Select-Object -First 1
+    $year = & $vswhere -path $vsRoot -property catalog_productLineVersion | Select-Object -First 1
     if ($year) { $script:VsYear = ("$year").Trim() }
     $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
     if (-not (Test-Path -LiteralPath $vcvars)) {

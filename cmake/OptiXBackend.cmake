@@ -105,10 +105,10 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(_solstice_nvcc_lineinfo -lineinfo)
 endif()
 
-# VS 2026 (cl 19.50+) is newer than CUDA 12.0's supported host list.
+# VS 2026 STL (yvals_core.h STL1002) requires CUDA 13.2; CUDA 12.0 needs this define.
 set(_solstice_nvcc_unsupported)
 if(WIN32)
-    set(_solstice_nvcc_unsupported --allow-unsupported-compiler)
+    set(_solstice_nvcc_unsupported --allow-unsupported-compiler -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH)
 endif()
 
 add_custom_command(
