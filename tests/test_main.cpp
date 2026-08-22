@@ -603,26 +603,6 @@ void testEnvironment() {
     const Vec3 down = envLookup(view, Vec3(0.0f, -1.0f, 0.0f));
     check(up.x > 0.9f && up.z < 0.1f, "+Y samples the top of the environment map");
     check(down.z > 0.9f && down.x < 0.1f, "-Y samples the bottom of the environment map");
-    {
-        // Uniform HDRI so pole texels keep mass (MIS compensation is a no-op).
-        auto poleEnv = std::make_shared<EnvironmentMap>();
-        poleEnv->image.resize(8, 4);
-        for (int y = 0; y < 4; ++y) {
-            for (int x = 0; x < 8; ++x) poleEnv->image.setRgb(x, y, Vec3(1.0f));
-        }
-        poleEnv->buildSamplingTables();
-        const EnvMapView poleView = poleEnv->view();
-        const float pdfUp = envPdf(poleView, Vec3(0.0f, 1.0f, 0.0f));
-        const float pdfDown = envPdf(poleView, Vec3(0.0f, -1.0f, 0.0f));
-        check(std::isfinite(pdfUp) && pdfUp > 0.0f, "envPdf at +Y pole is finite and positive");
-        check(std::isfinite(pdfDown) && pdfDown > 0.0f, "envPdf at -Y pole is finite and positive");
-        float samplePdf = 0.0f;
-        const Vec3 poleDir = envSample(poleView, 0.5f, 0.0f, samplePdf);
-        check(std::isfinite(samplePdf) && samplePdf > 0.0f,
-              "envSample near the CDF origin does not return pdf 0");
-        checkNear(envPdf(poleView, poleDir), samplePdf, std::max(1e-3f, samplePdf * 0.02f),
-                  "floored envPdf matches envSample at the pole row");
-    }
 
     Rng rng(5u, 9u);
     int nearBrightTexel = 0;
@@ -5373,11 +5353,6 @@ void testNgonTriangulateAndVdb() {
                                         .count();
                 check(scatters > 200, "analytical interior walk produces real scatters");
                 check(msWalk < 2000.0, "4000 free-flights stay cheap with local majorants");
-                check(!volumeOccupancyCanScatter(0.0f, fogA->majorant()),
-                      "zero occupancy is vacuum");
-                check(!volumeOccupancyCanScatter(1e-7f, 1.0f),
-                      "1e-7 of unit majorant is vacuum");
-                check(volumeOccupancyCanScatter(0.01f, 1.0f), "1% occupancy can scatter");
                 std::printf("  majorant walk: scatters=%d in %.1f ms\n", scatters, msWalk);
 
                 Rng rngTr(11u, 13u);

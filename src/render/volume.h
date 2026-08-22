@@ -74,16 +74,6 @@ SR_INL SR_HD float mediumMajorant(const MediumData& m) {
     return srMax(st.x, srMax(st.y, st.z));
 }
 
-// Occupancy below this fraction of the grid majorant is vacuum: null collision
-// only — no scatter, no absorb-as-scatter, no NEE. Fog AABBs are larger than the
-// visible cloud; empty corners otherwise spawn 1/pdf dome sparkles on a clear sky.
-constexpr float kVolumeOccupancyScatterMin = 1e-5f;
-
-SR_INL SR_HD bool volumeOccupancyCanScatter(float occupancy, float gridMajorant) {
-    const float floor = kVolumeOccupancyScatterMin * srMax(gridMajorant, 1e-6f);
-    return occupancy > floor;
-}
-
 SR_INL SR_HD bool mediumIsActive(const SceneView& scene, int mediumIndex) {
     if (mediumIndex < 0 || mediumIndex >= scene.mediumCount || !scene.media) return false;
     const MediumData& m = scene.media[mediumIndex];

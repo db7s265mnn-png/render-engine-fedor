@@ -178,12 +178,7 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
     auto sampleOcc = [&](Vec3 p) { return srMax(0.0f, grid.sampleWorldTracking(p)); };
 #endif
 
-    const float gridMaj = srMax(grid.majorant(), 1e-6f);
-
     auto interact = [&](float occupancy, float tHit) -> bool {
-        // Near-zero occupancy is vacuum: albedo σs/σt does not go to 0 with
-        // density, so a "real" event here would NEE the dome at weight ~1.
-        if (!volumeOccupancyCanScatter(occupancy, gridMaj)) return false;
         const float dens = srMax(0.0f, occupancy) * densityScale;
         const Vec3 sigmaA = sigmaA0 * dens;
         const Vec3 sigmaS = sigmaS0 * dens;
@@ -207,7 +202,6 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
     };
 
     auto collide = [&](float occupancy, float majorant, float tHit) -> bool {
-        if (!volumeOccupancyCanScatter(occupancy, gridMaj)) return false;
         const float dens = srMax(0.0f, occupancy) * densityScale;
         const Vec3 sigmaT = (sigmaA0 + sigmaS0) * dens;
         // Real-vs-null uses the densest channel (matches the max-channel majorant).
@@ -263,9 +257,7 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
 
         // Decomposition tracking (Kutz et al.): control μ_c = σt(min) is a real
         // collision; residual uses local Λ − μ_c. min=0 reduces to Woodcock.
-        // Vacuum min occupancy must not emit a control scatter (empty AABB corners).
-        const float muC =
-            volumeOccupancyCanScatter(minD, gridMaj) ? st0 * srMax(0.0f, minD) : 0.0f;
+        const float muC = st0 * srMax(0.0f, minD);
         const float residualMaj = srMax(0.0f, majorant - muC);
         float tLocal = t;
         const float tCtrl = (muC > 1e-8f)
@@ -285,20 +277,15 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
                 break;
             }
             if (tCtrl <= tRes) {
-                if (interact(minD, tCtrl)) return out;
-                t = tCtrl;
-                leftCell = true;
-                break;
+                interact(minD, tCtrl);
+                return out;
             }
             const float occ = clampf(sampleOcc(origin + direction * tRes), minD, maxD);
-            ++iter;
-            if (!volumeOccupancyCanScatter(occ, gridMaj)) continue;
             const float pReal = (st0 * occ - muC) / srMax(residualMaj, 1e-12f);
+            ++iter;
             if (rng.nextFloat() >= clampf(pReal, 0.0f, 1.0f)) continue;
-            if (interact(occ, tRes)) return out;
-            t = tRes;
-            leftCell = true;
-            break;
+            interact(occ, tRes);
+            return out;
         }
         if (leftCell) continue;
         break;
