@@ -23,7 +23,7 @@ struct GpuVolumeGrid {
     float majorant = 1.0f;
 };
 
-struct LaunchParams {
+struct alignas(16) LaunchParams {
     SceneView scene;
     const GpuVolumeGrid* volumes = nullptr;
     int volumeCount = 0;

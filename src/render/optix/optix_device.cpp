@@ -57,16 +57,15 @@ namespace {
                                      #call + ")");                                                   \
     } while (0)
 
-#define OPTIX_CHECK(call)                                                                    \
-    do {                                                                                     \
-        const OptixResult result = (call);                                                   \
-        if (result != OPTIX_SUCCESS)                                                         \
-            throw std::runtime_error(std::string("OptiX error ") + std::to_string(int(result)) + \
-                                     " in " + #call);                                        \
-    } while (0)
+std::mutex gOptixLogMutex;
+std::string gLastOptixLog;
 
 void contextLog(unsigned int level, const char* tag, const char* message, void*) {
     const std::string text = std::string("[OptiX ") + (tag ? tag : "") + "] " + (message ? message : "");
+    {
+        std::lock_guard<std::mutex> lock(gOptixLogMutex);
+        gLastOptixLog = text;
+    }
     if (level <= 2) {
         logError(text);
     } else if (level == 3) {
@@ -75,6 +74,34 @@ void contextLog(unsigned int level, const char* tag, const char* message, void*)
         logDebug(text);
     }
 }
+
+std::string optixFailMessage(OptixResult result, const char* call) {
+    std::ostringstream oss;
+    oss << "OptiX error " << int(result);
+    if (result == 7900) oss << " OPTIX_ERROR_CUDA_ERROR";
+#ifdef OPTIX_ERROR_INVALID_VALUE
+    else if (result == OPTIX_ERROR_INVALID_VALUE) oss << " OPTIX_ERROR_INVALID_VALUE";
+#endif
+    oss << " in " << call;
+    const cudaError_t cudaErr = cudaGetLastError();
+    if (cudaErr != cudaSuccess) {
+        oss << "; CUDA " << int(cudaErr) << " " << cudaGetErrorString(cudaErr);
+    }
+    std::string log;
+    {
+        std::lock_guard<std::mutex> lock(gOptixLogMutex);
+        log = gLastOptixLog;
+    }
+    if (!log.empty()) oss << "; " << log;
+    return oss.str();
+}
+
+#define OPTIX_CHECK(call)                                                                    \
+    do {                                                                                     \
+        const OptixResult result = (call);                                                   \
+        if (result != OPTIX_SUCCESS)                                                         \
+            throw std::runtime_error(optixFailMessage(result, #call));                       \
+    } while (0)
 
 // Small owning wrapper around a device allocation.
 class DeviceBuffer {
@@ -219,7 +246,10 @@ public:
 
             OptixDeviceContextOptions options{};
             options.logCallbackFunction = &contextLog;
-            options.logCallbackLevel = 3;
+            options.logCallbackLevel = 4;
+#if OPTIX_VERSION >= 70200
+            options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+#endif
             OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
 
             CUDA_CHECK(cudaStreamCreate(&stream_));
@@ -231,7 +261,8 @@ public:
             initialized_ = true;
             logInfo("OptiX backend initialised on " + deviceName_ +
                     " (" + std::to_string(properties.multiProcessorCount) +
-                    " SMs, wavefront PT: surfaces + thin-lens + GPU volumes)");
+                    " SMs, wavefront PT: surfaces + thin-lens + GPU volumes, LaunchParams " +
+                    std::to_string(sizeof(LaunchParams)) + " bytes)");
             logInfo("OptiX submits CUDA/Compute work. Windows Task Manager defaults to the 3D graph "
                     "(~0% for path tracing) — switch a GPU graph to CUDA or Compute_0, or watch the HUD ms.");
             return true;
@@ -486,6 +517,9 @@ public:
                 pathBuffer_.alloc(pixelCount * sizeof(GpuPath));
                 hitBuffer_.alloc(pixelCount * sizeof(GpuHit));
                 shadowBuffer_.alloc(pixelCount * sizeof(GpuShadow));
+                CUDA_CHECK(cudaMemsetAsync(pathBuffer_.as<void>(), 0, pathBuffer_.size(), stream_));
+                CUDA_CHECK(cudaMemsetAsync(hitBuffer_.as<void>(), 0, hitBuffer_.size(), stream_));
+                CUDA_CHECK(cudaMemsetAsync(shadowBuffer_.as<void>(), 0, shadowBuffer_.size(), stream_));
             }
             if (sampleIndex == 0) {
                 CUDA_CHECK(cudaMemsetAsync(accumBuffer_.as<void>(), 0, accumBuffer_.size(), stream_));
@@ -514,15 +548,13 @@ public:
             const unsigned h = unsigned(height);
             const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
             const int maxIters = maxDepth + 18;
-            ensureGraph(w, h, maxIters);
 
             const auto wall0 = std::chrono::steady_clock::now();
             CUDA_CHECK(cudaEventRecord(gpuStartEvent_, stream_));
-            if (graphExec_) {
-                CUDA_CHECK(cudaGraphLaunch(graphExec_, stream_));
-            } else {
-                launchBounceLoop(w, h, maxIters);
-            }
+            // Queue every wavefront stage on `stream_` and sync once at the end.
+            // Capturing optixLaunch into a CUDA graph (CaptureModeGlobal) returns
+            // OPTIX_ERROR_CUDA_ERROR (7900) on current Windows OptiX/driver stacks.
+            launchBounceLoop(w, h, maxIters);
             CUDA_CHECK(cudaEventRecord(gpuStopEvent_, stream_));
             CUDA_CHECK(cudaMemcpyAsync(fb.data(), accumBuffer_.as<Vec4>(), pixelCount * sizeof(Vec4),
                                        cudaMemcpyDeviceToHost, stream_));
@@ -539,7 +571,8 @@ public:
                 msg.setf(std::ios::fixed);
                 msg.precision(2);
                 msg << "OptiX GPU " << lastGpuSampleMs_ << " ms  wall " << wallMs << " ms  " << deviceName_
-                    << "  " << width << "x" << height << (graphExec_ ? "  graph=yes" : "  graph=no");
+                    << "  " << width << "x" << height << "  wavefront=" << (1 + 6 * maxIters)
+                    << " launches/spp";
                 logInfo(msg.str());
             }
 
@@ -564,10 +597,18 @@ public:
 
 private:
     void launchKernel(int raygenIndex, unsigned width, unsigned height) {
-        sbt_.raygenRecord =
-            raygenRecordBuffer_.device() + sizeof(RayGenRecord) * static_cast<size_t>(raygenIndex);
-        OPTIX_CHECK(optixLaunch(pipeline_, stream_, launchParamsBuffer_.device(), sizeof(LaunchParams), &sbt_,
-                                width, height, 1));
+        static const char* kNames[kRgCount] = {
+            "init_from_camera", "intersect_closest", "intersect_shadow", "shade_surface",
+            "shade_background",  "shade_shadow",     "shade_volume",
+        };
+        const OptixResult result =
+            optixLaunch(pipeline_, stream_, launchParamsBuffer_.device(), sizeof(LaunchParams),
+                        &sbts_[raygenIndex], width, height, 1);
+        if (result != OPTIX_SUCCESS) {
+            throw std::runtime_error(optixFailMessage(result, "optixLaunch") + " [" +
+                                     kNames[raygenIndex] + " " + std::to_string(width) + "x" +
+                                     std::to_string(height) + "]");
+        }
     }
 
     void launchBounceLoop(unsigned width, unsigned height, int maxIters) {
@@ -590,56 +631,6 @@ private:
         graphW_ = 0;
         graphH_ = 0;
         graphIters_ = 0;
-    }
-
-    bool captureGraph(unsigned width, unsigned height, int maxIters) {
-        destroyGraph();
-        const cudaError_t begin = cudaStreamBeginCapture(stream_, cudaStreamCaptureModeGlobal);
-        if (begin != cudaSuccess) {
-            cudaGetLastError();
-            return false;
-        }
-        cudaGraph_t graph = nullptr;
-        try {
-            launchBounceLoop(width, height, maxIters);
-            const cudaError_t end = cudaStreamEndCapture(stream_, &graph);
-            if (end != cudaSuccess || !graph) {
-                cudaGetLastError();
-                if (graph) cudaGraphDestroy(graph);
-                return false;
-            }
-        } catch (...) {
-            cudaGraph_t dumped = nullptr;
-            cudaStreamEndCapture(stream_, &dumped);
-            if (dumped) cudaGraphDestroy(dumped);
-            throw;
-        }
-        const cudaError_t inst = cudaGraphInstantiate(&graphExec_, graph, nullptr, nullptr, 0);
-        cudaGraphDestroy(graph);
-        if (inst != cudaSuccess) {
-            graphExec_ = nullptr;
-            cudaGetLastError();
-            return false;
-        }
-        graphW_ = int(width);
-        graphH_ = int(height);
-        graphIters_ = maxIters;
-        return true;
-    }
-
-    void ensureGraph(unsigned width, unsigned height, int maxIters) {
-        if (graphExec_ && graphW_ == int(width) && graphH_ == int(height) && graphIters_ == maxIters) return;
-        if (graphFailed_) return;
-        // Capture requires an idle stream (no pending memcpy / events).
-        CUDA_CHECK(cudaStreamSynchronize(stream_));
-        if (captureGraph(width, height, maxIters)) {
-            logInfo("OptiX: CUDA graph captured (" + std::to_string(1 + 6 * maxIters) +
-                    " launches/spp) so the GPU stays busy instead of waiting on CPU optixLaunch");
-            return;
-        }
-        graphFailed_ = true;
-        logWarning("OptiX: CUDA graph capture failed — falling back to one optixLaunch per kernel. "
-                   "GPU load in Task Manager 3D will look near zero; watch the HUD ms / CUDA graph.");
     }
 
     void warmupPrograms() {
@@ -856,7 +847,7 @@ private:
         // IAS→GAS is two traversables. Depth 1 is OPTIX_ERROR_INVALID_VALUE (7001)
         // with ALLOW_SINGLE_LEVEL_INSTANCING.
         constexpr unsigned int kTraversableGraphDepth = 2;
-        if (continuationStack < 1024u) continuationStack = 1024u;
+        if (continuationStack < 4096u) continuationStack = 4096u;
         OPTIX_CHECK(optixPipelineSetStackSize(pipeline_, directCallableFromTraversal, directCallableFromState,
                                               continuationStack, kTraversableGraphDepth));
 
@@ -884,6 +875,11 @@ private:
         sbt_.hitgroupRecordBase = hitRecordBuffer_.device();
         sbt_.hitgroupRecordStrideInBytes = sizeof(HitGroupRecord);
         sbt_.hitgroupRecordCount = 2;
+        for (int i = 0; i < kRgCount; ++i) {
+            sbts_[i] = sbt_;
+            sbts_[i].raygenRecord =
+                raygenRecordBuffer_.device() + sizeof(RayGenRecord) * static_cast<size_t>(i);
+        }
     }
 
     void releaseScene() {
@@ -960,7 +956,6 @@ private:
     bool warnedProcedurals_ = false;
     bool warnedOptics_ = false;
     bool warnedVolumes_ = false;
-    bool graphFailed_ = false;
     double lastGpuSampleMs_ = 0.0;
     std::string deviceName_;
 
@@ -971,6 +966,7 @@ private:
     OptixProgramGroup hitGroups_[2] = {nullptr, nullptr};
     OptixPipeline pipeline_ = nullptr;
     OptixShaderBindingTable sbt_{};
+    OptixShaderBindingTable sbts_[kRgCount]{};
 
     cudaStream_t stream_ = nullptr;
     cudaEvent_t gpuStartEvent_ = nullptr;
