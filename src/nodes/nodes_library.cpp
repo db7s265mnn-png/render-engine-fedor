@@ -574,23 +574,18 @@ public:
     LightNode(const QString& typeName, const QString& name, LightType type) : Node(typeName, name), type_(type) {
         addParameter(Parameter::makeString("primname", "Prim Name", name));
         addParameter(Parameter::makeBool("enabled", "Enabled", true)
-                         .withGroup("Light")
                          .withTooltip("Uncheck to turn this light off without deleting the node"));
-        addParameter(Parameter::makeColor("color", "Color", Vec3(1.0f, 1.0f, 1.0f)).withGroup("Light"));
+        addParameter(Parameter::makeColor("color", "Color", Vec3(1.0f, 1.0f, 1.0f)));
         addParameter(Parameter::makeFloat("colortemperature", "Color Temperature (K)", 0.0, 0.0, 20000.0)
-                         .withGroup("Light")
                          .withTooltip("Blackbody CCT in Kelvin for spectral integrators.\n"
                                       "0 = off (RGB Color only). Typical: 2700 warm, 6500 daylight.\n"
                                       "RGB Path Tracer ignores this (uses Color)."));
-        addParameter(Parameter::makeFloat("intensity", "Intensity", defaultIntensity(), 0.0, 100.0, false)
-                         .withGroup("Light"));
-        addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -10.0, 10.0).withGroup("Light"));
+        addParameter(Parameter::makeFloat("intensity", "Intensity", defaultIntensity(), 0.0, 100.0, false));
+        addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -10.0, 10.0));
         addParameter(Parameter::makeBool("shadows", "Cast Shadows", true)
-                         .withGroup("Light")
                          .withTooltip("When off, this light ignores occluders (no shadows). "
                                       "For HDRI/dome lights, off removes hard environment shadows"));
         addParameter(Parameter::makeBool("caustics", "Contribute to Caustics", true)
-                         .withGroup("Light")
                          .withTooltip("When off, this light still illuminates surfaces directly but "
                                       "does not cast caustics through glass (MNEE / BDPT / photon map / "
                                       "specular→light paths). Works for area, sun, and dome lights."));
@@ -737,22 +732,17 @@ public:
     explicit PhysicalSkyLightNode(const QString& name) : Node("physicalskylight", name) {
         addParameter(Parameter::makeString("primname", "Prim Name", name));
         addParameter(Parameter::makeBool("enabled", "Enabled", true)
-                         .withGroup("Light")
                          .withTooltip("Uncheck to turn this light off without deleting the node"));
         addParameter(Parameter::makeFloat("intensity", "Intensity", 1.0, 0.0, 100.0, false)
-                         .withGroup("Light")
                          .withTooltip("Overall scale for both the sky dome and the sun.\n"
                                       "Sky Intensity and Sun Intensity are extra multipliers"));
         addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -10.0, 10.0)
-                         .withGroup("Light")
                          .withTooltip("2^exposure multiplier on sky and sun"));
-        addParameter(Parameter::makeBool("shadows", "Cast Shadows", true).withGroup("Light"));
+        addParameter(Parameter::makeBool("shadows", "Cast Shadows", true));
         addParameter(Parameter::makeBool("caustics", "Contribute to Caustics", true)
-                         .withGroup("Light")
                          .withTooltip("When off, sky and sun still light surfaces directly but "
                                       "do not cast caustics through glass"));
         addParameter(Parameter::makeBool("visiblecamera", "Visible To Camera", true)
-                         .withGroup("Light")
                          .withTooltip("Show the sky and sun disc in the camera (both lights).\n"
                                       "Off hides the background and disc; they still light the scene"));
 
@@ -940,19 +930,15 @@ public:
     explicit CameraNode(const QString& name) : Node("camera", name) {
         addParameter(Parameter::makeString("primname", "Prim Name", name));
         addParameter(Parameter::makeFloat("focal", "Focal Length (mm)", 50.0, 8.0, 300.0)
-                         .withGroup("Lens")
                          .withTooltip("Focal length in millimetres (Houdini camera convention). "
                                       "Use the preset menu for common lens lengths"));
         addParameter(Parameter::makeFloat("aperture", "Sensor Width (mm)", 36.0, 4.0, 100.0)
-                         .withGroup("Lens")
                          .withTooltip("Horizontal aperture in millimetres"));
         addParameter(Parameter::makeFloat("fstop", "F-Stop", 0.0, 0.0, 64.0)
-                         .withGroup("Lens")
                          .withTooltip("Aperture. Lower = stronger bokeh. 0 = wide open. "
                                       "Polynomial Optics cannot open wider than the real lens "
                                       "(e.g. f/1 on an f/1.1 optic = wide open)."));
         addParameter(Parameter::makeFloat("focusdistance", "Focus Distance", 5.0, 0.01, 1000.0, false)
-                         .withGroup("Lens")
                          .withTooltip(units::focusDistanceTooltip()));
         addParameter(Parameter::makeMenu("opticalmodel", "Camera Model",
                                          QStringList{"Thin Lens", "Polynomial Optics (Embree)"}, 0)

@@ -801,6 +801,74 @@ void testRenderSettingsFolders() {
     }
 }
 
+void testSceneGraphFolders() {
+    std::printf("scene graph folders\n");
+    registerBuiltinNodes();
+    NodeGraph graph;
+
+    auto groupOf = [](const Node* node, const char* name) -> QString {
+        const Parameter* parameter = node->findParameter(QLatin1String(name));
+        return parameter ? parameter->group : QStringLiteral("<missing>");
+    };
+    auto hasGroup = [](const Node* node, const QString& group) -> bool {
+        for (const Parameter& parameter : node->parameters()) {
+            if (parameter.group == group) return true;
+        }
+        return false;
+    };
+
+    Node* camera = graph.createNode("camera", "camera1");
+    check(camera != nullptr, "create camera");
+    if (camera) {
+        check(!hasGroup(camera, QStringLiteral("Lens")), "camera has no Lens folder");
+        check(groupOf(camera, "focal").isEmpty(), "focal is in the default folder");
+        check(groupOf(camera, "aperture").isEmpty(), "aperture is in the default folder");
+        check(groupOf(camera, "fstop").isEmpty(), "fstop is in the default folder");
+        check(groupOf(camera, "focusdistance").isEmpty(), "focusdistance is in the default folder");
+        check(groupOf(camera, "opticalmodel") == QLatin1String("Optics"), "opticalmodel stays in Optics");
+        check(defaultParameterFolderTitle(camera->typeName()) == QLatin1String("Base"),
+              "camera default folder is Base");
+    }
+
+    Node* rect = graph.createNode("rectlight", "rectlight1");
+    check(rect != nullptr, "create rect light");
+    if (rect) {
+        check(!hasGroup(rect, QStringLiteral("Light")), "rect light has no Light folder");
+        check(groupOf(rect, "enabled").isEmpty(), "enabled is in the default folder");
+        check(groupOf(rect, "color").isEmpty(), "color is in the default folder");
+        check(groupOf(rect, "intensity").isEmpty(), "intensity is in the default folder");
+        check(groupOf(rect, "width") == QLatin1String("Shape"), "width stays in Shape");
+        check(defaultParameterFolderTitle(rect->typeName()) == QLatin1String("Base"),
+              "rect light default folder is Base");
+    }
+
+    Node* sky = graph.createNode("physicalskylight", "sky1");
+    check(sky != nullptr, "create physical sky");
+    if (sky) {
+        check(!hasGroup(sky, QStringLiteral("Light")), "physical sky has no Light folder");
+        check(groupOf(sky, "intensity").isEmpty(), "sky intensity is in the default folder");
+        check(groupOf(sky, "turbidity") == QLatin1String("Sky"), "turbidity stays in Sky");
+        check(defaultParameterFolderTitle(sky->typeName()) == QLatin1String("Base"),
+              "physical sky default folder is Base");
+    }
+
+    const char* baseTypes[] = {"sphere", "grid", "box", "tube", "alembic", "usd",
+                               "vdbfrompolygons", "vdbfile", "sdftopolygons_vdb", "sdftopolygons_dcsdd",
+                               "domelight", "distantlight", "disklight", "spherelight"};
+    for (const char* type : baseTypes) {
+        Node* node = graph.createNode(QString::fromLatin1(type), QString::fromLatin1(type) + QLatin1Char('1'));
+        check(node != nullptr, std::string("create ") + type);
+        if (!node) continue;
+        check(defaultParameterFolderTitle(node->typeName()) == QLatin1String("Base"),
+              std::string(type) + " default folder is Base");
+        check(!hasGroup(node, QStringLiteral("Lens")), std::string(type) + " has no Lens folder");
+        check(!hasGroup(node, QStringLiteral("Light")), std::string(type) + " has no Light folder");
+    }
+
+    check(defaultParameterFolderTitle(QStringLiteral("rendersettings")) == QLatin1String("Parameters"),
+          "render settings keep Parameters as the empty-folder title");
+}
+
 void testRender() {
     std::printf("render\n");
     registerBuiltinNodes();
@@ -6330,6 +6398,7 @@ int main() {
     if (getenv("SOL_ONLY_FOLDERS")) {
         registerBuiltinNodes();
         testRenderSettingsFolders();
+        testSceneGraphFolders();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -6357,6 +6426,7 @@ int main() {
     testGraphCook();
     testXpuDevice();
     testRenderSettingsFolders();
+    testSceneGraphFolders();
     testCameraDofFocus();
     testPolyOpticsApertureSpread();
     testPolynomialOpticsCamera();

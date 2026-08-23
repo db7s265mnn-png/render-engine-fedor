@@ -30,8 +30,9 @@ QColor frameBoxBg() { return QColor(0x1a, 0x1c, 0x20); }
 QColor frameBoxBorder() { return QColor(0x7a, 0x7e, 0x86); }
 QColor frameBoxText() { return QColor(0xd8, 0xda, 0xe0); }
 
-// Same chrome as Start/Stop: muted orange fill, orange rim, light text.
-QColor playheadFill() { return theme::checkedFill(); }
+// Playhead is a solid chip (ticks must not show through). Checked buttons stay
+// translucent via theme::checkedFill(); this is a separate fill.
+QColor playheadFill() { return QColor(255, 190, 90); }
 QColor playheadStroke() { return theme::checkedStroke(); }
 QColor playheadText() { return theme::checkedText(); }
 
@@ -281,7 +282,7 @@ void TimelineScrubber::beginFrameEdit() {
     editor_->setFont(frameNumberFont());
     editor_->setTextMargins(0, 0, 0, 0);
     editor_->setStyleSheet(
-        "QLineEdit { background: rgba(255, 190, 90, 90); color: #ffffff; border: 1px solid #ffbe5a;"
+        "QLineEdit { background: #ffbe5a; color: #ffffff; border: 1px solid #ffbe5a;"
         " border-radius: 2px; padding: 0px; font-size: 11px; font-weight: 700; }");
     editor_->move(playheadRect().toRect().topLeft());
     editor_->selectAll();

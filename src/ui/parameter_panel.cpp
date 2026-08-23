@@ -820,7 +820,8 @@ void ParameterPanel::rebuildLop() {
     const QString previous = lastFolderByType_.value(node_->typeName());
     for (int i = 0; i < static_cast<int>(pages.size()); ++i) {
         const FolderPage& folder = pages[static_cast<size_t>(i)];
-        const QString title = folder.name.isEmpty() ? QStringLiteral("Parameters") : folder.name;
+        const QString title =
+            folder.name.isEmpty() ? defaultParameterFolderTitle(node_->typeName()) : folder.name;
         auto* btn = new FolderTabButton(title);
         btn->setStyleSheet(folderBtnCss);
         flow->addWidget(btn);
