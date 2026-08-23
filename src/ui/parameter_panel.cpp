@@ -75,7 +75,12 @@ public:
         QLayout::setGeometry(rect);
         doLayout(rect, false);
     }
-    QSize sizeHint() const override { return minimumSize(); }
+    QSize sizeHint() const override {
+        const QMargins m = contentsMargins();
+        // Typical Parameters dock inner width — wrapping height, not one fat row.
+        const int inner = 260;
+        return QSize(inner + m.left() + m.right(), heightForWidth(inner + m.left() + m.right()));
+    }
     QSize minimumSize() const override {
         QSize size;
         for (QLayoutItem* item : items_) size = size.expandedTo(hintFor(item));
@@ -86,26 +91,47 @@ public:
 
 private:
     static QSize hintFor(QLayoutItem* item) {
-        if (QWidget* widget = item->widget()) return widget->sizeHint();
+        if (QWidget* widget = item->widget()) {
+            widget->ensurePolished();
+            return widget->sizeHint().expandedTo(widget->minimumSizeHint());
+        }
         return item->sizeHint();
     }
 
     int doLayout(const QRect& rect, bool testOnly) const {
+        struct Place {
+            QLayoutItem* item = nullptr;
+            int x = 0;
+            QSize hint;
+        };
         int x = rect.x();
         int y = rect.y();
         int lineHeight = 0;
+        QList<Place> line;
+
+        auto flushLine = [&](bool more) {
+            if (line.isEmpty()) return;
+            if (!testOnly) {
+                for (const Place& p : line) {
+                    p.item->setGeometry(QRect(p.x, y, p.hint.width(), lineHeight));
+                }
+            }
+            y += lineHeight;
+            if (more) y += vSpacing_;
+            x = rect.x();
+            lineHeight = 0;
+            line.clear();
+        };
+
         for (QLayoutItem* item : items_) {
             const QSize hint = hintFor(item);
-            if (x + hint.width() > rect.right() + 1 && lineHeight > 0) {
-                x = rect.x();
-                y += lineHeight + vSpacing_;
-                lineHeight = 0;
-            }
-            if (!testOnly) item->setGeometry(QRect(QPoint(x, y), hint));
+            if (x + hint.width() > rect.right() + 1 && !line.isEmpty()) flushLine(true);
+            line.push_back(Place{item, x, hint});
             x += hint.width() + hSpacing_;
             lineHeight = qMax(lineHeight, hint.height());
         }
-        return y + lineHeight - rect.y();
+        flushLine(false);
+        return y - rect.y();
     }
 
     QList<QLayoutItem*> items_;
@@ -113,8 +139,10 @@ private:
     int vSpacing_ = 4;
 };
 
-// Folder tabs must size to the checked (orange) state. Fusion + stylesheet
-// padding otherwise clips glyphs when the label becomes the current folder.
+// Compact Houdini-style folder tabs. Fixed height so wrapped rows cannot
+// paint over each other (stylesheet padding used to exceed the layout cell).
+constexpr int kFolderTabHeight = 22;
+
 class FolderTabButton final : public QPushButton {
 public:
     explicit FolderTabButton(const QString& text, QWidget* parent = nullptr) : QPushButton(text, parent) {
@@ -122,15 +150,14 @@ public:
         setCursor(Qt::PointingHandCursor);
         setFocusPolicy(Qt::NoFocus);
         setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+        setFixedHeight(kFolderTabHeight);
         setAttribute(Qt::WA_LayoutUsesWidgetRect);
     }
 
     QSize sizeHint() const override {
-        QFont f = font();
-        f.setBold(true);
-        const QFontMetrics metrics(f);
-        const QSize textSize = metrics.size(Qt::TextSingleLine, text());
-        return QSize(textSize.width() + 28, qMax(28, textSize.height() + 14));
+        const QFontMetrics metrics(font());
+        const int w = metrics.horizontalAdvance(text()) + 20;
+        return QSize(qMax(40, w), kFolderTabHeight);
     }
 
     QSize minimumSizeHint() const override { return sizeHint(); }
@@ -699,8 +726,8 @@ void ParameterPanel::rebuildLop() {
     }
 
     auto* strip = new QWidget();
-    strip->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-    auto* flow = new FlowLayout(strip, 4, 6);
+    strip->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    auto* flow = new FlowLayout(strip, 4, 4);
     flow->setContentsMargins(0, 2, 0, 2);
     auto* buttons = new QButtonGroup(strip);
     buttons->setExclusive(true);
@@ -709,7 +736,7 @@ void ParameterPanel::rebuildLop() {
 
     const QString folderBtnCss = QStringLiteral(
         "QPushButton { background:#2a2e33; color:#d0d4da; border:1px solid #666b73;"
-        " border-radius:2px; padding:6px 14px; min-height:26px; }"
+        " border-radius:2px; padding:0 8px; min-height:22px; max-height:22px; }"
         "QPushButton:hover { background:#3a3f46; color:#f0f2f5; }"
         "QPushButton:checked { background:#ffa82e; color:#1a1c20; border-color:#ffa82e; }");
 

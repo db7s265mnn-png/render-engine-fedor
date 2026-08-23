@@ -10,6 +10,7 @@
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QAbstractButton>
 #include <QAction>
 #include <QMenu>
 #include <QMouseEvent>
@@ -28,6 +29,8 @@
 namespace sol {
 namespace {
 
+constexpr int kChromeButtonHeight = 24;
+
 QString chromeToolButtonStyle(int minWidth) {
     return QStringLiteral(
                "QToolButton {"
@@ -36,7 +39,8 @@ QString chromeToolButtonStyle(int minWidth) {
                "  border: 1px solid #4a4f57;"
                "  border-radius: 6px;"
                "  min-width: %1px;"
-               "  min-height: 24px;"
+               "  min-height: %2px;"
+               "  max-height: %2px;"
                "  font-weight: 600;"
                "  font-size: 11px;"
                "  padding: 0 8px;"
@@ -48,7 +52,15 @@ QString chromeToolButtonStyle(int minWidth) {
                "}"
                "QToolButton:hover { background: #474c54; }"
                "QToolButton:checked:hover { background: rgba(255, 190, 90, 120); }")
-        .arg(minWidth);
+        .arg(minWidth)
+        .arg(kChromeButtonHeight);
+}
+
+void fitChromeButton(QAbstractButton* button) {
+    if (!button) return;
+    button->setFixedHeight(kChromeButtonHeight);
+    button->setFocusPolicy(Qt::NoFocus);
+    if (auto* tool = qobject_cast<QToolButton*>(button)) tool->setAutoRaise(true);
 }
 
 QString findPlaceholderAsset() {
@@ -272,21 +284,19 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     renderControlStrip_->setStyleSheet(
         "QWidget#viewportRenderControls { background: transparent; border: none; }");
     auto* renderLayout = new QHBoxLayout(renderControlStrip_);
-    renderLayout->setContentsMargins(8, 3, 4, 3);
+    renderLayout->setContentsMargins(8, 4, 4, 4);
     renderLayout->setSpacing(4);
     startButton_ = new QToolButton(renderControlStrip_);
     startButton_->setText(QStringLiteral("Start"));
     startButton_->setCheckable(true);
-    startButton_->setAutoRaise(true);
-    startButton_->setFocusPolicy(Qt::NoFocus);
     startButton_->setStyleSheet(chromeToolButtonStyle(48));
+    fitChromeButton(startButton_);
     stopButton_ = new QToolButton(renderControlStrip_);
     stopButton_->setText(QStringLiteral("Stop"));
     stopButton_->setCheckable(true);
     stopButton_->setChecked(true);
-    stopButton_->setAutoRaise(true);
-    stopButton_->setFocusPolicy(Qt::NoFocus);
     stopButton_->setStyleSheet(chromeToolButtonStyle(48));
+    fitChromeButton(stopButton_);
     renderLayout->addWidget(startButton_);
     renderLayout->addWidget(stopButton_);
 
@@ -304,8 +314,9 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         "  border-radius: 6px;"
         "  min-width: 28px;"
         "  min-height: 24px;"
+        "  max-height: 24px;"
         "  font-weight: 700;"
-        "  font-size: 12px;"
+        "  font-size: 11px;"
         "  padding: 0 4px;"
         "}"
         "QToolButton:checked {"
@@ -317,8 +328,8 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         "  background: #474c54;"
         "}");
     auto* stripLayout = new QHBoxLayout(toolStrip_);
-    stripLayout->setContentsMargins(4, 3, 4, 3);
-    stripLayout->setSpacing(2);
+    stripLayout->setContentsMargins(4, 4, 4, 4);
+    stripLayout->setSpacing(4);
 
     cameraMenuButton_ = new QToolButton(toolStrip_);
     cameraMenuButton_->setText("persp");
@@ -328,13 +339,14 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     cameraMenuButton_->setStyleSheet(
         "QToolButton {"
         "  min-width: 72px; max-width: 140px;"
-        "  min-height: 24px;"
-        "  font-size: 10px; font-weight: 600;"
+        "  min-height: 24px; max-height: 24px;"
+        "  font-size: 11px; font-weight: 600;"
         "  text-align: left; padding-left: 6px; padding-right: 6px;"
         "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
         "}"
         "QToolButton:hover { background: #474c54; }"
         "QToolButton::menu-indicator { width: 10px; }");
+    fitChromeButton(cameraMenuButton_);
     stripLayout->addWidget(cameraMenuButton_);
     rebuildCameraMenu();
 
@@ -344,11 +356,12 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     homeButton_->setAutoRaise(true);
     homeButton_->setStyleSheet(
         "QToolButton {"
-        "  min-width: 44px; min-height: 24px;"
-        "  font-size: 10px; font-weight: 600;"
+        "  min-width: 44px; min-height: 24px; max-height: 24px;"
+        "  font-size: 11px; font-weight: 600;"
         "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
         "}"
         "QToolButton:hover { background: #474c54; }");
+    fitChromeButton(homeButton_);
     stripLayout->addWidget(homeButton_);
     connect(homeButton_, &QToolButton::clicked, this, [this] { frameAll(); });
 
@@ -370,6 +383,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         button->setAutoRaise(true);
         group->addButton(button);
         stripLayout->addWidget(button);
+        fitChromeButton(button);
         return button;
     };
     selectButton_ = makeButton("Q", "Select (Q) — click objects in the viewport");
@@ -396,8 +410,8 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         button->setAutoRaise(true);
         button->setStyleSheet(
             "QToolButton {"
-            "  min-width: 42px; min-height: 24px;"
-            "  font-size: 10px; font-weight: 600;"
+            "  min-width: 42px; min-height: 24px; max-height: 24px;"
+            "  font-size: 11px; font-weight: 600;"
             "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
             "}"
             "QToolButton:checked {"
@@ -406,6 +420,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
             "QToolButton:hover { background: #474c54; }");
         spaceGroup->addButton(button);
         stripLayout->addWidget(button);
+        fitChromeButton(button);
         return button;
     };
     localSpaceButton_ = makeSpaceButton("Local", "Local transform space");
@@ -415,8 +430,8 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     stripLayout->addSpacing(8);
     auto comboStyle = QStringLiteral(
         "QComboBox {"
-        "  min-height: 24px;"
-        "  font-size: 10px; font-weight: 600;"
+        "  min-height: 24px; max-height: 24px;"
+        "  font-size: 11px; font-weight: 600;"
         "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
         "  padding: 0 6px;"
         "}"
@@ -431,6 +446,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         QStringLiteral("Classic: linear → sRGB (no OCIO, no tone map; Houdini-style).\n"
                        "ACES: OpenColorIO Display/View from the ACES config."));
     colorManagementCombo_->setStyleSheet(comboStyle + QStringLiteral(" QComboBox { max-width: 90px; }"));
+    colorManagementCombo_->setFixedHeight(kChromeButtonHeight);
     stripLayout->addWidget(colorManagementCombo_);
     connect(colorManagementCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int index) {
@@ -448,6 +464,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         QStringLiteral("Monitor view transform.\n"
                        "Working space is set in Render Settings → Film."));
     viewTransformCombo_->setStyleSheet(comboStyle + QStringLiteral(" QComboBox { max-width: 110px; }"));
+    viewTransformCombo_->setFixedHeight(kChromeButtonHeight);
     stripLayout->addWidget(viewTransformCombo_);
     connect(viewTransformCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int index) {
@@ -676,16 +693,14 @@ void RenderView::attachRenderActions(QAction* start, QAction* stop) {
     if (startButton_ && start) {
         startButton_->setDefaultAction(start);
         startButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-        startButton_->setAutoRaise(true);
-        startButton_->setFocusPolicy(Qt::NoFocus);
         startButton_->setStyleSheet(chromeToolButtonStyle(48));
+        fitChromeButton(startButton_);
     }
     if (stopButton_ && stop) {
         stopButton_->setDefaultAction(stop);
         stopButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
-        stopButton_->setAutoRaise(true);
-        stopButton_->setFocusPolicy(Qt::NoFocus);
         stopButton_->setStyleSheet(chromeToolButtonStyle(48));
+        fitChromeButton(stopButton_);
     }
     layoutToolStrip();
 }
