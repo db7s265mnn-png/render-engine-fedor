@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <new>
 #include <string>
 
@@ -55,6 +56,7 @@
 #include "scene/tessellate.h"
 #include "scene/displace.h"
 #include "solstice_config.h"
+#include "ui/dock_chrome.h"
 #include "ui/log_panel.h"
 #include "ui/material_network_view.h"
 #include "ui/node_graph_view.h"
@@ -66,113 +68,30 @@
 namespace sol {
 namespace {
 
-class DockDetachButton : public QToolButton {
+// Floating viewport host. Not a QDockWidget — putting the viewer in the dock
+// layout is what collapsed the central pane and blew up Scene Network.
+class ViewportFloatWindow : public QWidget {
 public:
-    explicit DockDetachButton(QWidget* parent = nullptr) : QToolButton(parent) {
-        setObjectName(QStringLiteral("dockDetachButton"));
-        setFocusPolicy(Qt::NoFocus);
-        setCursor(Qt::ArrowCursor);
-        setFixedSize(18, 18);
-        setAutoRaise(true);
-        setAttribute(Qt::WA_Hover, true);
-        setStyleSheet(QStringLiteral(
-            "QToolButton#dockDetachButton {"
-            "  background: transparent;"
-            "  border: none;"
-            "  padding: 0px;"
-            "}"));
+    explicit ViewportFloatWindow(QWidget* parent = nullptr) : QWidget(parent, Qt::Window) {
+        setObjectName(QStringLiteral("viewportFloatWindow"));
+        setWindowTitle(QStringLiteral("Viewport"));
+        setMinimumSize(320, 240);
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
     }
+
+    void setOnClose(std::function<void()> onClose) { onClose_ = std::move(onClose); }
 
 protected:
-    void paintEvent(QPaintEvent*) override {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, false);
-        constexpr int kSide = 10;
-        const QRect square((width() - kSide) / 2, (height() - kSide) / 2, kSide, kSide);
-        painter.fillRect(square, underMouse() ? QColor(0x7a, 0x7e, 0x86) : QColor(0x5c, 0x60, 0x66));
-        painter.setPen(QColor(0x2a, 0x2d, 0x32));
-        painter.drawRect(square.adjusted(0, 0, -1, -1));
-    }
-
-    void mousePressEvent(QMouseEvent* event) override {
-        QToolButton::mousePressEvent(event);
-        event->accept();
-    }
-};
-
-class DockTitleBar : public QWidget {
-public:
-    explicit DockTitleBar(QDockWidget* dock) : QWidget(dock), dock_(dock) {
-        setObjectName("dockTitleBar");
-        setStyleSheet(
-            "QWidget#dockTitleBar {"
-            "  background: #2e3136;"
-            "  border-bottom: 1px solid #22242a;"
-            "}"
-            "QLabel {"
-            "  color: #dcdee2;"
-            "  font-weight: 700;"
-            "  background: transparent;"
-            "  border: none;"
-            "}");
-        auto* layout = new QHBoxLayout(this);
-        layout->setContentsMargins(10, 0, 8, 0);
-        layout->setSpacing(6);
-        auto* label = new QLabel(dock ? dock->windowTitle() : QString(), this);
-        layout->addWidget(label, 1);
-        auto* detach = new DockDetachButton(this);
-        detach->setToolTip(QStringLiteral("Detach"));
-        layout->addWidget(detach, 0, Qt::AlignVCenter);
-        if (dock_) {
-            connect(dock_, &QDockWidget::windowTitleChanged, label, &QLabel::setText);
-            connect(dock_, &QDockWidget::topLevelChanged, this, [detach](bool floating) {
-                detach->setToolTip(floating ? QStringLiteral("Dock") : QStringLiteral("Detach"));
-            });
-            connect(detach, &QToolButton::clicked, this, [this] {
-                if (dock_) dock_->setFloating(!dock_->isFloating());
-            });
-        }
-    }
-
-    QSize sizeHint() const override {
-        return {120, theme::chromeBarHeight()};
-    }
-    QSize minimumSizeHint() const override { return sizeHint(); }
-
-protected:
-    // Unused chrome still lets Qt drag / double-click float the dock.
-    void mousePressEvent(QMouseEvent* event) override {
+    void closeEvent(QCloseEvent* event) override {
         event->ignore();
-    }
-    void mouseReleaseEvent(QMouseEvent* event) override {
-        event->ignore();
-    }
-    void mouseMoveEvent(QMouseEvent* event) override {
-        event->ignore();
-    }
-    void mouseDoubleClickEvent(QMouseEvent* event) override {
-        event->ignore();
+        if (onClose_) onClose_();
     }
 
 private:
-    QDockWidget* dock_ = nullptr;
+    std::function<void()> onClose_;
 };
-
-void installDetachableTitleBar(QDockWidget* dock) {
-    if (!dock) return;
-    dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
-    dock->setTitleBarWidget(new DockTitleBar(dock));
-    // Closing a floating window must redock it — these panes have no close button
-    // and must not vanish from the layout.
-    QObject::connect(dock, &QDockWidget::visibilityChanged, dock, [dock](bool visible) {
-        if (visible || !dock->isFloating()) return;
-        QTimer::singleShot(0, dock, [dock] {
-            if (dock->isVisible()) return;
-            dock->setFloating(false);
-            dock->show();
-        });
-    });
-}
 
 QMessageBox::StandardButton appMessageBox(QWidget* parent, const QString& title, const QString& text,
                                           QMessageBox::StandardButtons buttons = QMessageBox::Ok,
@@ -233,8 +152,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowIcon(QIcon(QStringLiteral(":/icons/app_icon.png")));
     resize(1720, 1000);
 
-    // Viewport lives in a dock (with the timeline) so it can detach like Scene Graph
-    // and Parameters. createDocks() builds that pane before actions bind to it.
+    // Viewport stays the central widget (same proportions as before detach).
+    // Docks around it can float; the viewer itself floats via a dedicated window.
     createDocks();
     createActions();
     createMenus();
@@ -497,7 +416,7 @@ void MainWindow::createToolBar() {
 }
 
 void MainWindow::createTimeline() {
-    // TimelineBar is created inside the Viewport dock (under the render view).
+    // TimelineBar is created under the viewport (central pane).
     if (!timelineBar_) return;
     connect(timelineBar_, &TimelineBar::frameChanged, this, &MainWindow::onTimelineFrameChanged);
     // After scrubbing / stop, cook once more with full Embree quality when needed.
@@ -526,16 +445,8 @@ void MainWindow::onTimelineFrameChanged(int) {
 }
 
 void MainWindow::createDocks() {
-    // QMainWindow requires a central widget; keep it 0×0 so Scene Graph, Viewport
-    // and Parameters can sit as three glued docks that still float/redock.
-    auto* dummy = new QWidget(this);
-    dummy->setObjectName(QStringLiteral("centralDummy"));
-    dummy->setMaximumSize(0, 0);
-    dummy->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
-    setCentralWidget(dummy);
-
     setDockOptions(QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks |
-                   QMainWindow::AllowTabbedDocks | QMainWindow::GroupedDragging);
+                   QMainWindow::AllowTabbedDocks);
     // Keep the network pane at the bottom of the window, but put the tab bar
     // (Scene Network / Material Network / Log) on TOP of that pane.
     setTabPosition(Qt::BottomDockWidgetArea, QTabWidget::North);
@@ -553,9 +464,70 @@ void MainWindow::createDocks() {
     renderView_ = new RenderView(viewportPane);
     viewportLayout->addWidget(renderView_, 1);
 
-    // Compact Houdini-style timeline stays with the viewport when that dock floats.
+    // Compact Houdini-style timeline stays with the viewport when that pane floats.
     timelineBar_ = new TimelineBar(viewportPane);
     viewportLayout->addWidget(timelineBar_, 0);
+
+    // Viewport + timeline stay the central widget so leftover space after the
+    // ~340px side docks and ~330px bottom network goes to the viewer — same
+    // split as before detach. Floating uses a separate QWidget window, not a
+    // competing QDockWidget (that is what inflated Scene Network).
+    auto* viewportHost = new QWidget(this);
+    viewportHost->setObjectName(QStringLiteral("viewportHost"));
+    viewportHost->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    auto* hostLayout = new QVBoxLayout(viewportHost);
+    hostLayout->setContentsMargins(0, 0, 0, 0);
+    hostLayout->setSpacing(0);
+
+    auto* viewportPlaceholder = new QWidget(viewportHost);
+    viewportPlaceholder->setObjectName(QStringLiteral("viewportPlaceholder"));
+    viewportPlaceholder->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    viewportPlaceholder->hide();
+
+    auto* viewportFloat = new ViewportFloatWindow(this);
+    auto* floatLayout = qobject_cast<QVBoxLayout*>(viewportFloat->layout());
+
+    auto redockViewport = [this, viewportHost, hostLayout, viewportPane, viewportPlaceholder,
+                           viewportFloat, floatLayout] {
+        if (viewportPane->parentWidget() == viewportHost) {
+            viewportFloat->hide();
+            return;
+        }
+        if (floatLayout) floatLayout->removeWidget(viewportPane);
+        viewportPlaceholder->hide();
+        viewportPane->setParent(viewportHost);
+        hostLayout->addWidget(viewportPane, 1);
+        viewportPane->show();
+        viewportFloat->hide();
+        renderView_->setViewportFloating(false);
+    };
+    auto detachViewport = [this, hostLayout, viewportPane, viewportPlaceholder, viewportFloat,
+                           floatLayout] {
+        if (viewportPane->parentWidget() == viewportFloat) {
+            viewportFloat->show();
+            viewportFloat->raise();
+            viewportFloat->activateWindow();
+            return;
+        }
+        hostLayout->removeWidget(viewportPane);
+        viewportPlaceholder->show();
+        if (floatLayout) floatLayout->addWidget(viewportPane, 1);
+        viewportPane->show();
+        viewportFloat->resize(std::max(640, viewportPane->width()),
+                              std::max(400, viewportPane->height()));
+        viewportFloat->show();
+        viewportFloat->raise();
+        viewportFloat->activateWindow();
+        renderView_->setViewportFloating(true);
+    };
+    viewportFloat->setOnClose(redockViewport);
+    renderView_->setOnDetach([viewportPane, viewportFloat, detachViewport, redockViewport] {
+        if (viewportPane->parentWidget() == viewportFloat) redockViewport();
+        else detachViewport();
+    });
+    hostLayout->addWidget(viewportPane, 1);
+    hostLayout->addWidget(viewportPlaceholder, 1);
+    setCentralWidget(viewportHost);
 
     // Framing shortcuts stay scoped to the viewport pane so F/H are not stolen
     // from Scene / Material Network docks.
@@ -568,13 +540,6 @@ void MainWindow::createDocks() {
     auto* homeShortcut = new QShortcut(QKeySequence(Qt::Key_Home), viewportPane);
     homeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(homeShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
-
-    auto* viewportDock = new QDockWidget("Viewport", this);
-    viewportDock->setObjectName("viewportDock");
-    viewportDock->setWidget(viewportPane);
-    viewportDock->setMinimumWidth(420);
-    viewportDock->setMinimumHeight(280);
-    installDetachableTitleBar(viewportDock);
 
     auto* networkDock = new QDockWidget("Scene Network", this);
     networkDock->setObjectName("networkDock");
@@ -593,14 +558,14 @@ void MainWindow::createDocks() {
     parameterDock->setObjectName("parameterDock");
     parameterPanel_ = new ParameterPanel(parameterDock);
     parameterDock->setWidget(parameterPanel_);
-    parameterDock->setMinimumWidth(300);
+    parameterDock->setMinimumWidth(200);
     installDetachableTitleBar(parameterDock);
 
     auto* sceneDock = new QDockWidget("Scene Graph", this);
     sceneDock->setObjectName("sceneDock");
     sceneGraphPanel_ = new SceneGraphPanel(sceneDock);
     sceneDock->setWidget(sceneGraphPanel_);
-    sceneDock->setMinimumWidth(300);
+    sceneDock->setMinimumWidth(80);
     installDetachableTitleBar(sceneDock);
 
     auto* logDock = new QDockWidget("Log", this);
@@ -611,8 +576,6 @@ void MainWindow::createDocks() {
     installDetachableTitleBar(logDock);
 
     addDockWidget(Qt::LeftDockWidgetArea, sceneDock);
-    addDockWidget(Qt::LeftDockWidgetArea, viewportDock);
-    splitDockWidget(sceneDock, viewportDock, Qt::Horizontal);
     addDockWidget(Qt::RightDockWidgetArea, parameterDock);
     addDockWidget(Qt::BottomDockWidgetArea, networkDock);
     addDockWidget(Qt::BottomDockWidgetArea, materialNetworkDock);
@@ -623,13 +586,10 @@ void MainWindow::createDocks() {
     networkDock->raise();
 
     resizeDocks({networkDock}, {330}, Qt::Vertical);
-    // Side docks stay ~340px; leftover width goes to the viewport split.
     constexpr int kSideDockWidth = 340;
     resizeDocks({sceneDock, parameterDock}, {kSideDockWidth, kSideDockWidth}, Qt::Horizontal);
-    QTimer::singleShot(0, this, [this, sceneDock, viewportDock, parameterDock, networkDock, kSideDockWidth] {
+    QTimer::singleShot(0, this, [this, sceneDock, parameterDock, networkDock, kSideDockWidth] {
         resizeDocks({sceneDock, parameterDock}, {kSideDockWidth, kSideDockWidth}, Qt::Horizontal);
-        const int leftover = std::max(420, width() - kSideDockWidth * 2 - 24);
-        resizeDocks({sceneDock, viewportDock}, {kSideDockWidth, leftover}, Qt::Horizontal);
         resizeDocks({networkDock}, {330}, Qt::Vertical);
     });
 

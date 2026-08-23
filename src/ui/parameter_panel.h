@@ -3,6 +3,7 @@
 #pragma once
 
 #include <QHash>
+#include <QSize>
 #include <QWidget>
 
 #include "nodes/node.h"
@@ -19,6 +20,9 @@ class ParameterPanel : public QWidget {
 
 public:
     explicit ParameterPanel(QWidget* parent = nullptr);
+
+    QSize sizeHint() const override { return QSize(340, 400); }
+    QSize minimumSizeHint() const override { return QSize(180, 120); }
 
     void setNode(Node* node);
     void setMaterialXSelection(const MaterialXSelection& selection);

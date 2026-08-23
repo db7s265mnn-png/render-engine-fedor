@@ -2,6 +2,7 @@
 // Also lists material container nodes from the LOPs network (not MaterialX guts).
 #pragma once
 
+#include <QSize>
 #include <QStringList>
 #include <QWidget>
 
@@ -17,6 +18,9 @@ class SceneGraphPanel : public QWidget {
 
 public:
     explicit SceneGraphPanel(QWidget* parent = nullptr);
+
+    QSize sizeHint() const override { return QSize(340, 280); }
+    QSize minimumSizeHint() const override { return QSize(80, 80); }
 
     void setStage(const StagePtr& stage, const QStringList& materialContainers = {});
     QString selectedPath() const;

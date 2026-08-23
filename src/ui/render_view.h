@@ -121,6 +121,10 @@ public:
     // Start / Stop live on the viewport chrome (left of camera / transform tools).
     void attachRenderActions(QAction* start, QAction* stop);
 
+    // Detach square on the existing chrome (no second "Viewport" title bar).
+    void setOnDetach(std::function<void()> onDetach);
+    void setViewportFloating(bool floating);
+
 signals:
     void cameraMoved();
     // Fired while dragging (values already written quietly — do not cook/IPR).
@@ -223,6 +227,8 @@ private:
     QWidget* chromeBar_ = nullptr;
     QWidget* renderControlStrip_ = nullptr;
     QWidget* toolStrip_ = nullptr;
+    QToolButton* detachButton_ = nullptr;
+    std::function<void()> onDetach_;
     QToolButton* startButton_ = nullptr;
     QToolButton* stopButton_ = nullptr;
     QToolButton* cameraMenuButton_ = nullptr;

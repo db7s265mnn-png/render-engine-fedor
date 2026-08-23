@@ -603,7 +603,7 @@ QWidget* makeSpinSliderRow(QWidget* spin, double value, double minimum, double m
 }  // namespace
 
 ParameterPanel::ParameterPanel(QWidget* parent) : QWidget(parent) {
-    setMinimumWidth(280);
+    setMinimumWidth(180);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);

@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "ui/dock_chrome.h"
 #include "ui/theme.h"
 
 namespace sol {
@@ -276,6 +277,12 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         "  background: #2e3136;"
         "  border-bottom: 1px solid #22242a;"
         "}");
+
+    detachButton_ = new DockDetachButton(chromeBar_);
+    detachButton_->hide();
+    connect(detachButton_, &QToolButton::clicked, this, [this] {
+        if (onDetach_) onDetach_();
+    });
 
     renderControlStrip_ = new QWidget(chromeBar_);
     renderControlStrip_->setObjectName("viewportRenderControls");
@@ -669,6 +676,13 @@ void RenderView::layoutToolStrip() {
     if (!chromeBar_ || !toolStrip_) return;
     const int chromeH = theme::chromeBarHeight();
     chromeBar_->setGeometry(0, 0, width(), chromeH);
+    int rightReserve = 0;
+    if (detachButton_ && detachButton_->isVisible()) {
+        const int y = std::max(0, (chromeH - detachButton_->height()) / 2);
+        detachButton_->move(chromeBar_->width() - detachButton_->width() - 8, y);
+        detachButton_->raise();
+        rightReserve = detachButton_->width() + 16;
+    }
     int left = 0;
     if (renderControlStrip_) {
         renderControlStrip_->adjustSize();
@@ -678,10 +692,12 @@ void RenderView::layoutToolStrip() {
         left = renderControlStrip_->width() + 4;
     }
     toolStrip_->adjustSize();
-    const int x = std::max(left, (chromeBar_->width() - toolStrip_->width()) / 2);
+    const int available = std::max(0, chromeBar_->width() - rightReserve);
+    const int x = std::max(left, (available - toolStrip_->width()) / 2);
     const int y = std::max(0, (chromeH - toolStrip_->height()) / 2);
     toolStrip_->move(x, y);
     toolStrip_->raise();
+    if (detachButton_ && detachButton_->isVisible()) detachButton_->raise();
     chromeBar_->raise();
 }
 
@@ -699,6 +715,21 @@ void RenderView::attachRenderActions(QAction* start, QAction* stop) {
         fitChromeButton(stopButton_);
     }
     layoutToolStrip();
+}
+
+void RenderView::setOnDetach(std::function<void()> onDetach) {
+    onDetach_ = std::move(onDetach);
+    if (detachButton_) {
+        detachButton_->setVisible(bool(onDetach_));
+        detachButton_->setToolTip(QStringLiteral("Detach"));
+    }
+    layoutToolStrip();
+}
+
+void RenderView::setViewportFloating(bool floating) {
+    if (detachButton_) {
+        detachButton_->setToolTip(floating ? QStringLiteral("Dock") : QStringLiteral("Detach"));
+    }
 }
 
 void RenderView::setCameraMenu(const QStringList& cameraNames, const QString& activeName) {

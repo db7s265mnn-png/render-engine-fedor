@@ -6,6 +6,7 @@
 #include <QDrag>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QSizePolicy>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMenu>
@@ -137,6 +138,8 @@ QTreeWidgetItem* findItemBySourceNode(QTreeWidget* tree, const QString& sourceNo
 }  // namespace
 
 SceneGraphPanel::SceneGraphPanel(QWidget* parent) : QWidget(parent) {
+    setMinimumWidth(80);
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(4, 4, 4, 4);
     layout->setSpacing(4);
@@ -146,6 +149,11 @@ SceneGraphPanel::SceneGraphPanel(QWidget* parent) : QWidget(parent) {
     tree_->setColumnCount(3);
     tree_->setHeaderLabels({"Prim", "Type", "Info"});
     tree_->header()->setStretchLastSection(true);
+    tree_->header()->setMinimumSectionSize(24);
+    tree_->header()->setSectionResizeMode(QHeaderView::Interactive);
+    tree_->header()->setDefaultSectionSize(72);
+    tree_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    tree_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
     tree_->setRootIsDecorated(true);
     tree_->setAlternatingRowColors(false);
     tree_->setUniformRowHeights(true);

@@ -676,6 +676,7 @@ target_link_libraries(solstice_lib PUBLIC Threads::Threads)
 set(SOLSTICE_APP_SOURCES
     src/main.cpp
     src/ui/main_window.cpp
+    src/ui/dock_chrome.cpp
     src/ui/material_network_view.cpp
     src/ui/material_wire_item.cpp
     src/ui/node_graph_view.cpp
@@ -693,6 +694,7 @@ set(SOLSTICE_APP_SOURCES
 
 set(SOLSTICE_APP_HEADERS
     src/ui/main_window.h
+    src/ui/dock_chrome.h
     src/ui/material_network_view.h
     src/ui/material_wire_item.h
     src/ui/node_graph_view.h
