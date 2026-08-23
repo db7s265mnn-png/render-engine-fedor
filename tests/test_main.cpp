@@ -318,6 +318,82 @@ void testSampling() {
     }
 }
 
+void testLightSelectionDistantRect() {
+    std::printf("light selection distant+rect\n");
+    LightData lights[2];
+    lights[0].type = kLightDistant;
+    lights[0].intensity = 2.5f;
+    lights[0].color = Vec3(1.0f);
+    lights[0].normalize = 1;
+    lights[0].angle = 1.5f;
+    lights[0].xform = Mat4::identity();
+    lights[0].xformInv = Mat4::identity();
+
+    lights[1].type = kLightRect;
+    lights[1].intensity = 24.0f;
+    lights[1].color = Vec3(1.0f);
+    lights[1].normalize = 1;
+    lights[1].width = 4.0f;
+    lights[1].height = 3.0f;
+    lights[1].xform = Mat4::identity();
+    lights[1].xformInv = Mat4::identity();
+
+    SceneView view{};
+    view.lights = lights;
+    view.lightCount = 2;
+
+    const float fSun = lightFluxWeight(view, 0);
+    const float fRect = lightFluxWeight(view, 1);
+    check(std::fabs(fSun - 2.5f) < 0.05f, "normalized distant flux is intensity");
+    check(std::fabs(fRect - 24.0f) < 0.5f, "normalized rect flux is intensity, not intensity×area");
+    check(fRect / srMax(fSun, 1e-6f) < 20.0f, "rect is not ~area times more important than the sun");
+
+    lights[1].normalize = 0;
+    const float fRectRadiance = lightFluxWeight(view, 1);
+    check(fRectRadiance > 24.0f * 10.0f, "unnormalized rect flux includes area");
+    lights[1].normalize = 1;
+
+    const float pSun = lightSelectionPdfIndex(view, 0);
+    const float pRect = lightSelectionPdfIndex(view, 1);
+    check(std::fabs(pSun + pRect - 1.0f) < 1e-4f, "selection pdfs sum to 1");
+    // Flux group floor 0.2, mixed 50/50 with uniform: 0.5/2 + 0.5*0.2 = 0.35.
+    check(std::fabs(pSun - 0.35f) < 0.02f, "sun pdf is defensive mix of uniform and group floor");
+    check(1.0f / pSun < 4.0f, "sun 1/pdf is bounded (no 100× fireflies)");
+
+    int nSun = 0;
+    int pdfMismatch = 0;
+    constexpr int kN = 20000;
+    for (int i = 0; i < kN; ++i) {
+        float pdf = 0.0f;
+        const int idx = sampleLightIndex(view, (float(i) + 0.5f) / float(kN), pdf);
+        if (idx == 0) ++nSun;
+        if (idx >= 0 && std::fabs(pdf - lightSelectionPdfIndex(view, idx)) > 1e-4f) ++pdfMismatch;
+    }
+    check(pdfMismatch == 0, "sampled pdf matches selection pdf");
+    const float frac = float(nSun) / float(kN);
+    check(frac > 0.28f && frac < 0.42f, "sun is sampled ~35% of the time next to a key rect");
+
+    // Default scene: dome + distant + rect. Sun must not be starved by the dome
+    // inside the infinite group when a key rect is also present.
+    LightData trio[3];
+    trio[0] = lights[0];
+    trio[1] = lights[1];
+    trio[2].type = kLightDome;
+    trio[2].intensity = 0.6f;
+    trio[2].color = Vec3(1.0f);
+    trio[2].normalize = 0;
+    trio[2].xform = Mat4::identity();
+    trio[2].xformInv = Mat4::identity();
+    view.lights = trio;
+    view.lightCount = 3;
+    const float pSun3 = lightSelectionPdfIndex(view, 0);
+    const float pRect3 = lightSelectionPdfIndex(view, 1);
+    const float pDome3 = lightSelectionPdfIndex(view, 2);
+    check(std::fabs(pSun3 + pRect3 + pDome3 - 1.0f) < 1e-4f, "default-scene pdfs sum to 1");
+    check(pSun3 > 0.15f, "sun keeps a usable share next to dome+rect");
+    check(1.0f / pSun3 < 8.0f, "default-scene sun 1/pdf is bounded");
+}
+
 void testBsdf() {
     std::printf("bsdf\n");
     Material diffuse;
@@ -6430,6 +6506,7 @@ int main() {
     testMath();
     testPixelFilter();
     testSampling();
+    testLightSelectionDistantRect();
     testBsdf();
     testGlob();
     testGraphCook();

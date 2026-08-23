@@ -424,16 +424,19 @@ static float lightPowerForBvh(const LightData& l,
                 return intens * std::max(1e-4f, envMaps[l.envIndex]->distribution.integral());
             return intens * 4.0f;
         case kLightRect: {
+            if (l.normalize) return intens;
             const Vec3 ax = transformVector(l.xform, Vec3(l.width,  0.0f, 0.0f));
             const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.height, 0.0f));
             return intens * std::max(1e-6f, length(cross(ax, ay)));
         }
         case kLightDisk: {
+            if (l.normalize) return intens;
             const Vec3 ax = transformVector(l.xform, Vec3(l.radius, 0.0f, 0.0f));
             const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.radius, 0.0f));
             return intens * std::max(1e-6f, kPi * length(cross(ax, ay)));
         }
         case kLightSphere: {
+            if (l.normalize) return intens;
             const float sx = length(transformVector(l.xform, Vec3(1.0f, 0.0f, 0.0f)));
             const float sy = length(transformVector(l.xform, Vec3(0.0f, 1.0f, 0.0f)));
             const float sz = length(transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f)));

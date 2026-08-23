@@ -33,6 +33,13 @@ SR_INL SR_HD bool lightIsInfinite(const LightData& l) {
 // Pick candidate i with probability w_i / Σw; unbiased estimator is
 // vis(Y) · (Σw) / M · (rgb_Y / w_Y). See Talbot 2005 / Bitterli ReSTIR.
 constexpr int kRisCandidates = 8;
+// Floor on P(pick an infinite light) vs P(pick a finite light) when both exist.
+// Stops a bright area light from starving the sun (NEE fireflies).
+constexpr float kLightGroupProbMin = 0.2f;
+// Few-light scenes (default: dome + sun + rect): mix uniform with flux so one
+// bright key cannot starve another. Unbiased: pdf = α/N + (1-α)·p_flux.
+constexpr int kLightDefensiveCount = 8;
+constexpr float kLightDefensiveMix = 0.5f;
 #if !defined(SOLSTICE_OPTIX_KERNEL)
 // Volume NEE: env CDF ignores HG, so high anisotropy needs more unshadowed
 // probes (still one shadow ray). g=0 keeps M=8; g≥0.8 uses the full 64.
@@ -464,10 +471,14 @@ SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
                 return intens * srMax(1e-4f, scene.envMaps[l.envIndex].integral);
             return intens * 4.0f;
         case kLightRect:
-            return intens * srMax(1e-6f, rectLightArea(l));
         case kLightDisk:
-            return intens * srMax(1e-6f, diskLightArea(l));
         case kLightSphere: {
+            // Normalize: intensity is size-independent power (Karma / USD). Multiplying
+            // by area again made a 4×3 key light ~12× likelier than the sun, so NEE
+            // of the distant light became a rare 1/pdf firefly (default scene).
+            if (l.normalize) return intens;
+            if (l.type == kLightRect) return intens * srMax(1e-6f, rectLightArea(l));
+            if (l.type == kLightDisk) return intens * srMax(1e-6f, diskLightArea(l));
             const float r = sphereLightRadius(l);
             return intens * srMax(1e-6f, 4.0f * kPi * r * r);
         }
@@ -484,6 +495,31 @@ SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
         default:
             return intens;
     }
+}
+
+SR_INL SR_HD void lightGroupFluxTotals(const SceneView& scene, float& wInf, float& wFin) {
+    wInf = 0.0f;
+    wFin = 0.0f;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        const float w = lightFluxWeight(scene, i);
+        if (lightIsInfinite(scene.lights[i])) wInf += w;
+        else wFin += w;
+    }
+}
+
+SR_INL SR_HD float infiniteLightGroupProbability(float wInf, float wFin) {
+    if (wInf <= 0.0f) return 0.0f;
+    if (wFin <= 0.0f) return 1.0f;
+    return clampf(wInf / (wInf + wFin), kLightGroupProbMin, 1.0f - kLightGroupProbMin);
+}
+
+SR_INL SR_HD bool lightUsesDefensiveMix(const SceneView& scene) {
+    return scene.lightCount > 1 && scene.lightCount <= kLightDefensiveCount;
+}
+
+SR_INL SR_HD float lightDefensiveMixPdf(const SceneView& scene, float fluxPdf) {
+    if (!lightUsesDefensiveMix(scene)) return fluxPdf;
+    return kLightDefensiveMix / float(scene.lightCount) + (1.0f - kLightDefensiveMix) * fluxPdf;
 }
 
 #if !defined(SOLSTICE_OPTIX_KERNEL)
@@ -522,45 +558,94 @@ SR_INL SR_HD float lightSelectionPdf(const SceneView& scene) {
     return scene.lightCount > 0 ? 1.0f / float(scene.lightCount) : 0.0f;
 }
 
-// Flux-weighted probability of selecting a specific light.
+// Flux-weighted probability of selecting a specific light. Infinite vs finite
+// groups get a minimum share so a large area light cannot starve the sun.
+// With few lights, mix in uniform (see kLightDefensiveMix) so 1/pdf stays bounded.
 SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, int lightIndex) {
     if (scene.lightCount <= 0 || lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
-    float total = 0.0f;
-    float chosen = 0.0f;
-    for (int i = 0; i < scene.lightCount; ++i) {
-        const float w = lightFluxWeight(scene, i);
-        total += w;
-        if (i == lightIndex) chosen = w;
+    float wInf = 0.0f, wFin = 0.0f;
+    lightGroupFluxTotals(scene, wInf, wFin);
+    float pFlux = 0.0f;
+    if (wInf + wFin <= 1e-20f) {
+        pFlux = lightSelectionPdf(scene);
+    } else {
+        const float pInf = infiniteLightGroupProbability(wInf, wFin);
+        const float w = lightFluxWeight(scene, lightIndex);
+        if (lightIsInfinite(scene.lights[lightIndex])) {
+            pFlux = (wInf > 1e-20f) ? (w / wInf) * pInf : 0.0f;
+        } else {
+            pFlux = (wFin > 1e-20f) ? (w / wFin) * (1.0f - pInf) : 0.0f;
+        }
     }
-    if (total <= 1e-20f) return lightSelectionPdf(scene);
-    return chosen / total;
+    return lightDefensiveMixPdf(scene, pFlux);
 }
 
-// Sample a light index with probability ∝ flux. `pdf` is the selection pdf.
+SR_INL SR_HD int sampleLightIndexInGroup(const SceneView& scene, float u, bool infinite, float groupFlux,
+                                         float groupProb, float& pdf) {
+    if (groupFlux <= 1e-20f || groupProb <= 0.0f) {
+        pdf = 0.0f;
+        return -1;
+    }
+    float r = clampf(u, 0.0f, 0.999999f) * groupFlux;
+    int last = -1;
+    float lastW = 0.0f;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        if (lightIsInfinite(scene.lights[i]) != infinite) continue;
+        const float w = lightFluxWeight(scene, i);
+        last = i;
+        lastW = w;
+        if (r < w) {
+            pdf = (w / groupFlux) * groupProb;
+            return i;
+        }
+        r -= w;
+    }
+    if (last < 0) {
+        pdf = 0.0f;
+        return -1;
+    }
+    pdf = (lastW / groupFlux) * groupProb;
+    return last;
+}
+
+// Sample a light index with probability ∝ flux, split infinite / finite.
 SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
     if (scene.lightCount <= 0) {
         pdf = 0.0f;
         return -1;
     }
-    float total = 0.0f;
-    for (int i = 0; i < scene.lightCount; ++i) total += lightFluxWeight(scene, i);
-    if (total <= 1e-20f) {
-        int idx = int(u * float(scene.lightCount));
+    u = clampf(u, 0.0f, 0.999999f);
+    if (lightUsesDefensiveMix(scene) && u < kLightDefensiveMix) {
+        const float uU = kLightDefensiveMix > 0.0f ? u / kLightDefensiveMix : 0.0f;
+        int idx = int(uU * float(scene.lightCount));
         if (idx >= scene.lightCount) idx = scene.lightCount - 1;
-        pdf = lightSelectionPdf(scene);
+        pdf = lightSelectionPdfIndex(scene, idx);
         return idx;
     }
-    float r = clampf(u, 0.0f, 0.999999f) * total;
-    for (int i = 0; i < scene.lightCount; ++i) {
-        const float w = lightFluxWeight(scene, i);
-        if (r < w) {
-            pdf = w / total;
-            return i;
+    if (lightUsesDefensiveMix(scene))
+        u = (u - kLightDefensiveMix) / srMax(1e-6f, 1.0f - kLightDefensiveMix);
+
+    float wInf = 0.0f, wFin = 0.0f;
+    lightGroupFluxTotals(scene, wInf, wFin);
+    const float total = wInf + wFin;
+    int idx = -1;
+    if (total <= 1e-20f) {
+        idx = int(u * float(scene.lightCount));
+        if (idx >= scene.lightCount) idx = scene.lightCount - 1;
+    } else {
+        const float pInf = infiniteLightGroupProbability(wInf, wFin);
+        u = clampf(u, 0.0f, 0.999999f);
+        if (u < pInf && wInf > 0.0f) {
+            const float uG = pInf > 0.0f ? u / pInf : 0.0f;
+            idx = sampleLightIndexInGroup(scene, uG, true, wInf, pInf, pdf);
+        } else {
+            const float pFin = 1.0f - pInf;
+            const float uG = pFin > 0.0f ? (u - pInf) / pFin : 0.0f;
+            idx = sampleLightIndexInGroup(scene, uG, false, wFin, pFin, pdf);
         }
-        r -= w;
     }
-    pdf = lightFluxWeight(scene, scene.lightCount - 1) / total;
-    return scene.lightCount - 1;
+    pdf = (idx >= 0) ? lightSelectionPdfIndex(scene, idx) : 0.0f;
+    return idx;
 }
 
 // ---------------------------------------------------------------------------
@@ -625,17 +710,20 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, fl
     const float wTotal = wInf + wFin;
     if (wTotal <= 1e-30f) return sampleLightIndex(scene, u, pdf);
 
-    float r = clampf(u, 0.f, 0.999999f) * wTotal;
+    const float pInf = infiniteLightGroupProbability(wInf, wFin);
+    u = clampf(u, 0.f, 0.999999f);
 
     // -- Infinite-light branch --------------------------------------------------
-    if (r < wInf && scene.infiniteLightCount > 0) {
+    if (u < pInf && scene.infiniteLightCount > 0 && wInf > 0.f) {
+        const float uInf = pInf > 0.f ? u / pInf : 0.f;
+        float r = uInf * wInf;
         float cumW = 0.f;
         for (int i = 0; i < scene.infiniteLightCount; ++i) {
             const int   idx = scene.infiniteLightIndices[i];
             const float w   = lightFluxWeight(scene, idx);
             cumW += w;
             if (r < cumW || i == scene.infiniteLightCount - 1) {
-                pdf = (wInf > 0.f ? w / wInf : 1.f) * (wInf / wTotal);
+                pdf = (wInf > 0.f ? w / wInf : 1.f) * pInf;
                 if (pdf <= 0.f) { pdf = 0.f; return -1; }
                 return idx;
             }
@@ -643,11 +731,12 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, fl
     }
 
     // -- Finite-light branch: traverse BVH -------------------------------------
-    if (wFin <= 0.f) {
+    const float pFin = 1.f - pInf;
+    if (wFin <= 0.f || pFin <= 0.f) {
         pdf = 0.f; return -1;
     }
-    float uFin = clampf((r - wInf) / wFin, 0.f, 0.999999f);
-    float travPdf = wFin / wTotal;
+    float uFin = pFin > 0.f ? clampf((u - pInf) / pFin, 0.f, 0.999999f) : 0.f;
+    float travPdf = pFin;
 
     int nodeIdx = 0;
     for (int depth = 0; depth < 64 && !scene.lightBvh[nodeIdx].isLeaf; ++depth) {
@@ -697,13 +786,15 @@ SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int
     const float wTotal = wInf + wFin;
     if (wTotal <= 1e-30f) return lightSelectionPdfIndex(scene, lightIndex);
 
+    const float pInf = infiniteLightGroupProbability(wInf, wFin);
     const LightData& l = scene.lights[lightIndex];
     if (l.type == kLightDome || l.type == kLightDistant) {
-        return lightFluxWeight(scene, lightIndex) / wTotal;
+        if (wInf <= 1e-30f) return 0.f;
+        return (lightFluxWeight(scene, lightIndex) / wInf) * pInf;
     }
 
     // Walk BVH path to the leaf containing lightIndex.
-    float travPdf = wFin / wTotal;
+    float travPdf = 1.f - pInf;
     int nodeIdx = 0;
     for (int depth = 0; depth < 64 && !scene.lightBvh[nodeIdx].isLeaf; ++depth) {
         const LightBvhNode& nd = scene.lightBvh[nodeIdx];
