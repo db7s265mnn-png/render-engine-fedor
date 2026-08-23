@@ -190,7 +190,9 @@ function(solstice_optix_kernel name source symbol)
                 -DOUTPUT=${embed}
                 -DSYMBOL=${symbol}
                 -P ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
-        DEPENDS ${ptx} ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
+        DEPENDS ${ptx}
+                ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
+                ${CMAKE_SOURCE_DIR}/cmake/embed_binary.py
         COMMENT "Embedding OptiX PTX (${name})"
         VERBATIM
     )

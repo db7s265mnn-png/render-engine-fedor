@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# One Windows OptiX job at a time per ref. Stacked PTX compiles each sat in
+# embed_binary.cmake until the 45-minute cap and starved HEAD.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Linux jobs intentionally disabled for now — re-enable when requested.
   linux:
