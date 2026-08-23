@@ -171,7 +171,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
         {
             Material matHero = mat;
             matHero.ior = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, heroLambda);
-            const LobeWeights lw = computeLobes(matHero);
+            const LobeWeights lw = computeLobes(matHero, Frame(si.ns).toLocal(-dir));
             v.delta = lw.delta && lw.diffuse < 1e-4f;
             v.connectable = !v.delta;
             v.nearSpec = v.delta || isNearSpecularLobe(lw) || isPhotonCausticCasterLobe(lw);
@@ -198,7 +198,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
 
         if (materialSupportsSss(cur.mat) && rng.nextFloat() < saturatef(cur.mat.subsurface)) {
             Material specMat = sssSpecularEntryMaterial(cur.mat);
-            const LobeWeights specLw = computeLobes(specMat);
+            const LobeWeights specLw = computeLobes(specMat, woLocal);
             const float pSpec = sssEntrySpecularProb(specMat, woLocal);
             if (pSpec <= 0.0f || rng.nextFloat() >= pSpec) break;
             beta *= 1.0f / pSpec;
@@ -225,7 +225,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
 
 #if SOLSTICE_HAVE_OPENPGL
         bool guideReady = false;
-        const LobeWeights curLw = computeLobes(cur.mat);
+        const LobeWeights curLw = computeLobes(cur.mat, woLocal);
         if (!haveSample && cfg.eyePath && cfg.guiding && cfg.guiding->active() && !cur.delta &&
             !cur.nearSpec && curLw.diffuse > 1e-4f) {
             guideReady = cfg.guiding->prepare(cur.p, cur.ns, rng);
@@ -300,7 +300,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
         beta *= weight;
         if (!spectrumIsFinite(beta) || spectrumNearBlack(beta)) break;
         {
-            const LobeWeights lwTerm = computeLobes(cur.mat);
+            const LobeWeights lwTerm = computeLobes(cur.mat, woLocal);
             if (cfg.eyePath && shouldTerminateSecondaryWavelengths(bs, lwTerm) &&
                 !waves.secondaryTerminated())
                 waves.terminateSecondary();
@@ -313,7 +313,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
             const bool entering = dot(cur.ng, wiWorld) < 0.0f;
             currentMedium = entering ? cur.mediumIndex : -1;
         }
-        if (cfg.eyePath) rayKind = nextRayShadeKind(bs, computeLobes(cur.mat));
+        if (cfg.eyePath) rayKind = nextRayShadeKind(bs, computeLobes(cur.mat, woLocal));
         passThrough = 0;
     }
     return count;

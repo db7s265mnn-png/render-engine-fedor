@@ -429,7 +429,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         v.mediumIndex = scene.instances[si.instanceIndex].mediumIndex;
         v.pdfFwd = toAreaPdf(pdfSaFwd, prev.p, si.p, si.ns);
         {
-            const LobeWeights lw = computeLobes(mat);
+            const LobeWeights lw = computeLobes(mat, Frame(si.ns).toLocal(-dir));
             v.delta = lw.delta && lw.diffuse < 1e-4f;
             v.connectable = !v.delta;
             // Include rough refractive casters so Photon/LT family partition matches
@@ -461,7 +461,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         // exit; light paths only keep the specular entry layer (eye owns BSSRDF).
         if (materialSupportsSss(cur.mat) && rng.nextFloat() < saturatef(cur.mat.subsurface)) {
             Material specMat = sssSpecularEntryMaterial(cur.mat);
-            const LobeWeights specLw = computeLobes(specMat);
+            const LobeWeights specLw = computeLobes(specMat, woLocal);
             const float pSpec = sssEntrySpecularProb(specMat, woLocal);
 
             if (pSpec > 0.0f && rng.nextFloat() < pSpec) {
@@ -509,7 +509,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         // Guide only diffuse-ish eye vertices — near-spec / delta glass is owned
         // by MNEE / light tracing; mixing a guide PDF there fights MIS.
         bool guideReady = false;
-        const LobeWeights curLw = computeLobes(cur.mat);
+        const LobeWeights curLw = computeLobes(cur.mat, woLocal);
         if (!haveSample && cfg.eyePath && cfg.guiding && cfg.guiding->active() && !cur.delta &&
             !cur.nearSpec && curLw.diffuse > 1e-4f) {
             guideReady = cfg.guiding->prepare(cur.p, cur.ns, rng);
@@ -581,7 +581,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
             const bool entering = dot(cur.ng, wiWorld) < 0.0f;
             currentMedium = entering ? cur.mediumIndex : -1;
         }
-        if (cfg.eyePath) rayKind = nextRayShadeKind(bs, computeLobes(cur.mat));
+        if (cfg.eyePath) rayKind = nextRayShadeKind(bs, computeLobes(cur.mat, woLocal));
         passThrough = 0;
     }
     return count;

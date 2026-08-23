@@ -224,9 +224,9 @@ public:
             bs.specular = ss.specular;
             bs.transmitted = ss.transmitted;
             bs.weight = Vec3(1.0f);  // unused after spectral weight
-            rayKind = nextRayShadeKind(bs, computeLobes(mat));
+            rayKind = nextRayShadeKind(bs, computeLobes(mat, woLocal));
 
-            const LobeWeights lw = computeLobes(mat);
+            const LobeWeights lw = computeLobes(mat, woLocal);
             if (shouldTerminateSecondaryWavelengths(bs, lw) && !waves.secondaryTerminated())
                 waves.terminateSecondary();
 

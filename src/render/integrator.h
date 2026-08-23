@@ -436,7 +436,7 @@ SR_INL SR_HD Material sssExitLambertMaterial() {
 
 // Fresnel RR probability of reflecting at the SSS entry instead of entering the body.
 SR_INL SR_HD float sssEntrySpecularProb(const Material& specMat, Vec3 woLocal) {
-    const LobeWeights specLw = computeLobes(specMat);
+    const LobeWeights specLw = computeLobes(specMat, woLocal);
     if (specLw.specular <= 1e-5f || saturatef(specMat.specular) <= 1e-5f) return 0.0f;
     const float cosWo = srMax(0.0f, woLocal.z);
     const float fresnelEst = average(fresnelSchlick(specLw.f0, cosWo));
@@ -575,7 +575,8 @@ SR_INL SssWalkResult sampleSssRandomWalk(const SceneView& scene, const Tracer& t
     out.exitP = entrySi.p;
     out.exitN = entrySi.ns;
     out.exitWo = wo;
-    out.pathWeight = vmax(Vec3(0.0f), mat.subsurfaceColor);
+    out.escaped = false;
+    out.pathWeight = Vec3(0.0f);  // pbrt variant B: never dump albedo at entry
 
     const Vec3 mfpRGB = vmax(Vec3(0.0f), mat.subsurfaceRadius) * srMax(0.0f, mat.subsurfaceScale);
     const Vec3 multiAlbedo = vmax(Vec3(0.0f), mat.subsurfaceColor);
@@ -1393,7 +1394,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             Material specMat = sssSpecularEntryMaterial(mat);
 
             const Vec3 woLocalEntry = frame.toLocal(wo);
-            const LobeWeights specLw = computeLobes(specMat);
+            const LobeWeights specLw = computeLobes(specMat, woLocalEntry);
             const float pSpec = sssEntrySpecularProb(specMat, woLocalEntry);
 
             // Direct specular lighting at entry (works for rough GGX; delta → 0).
@@ -1478,7 +1479,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         // Complementary BRDF path: selected with probability (1 - subsurface).
         // No 1/(1-w) boost — that previously made diffuse+SSS additive.
 
-        const LobeWeights lw = computeLobes(mat);
+        const Vec3 woLocal = frame.toLocal(wo);
+        const LobeWeights lw = computeLobes(mat, woLocal);
 #if !defined(__CUDACC__)
         const bool guideReady =
             guiding && guiding->active() && !lw.delta && !isNearSpecularLobe(lw) &&
@@ -1499,7 +1501,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             if (guiding && guiding->active()) guiding->addScattered(nee);
 #endif
         }
-        const Vec3 woLocal = frame.toLocal(wo);
         BsdfSample bs;
         bool gotSample = false;
 #if !defined(__CUDACC__)

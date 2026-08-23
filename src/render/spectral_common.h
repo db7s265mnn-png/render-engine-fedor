@@ -389,7 +389,7 @@ inline SampledSpectrum bsdfEvalSpectralDielectric(const Material& mat, Vec3 wo, 
 
     Material matNd = mat;
     matNd.ior = baseIor;
-    const LobeWeights lw = computeLobes(matNd);
+    const LobeWeights lw = computeLobes(matNd, wo);
     if (lw.transmission <= 1e-5f || lw.delta) return out;
 
     const float tw = saturatef(mat.transmission) * (1.0f - saturatef(mat.metallic));
@@ -453,7 +453,7 @@ inline SampledSpectrum bsdfEvalSpectral(const Material& mat, Vec3 ng, Vec3 ns, V
     if (usesSpectralDielectric(mat)) {
         Material matNd = mat;
         matNd.ior = baseIor;
-        const LobeWeights lw = computeLobes(matNd);
+        const LobeWeights lw = computeLobes(matNd, wo);
         if (lw.transmission > 0.5f && lw.diffuse < 1e-3f)
             return bsdfEvalSpectralDielectric(mat, wo, wi, w, baseIor);
         SampledSpectrum f = bsdfEvalSpectralDielectric(mat, wo, wi, w, baseIor);
@@ -496,7 +496,7 @@ inline BsdfSampleSpectral bsdfSampleSpectral(const Material& mat, Vec3 woLocal, 
 
     Material matNd = mat;
     matNd.ior = baseIor;
-    const LobeWeights lw = computeLobes(matNd);
+    const LobeWeights lw = computeLobes(matNd, woLocal);
     const bool fromDielectricLobe = uLobe >= lw.diffuse + lw.specular - 1e-6f || rgb.transmitted;
     if (!fromDielectricLobe) {
         out.weight =
