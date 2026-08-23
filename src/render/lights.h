@@ -33,13 +33,10 @@ SR_INL SR_HD bool lightIsInfinite(const LightData& l) {
 // Pick candidate i with probability w_i / Σw; unbiased estimator is
 // vis(Y) · (Σw) / M · (rgb_Y / w_Y). See Talbot 2005 / Bitterli ReSTIR.
 constexpr int kRisCandidates = 8;
-// Floor on P(pick an infinite light) vs P(pick a finite light) when both exist.
-// Stops a bright area light from starving the sun (NEE fireflies).
-constexpr float kLightGroupProbMin = 0.2f;
-// Few-light scenes (default: dome + sun + rect): mix uniform with flux so one
-// bright key cannot starve another. Unbiased: pdf = α/N + (1-α)·p_flux.
-constexpr int kLightDefensiveCount = 8;
-constexpr float kLightDefensiveMix = 0.5f;
+// PBRT 4 BVHLightSampler: each infinite light is one discrete slot; all
+// bounded lights together are one slot. p_inf = n_inf / (n_inf + has_finite).
+// Flux ratios between a sun (irradiance) and a rect (power) are incomparable,
+// so a 20% clamp / uniform mix is not needed if the split is by slots.
 #if !defined(SOLSTICE_OPTIX_KERNEL)
 // Volume NEE: env CDF ignores HG, so high anisotropy needs more unshadowed
 // probes (still one shadow ray). g=0 keeps M=8; g≥0.8 uses the full 64.
@@ -497,6 +494,15 @@ SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
     }
 }
 
+SR_INL SR_HD void lightGroupCounts(const SceneView& scene, int& nInf, int& nFin) {
+    nInf = 0;
+    nFin = 0;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        if (lightIsInfinite(scene.lights[i])) ++nInf;
+        else ++nFin;
+    }
+}
+
 SR_INL SR_HD void lightGroupFluxTotals(const SceneView& scene, float& wInf, float& wFin) {
     wInf = 0.0f;
     wFin = 0.0f;
@@ -507,19 +513,34 @@ SR_INL SR_HD void lightGroupFluxTotals(const SceneView& scene, float& wInf, floa
     }
 }
 
-SR_INL SR_HD float infiniteLightGroupProbability(float wInf, float wFin) {
-    if (wInf <= 0.0f) return 0.0f;
-    if (wFin <= 0.0f) return 1.0f;
-    return clampf(wInf / (wInf + wFin), kLightGroupProbMin, 1.0f - kLightGroupProbMin);
+// PBRT 4 BVHLightSampler: n infinite slots + one slot for the whole finite set.
+SR_INL SR_HD float infiniteLightGroupProbability(int nInf, int nFin) {
+    if (nInf <= 0) return 0.0f;
+    if (nFin <= 0) return 1.0f;
+    return float(nInf) / float(nInf + 1);
 }
 
-SR_INL SR_HD bool lightUsesDefensiveMix(const SceneView& scene) {
-    return scene.lightCount > 1 && scene.lightCount <= kLightDefensiveCount;
-}
-
-SR_INL SR_HD float lightDefensiveMixPdf(const SceneView& scene, float fluxPdf) {
-    if (!lightUsesDefensiveMix(scene)) return fluxPdf;
-    return kLightDefensiveMix / float(scene.lightCount) + (1.0f - kLightDefensiveMix) * fluxPdf;
+SR_INL SR_HD int sampleInfiniteLightUniform(const SceneView& scene, float u, float pInf, float& pdf) {
+    int nInf = 0;
+    for (int i = 0; i < scene.lightCount; ++i)
+        if (lightIsInfinite(scene.lights[i])) ++nInf;
+    if (nInf <= 0 || pInf <= 0.0f) {
+        pdf = 0.0f;
+        return -1;
+    }
+    int k = int(clampf(u, 0.0f, 0.999999f) * float(nInf));
+    if (k >= nInf) k = nInf - 1;
+    int seen = 0;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        if (!lightIsInfinite(scene.lights[i])) continue;
+        if (seen == k) {
+            pdf = pInf / float(nInf);
+            return i;
+        }
+        ++seen;
+    }
+    pdf = 0.0f;
+    return -1;
 }
 
 #if !defined(SOLSTICE_OPTIX_KERNEL)
@@ -558,26 +579,23 @@ SR_INL SR_HD float lightSelectionPdf(const SceneView& scene) {
     return scene.lightCount > 0 ? 1.0f / float(scene.lightCount) : 0.0f;
 }
 
-// Flux-weighted probability of selecting a specific light. Infinite vs finite
-// groups get a minimum share so a large area light cannot starve the sun.
-// With few lights, mix in uniform (see kLightDefensiveMix) so 1/pdf stays bounded.
+// PBRT 4 BVHLightSampler discrete pdf: infinite lights uniform in their slots,
+// finite lights flux-weighted inside the single finite slot.
 SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, int lightIndex) {
     if (scene.lightCount <= 0 || lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
+    int nInf = 0, nFin = 0;
+    lightGroupCounts(scene, nInf, nFin);
+    const float pInf = infiniteLightGroupProbability(nInf, nFin);
+    if (lightIsInfinite(scene.lights[lightIndex])) {
+        if (nInf <= 0 || pInf <= 0.0f) return 0.0f;
+        return pInf / float(nInf);
+    }
+    if (nFin <= 0 || pInf >= 1.0f) return 0.0f;
     float wInf = 0.0f, wFin = 0.0f;
     lightGroupFluxTotals(scene, wInf, wFin);
-    float pFlux = 0.0f;
-    if (wInf + wFin <= 1e-20f) {
-        pFlux = lightSelectionPdf(scene);
-    } else {
-        const float pInf = infiniteLightGroupProbability(wInf, wFin);
-        const float w = lightFluxWeight(scene, lightIndex);
-        if (lightIsInfinite(scene.lights[lightIndex])) {
-            pFlux = (wInf > 1e-20f) ? (w / wInf) * pInf : 0.0f;
-        } else {
-            pFlux = (wFin > 1e-20f) ? (w / wFin) * (1.0f - pInf) : 0.0f;
-        }
-    }
-    return lightDefensiveMixPdf(scene, pFlux);
+    if (wFin <= 1e-20f) return (1.0f - pInf) / float(nFin);
+    const float w = lightFluxWeight(scene, lightIndex);
+    return (w / wFin) * (1.0f - pInf);
 }
 
 SR_INL SR_HD int sampleLightIndexInGroup(const SceneView& scene, float u, bool infinite, float groupFlux,
@@ -608,42 +626,25 @@ SR_INL SR_HD int sampleLightIndexInGroup(const SceneView& scene, float u, bool i
     return last;
 }
 
-// Sample a light index with probability ∝ flux, split infinite / finite.
+// Sample a light index: PBRT 4 slot split, then uniform infinite / flux finite.
 SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
     if (scene.lightCount <= 0) {
         pdf = 0.0f;
         return -1;
     }
+    int nInf = 0, nFin = 0;
+    lightGroupCounts(scene, nInf, nFin);
+    const float pInf = infiniteLightGroupProbability(nInf, nFin);
     u = clampf(u, 0.0f, 0.999999f);
-    if (lightUsesDefensiveMix(scene) && u < kLightDefensiveMix) {
-        const float uU = kLightDefensiveMix > 0.0f ? u / kLightDefensiveMix : 0.0f;
-        int idx = int(uU * float(scene.lightCount));
-        if (idx >= scene.lightCount) idx = scene.lightCount - 1;
-        pdf = lightSelectionPdfIndex(scene, idx);
-        return idx;
+    if (u < pInf && nInf > 0) {
+        const float uG = pInf > 0.0f ? u / pInf : 0.0f;
+        return sampleInfiniteLightUniform(scene, uG, pInf, pdf);
     }
-    if (lightUsesDefensiveMix(scene))
-        u = (u - kLightDefensiveMix) / srMax(1e-6f, 1.0f - kLightDefensiveMix);
-
     float wInf = 0.0f, wFin = 0.0f;
     lightGroupFluxTotals(scene, wInf, wFin);
-    const float total = wInf + wFin;
-    int idx = -1;
-    if (total <= 1e-20f) {
-        idx = int(u * float(scene.lightCount));
-        if (idx >= scene.lightCount) idx = scene.lightCount - 1;
-    } else {
-        const float pInf = infiniteLightGroupProbability(wInf, wFin);
-        u = clampf(u, 0.0f, 0.999999f);
-        if (u < pInf && wInf > 0.0f) {
-            const float uG = pInf > 0.0f ? u / pInf : 0.0f;
-            idx = sampleLightIndexInGroup(scene, uG, true, wInf, pInf, pdf);
-        } else {
-            const float pFin = 1.0f - pInf;
-            const float uG = pFin > 0.0f ? (u - pInf) / pFin : 0.0f;
-            idx = sampleLightIndexInGroup(scene, uG, false, wFin, pFin, pdf);
-        }
-    }
+    const float pFin = 1.0f - pInf;
+    const float uG = pFin > 0.0f ? (u - pInf) / pFin : 0.0f;
+    int idx = sampleLightIndexInGroup(scene, uG, false, wFin, pFin, pdf);
     pdf = (idx >= 0) ? lightSelectionPdfIndex(scene, idx) : 0.0f;
     return idx;
 }
@@ -705,29 +706,19 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, fl
     if (!scene.lightBvh || scene.lightBvhNodeCount == 0)
         return sampleLightIndex(scene, u, pdf);
 
-    const float wInf = scene.infiniteLightPower;
     const float wFin = bvhNodeImportance(scene.lightBvh[0], refP);
-    const float wTotal = wInf + wFin;
-    if (wTotal <= 1e-30f) return sampleLightIndex(scene, u, pdf);
-
-    const float pInf = infiniteLightGroupProbability(wInf, wFin);
+    const int nInf = scene.infiniteLightCount;
+    const float pInf = infiniteLightGroupProbability(nInf, 1);
     u = clampf(u, 0.f, 0.999999f);
 
-    // -- Infinite-light branch --------------------------------------------------
-    if (u < pInf && scene.infiniteLightCount > 0 && wInf > 0.f) {
+    // -- Infinite-light branch: uniform among infinite slots (PBRT 4) ----------
+    if (u < pInf && nInf > 0) {
         const float uInf = pInf > 0.f ? u / pInf : 0.f;
-        float r = uInf * wInf;
-        float cumW = 0.f;
-        for (int i = 0; i < scene.infiniteLightCount; ++i) {
-            const int   idx = scene.infiniteLightIndices[i];
-            const float w   = lightFluxWeight(scene, idx);
-            cumW += w;
-            if (r < cumW || i == scene.infiniteLightCount - 1) {
-                pdf = (wInf > 0.f ? w / wInf : 1.f) * pInf;
-                if (pdf <= 0.f) { pdf = 0.f; return -1; }
-                return idx;
-            }
-        }
+        int k = int(uInf * float(nInf));
+        if (k >= nInf) k = nInf - 1;
+        pdf = pInf / float(nInf);
+        if (pdf <= 0.f) { pdf = 0.f; return -1; }
+        return scene.infiniteLightIndices[k];
     }
 
     // -- Finite-light branch: traverse BVH -------------------------------------
@@ -781,17 +772,15 @@ SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int
         lightIndex < 0 || lightIndex >= scene.lightCount)
         return lightSelectionPdfIndex(scene, lightIndex);
 
-    const float wInf   = scene.infiniteLightPower;
-    const float wFin   = bvhNodeImportance(scene.lightBvh[0], refP);
-    const float wTotal = wInf + wFin;
-    if (wTotal <= 1e-30f) return lightSelectionPdfIndex(scene, lightIndex);
-
-    const float pInf = infiniteLightGroupProbability(wInf, wFin);
+    const float wFin = bvhNodeImportance(scene.lightBvh[0], refP);
+    const int nInf = scene.infiniteLightCount;
+    const float pInf = infiniteLightGroupProbability(nInf, 1);
     const LightData& l = scene.lights[lightIndex];
     if (l.type == kLightDome || l.type == kLightDistant) {
-        if (wInf <= 1e-30f) return 0.f;
-        return (lightFluxWeight(scene, lightIndex) / wInf) * pInf;
+        if (nInf <= 0 || pInf <= 0.f) return 0.f;
+        return pInf / float(nInf);
     }
+    if (wFin <= 0.f) return 0.f;
 
     // Walk BVH path to the leaf containing lightIndex.
     float travPdf = 1.f - pInf;

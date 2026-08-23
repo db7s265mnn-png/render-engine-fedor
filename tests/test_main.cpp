@@ -356,9 +356,10 @@ void testLightSelectionDistantRect() {
     const float pSun = lightSelectionPdfIndex(view, 0);
     const float pRect = lightSelectionPdfIndex(view, 1);
     check(std::fabs(pSun + pRect - 1.0f) < 1e-4f, "selection pdfs sum to 1");
-    // Flux group floor 0.2, mixed 50/50 with uniform: 0.5/2 + 0.5*0.2 = 0.35.
-    check(std::fabs(pSun - 0.35f) < 0.02f, "sun pdf is defensive mix of uniform and group floor");
-    check(1.0f / pSun < 4.0f, "sun 1/pdf is bounded (no 100× fireflies)");
+    // PBRT 4: 1 infinite slot + 1 finite slot → 1/2 each.
+    check(std::fabs(pSun - 0.5f) < 1e-4f, "sun pdf is one infinite slot vs one finite slot");
+    check(std::fabs(pRect - 0.5f) < 1e-4f, "rect pdf is the finite slot");
+    check(1.0f / pSun < 2.1f, "sun 1/pdf is 2 (no 100× fireflies)");
 
     int nSun = 0;
     int pdfMismatch = 0;
@@ -371,10 +372,10 @@ void testLightSelectionDistantRect() {
     }
     check(pdfMismatch == 0, "sampled pdf matches selection pdf");
     const float frac = float(nSun) / float(kN);
-    check(frac > 0.28f && frac < 0.42f, "sun is sampled ~35% of the time next to a key rect");
+    check(frac > 0.45f && frac < 0.55f, "sun is sampled ~50% of the time next to a key rect");
 
-    // Default scene: dome + distant + rect. Sun must not be starved by the dome
-    // inside the infinite group when a key rect is also present.
+    // Default scene: dome + distant + rect. PBRT 4: 2 infinite slots + 1 finite
+    // slot → p_inf = 2/3, uniform in infinite → sun = dome = 1/3, rect = 1/3.
     LightData trio[3];
     trio[0] = lights[0];
     trio[1] = lights[1];
@@ -390,8 +391,9 @@ void testLightSelectionDistantRect() {
     const float pRect3 = lightSelectionPdfIndex(view, 1);
     const float pDome3 = lightSelectionPdfIndex(view, 2);
     check(std::fabs(pSun3 + pRect3 + pDome3 - 1.0f) < 1e-4f, "default-scene pdfs sum to 1");
-    check(pSun3 > 0.15f, "sun keeps a usable share next to dome+rect");
-    check(1.0f / pSun3 < 8.0f, "default-scene sun 1/pdf is bounded");
+    check(std::fabs(pSun3 - 1.0f / 3.0f) < 1e-4f, "sun is one of two infinite slots");
+    check(std::fabs(pDome3 - 1.0f / 3.0f) < 1e-4f, "dome is the other infinite slot");
+    check(std::fabs(pRect3 - 1.0f / 3.0f) < 1e-4f, "rect is the finite slot");
 }
 
 void testBsdf() {
