@@ -95,7 +95,7 @@ ParamType paramTypeFromName(const QString& name);
 bool evaluateVisibleWhen(const QString& expression, const class Node& node);
 
 // Empty-group tab title. Scene-graph sources (geo / file / lights / camera / vdb)
-// use "Base"; everyone else keeps "Parameters".
+// and material nodes use "Base"; everyone else keeps "Parameters".
 inline QString defaultParameterFolderTitle(const QString& nodeType) {
     static const QStringList kBaseTypes{
         QStringLiteral("alembic"),
@@ -115,6 +115,7 @@ inline QString defaultParameterFolderTitle(const QString& nodeType) {
         QStringLiteral("vdbfile"),
         QStringLiteral("sdftopolygons_vdb"),
         QStringLiteral("sdftopolygons_dcsdd"),
+        QStringLiteral("material"),
     };
     return kBaseTypes.contains(nodeType) ? QStringLiteral("Base") : QStringLiteral("Parameters");
 }

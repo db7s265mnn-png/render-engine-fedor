@@ -18,9 +18,12 @@
 #include <QMetaObject>
 #include <QPixmap>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QShortcut>
+#include <QSizePolicy>
+#include <QToolButton>
 #include <QSignalBlocker>
 #include <QTimer>
 #include <QVector3D>
@@ -63,9 +66,43 @@
 namespace sol {
 namespace {
 
+class DockDetachButton : public QToolButton {
+public:
+    explicit DockDetachButton(QWidget* parent = nullptr) : QToolButton(parent) {
+        setObjectName(QStringLiteral("dockDetachButton"));
+        setFocusPolicy(Qt::NoFocus);
+        setCursor(Qt::ArrowCursor);
+        setFixedSize(18, 18);
+        setAutoRaise(true);
+        setAttribute(Qt::WA_Hover, true);
+        setStyleSheet(QStringLiteral(
+            "QToolButton#dockDetachButton {"
+            "  background: transparent;"
+            "  border: none;"
+            "  padding: 0px;"
+            "}"));
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        constexpr int kSide = 10;
+        const QRect square((width() - kSide) / 2, (height() - kSide) / 2, kSide, kSide);
+        painter.fillRect(square, underMouse() ? QColor(0x7a, 0x7e, 0x86) : QColor(0x5c, 0x60, 0x66));
+        painter.setPen(QColor(0x2a, 0x2d, 0x32));
+        painter.drawRect(square.adjusted(0, 0, -1, -1));
+    }
+
+    void mousePressEvent(QMouseEvent* event) override {
+        QToolButton::mousePressEvent(event);
+        event->accept();
+    }
+};
+
 class DockTitleBar : public QWidget {
 public:
-    explicit DockTitleBar(const QString& title, QWidget* parent = nullptr) : QWidget(parent) {
+    explicit DockTitleBar(QDockWidget* dock) : QWidget(dock), dock_(dock) {
         setObjectName("dockTitleBar");
         setStyleSheet(
             "QWidget#dockTitleBar {"
@@ -79,10 +116,22 @@ public:
             "  border: none;"
             "}");
         auto* layout = new QHBoxLayout(this);
-        layout->setContentsMargins(10, 0, 10, 0);
-        layout->setSpacing(0);
-        auto* label = new QLabel(title, this);
+        layout->setContentsMargins(10, 0, 8, 0);
+        layout->setSpacing(6);
+        auto* label = new QLabel(dock ? dock->windowTitle() : QString(), this);
         layout->addWidget(label, 1);
+        auto* detach = new DockDetachButton(this);
+        detach->setToolTip(QStringLiteral("Detach"));
+        layout->addWidget(detach, 0, Qt::AlignVCenter);
+        if (dock_) {
+            connect(dock_, &QDockWidget::windowTitleChanged, label, &QLabel::setText);
+            connect(dock_, &QDockWidget::topLevelChanged, this, [detach](bool floating) {
+                detach->setToolTip(floating ? QStringLiteral("Dock") : QStringLiteral("Detach"));
+            });
+            connect(detach, &QToolButton::clicked, this, [this] {
+                if (dock_) dock_->setFloating(!dock_->isFloating());
+            });
+        }
     }
 
     QSize sizeHint() const override {
@@ -91,7 +140,7 @@ public:
     QSize minimumSizeHint() const override { return sizeHint(); }
 
 protected:
-    // Let the dock handle drag / double-click float (Qt requirement for custom titles).
+    // Unused chrome still lets Qt drag / double-click float the dock.
     void mousePressEvent(QMouseEvent* event) override {
         event->ignore();
     }
@@ -104,7 +153,26 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* event) override {
         event->ignore();
     }
+
+private:
+    QDockWidget* dock_ = nullptr;
 };
+
+void installDetachableTitleBar(QDockWidget* dock) {
+    if (!dock) return;
+    dock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
+    dock->setTitleBarWidget(new DockTitleBar(dock));
+    // Closing a floating window must redock it — these panes have no close button
+    // and must not vanish from the layout.
+    QObject::connect(dock, &QDockWidget::visibilityChanged, dock, [dock](bool visible) {
+        if (visible || !dock->isFloating()) return;
+        QTimer::singleShot(0, dock, [dock] {
+            if (dock->isVisible()) return;
+            dock->setFloating(false);
+            dock->show();
+        });
+    });
+}
 
 QMessageBox::StandardButton appMessageBox(QWidget* parent, const QString& title, const QString& text,
                                           QMessageBox::StandardButtons buttons = QMessageBox::Ok,
@@ -165,35 +233,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowIcon(QIcon(QStringLiteral(":/icons/app_icon.png")));
     resize(1720, 1000);
 
-    auto* central = new QWidget(this);
-    auto* centralLayout = new QVBoxLayout(central);
-    centralLayout->setContentsMargins(0, 0, 0, 0);
-    centralLayout->setSpacing(0);
-
-    renderView_ = new RenderView(central);
-    centralLayout->addWidget(renderView_, 1);
-
-    // Compact Houdini-style timeline in the dark strip under the viewport
-    // (above Scene Network / Material Network docks).
-    timelineBar_ = new TimelineBar(central);
-    centralLayout->addWidget(timelineBar_, 0);
-
-    setCentralWidget(central);
-
-    // Viewport framing shortcuts work anywhere in the central column (viewport +
-    // timeline), without stealing F/H from Scene/Material Network docks.
-    auto* frameSelectedShortcut = new QShortcut(QKeySequence(Qt::Key_F), central);
-    frameSelectedShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(frameSelectedShortcut, &QShortcut::activated, renderView_, &RenderView::frameSelection);
-    auto* frameAllShortcut = new QShortcut(QKeySequence(Qt::Key_H), central);
-    frameAllShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(frameAllShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
-    auto* homeShortcut = new QShortcut(QKeySequence(Qt::Key_Home), central);
-    homeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(homeShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
-
-    createActions();
+    // Viewport lives in a dock (with the timeline) so it can detach like Scene Graph
+    // and Parameters. createDocks() builds that pane before actions bind to it.
     createDocks();
+    createActions();
     createMenus();
     createToolBar();
     createTimeline();
@@ -454,7 +497,7 @@ void MainWindow::createToolBar() {
 }
 
 void MainWindow::createTimeline() {
-    // TimelineBar is created with the central widget (under the viewport).
+    // TimelineBar is created inside the Viewport dock (under the render view).
     if (!timelineBar_) return;
     connect(timelineBar_, &TimelineBar::frameChanged, this, &MainWindow::onTimelineFrameChanged);
     // After scrubbing / stop, cook once more with full Embree quality when needed.
@@ -483,46 +526,96 @@ void MainWindow::onTimelineFrameChanged(int) {
 }
 
 void MainWindow::createDocks() {
+    // QMainWindow requires a central widget; keep it 0×0 so Scene Graph, Viewport
+    // and Parameters can sit as three glued docks that still float/redock.
+    auto* dummy = new QWidget(this);
+    dummy->setObjectName(QStringLiteral("centralDummy"));
+    dummy->setMaximumSize(0, 0);
+    dummy->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+    setCentralWidget(dummy);
+
     setDockOptions(QMainWindow::AnimatedDocks | QMainWindow::AllowNestedDocks |
-                   QMainWindow::AllowTabbedDocks);
+                   QMainWindow::AllowTabbedDocks | QMainWindow::GroupedDragging);
     // Keep the network pane at the bottom of the window, but put the tab bar
     // (Scene Network / Material Network / Log) on TOP of that pane.
     setTabPosition(Qt::BottomDockWidgetArea, QTabWidget::North);
+    setCorner(Qt::TopLeftCorner, Qt::LeftDockWidgetArea);
+    setCorner(Qt::TopRightCorner, Qt::RightDockWidgetArea);
+    setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+    setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
+
+    auto* viewportPane = new QWidget(this);
+    viewportPane->setObjectName(QStringLiteral("viewportPane"));
+    auto* viewportLayout = new QVBoxLayout(viewportPane);
+    viewportLayout->setContentsMargins(0, 0, 0, 0);
+    viewportLayout->setSpacing(0);
+
+    renderView_ = new RenderView(viewportPane);
+    viewportLayout->addWidget(renderView_, 1);
+
+    // Compact Houdini-style timeline stays with the viewport when that dock floats.
+    timelineBar_ = new TimelineBar(viewportPane);
+    viewportLayout->addWidget(timelineBar_, 0);
+
+    // Framing shortcuts stay scoped to the viewport pane so F/H are not stolen
+    // from Scene / Material Network docks.
+    auto* frameSelectedShortcut = new QShortcut(QKeySequence(Qt::Key_F), viewportPane);
+    frameSelectedShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(frameSelectedShortcut, &QShortcut::activated, renderView_, &RenderView::frameSelection);
+    auto* frameAllShortcut = new QShortcut(QKeySequence(Qt::Key_H), viewportPane);
+    frameAllShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(frameAllShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
+    auto* homeShortcut = new QShortcut(QKeySequence(Qt::Key_Home), viewportPane);
+    homeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(homeShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
+
+    auto* viewportDock = new QDockWidget("Viewport", this);
+    viewportDock->setObjectName("viewportDock");
+    viewportDock->setWidget(viewportPane);
+    viewportDock->setMinimumWidth(420);
+    viewportDock->setMinimumHeight(280);
+    installDetachableTitleBar(viewportDock);
 
     auto* networkDock = new QDockWidget("Scene Network", this);
     networkDock->setObjectName("networkDock");
     networkView_ = new NodeGraphView(networkDock);
     networkView_->setGraph(&graph_);
     networkDock->setWidget(networkView_);
-    addDockWidget(Qt::BottomDockWidgetArea, networkDock);
+    installDetachableTitleBar(networkDock);
 
     auto* materialNetworkDock = new QDockWidget("Material Network", this);
     materialNetworkDock->setObjectName("materialNetworkDock");
     materialNetworkView_ = new MaterialNetworkView(materialNetworkDock);
     materialNetworkDock->setWidget(materialNetworkView_);
-    addDockWidget(Qt::BottomDockWidgetArea, materialNetworkDock);
+    installDetachableTitleBar(materialNetworkDock);
 
     auto* parameterDock = new QDockWidget("Parameters", this);
     parameterDock->setObjectName("parameterDock");
-    parameterDock->setTitleBarWidget(new DockTitleBar("Parameters", parameterDock));
     parameterPanel_ = new ParameterPanel(parameterDock);
     parameterDock->setWidget(parameterPanel_);
     parameterDock->setMinimumWidth(300);
-    addDockWidget(Qt::RightDockWidgetArea, parameterDock);
+    installDetachableTitleBar(parameterDock);
 
     auto* sceneDock = new QDockWidget("Scene Graph", this);
     sceneDock->setObjectName("sceneDock");
-    sceneDock->setTitleBarWidget(new DockTitleBar("Scene Graph", sceneDock));
     sceneGraphPanel_ = new SceneGraphPanel(sceneDock);
     sceneDock->setWidget(sceneGraphPanel_);
     sceneDock->setMinimumWidth(300);
-    addDockWidget(Qt::LeftDockWidgetArea, sceneDock);
+    installDetachableTitleBar(sceneDock);
 
     auto* logDock = new QDockWidget("Log", this);
     logDock->setObjectName("logDock");
     logPanel_ = new LogPanel(logDock);
     logPanel_->installAsLogSink();
     logDock->setWidget(logPanel_);
+    installDetachableTitleBar(logDock);
+
+    addDockWidget(Qt::LeftDockWidgetArea, sceneDock);
+    addDockWidget(Qt::LeftDockWidgetArea, viewportDock);
+    splitDockWidget(sceneDock, viewportDock, Qt::Horizontal);
+    addDockWidget(Qt::RightDockWidgetArea, parameterDock);
+    addDockWidget(Qt::BottomDockWidgetArea, networkDock);
+    addDockWidget(Qt::BottomDockWidgetArea, materialNetworkDock);
     addDockWidget(Qt::BottomDockWidgetArea, logDock);
 
     tabifyDockWidget(networkDock, materialNetworkDock);
@@ -530,12 +623,14 @@ void MainWindow::createDocks() {
     networkDock->raise();
 
     resizeDocks({networkDock}, {330}, Qt::Vertical);
-    // Match left/right dock widths so Parameters is as wide as Scene Graph.
+    // Side docks stay ~340px; leftover width goes to the viewport split.
     constexpr int kSideDockWidth = 340;
     resizeDocks({sceneDock, parameterDock}, {kSideDockWidth, kSideDockWidth}, Qt::Horizontal);
-    // Apply again after the first layout pass — early resizeDocks can be ignored.
-    QTimer::singleShot(0, this, [this, sceneDock, parameterDock, kSideDockWidth] {
+    QTimer::singleShot(0, this, [this, sceneDock, viewportDock, parameterDock, networkDock, kSideDockWidth] {
         resizeDocks({sceneDock, parameterDock}, {kSideDockWidth, kSideDockWidth}, Qt::Horizontal);
+        const int leftover = std::max(420, width() - kSideDockWidth * 2 - 24);
+        resizeDocks({sceneDock, viewportDock}, {kSideDockWidth, leftover}, Qt::Horizontal);
+        resizeDocks({networkDock}, {330}, Qt::Vertical);
     });
 
     materialNetworkView_->setGraph(&graph_);
@@ -1835,6 +1930,8 @@ void MainWindow::onShowShortcuts() {
                              "  |<<  /  ▶■  /  >>|   under scrubber (centered)\n"
                              "  Scrubber playhead    current frame (double-click to type)\n"
                              "  Frame → time         Alembic & USD sample time\n\n"
+                             "Layout\n"
+                             "  square on a pane title   detach / redock Scene Graph, Viewport, Parameters\n\n"
                              "General\n"
                              "  F5            Start cook + render (button stays pressed)\n"
                              "  Esc           Stop (no cook until Start; last frame held)\n"

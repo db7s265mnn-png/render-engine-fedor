@@ -865,6 +865,15 @@ void testSceneGraphFolders() {
         check(!hasGroup(node, QStringLiteral("Light")), std::string(type) + " has no Light folder");
     }
 
+    Node* material = graph.createNode("material", "material1");
+    check(material != nullptr, "create material");
+    if (material) {
+        check(defaultParameterFolderTitle(material->typeName()) == QLatin1String("Base"),
+              "material default folder is Base");
+        check(hasGroup(material, QStringLiteral("MaterialX")), "material keeps MaterialX folder");
+        check(groupOf(material, "pattern").isEmpty(), "Assign To is in the default folder");
+    }
+
     check(defaultParameterFolderTitle(QStringLiteral("rendersettings")) == QLatin1String("Parameters"),
           "render settings keep Parameters as the empty-folder title");
 }

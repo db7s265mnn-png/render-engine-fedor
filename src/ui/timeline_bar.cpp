@@ -30,10 +30,10 @@ QColor frameBoxBg() { return QColor(0x1a, 0x1c, 0x20); }
 QColor frameBoxBorder() { return QColor(0x7a, 0x7e, 0x86); }
 QColor frameBoxText() { return QColor(0xd8, 0xda, 0xe0); }
 
-// Playhead is a solid chip (ticks must not show through). Checked buttons stay
-// translucent via theme::checkedFill(); this is a separate fill.
-QColor playheadFill() { return QColor(255, 190, 90); }
-QColor playheadStroke() { return theme::checkedStroke(); }
+// Playhead is a solid chip (ticks must not show through). Half the luminance of
+// the old #ffbe5a chip so it stays opaque without blowing out the timeline.
+QColor playheadFill() { return QColor(0x80, 0x5f, 0x2d); }
+QColor playheadStroke() { return QColor(0x6a, 0x4e, 0x24); }
 QColor playheadText() { return theme::checkedText(); }
 
 QFont frameNumberFont() {
@@ -282,7 +282,7 @@ void TimelineScrubber::beginFrameEdit() {
     editor_->setFont(frameNumberFont());
     editor_->setTextMargins(0, 0, 0, 0);
     editor_->setStyleSheet(
-        "QLineEdit { background: #ffbe5a; color: #ffffff; border: 1px solid #ffbe5a;"
+        "QLineEdit { background: #805f2d; color: #ffffff; border: 1px solid #6a4e24;"
         " border-radius: 2px; padding: 0px; font-size: 11px; font-weight: 700; }");
     editor_->move(playheadRect().toRect().topLeft());
     editor_->selectAll();

@@ -1,8 +1,10 @@
 #include "ui/theme.h"
 
+#include <QIcon>
 #include <QLocale>
 #include <QPainter>
 #include <QPalette>
+#include <QPixmap>
 #include <QProxyStyle>
 #include <QStyleFactory>
 #include <QStyleOption>
@@ -40,7 +42,24 @@ public:
         QProxyStyle::drawControl(element, option, painter, widget);
     }
 
+    QIcon standardIcon(StandardPixmap icon, const QStyleOption* option = nullptr,
+                       const QWidget* widget = nullptr) const override {
+        if (icon == SP_TitleBarNormalButton) return detachSquareIcon();
+        return QProxyStyle::standardIcon(icon, option, widget);
+    }
+
 private:
+    static QIcon detachSquareIcon() {
+        QPixmap pixmap(16, 16);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.fillRect(3, 3, 10, 10, QColor(0x5c, 0x60, 0x66));
+        painter.setPen(QColor(0x2a, 0x2d, 0x32));
+        painter.drawRect(3, 3, 9, 9);
+        painter.end();
+        return QIcon(pixmap);
+    }
     static void drawGrip(const QStyleOption* option, QPainter* painter) {
         if (!option || !painter) return;
         const QRect r = option->rect;
