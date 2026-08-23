@@ -538,6 +538,27 @@ void testBsdf() {
         if (!sample.transmitted && sample.wi.z < 0.0f) ++tirHits;
     }
     check(tirHits > 150, "IR-off: TIR still reflects past the critical angle");
+
+    // pbrt energy lottery: spec share tracks E(mu, alpha) F, so grazing wo is more specular.
+    {
+        Material diel;
+        diel.baseColor = Vec3(0.8f);
+        diel.roughness = 0.25f;
+        diel.metallic = 0.0f;
+        diel.specular = 1.0f;
+        diel.transmission = 0.0f;
+        diel.ior = 1.5f;
+        const LobeWeights nrm = computeLobes(diel, Vec3(0.0f, 0.0f, 1.0f));
+        const LobeWeights grz = computeLobes(diel, normalize(Vec3(0.95f, 0.0f, 0.08f)));
+        check(grz.specular > nrm.specular, "grazing wo raises the specular energy share");
+        check(grz.diffuse < nrm.diffuse, "grazing wo lowers the diffuse energy share");
+        Material coat = diel;
+        coat.coat = 1.0f;
+        coat.coatThickness = 0.25f;
+        coat.coatIor = 1.5f;
+        coat.coatRoughness = 0.1f;
+        check(coatPickProb(coat, Vec3(0.0f, 0.0f, 1.0f)) > 0.02f, "dielectric coat overlay is selectable");
+    }
 }
 
 void testGlob() {
