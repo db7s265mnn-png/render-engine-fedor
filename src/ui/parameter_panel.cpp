@@ -1,6 +1,7 @@
 #include "ui/parameter_panel.h"
 
 #include <QAbstractButton>
+#include <QAbstractScrollArea>
 #include <QAbstractSpinBox>
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -9,6 +10,7 @@
 #include <QDoubleSpinBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QEvent>
 #include <QFileDialog>
 #include <QFont>
 #include <QFontMetrics>
@@ -26,6 +28,7 @@
 #include <QMimeData>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSizePolicy>
@@ -77,19 +80,29 @@ public:
     }
     QSize sizeHint() const override {
         const QMargins m = contentsMargins();
-        // Typical Parameters dock inner width — wrapping height, not one fat row.
-        const int inner = 260;
+        const int inner = wrapWidth();
         return QSize(inner + m.left() + m.right(), heightForWidth(inner + m.left() + m.right()));
     }
     QSize minimumSize() const override {
-        QSize size;
-        for (QLayoutItem* item : items_) size = size.expandedTo(hintFor(item));
+        // Must be the wrapped height. QVBoxLayout shrinks Preferred children
+        // toward minimumSize when the stacked form's sizeHint is huge — a
+        // one-row minimum is why the second folder row was clipped.
         const QMargins m = contentsMargins();
-        size += QSize(m.left() + m.right(), m.top() + m.bottom());
-        return size;
+        int minItem = 0;
+        for (QLayoutItem* item : items_) minItem = qMax(minItem, hintFor(item).width());
+        const int inner = qMax(minItem, wrapWidth());
+        return QSize(minItem + m.left() + m.right(), heightForWidth(inner + m.left() + m.right()));
     }
 
 private:
+    int wrapWidth() const {
+        if (const QWidget* host = parentWidget()) {
+            const int w = host->contentsRect().width();
+            if (w >= 64) return w;
+        }
+        return 260;
+    }
+
     static QSize hintFor(QLayoutItem* item) {
         if (QWidget* widget = item->widget()) {
             widget->ensurePolished();
@@ -99,13 +112,15 @@ private:
     }
 
     int doLayout(const QRect& rect, bool testOnly) const {
+        const QMargins m = contentsMargins();
+        const QRect area = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom());
         struct Place {
             QLayoutItem* item = nullptr;
             int x = 0;
             QSize hint;
         };
-        int x = rect.x();
-        int y = rect.y();
+        int x = area.x();
+        int y = area.y();
         int lineHeight = 0;
         QList<Place> line;
 
@@ -118,20 +133,20 @@ private:
             }
             y += lineHeight;
             if (more) y += vSpacing_;
-            x = rect.x();
+            x = area.x();
             lineHeight = 0;
             line.clear();
         };
 
         for (QLayoutItem* item : items_) {
             const QSize hint = hintFor(item);
-            if (x + hint.width() > rect.right() + 1 && !line.isEmpty()) flushLine(true);
+            if (x + hint.width() > area.x() + area.width() && !line.isEmpty()) flushLine(true);
             line.push_back(Place{item, x, hint});
             x += hint.width() + hSpacing_;
             lineHeight = qMax(lineHeight, hint.height());
         }
         flushLine(false);
-        return y - rect.y();
+        return (y - area.y()) + m.top() + m.bottom();
     }
 
     QList<QLayoutItem*> items_;
@@ -139,9 +154,9 @@ private:
     int vSpacing_ = 4;
 };
 
-// Compact Houdini-style folder tabs. Fixed height so wrapped rows cannot
-// paint over each other (stylesheet padding used to exceed the layout cell).
-constexpr int kFolderTabHeight = 22;
+// Same height as viewport chrome (Start/Stop). Stylesheet must not add extra
+// min-height on top of the 1px border or the second wrap row gets clipped.
+constexpr int kFolderTabHeight = 24;
 
 class FolderTabButton final : public QPushButton {
 public:
@@ -152,15 +167,70 @@ public:
         setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
         setFixedHeight(kFolderTabHeight);
         setAttribute(Qt::WA_LayoutUsesWidgetRect);
+        setAttribute(Qt::WA_StyledBackground);
     }
 
     QSize sizeHint() const override {
         const QFontMetrics metrics(font());
-        const int w = metrics.horizontalAdvance(text()) + 20;
+        const int w = metrics.horizontalAdvance(text()) + 16;
         return QSize(qMax(40, w), kFolderTabHeight);
     }
 
     QSize minimumSizeHint() const override { return sizeHint(); }
+};
+
+// Host for the wrapping folder buttons. QVBoxLayout will otherwise shrink this
+// strip toward a one-row minimum so the stacked form can keep its sizeHint.
+class FolderTabStrip final : public QWidget {
+public:
+    explicit FolderTabStrip(QWidget* parent = nullptr) : QWidget(parent) {
+        QSizePolicy policy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        policy.setHeightForWidth(true);
+        setSizePolicy(policy);
+        setAttribute(Qt::WA_LayoutUsesWidgetRect);
+    }
+
+    bool hasHeightForWidth() const override { return true; }
+
+    int heightForWidth(int w) const override {
+        if (const QLayout* lay = layout()) return qMax(kFolderTabHeight, lay->heightForWidth(qMax(w, 1)));
+        return kFolderTabHeight;
+    }
+
+    QSize sizeHint() const override {
+        // width() is 0 on the first pass — use a typical Parameters dock width
+        // so we reserve two rows instead of stacking every tab vertically.
+        int w = width();
+        if (w < 64) w = 260;
+        return QSize(w, heightForWidth(w));
+    }
+
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+protected:
+    void resizeEvent(QResizeEvent* event) override {
+        QWidget::resizeEvent(event);
+        lockHeight(event->size().width());
+    }
+
+    bool event(QEvent* event) override {
+        if (event->type() == QEvent::LayoutRequest) lockHeight(width());
+        return QWidget::event(event);
+    }
+
+private:
+    void lockHeight(int w) {
+        if (locking_ || w <= 0) return;
+        const int h = heightForWidth(w);
+        if (h <= 0 || height() == h) return;
+        locking_ = true;
+        setFixedHeight(h);
+        setMinimumHeight(h);
+        locking_ = false;
+        updateGeometry();
+    }
+
+    bool locking_ = false;
 };
 
 QComboBox* makeColorSpaceCombo(const QString& current, const std::function<void(const QString&)>& commit) {
@@ -673,6 +743,9 @@ void ParameterPanel::rebuildLop() {
         scroll->setWidgetResizable(true);
         scroll->setFrameShape(QFrame::NoFrame);
         scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setMinimumHeight(0);
+        scroll->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+        scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         auto* inner = new QWidget();
         auto* layout = new QVBoxLayout(inner);
         layout->setContentsMargins(6, 8, 6, 8);
@@ -725,18 +798,20 @@ void ParameterPanel::rebuildLop() {
         return;
     }
 
-    auto* strip = new QWidget();
-    strip->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    auto* strip = new FolderTabStrip();
     auto* flow = new FlowLayout(strip, 4, 4);
     flow->setContentsMargins(0, 2, 0, 2);
     auto* buttons = new QButtonGroup(strip);
     buttons->setExclusive(true);
     auto* stack = new QStackedWidget();
     stack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    stack->setMinimumHeight(0);
 
+    // No min/max-height in CSS — that is content-box and sits on top of the
+    // 1px border, so a 22px cap still paints taller than the layout cell.
     const QString folderBtnCss = QStringLiteral(
         "QPushButton { background:#2a2e33; color:#d0d4da; border:1px solid #666b73;"
-        " border-radius:2px; padding:0 8px; min-height:22px; max-height:22px; }"
+        " border-radius:2px; padding:0 8px; }"
         "QPushButton:hover { background:#3a3f46; color:#f0f2f5; }"
         "QPushButton:checked { background:#ffa82e; color:#1a1c20; border-color:#ffa82e; }");
 
@@ -763,8 +838,12 @@ void ParameterPanel::rebuildLop() {
         if (node_) lastFolderByType_[node_->typeName()] = buttons->button(id)->text();
     });
 
-    contentLayout_->addWidget(strip);
+    contentLayout_->addWidget(strip, 0);
     contentLayout_->addWidget(stack, 1);
+    QTimer::singleShot(0, strip, [strip] {
+        const int w = strip->width();
+        if (w > 0) strip->setFixedHeight(strip->heightForWidth(w));
+    });
 }
 
 void ParameterPanel::rebuildMaterialX() {
