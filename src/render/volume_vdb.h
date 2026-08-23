@@ -5,6 +5,7 @@
 #include "core/rng.h"
 #include "scene/types.h"
 #include "scene/volume_grid.h"
+#include "render/spectrum.h"
 #include "render/volume.h"
 
 namespace sol {
@@ -19,6 +20,11 @@ bool intersectSdfVolume(const VolumeGrid& grid, Vec3 origin, Vec3 direction, flo
 // are analytical, mixed cells use decomposition tracking + a cached OpenVDB accessor.
 MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium, Vec3 origin,
                                 Vec3 direction, float tMax, Rng& rng, Vec3& throughput);
+
+// Spectral delta tracking through VDB fog (hero-λ absorb/scatter/null). CPU only.
+MediumSample sampleMediumVdbFogSpectral(const VolumeGrid& grid, const MediumData& medium, Vec3 origin,
+                                        Vec3 direction, float tMax, Rng& rng, SampledSpectrum& throughput,
+                                        const SampledWavelengths& lambda);
 
 // Shadow-ray transmittance via residual ratio tracking (Novak et al. / PBRT §11.2.2):
 // control μ_c = σt(min occupancy) is analytic; leftover uses local Λ. Homogeneous

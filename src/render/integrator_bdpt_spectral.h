@@ -64,10 +64,8 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
         // transmittance/albedo as a wavelength-sampled transport factor.
         if (const MediumData* medium = getMedium(scene, currentMedium)) {
             const float tMax = didHit ? hit.t : 1.0e6f;
-            Vec3 mediumWeight(1.0f);
             const MediumSample ms =
-                sampleMediumHomogeneous(*medium, tMax, rng, mediumWeight);
-            beta *= upsampleRgb(mediumWeight, waves);
+                sampleMediumHomogeneousSpectral(*medium, tMax, rng, beta, waves);
             if (ms.absorbed || !spectrumIsFinite(beta) || spectrumNearBlack(beta)) break;
             if (ms.scattered) {
                 Vert v{};
@@ -129,7 +127,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 const InstanceData& inst = scene.instances[si.instanceIndex];
                 if (count == 1 && !inst.visibleCamera) {
                     origin = offsetRayOrigin(si.p, si.ng, dir);
-                    if (++passThrough > 16) break;
+                    ++passThrough;
                     continue;
                 }
                 Vert v{};
@@ -156,7 +154,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
 
         if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
             origin = offsetRayOrigin(si.p, si.ng, dir);
-            if (++passThrough > 16) break;
+            ++passThrough;
             continue;
         }
 
@@ -586,56 +584,25 @@ inline Vec3 traceRadianceBdptSpectral(
         const LightData& l = scene.lights[li];
 
         if (l.type == kLightDome || l.type == kLightDistant) {
-            LightSample cands[kRisCandidates];
-            int lis[kRisCandidates];
-            float selPdfs[kRisCandidates];
-            SampledSpectrum specs[kRisCandidates];
-            float bsdfPdfs[kRisCandidates];
-            float ws[kRisCandidates];
-            int nOk = 0;
-            for (int i = 0; i < kRisCandidates; ++i) {
-                float sp = 0.0f;
-                const int lii = sampleLightIndex(scene, E.p, rng.nextFloat(), sp);
-                if (lii < 0 || sp <= 0.0f) continue;
-                if (scene.lights[lii].type != kLightDome && scene.lights[lii].type != kLightDistant)
-                    continue;
-                LightSample ls;
-                if (!sampleLight(scene, lii, E.p, rng.nextFloat(), rng.nextFloat(), ls) ||
-                    ls.pdf <= 0.0f || isBlack(ls.radiance))
-                    continue;
-                const SampledSpectrum f = vertBsdfFSpectral(E, E.wo, ls.wi, waves);
-                if (spectrumNearBlack(f)) continue;
-                const float lightPdf = ls.pdf * sp;
-                const float cosAbs = fabsf(dot(E.ns, ls.wi));
-                const SampledSpectrum unshadowed =
-                    f * upsampleRgb(ls.radiance, waves) * (cosAbs / lightPdf);
-                const Vec3 fRgb = bsdfF(E, E.wo, ls.wi);
-                const float wgt =
-                    luminance(vmax(fRgb * ls.radiance * (cosAbs / lightPdf), Vec3(0.0f)));
-                if (wgt <= 1e-20f) continue;
-                cands[nOk] = ls;
-                lis[nOk] = lii;
-                selPdfs[nOk] = sp;
-                specs[nOk] = unshadowed;
-                bsdfPdfs[nOk] = ls.delta ? 0.0f : bsdfPdfSa(E, E.wo, ls.wi);
-                ws[nOk] = wgt;
-                ++nOk;
-            }
-            float wSum = 0.0f;
-            const int pick = risPick(ws, nOk, rng.nextFloat(), wSum);
-            if (pick < 0) continue;
-            const LightSample& ls = cands[pick];
-            const int lii = lis[pick];
+            LightSample ls;
+            if (!sampleLight(scene, li, E.p, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
+                isBlack(ls.radiance))
+                continue;
+            const SampledSpectrum f = vertBsdfFSpectral(E, E.wo, ls.wi, waves);
+            if (spectrumNearBlack(f)) continue;
+            const float lightPdf = ls.pdf * selectPdf;
+            const float cosAbs = fabsf(dot(E.ns, ls.wi));
+            const SampledSpectrum unshadowed =
+                f * upsampleRgb(ls.radiance, waves) * (cosAbs / lightPdf);
             float visibility = 1.0f;
-            if (scene.lights[lii].shadowEnable) {
+            if (scene.lights[li].shadowEnable) {
                 const Vec3 o = offsetRayOrigin(E.p, E.ng, ls.wi);
                 visibility = shadowVisibility(scene, tracer, o, ls.wi, 1.0e8f);
             }
             if (visibility <= 1e-5f) continue;
-            const float lightPdf = ls.pdf * selPdfs[pick];
-            const float w = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdfs[pick]);
-            const float risW = wSum / (float(kRisCandidates) * ws[pick]);
-            SampledSpectrum local = specs[pick] * (w * visibility * risW);
+            const float bsdfPdf = ls.delta ? 0.0f : bsdfPdfSa(E, E.wo, ls.wi);
+            const float w = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdf);
+            SampledSpectrum local = unshadowed * (w * visibility);
             SampledSpectrum c = eyeBeta[t - 1] * local;
             if (t >= 2) c = clampSpectrumIndirect(c, settings.clampDirect);
             if (E.nearSpec) c = clampSpectrumIndirect(c, causticFireflyCap(settings));

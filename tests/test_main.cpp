@@ -344,8 +344,8 @@ void testLightSelectionDistantRect() {
 
     const float fSun = lightFluxWeight(view, 0);
     const float fRect = lightFluxWeight(view, 1);
-    check(std::fabs(fSun - 2.5f) < 0.05f, "normalized distant flux is intensity");
-    check(std::fabs(fRect - 24.0f) < 0.5f, "normalized rect flux is intensity, not intensity×area");
+    check(std::fabs(fSun - 2.5f * kPi) < 0.05f, "pbrt distant Φ = E π r² with r=1");
+    check(std::fabs(fRect - 24.0f * kPi) < 0.5f, "pbrt area Φ = L A π (normalize → E π)");
     check(fRect / srMax(fSun, 1e-6f) < 20.0f, "rect is not ~area times more important than the sun");
 
     lights[1].normalize = 0;
@@ -5718,14 +5718,14 @@ void testNgonTriangulateAndVdb() {
 
         checkNear(volumeNeeRouletteP(0), 1.0f, 1e-6f, "volume NEE RR is 1 before bounce 4");
         checkNear(volumeNeeRouletteP(3), 1.0f, 1e-6f, "volume NEE RR is 1 at bounce 3");
-        checkNear(volumeNeeRouletteP(4), 4.0f / 5.0f, 1e-6f, "volume NEE RR at bounce 4 is 4/5");
-        checkNear(volumeNeeRouletteP(499), 0.05f, 1e-6f, "volume NEE RR floor is 0.05 at depth 500");
+        checkNear(volumeNeeRouletteP(4), 1.0f, 1e-6f, "volume NEE RR stays 1 at bounce 4 (pbrt: no extra lottery)");
+        checkNear(volumeNeeRouletteP(499), 1.0f, 1e-6f, "volume NEE RR stays 1 at high depth");
 
         const Vec3 rawNee(100.0f);
         const Vec3 pathThru(50.0f);
-        const float pNee = volumeNeeRouletteP(499);
-        const Vec3 oldWrong = clampContribution(rawNee, 10.0f) * (1.0f / pNee) * pathThru;
-        const Vec3 pathNee = clampContribution(pathThru * rawNee * (1.0f / pNee), 10.0f);
+        const float pNeeSynth = 0.05f;  // illustrate clamp-after-1/p, not current roulette
+        const Vec3 oldWrong = clampContribution(rawNee, 10.0f) * (1.0f / pNeeSynth) * pathThru;
+        const Vec3 pathNee = clampContribution(pathThru * rawNee * (1.0f / pNeeSynth), 10.0f);
         check(maxComponent(oldWrong) > 1000.0f, "clamping raw NEE left 1/pNee spikes");
         checkNear(maxComponent(pathNee), 10.0f, 1e-5f,
                   "volume NEE path contribution is clamped after 1/pNee");
@@ -5926,12 +5926,10 @@ void testNgonTriangulateAndVdb() {
                       "g=0 volume weight equals flux (sun)");
                 const float wSunFwd = volumeLightSelectionWeight(sv, 1, p, sunDir, 0.9f);
                 const float wDomeFwd = volumeLightSelectionWeight(sv, 0, p, sunDir, 0.9f);
-                const float fluxRatio = fSun / srMax(fDome, 1e-8f);
-                const float prodRatio = wSunFwd / srMax(wDomeFwd, 1e-8f);
-                check(prodRatio > fluxRatio * 10.0f,
-                      "HG×sun selection upweights the sun when wo is aligned at g=0.9");
+                check(std::fabs(wSunFwd - fSun) < 1e-5f, "volume pick ignores HG (sun = flux)");
+                check(std::fabs(wDomeFwd - fDome) < 1e-5f, "volume pick ignores HG (dome = flux)");
                 const float wSunBack = volumeLightSelectionWeight(sv, 1, p, sunDir * -1.0f, 0.9f);
-                check(wSunBack < wSunFwd * 0.1f, "HG×sun selection downweights the sun in the HG tail");
+                check(std::fabs(wSunBack - fSun) < 1e-5f, "volume pick ignores HG tail");
                 float pdfSel = 0.0f;
                 const int picked = sampleVolumeLightIndex(sv, p, sunDir, 0.9f, 0.5f, pdfSel);
                 check(picked >= 0 && pdfSel > 0.0f, "volume light pick at g=0.9 succeeds");
@@ -6030,9 +6028,9 @@ void testNgonTriangulateAndVdb() {
         const float ratio = float(fogBdpt / srMax(fogPtOff, 1e-8));
         check(ratio > 0.5f && ratio < 2.0f, "Fog BDPT fallback energy matches Path Tracer");
     }
-    check(volumeRisCandidateCount(0.0f) == kRisCandidates, "isotropic volume RIS keeps M=8");
-    check(volumeRisCandidateCount(0.9f) == kVolumeRisMax, "g=0.9 volume RIS uses 64 unshadowed probes");
-    check(volumeRisCandidateCount(-0.9f) == kVolumeRisMax, "|g| drives volume RIS count");
+    check(volumeRisCandidateCount(0.0f) == 1, "volume NEE uses one candidate (no RIS)");
+    check(volumeRisCandidateCount(0.9f) == 1, "anisotropic volume NEE still M=1");
+    check(volumeRisCandidateCount(-0.9f) == 1, "|g| does not enable volume RIS");
 
     // Indirect Guides + dense fog: OpenPGL used to Reserve(128) path segments.
     // A walk past that (Windows ACCESS_VIOLATION at 0xFFFFFFFFFFFFFFFF) plus

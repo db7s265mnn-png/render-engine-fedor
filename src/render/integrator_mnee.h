@@ -605,7 +605,6 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         if (si.lightIndex >= 0 && depth == 0 && !inst.visibleCamera) {
             origin = offsetRayOrigin(si.p, si.ng, direction);
             ++passThrough;
-            if (passThrough > 16) break;
             continue;
         }
 
@@ -720,7 +719,6 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
             origin = offsetRayOrigin(si.p, si.ng, direction);
             ++passThrough;
-            if (passThrough > 32) break;
             continue;
         }
 
@@ -777,6 +775,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             if (pSpec > 0.0f && pSpec < 0.999f) throughput /= (1.0f - pSpec);
 
             const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
+            if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
             Material lambert = sssExitLambertMaterial();
             SurfaceInteraction ssSi = si;
             ssSi.p = walk.exitP;

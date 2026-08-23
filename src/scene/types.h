@@ -122,6 +122,14 @@ struct Material {
     // dielectric skip Fresnel reflections (TIR still reflects — nowhere else to go).
     float internalReflections = 1.0f;
 
+    // Separate dielectric coat (pbrt-style overlay, not mixed into the base lobes).
+    // thickness is an optical depth in the coat medium (Beer–Lambert); 0 = clear.
+    float coat = 0.0f;
+    float coatRoughness = 0.1f;
+    float coatIor = 1.5f;
+    float coatThickness = 0.0f;
+    Vec3 coatColor{1.0f, 1.0f, 1.0f};
+
     // MaterialX volumeshader (connected to surfacematerial.volumeshader).
     // When hasVolumeShader != 0, fog/VDB path uses these coefficients.
     int hasVolumeShader = 0;
@@ -355,6 +363,11 @@ struct LightBvhNode {
     int   childOrLight = -1;          // leaf: scene light index; interior: left child node index
     int   rightChild   = -1;          // interior only; -1 for leaves
     int   isLeaf       = 0;
+    // pbrt-v4 LightBounds emission cone: axis w, θ_o (emit cone), θ_e (falloff).
+    Vec3  coneAxis{0.0f, 0.0f, 1.0f};
+    float cosThetaO = -1.0f;          // cos of emit-cone half-angle (–1 = 4π)
+    float cosThetaE = 0.0f;           // cos of extra falloff (0 = π/2 Lambert)
+    int   twoSided  = 0;
 };
 
 // ---------------------------------------------------------------------------

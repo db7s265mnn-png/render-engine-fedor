@@ -258,13 +258,8 @@ public:
         const uint32_t frameSeed = uint32_t(settings.seed) * 9781u + uint32_t(sampleIndex) * 6271u;
 
         const bool pathTracer = settings.integrator == kIntegratorPathTracer;
-        const bool useSpectralBdpt = settings.integrator == kIntegratorSpectralBdpt;
-        const bool useBdpt = settings.integrator == kIntegratorBdpt || useSpectralBdpt;
-        const bool useSpectralPt = settings.integrator == kIntegratorSpectralPath;
-        const bool useSpectral = useSpectralPt || useSpectralBdpt;
-        // OpenVDB SDF/fog walks live in PathIntegrator only. When the scene has
-        // volumes, keep PT (even with Caustics on / BDPT selected) so we don't
-        // shade the opaque AABB proxy in MNEE/Photon/BDPT.
+        const bool wantBdpt = settings.integrator == kIntegratorBdpt ||
+                              settings.integrator == kIntegratorSpectralBdpt;
         const bool hasVolumes = scene.volumeCount > 0 && scene.volumes != nullptr;
         // Diagnostic integrators (AO / Direct / Wireframe) must stay on the plain
         // PathIntegrator path — never Photon/MNEE/BDPT — otherwise Wireframe never
@@ -273,12 +268,17 @@ public:
             settings.integrator == kIntegratorAmbientOcclusion ||
             settings.integrator == kIntegratorDirectLighting ||
             settings.integrator == kIntegratorWireframe;
-        // MNEE+Photon routes rough refractive casters to Photon, delta-only to MNEE.
-        // PT Spectral has no MNEE/photon; BDPT Spectral keeps BDPT caustic estimators.
-        const bool usePhoton = !diagnosticIntegrator && !hasVolumes && !useSpectralPt &&
-                               causticsUsePhotonMap(settings, &scene);
-        const bool useMnee = pathTracer && !hasVolumes && causticsUseMnee(settings, &scene);
-        const bool useBdptPath = useBdpt && !hasVolumes;
+        // pbrt: Path Tracer and BDPT are spectral (hero-λ). Volumes + BDPT fall
+        // back to spectral PT (no new volume integrator). Skip MNEE/photon mix.
+        const bool useSpectralBdpt = wantBdpt && !hasVolumes && !diagnosticIntegrator;
+        const bool useSpectralPt = !diagnosticIntegrator &&
+                                   (settings.integrator == kIntegratorSpectralPath || pathTracer ||
+                                    (wantBdpt && hasVolumes));
+        const bool useSpectral = useSpectralPt || useSpectralBdpt;
+        const bool useBdpt = wantBdpt;
+        const bool usePhoton = false;
+        const bool useMnee = false;
+        const bool useBdptPath = false;
 #if SOLSTICE_HAVE_OPENPGL
         // OpenPGL guides eye-path diffuse sampling on PT and BDPT (RGB + Spectral).
         // Specular / near-spec vertices are recorded as delta (radiance propagates for
@@ -406,13 +406,20 @@ public:
             Rng rng = makePathRng(x, y);
             float jx = 0.5f, jy = 0.5f;
             float lensU = 0.5f, lensV = 0.5f;
-            sampleCameraPixelLens(settings.pixelSampler, x, y, sampleIndex, width, frameSeed,
-                                  settings.manualTestMult, jx, jy, lensU, lensV);
 
-            // Path dims: always Owen Sobol (PBRT4).
-            // Must live for this sample — qmcCtx points here.
+            // pbrt: one Owen-Sobol stream from dimension 0. Camera consumes 0–3
+            // when the pixel sampler is Sobol; other pixel samplers stay independent.
             PathSobolStream pathSobol{};
             if (usePathSobol) attachPathSobol(rng, pathSobol, x, y, sampleIndex);
+            if (usePathSobol && settings.pixelSampler == kPixelSamplerSobol) {
+                jx = rng.nextFloat();
+                jy = rng.nextFloat();
+                lensU = rng.nextFloat();
+                lensV = rng.nextFloat();
+            } else {
+                sampleCameraPixelLens(settings.pixelSampler, x, y, sampleIndex, width, frameSeed,
+                                      settings.manualTestMult, jx, jy, lensU, lensV);
+            }
 
             auto done = [&](Vec3 L) -> PixelEval { return PixelEval{L, jx, jy}; };
 

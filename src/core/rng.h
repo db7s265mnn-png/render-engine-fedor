@@ -25,7 +25,7 @@ struct Rng {
     // Host QMC (Sobol path dims). Null on GPU / when unused.
     void* qmcCtx = nullptr;
     RngQmcFn qmcFn = nullptr;
-    uint32_t sampleDim = 4u;  // dims 0-3 reserved for pixel/lens
+    uint32_t sampleDim = 0u;  // pbrt: camera+path share one stream from dim 0
 
     Rng() = default;
 
@@ -40,7 +40,7 @@ struct Rng {
         nextUintPcg();
         qmcCtx = nullptr;
         qmcFn = nullptr;
-        sampleDim = 4u;
+        sampleDim = 0u;
         xsState = 1u;
     }
 
@@ -51,7 +51,7 @@ struct Rng {
         backend = kRngBackendXorshift32;
         qmcCtx = nullptr;
         qmcFn = nullptr;
-        sampleDim = 4u;
+        sampleDim = 0u;
         xsState = inSeed ? inSeed : 1u;
     }
 

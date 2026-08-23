@@ -451,6 +451,121 @@ struct SssWalkResult {
     Vec3 pathWeight{1.0f};
 };
 
+// Christensen–Burley / pbrt separable BSSRDF disk probe (variant B fallback).
+SR_INL float christensenBurleyD(float albedo, float mfp) {
+    albedo = clampf(albedo, 0.0f, 1.0f);
+    const float t = albedo - 0.8f;
+    const float s = srMax(1e-4f, 1.85f - albedo + 7.0f * t * t * t);
+    return srMax(1e-8f, mfp) / s;
+}
+
+SR_INL float christensenBurleyRd(float r, float d) {
+    r = srMax(r, 1e-6f);
+    d = srMax(d, 1e-8f);
+    return (expf(-r / d) + expf(-r / (3.0f * d))) / (8.0f * kPi * d * r);
+}
+
+SR_INL float christensenBurleyPdfR(float r, float d) {
+    d = srMax(d, 1e-8f);
+    return 0.25f * expf(-r / d) / d + 0.75f * expf(-r / (3.0f * d)) / (3.0f * d);
+}
+
+SR_INL float sampleChristensenBurleyR(float d, float u) {
+    u = clampf(u, 1e-6f, 1.0f - 1e-6f);
+    d = srMax(d, 1e-8f);
+    if (u < 0.25f) {
+        u = u / 0.25f;
+        return d * (-logf(srMax(1e-6f, 1.0f - u)));
+    }
+    u = (u - 0.25f) / 0.75f;
+    return 3.0f * d * (-logf(srMax(1e-6f, 1.0f - u)));
+}
+
+template <typename Tracer>
+SR_INL SssWalkResult sampleSssChristensenBurley(const SceneView& scene, const Tracer& tracer,
+                                                const SurfaceInteraction& entrySi, Vec3 wo, const Material& mat,
+                                                Rng& rng) {
+    SssWalkResult out;
+    out.exitP = entrySi.p;
+    out.exitN = entrySi.ns;
+    out.exitWo = wo;
+    out.escaped = false;
+    out.pathWeight = Vec3(0.0f);
+
+    const Vec3 albedo = vmax(Vec3(0.0f), mat.subsurfaceColor);
+    const Vec3 mfp = vmax(Vec3(0.0f), mat.subsurfaceRadius) * srMax(0.0f, mat.subsurfaceScale);
+    if (maxComponent(mfp) < 1e-8f || maxComponent(albedo) < 1e-8f) return out;
+
+    float dCh[3] = {christensenBurleyD(albedo.x, mfp.x), christensenBurleyD(albedo.y, mfp.y),
+                    christensenBurleyD(albedo.z, mfp.z)};
+    float wCh[3] = {srMax(1e-6f, albedo.x * mfp.x), srMax(1e-6f, albedo.y * mfp.y),
+                    srMax(1e-6f, albedo.z * mfp.z)};
+    const float wSum = wCh[0] + wCh[1] + wCh[2];
+    const float pCh[3] = {wCh[0] / wSum, wCh[1] / wSum, wCh[2] / wSum};
+    float uCh = rng.nextFloat() * wSum;
+    int ch = 0;
+    if (uCh >= wCh[0]) {
+        ch = 1;
+        uCh -= wCh[0];
+    }
+    if (ch == 1 && uCh >= wCh[1]) ch = 2;
+
+    const float r = sampleChristensenBurleyR(dCh[ch], rng.nextFloat());
+    const float phi = kTwoPi * rng.nextFloat();
+    const Frame fr(entrySi.ns);
+    const float uAxis = rng.nextFloat();
+    Vec3 vx, vy, vz;
+    float pdfAxis = 0.5f;
+    if (uAxis < 0.5f) {
+        vz = fr.n;
+        vx = fr.t;
+        vy = fr.b;
+        pdfAxis = 0.5f;
+    } else if (uAxis < 0.75f) {
+        vz = fr.t;
+        vx = fr.b;
+        vy = fr.n;
+        pdfAxis = 0.25f;
+    } else {
+        vz = fr.b;
+        vx = fr.n;
+        vy = fr.t;
+        pdfAxis = 0.25f;
+    }
+    const Vec3 diskP = entrySi.p + vx * (r * cosf(phi)) + vy * (r * sinf(phi));
+    const float tProbe = srMax(8.0f * maxComponent(mfp), 8.0f * dCh[ch]);
+    const Vec3 probeDir = vz;
+    const Vec3 probeOrig = diskP - probeDir * tProbe;
+    RayHit hit;
+    if (!tracer.intersect(probeOrig, probeDir, 2.0f * tProbe, hit)) return out;
+    SurfaceInteraction exitSi;
+    if (!buildSurfaceInteraction(scene, hit, probeOrig, probeDir, exitSi)) return out;
+    if (lengthSquared(exitSi.p - entrySi.p) < 1e-12f) return out;
+
+    float pdfR = 0.0f;
+    for (int c = 0; c < 3; ++c) pdfR += pCh[c] * christensenBurleyPdfR(r, dCh[c]);
+    const float pdf = pdfAxis * pdfR / srMax(1e-8f, kTwoPi * r);
+    if (pdf <= 1e-12f) return out;
+    const Vec3 rd(christensenBurleyRd(r, dCh[0]), christensenBurleyRd(r, dCh[1]),
+                  christensenBurleyRd(r, dCh[2]));
+    out.pathWeight = rd / pdf;
+    if (isBlack(out.pathWeight) || !isFinite(out.pathWeight)) {
+        out.pathWeight = Vec3(0.0f);
+        return out;
+    }
+    out.exitP = exitSi.p;
+    out.exitN = exitSi.ns;
+    if (dot(out.exitN, probeDir) < 0.0f) out.exitN = -out.exitN;
+    if (lengthSquared(out.exitN) < 1e-12f) out.exitN = entrySi.ns;
+    else out.exitN = normalize(out.exitN);
+    Vec3 exitWo = entrySi.p - out.exitP;
+    out.exitWo = lengthSquared(exitWo) > 1e-12f ? normalize(exitWo) : out.exitN;
+    if (dot(out.exitN, out.exitWo) < 0.0f) out.exitWo = out.exitN;
+    (void)wo;
+    out.escaped = true;
+    return out;
+}
+
 // Spectral Chiang random-walk BSSRDF (hero-channel MIS). Shared by PT and BDPT.
 template <typename Tracer>
 SR_INL SssWalkResult sampleSssRandomWalk(const SceneView& scene, const Tracer& tracer,
@@ -465,9 +580,7 @@ SR_INL SssWalkResult sampleSssRandomWalk(const SceneView& scene, const Tracer& t
     const Vec3 mfpRGB = vmax(Vec3(0.0f), mat.subsurfaceRadius) * srMax(0.0f, mat.subsurfaceScale);
     const Vec3 multiAlbedo = vmax(Vec3(0.0f), mat.subsurfaceColor);
     if (maxComponent(mfpRGB) < 1e-8f) {
-        out.escaped = true;
-        out.pathWeight = multiAlbedo;
-        return out;
+        return sampleSssChristensenBurley(scene, tracer, entrySi, wo, mat, rng);
     }
 
     const Vec3 singleAlbedo = chiangSingleScatterAlbedo(multiAlbedo);
@@ -568,12 +681,7 @@ SR_INL SssWalkResult sampleSssRandomWalk(const SceneView& scene, const Tracer& t
     }
 
     if (!escaped || isBlack(out.pathWeight) || !isFinite(out.pathWeight)) {
-        out.escaped = true;
-        out.exitP = entrySi.p;
-        out.exitN = entrySi.ns;
-        out.exitWo = wo;
-        out.pathWeight = multiAlbedo;
-        return out;
+        return sampleSssChristensenBurley(scene, tracer, entrySi, wo, mat, rng);
     }
     if (dot(out.exitN, out.exitWo) < 0.0f) out.exitWo = out.exitN;
     out.escaped = true;
@@ -740,51 +848,27 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     if (scene.lightCount <= 0) return result;
 
     const Vec3 woLocal = frame.toLocal(wo);
-    LightSample cands[kRisCandidates];
-    int lis[kRisCandidates];
-    float selPdfs[kRisCandidates];
-    Vec3 rgb[kRisCandidates];
-    float scatterPdfs[kRisCandidates];
-    float ws[kRisCandidates];
-    int nOk = 0;
-    for (int i = 0; i < kRisCandidates; ++i) {
-        float selectPdf = 0.0f;
-        const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
-        if (lightIndex < 0 || selectPdf <= 0.0f) continue;
-        LightSample ls;
-        if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) continue;
-        if (ls.pdf <= 0.0f || isBlack(ls.radiance)) continue;
-        if (!shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) continue;
-        const Vec3 wiLocal = frame.toLocal(ls.wi);
-        const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
-        if (be.pdf <= 0.0f || isBlack(be.f)) continue;
-        float scatterPdf = be.pdf;
+    float selectPdf = 0.0f;
+    const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
+    if (lightIndex < 0 || selectPdf <= 0.0f) return result;
+    LightSample ls;
+    if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) return result;
+    if (ls.pdf <= 0.0f || isBlack(ls.radiance)) return result;
+    if (!shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) return result;
+    const Vec3 wiLocal = frame.toLocal(ls.wi);
+    const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
+    if (be.pdf <= 0.0f || isBlack(be.f)) return result;
+    float scatterPdf = be.pdf;
 #if !defined(__CUDACC__)
-        if (guiding && guiding->active() && guiding->prepared()) {
-            const float pg = guiding->guideProbability();
-            const float gPdf = guiding->pdf(ls.wi);
-            scatterPdf = pg * gPdf + (1.0f - pg) * be.pdf;
-        }
-#else
-        (void)guiding;
-#endif
-        const float lightPdf = ls.pdf * selectPdf;
-        const Vec3 unshadowed = ls.radiance * be.f * (fabsf(wiLocal.z) / lightPdf);
-        const float w = luminance(vmax(unshadowed, Vec3(0.0f)));
-        if (w <= 1e-20f) continue;
-        cands[nOk] = ls;
-        lis[nOk] = lightIndex;
-        selPdfs[nOk] = selectPdf;
-        rgb[nOk] = unshadowed;
-        scatterPdfs[nOk] = scatterPdf;
-        ws[nOk] = w;
-        ++nOk;
+    if (guiding && guiding->active() && guiding->prepared()) {
+        const float pg = guiding->guideProbability();
+        const float gPdf = guiding->pdf(ls.wi);
+        scatterPdf = pg * gPdf + (1.0f - pg) * be.pdf;
     }
-    float wSum = 0.0f;
-    const int pick = risPick(ws, nOk, rng.nextFloat(), wSum);
-    if (pick < 0) return result;
-    const LightSample& ls = cands[pick];
-    const int lightIndex = lis[pick];
+#else
+    (void)guiding;
+#endif
+    const float lightPdf = ls.pdf * selectPdf;
 
     float visibility = 1.0f;
     Vec3 shadowOrigin = si.p;
@@ -796,10 +880,8 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
         if (visibility <= 1e-5f) return result;
     }
 
-    const float lightPdf = ls.pdf * selPdfs[pick];
-    const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdfs[pick]);
-    // RIS: vis * rgb_pick * (Σw) / (M * w_pick). Failed candidates are zeros in the M slots.
-    result = rgb[pick] * (visibility * misWeight * wSum / (float(kRisCandidates) * ws[pick]));
+    const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
+    result = ls.radiance * be.f * (fabsf(wiLocal.z) * visibility * misWeight / lightPdf);
 
 #if !defined(__CUDACC__)
     if (scene.lights[lightIndex].shadowEnable)
@@ -827,10 +909,7 @@ SR_INL SR_HD float volumeScatterPdf(Vec3 woVol, Vec3 wi, const MediumData& med, 
     return phasePdf;
 }
 
-// Volume NEE: M light candidates scored by phase·Le/pdf (product via RIS), one
-// shadow ray. M grows with |g| because the env CDF does not see the HG peak.
-// Light *selection* is flux × 4π·HG(wo, sun) so the sun is proposed when it
-// sits in the HG lobe. Continuation / walk phase stays vanilla HG.
+// Volume NEE: one light sample from the same LightSampler as surfaces, MIS vs HG.
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
                                                 Vec3 woVol, const MediumData& med, Rng& rng,
@@ -838,42 +917,18 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
-    const int nCand = volumeRisCandidateCount(med.g);
-    LightSample cands[kVolumeRisMax];
-    int lis[kVolumeRisMax];
-    float selPdfs[kVolumeRisMax];
-    Vec3 rgb[kVolumeRisMax];
-    float scatterPdfs[kVolumeRisMax];
-    float ws[kVolumeRisMax];
-    int nOk = 0;
-    for (int i = 0; i < nCand; ++i) {
-        float selectPdf = 0.0f;
-        const int li = sampleVolumeLightIndex(scene, origin, woVol, med.g, rng.nextFloat(), selectPdf);
-        if (li < 0 || selectPdf <= 0.0f) continue;
-        LightSample ls;
-        if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
-            isBlack(ls.radiance))
-            continue;
-        const float cosTheta = clampf(dot(woVol, ls.wi), -1.0f, 1.0f);
-        const float phasePdfL = henyeyGreenstein(cosTheta, med.g);
-        if (phasePdfL <= 0.0f) continue;
-        const float lightPdf = ls.pdf * selectPdf;
-        const Vec3 unshadowed = ls.radiance * (phasePdfL / lightPdf);
-        const float w = luminance(vmax(unshadowed, Vec3(0.0f)));
-        if (w <= 1e-20f) continue;
-        cands[nOk] = ls;
-        lis[nOk] = li;
-        selPdfs[nOk] = selectPdf;
-        rgb[nOk] = unshadowed;
-        scatterPdfs[nOk] = volumeScatterPdf(woVol, ls.wi, med, guiding);
-        ws[nOk] = w;
-        ++nOk;
-    }
-    float wSum = 0.0f;
-    const int pick = risPick(ws, nOk, rng.nextFloat(), wSum);
-    if (pick < 0) return result;
-    const LightSample& ls = cands[pick];
-    const int li = lis[pick];
+    float selectPdf = 0.0f;
+    const int li = sampleVolumeLightIndex(scene, origin, woVol, med.g, rng.nextFloat(), selectPdf);
+    if (li < 0 || selectPdf <= 0.0f) return result;
+    LightSample ls;
+    if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
+        isBlack(ls.radiance))
+        return result;
+    const float cosTheta = clampf(dot(woVol, ls.wi), -1.0f, 1.0f);
+    const float phasePdfL = henyeyGreenstein(cosTheta, med.g);
+    if (phasePdfL <= 0.0f) return result;
+    const float lightPdf = ls.pdf * selectPdf;
+    const float scatterPdf = volumeScatterPdf(woVol, ls.wi, med, guiding);
 
     float vis = 1.0f;
     float tShadow = 1.0e8f;
@@ -883,9 +938,8 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
         if (vis <= 1e-5f) return result;
     }
 
-    const float lightPdf = ls.pdf * selPdfs[pick];
-    const float misW = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdfs[pick]);
-    result = rgb[pick] * (vis * misW * wSum / (float(nCand) * ws[pick]));
+    const float misW = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, scatterPdf);
+    result = ls.radiance * (phasePdfL * vis * misW / lightPdf);
 
 #if !defined(__CUDACC__)
     if (scene.lights[li].shadowEnable)
@@ -906,7 +960,8 @@ template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
                                       const Material& mat, const Frame& frame, Vec3 wo, Rng& rng,
                                       Guiding* guiding, int mediumIndex = -1) {
-    const int n = srMax(1, scene.settings.lightSamples);
+    (void)scene.settings.lightSamples;
+    const int n = 1;  // pbrt-v4: one light sample per vertex, MIS with BSDF
     Vec3 sum(0.0f);
     for (int i = 0; i < n; ++i)
         sum += nextEventEstimationOnce(scene, tracer, si, mat, frame, wo, rng, guiding, mediumIndex);
@@ -1034,8 +1089,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     const float pNee = volumeNeeRouletteP(depth);
                     const bool takeNee = pNee >= 1.0f || rng.nextFloat() < pNee;
                     if (takeNee) {
-                            int nLight = srMax(1, settings.lightSamples);
-                            if (depth >= 4) nLight = 1;
+                            const int nLight = 1;
                             Vec3 volDirect(0.0f);
                             for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
                                 volDirect += nextEventEstimationVolumeOnce(scene, tracer, origin, woVol,
@@ -1118,7 +1172,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 origin = origin + direction * ms.t;
                 currentMedium = -1;
                 ++passThrough;
-                if (passThrough > 32) break;
                 continue;
             }
 #endif
@@ -1200,7 +1253,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                     origin = offsetRayOrigin(si.p, -si.ng, direction);
                 }
                 ++passThrough;
-                if (passThrough > 32) break;
                 continue;
             }
             if (vol.kind() == VolumeGridKind::Sdf) {
@@ -1218,7 +1270,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 } else {
                     origin = offsetRayOrigin(si.p, si.ng, direction);
                     ++passThrough;
-                    if (passThrough > 32) break;
                     continue;
                 }
             }
@@ -1229,7 +1280,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         if (si.lightIndex >= 0 && depth == 0 && !inst.visibleCamera) {
             origin = offsetRayOrigin(si.p, si.ng, direction);
             ++passThrough;
-            if (passThrough > 16) break;
             continue;
         }
 
@@ -1301,7 +1351,6 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
             origin = offsetRayOrigin(si.p, si.ng, direction);
             ++passThrough;
-            if (passThrough > 32) break;
             continue;
         }
 
@@ -1388,6 +1437,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             if (pSpec > 0.0f && pSpec < 0.999f) throughput /= (1.0f - pSpec);
 
             const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
+            if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
             Material lambert = sssExitLambertMaterial();
             SurfaceInteraction ssSi = si;
             ssSi.p = walk.exitP;

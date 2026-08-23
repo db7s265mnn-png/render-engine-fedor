@@ -7,6 +7,7 @@
 
 #include "render/integrator_base.h"
 #include "render/spectral_common.h"
+#include "render/volume_vdb.h"
 
 namespace sol {
 
@@ -41,6 +42,8 @@ public:
         bool specularBounce = true;
         int depth = 0;
         int passThrough = 0;
+        int currentMedium = -1;
+        int volumeScatterCount = 0;
         Vec3 origin = ctx.origin;
         Vec3 direction = ctx.direction;
         RayShadeKind rayKind = RayShadeKind::Camera;
@@ -48,7 +51,47 @@ public:
 
         while (depth <= maxDepth) {
             RayHit hit;
-            if (!tracer.intersect(origin, direction, kFloatMax, hit)) {
+            const bool didHit = tracer.intersect(origin, direction, kFloatMax, hit);
+            if (const MediumData* med = getMedium(scene, currentMedium)) {
+                const float tMax = didHit ? hit.t : 1.0e6f;
+                MediumData medWalk = *med;
+                if (settings.volumeSimilarity != 0)
+                    medWalk = mediumWithVolumeSimilarity(*med, volumeScatterCount);
+                MediumSample ms;
+                if (medWalk.type == 2 && medWalk.volumeIndex >= 0 &&
+                    medWalk.volumeIndex < scene.volumeCount && scene.volumes &&
+                    scene.volumes[medWalk.volumeIndex]) {
+                    const VolumeGrid& fogVol = *scene.volumes[medWalk.volumeIndex];
+                    ms = sampleMediumVdbFogSpectral(fogVol, medWalk, origin, direction, tMax, rng,
+                                                    throughput, waves);
+                } else {
+                    ms = sampleMediumHomogeneousSpectral(medWalk, tMax, rng, throughput, waves);
+                }
+                if (ms.absorbed || spectrumMaxComponent(throughput) < 1e-20f) break;
+                if (ms.scattered) {
+                    origin = origin + direction * ms.t;
+                    const Vec3 woVol = -direction;
+                    const float pNee = volumeNeeRouletteP(depth);
+                    if ((pNee >= 1.0f || rng.nextFloat() < pNee) && scene.lightCount > 0 &&
+                        depth < maxDepth) {
+                        const Vec3 volDirect =
+                            nextEventEstimationVolumeOnce(scene, tracer, origin, woVol, medWalk, rng);
+                        SampledSpectrum contrib =
+                            throughput * upsampleRgb(volDirect, waves) * (1.0f / srMax(pNee, 1e-8f));
+                        if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                        radiance += contrib;
+                    }
+                    float phasePdf = 0.0f;
+                    direction = sampleHenyeyGreenstein(woVol, medWalk.g, rng.nextFloat(), rng.nextFloat(),
+                                                       phasePdf);
+                    bsdfPdf = phasePdf;
+                    specularBounce = false;
+                    ++depth;
+                    ++volumeScatterCount;
+                    continue;
+                }
+            }
+            if (!didHit) {
                 if (scene.domeLightIndex >= 0) {
                     const LightData& dome = scene.lights[scene.domeLightIndex];
                     const bool primary = depth == 0 && passThrough == 0;
@@ -99,7 +142,6 @@ public:
             if (si.lightIndex >= 0 && depth == 0 && !inst.visibleCamera) {
                 origin = offsetRayOrigin(si.p, si.ng, direction);
                 ++passThrough;
-                if (passThrough > 16) break;
                 continue;
             }
 
@@ -146,7 +188,6 @@ public:
             if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
                 origin = offsetRayOrigin(si.p, si.ng, direction);
                 ++passThrough;
-                if (passThrough > 32) break;
                 continue;
             }
 
@@ -191,6 +232,10 @@ public:
 
             origin = offsetRayOrigin(si.p, si.ng, wiWorld);
             direction = wiWorld;
+            if (ss.transmitted && inst.mediumIndex >= 0 && mediumIsActive(scene, inst.mediumIndex)) {
+                const bool entering = dot(si.ng, wiWorld) < 0.0f;
+                currentMedium = entering ? inst.mediumIndex : -1;
+            }
             ++depth;
 
             if (depth >= settings.rrStartDepth) {

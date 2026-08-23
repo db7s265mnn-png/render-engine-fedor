@@ -100,6 +100,35 @@ struct MediumSample {
     bool absorbed = false;
 };
 
+SR_INL SR_HD int rgbHeroChannel(Vec3 v) {
+    int h = 0;
+    if (v.y > v.x) h = 1;
+    if (v.z > (h == 0 ? v.x : v.y)) h = 2;
+    return h;
+}
+
+SR_INL SR_HD float rgbChannel(Vec3 v, int c) { return c == 0 ? v.x : (c == 1 ? v.y : v.z); }
+
+// pbrt-v4 SimpleVolPath: discrete absorb / scatter / null on the hero channel,
+// with a relative spectral weight so the other RGB channels stay unbiased.
+SR_INL SR_HD int sampleHeroCollision(Vec3 sigmaA, Vec3 sigmaS, float majorant, float u, int hero,
+                                     Vec3& weight) {
+    const Vec3 sigmaT = sigmaA + sigmaS;
+    const Vec3 sigmaN = Vec3(majorant) - sigmaT;
+    const float pA = rgbChannel(sigmaA, hero) / srMax(majorant, 1e-12f);
+    const float pS = rgbChannel(sigmaS, hero) / srMax(majorant, 1e-12f);
+    if (u < pA) {
+        weight = Vec3(0.0f);
+        return 0;  // absorb
+    }
+    if (u < pA + pS) {
+        weight = sigmaS / srMax(rgbChannel(sigmaS, hero), 1e-12f);
+        return 1;  // scatter
+    }
+    weight = sigmaN / srMax(rgbChannel(sigmaN, hero), 1e-12f);
+    return 2;  // null
+}
+
 SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMax, Rng& rng,
                                                   Vec3& throughput) {
     MediumSample out;
@@ -111,44 +140,41 @@ SR_INL SR_HD MediumSample sampleMediumHomogeneous(const MediumData& m, float tMa
     const Vec3 sigmaA = mediumSigmaA(m);
     const Vec3 sigmaS = mediumSigmaS(m);
     const Vec3 sigmaT = sigmaA + sigmaS;
-    // Analytical free-flight with max-channel majorant + null collisions so the
-    // same control flow works for heterogeneous (VDB) majorant tracking later.
+    const int hero = rgbHeroChannel(sigmaT);
+    const float stHero = rgbChannel(sigmaT, hero);
     float t = 0.0f;
+    bool anyEvent = false;
     constexpr int kNullCollisionMaxIters = 1 << 20;
     for (int iter = 0; iter < kNullCollisionMaxIters; ++iter) {
         const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
         t += -logf(u) / majorant;
         if (t >= tMax) {
-            throughput = throughput * mediumTr(m, tMax);
+            // No remaining majorant events: relative Beer vs the hero channel.
+            if (!anyEvent) {
+                throughput = throughput * Vec3(expf(-(sigmaT.x - stHero) * tMax),
+                                               expf(-(sigmaT.y - stHero) * tMax),
+                                               expf(-(sigmaT.z - stHero) * tMax));
+            }
             out.t = tMax;
             return out;
         }
-        // Real collision probability: densest channel vs max-channel majorant.
-        const float stHero = srMax(sigmaT.x, srMax(sigmaT.y, sigmaT.z)) / srMax(majorant, 1e-12f);
-        const float xi = rng.nextFloat();
-        if (xi >= stHero) {
-            // Null collision — continue.
-            continue;
-        }
-        // Real collision: absorb vs scatter by σa:(σa+σs).
-        const float saAvg = (sigmaA.x + sigmaA.y + sigmaA.z) * (1.0f / 3.0f);
-        const float ssAvg = (sigmaS.x + sigmaS.y + sigmaS.z) * (1.0f / 3.0f);
-        const float stSum = srMax(1e-8f, saAvg + ssAvg);
-        if (rng.nextFloat() < saAvg / stSum) {
+        anyEvent = true;
+        Vec3 w(1.0f);
+        const int mode = sampleHeroCollision(sigmaA, sigmaS, majorant, rng.nextFloat(), hero, w);
+        if (mode == 0) {
             throughput = Vec3(0.0f);
             out.t = t;
             out.absorbed = true;
             return out;
         }
-        const Vec3 albedo(sigmaT.x > 1e-8f ? sigmaS.x / sigmaT.x : 0.0f,
-                          sigmaT.y > 1e-8f ? sigmaS.y / sigmaT.y : 0.0f,
-                          sigmaT.z > 1e-8f ? sigmaS.z / sigmaT.z : 0.0f);
-        throughput = throughput * albedo;
-        out.t = t;
-        out.scattered = true;
-        return out;
+        if (mode == 1) {
+            throughput = throughput * w;
+            out.t = t;
+            out.scattered = true;
+            return out;
+        }
+        throughput = throughput * w;
     }
-    throughput = throughput * mediumTr(m, tMax);
     out.t = tMax;
     return out;
 }
@@ -168,11 +194,10 @@ SR_INL SR_HD float volumeRussianRouletteQ(Vec3 throughput) {
     return clampf(luminance(throughput), 0.05f, 1.0f);
 }
 
-// Unbiased volume NEE skip from the 5th scatter (depth >= 4). Survivors are
-// weighted by 1/p. Direct Clamp must run on β · NEE / p, not on raw NEE.
+// pbrt-v4 VolPath: one RR on path throughput only. Always take volume NEE.
 SR_INL SR_HD float volumeNeeRouletteP(int depth) {
-    if (depth < 4) return 1.0f;
-    return clampf(4.0f / float(depth + 1), 0.05f, 1.0f);
+    (void)depth;
+    return 1.0f;
 }
 
 // Resolve medium for an instance (type 2 VDB falls back to homogeneous coeffs

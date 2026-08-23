@@ -13,6 +13,7 @@
 #pragma once
 
 #include "core/math.h"
+#include "render/ggx_energy.h"
 #include "scene/types.h"
 
 namespace sol {
@@ -115,7 +116,7 @@ SR_INL SR_HD float ggxVndfPdf(Vec3 wo, Vec3 h, float alpha) {
     return smithG1(wo, alpha) * ggxD(h, alpha) * absDot(wo, h) / cosWo;
 }
 
-SR_INL SR_HD LobeWeights computeLobes(const Material& mat) {
+SR_INL SR_HD LobeWeights computeLobes(const Material& mat, Vec3 woLocal) {
     LobeWeights lw;
     const float metallic = saturatef(mat.metallic);
     const float transmission = saturatef(mat.transmission);
@@ -132,16 +133,18 @@ SR_INL SR_HD LobeWeights computeLobes(const Material& mat) {
     lw.diffuseAlbedo = base * (baseWeight * (1.0f - metallic) * (1.0f - transmission));
     lw.transmissionTint = transmissionColor;
     const float opaqueSpec = 1.0f - transmission * (1.0f - metallic);
-    const float diffuseWeight =
-        (1.0f - metallic) * (1.0f - transmission) * average(base) * baseWeight;
+    const float mu = srMax(1e-4f, fabsf(woLocal.z));
+    const float Eo = ggxEnergyE(mu, lw.alpha);
+    const float Fnorm = fresnelDielectric(mu, lw.eta);
+    const float diffuseWeight = luminance(lw.diffuseAlbedo);
     float specWeight = 0.0f;
     if (metallic > 1e-4f) {
-        specWeight = opaqueSpec;
+        specWeight = opaqueSpec * luminance(lw.f0) * Eo;
     } else if (specularControl > 1e-4f) {
-        specWeight = clampf(average(lw.f0) * 4.0f + 0.15f * specularControl, 0.0f, 1.0f) * opaqueSpec *
-                     specularControl;
+        specWeight = opaqueSpec * Fnorm * Eo;
     }
-    const float transWeight = (1.0f - metallic) * transmission;
+    const float transWeight =
+        (1.0f - metallic) * transmission * (1.0f - Fnorm) * average(lw.transmissionTint);
     const float total = diffuseWeight + specWeight + transWeight;
     if (total <= 0.0f) {
         lw.diffuse = 1.0f;
@@ -153,15 +156,53 @@ SR_INL SR_HD LobeWeights computeLobes(const Material& mat) {
     return lw;
 }
 
+SR_INL SR_HD LobeWeights computeLobes(const Material& mat) {
+    return computeLobes(mat, Vec3(0.0f, 0.0f, 1.0f));
+}
+
 SR_INL SR_HD bool shadingNormalConsistent(Vec3 ng, Vec3 ns, Vec3 wo, Vec3 wi) {
-    const float shading = dot(ns, wo) * dot(ns, wi);
-    const float geometric = dot(ng, wo) * dot(ng, wi);
-    return (shading > 0.0f) == (geometric > 0.0f);
+    (void)ng;
+    (void)ns;
+    (void)wo;
+    (void)wi;
+    return true;
+}
+
+SR_INL SR_HD Vec3 coatBeer(const Material& mat, float cosTheta) {
+    const float tau = srMax(0.0f, mat.coatThickness);
+    if (tau <= 1e-8f) return Vec3(1.0f);
+    const Vec3 sigmaA = (Vec3(1.0f) - vmax(Vec3(0.0f), mat.coatColor)) * tau;
+    const float mu = srMax(1e-3f, fabsf(cosTheta));
+    return Vec3(expf(-sigmaA.x / mu), expf(-sigmaA.y / mu), expf(-sigmaA.z / mu));
+}
+
+SR_INL SR_HD float coatPickProb(const Material& mat, Vec3 wo) {
+    if (mat.coat <= 1e-4f || wo.z <= 0.0f) return 0.0f;
+    const float alpha = roughnessToAlpha(mat.coatRoughness);
+    const float Eo = ggxEnergyE(wo.z, alpha);
+    const float F = fresnelDielectric(wo.z, srMax(1.01f, mat.coatIor));
+    return clampf(saturatef(mat.coat) * Eo * F, 0.0f, 0.95f);
+}
+
+SR_INL SR_HD BsdfEval evalDielectricCoat(Vec3 wo, Vec3 wi, float alpha, float eta) {
+    BsdfEval o;
+    if (wo.z <= 0.0f || wi.z <= 0.0f) return o;
+    if (alpha <= kDeltaAlpha) return o;
+    Vec3 h = wo + wi;
+    if (lengthSquared(h) <= 0.0f) return o;
+    h = normalize(h);
+    if (h.z < 0.0f) h = -h;
+    const float D = ggxD(h, alpha);
+    const float G = smithG2(wo, wi, alpha);
+    const float F = fresnelDielectric(dot(wo, h), eta);
+    o.f = Vec3(D * G * F / (4.0f * wo.z * wi.z));
+    o.pdf = ggxVndfPdf(wo, h, alpha) / (4.0f * srMax(1e-6f, absDot(wo, h)));
+    return o;
 }
 
 SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
     BsdfEval out;
-    const LobeWeights lw = computeLobes(mat);
+    const LobeWeights lw = computeLobes(mat, wo);
     const bool reflecting = wo.z * wi.z > 0.0f;
     if (fabsf(wo.z) < 1e-6f || fabsf(wi.z) < 1e-6f) return out;
     const float tw = saturatef(mat.transmission) * (1.0f - saturatef(mat.metallic));
@@ -180,7 +221,14 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
                 const float d = ggxD(h, lw.alpha);
                 const float g = smithG2(wo, wi, lw.alpha);
                 const float cosOH = absDot(wo, h);
-                if (tw > 0.0f) {
+                bool allowDielectricReflect = wo.z > 0.0f || mat.internalReflections > 0.5f;
+                if (!allowDielectricReflect && tw > 0.0f) {
+                    const float eta = lw.eta > 0.0f ? 1.0f / lw.eta : 1.0f;
+                    const float cosHI = absDot(wo, h);
+                    const float sin2 = srMax(0.0f, 1.0f - cosHI * cosHI);
+                    allowDielectricReflect = (sin2 / (eta * eta)) >= 1.0f;
+                }
+                if (tw > 0.0f && allowDielectricReflect) {
                     const float fr = fresnelDielectric(dot(wo, h), lw.eta);
                     const float specF = d * g * fr / (4.0f * fabsf(wo.z) * fabsf(wi.z));
                     out.f += Vec3(specF * tw);
@@ -193,6 +241,15 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
                     out.f += fr * (d * g / (4.0f * wo.z * wi.z)) * opaqueSpec;
                     out.pdf += lw.specular * ggxVndfPdf(wo, h, lw.alpha) / (4.0f * srMax(1e-6f, cosOH));
                 }
+            }
+        }
+        if (opaqueSpec > 0.0f && wo.z > 0.0f && wi.z > 0.0f && !lw.delta) {
+            const bool msOpaque =
+                lw.specular > 0.0f && (saturatef(mat.metallic) > 1e-4f || saturatef(mat.specular) > 1e-4f);
+            if (msOpaque) {
+                const Vec3 fAvg = saturatef(mat.metallic) > 1e-4f ? fresnelAverageSchlick(lw.f0)
+                                                                  : Vec3(fresnelAverageDielectric(lw.eta));
+                out.f += ggxMsAlbedo(wo, wi, lw.alpha, fAvg) * opaqueSpec;
             }
         }
     } else if (!lw.delta && lw.transmission > 0.0f) {
@@ -213,9 +270,24 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
                     const float ft = (1.0f - fr) * d * g * factor * (eta * eta) / (sqrtDenom * sqrtDenom);
                     out.f += lw.transmissionTint * (ft * tw);
                     const float dwhDwi = fabsf(eta * eta * dotIH) / (sqrtDenom * sqrtDenom);
-                    out.pdf += lw.transmission * (1.0f - fr) * ggxVndfPdf(wo, h, lw.alpha) * dwhDwi;
+                    const float reflectProb =
+                        (wo.z < 0.0f && mat.internalReflections <= 0.5f) ? 0.0f : fr;
+                    out.pdf += lw.transmission * (1.0f - reflectProb) * ggxVndfPdf(wo, h, lw.alpha) * dwhDwi;
                 }
             }
+        }
+    }
+    const float pCoat = coatPickProb(mat, wo);
+    if (pCoat > 0.0f && wo.z > 0.0f) {
+        const Vec3 beer = coatBeer(mat, wo.z) * (wi.z > 0.0f ? coatBeer(mat, wi.z) : Vec3(1.0f));
+        const float Fwo = fresnelDielectric(wo.z, srMax(1.01f, mat.coatIor));
+        out.f = out.f * ((1.0f - saturatef(mat.coat) * Fwo) * beer);
+        out.pdf *= (1.0f - pCoat);
+        if (wi.z > 0.0f) {
+            const BsdfEval coat = evalDielectricCoat(wo, wi, roughnessToAlpha(mat.coatRoughness),
+                                                     srMax(1.01f, mat.coatIor));
+            out.f += coat.f * saturatef(mat.coat);
+            out.pdf += pCoat * coat.pdf;
         }
     }
     if (!isFinite(out.f) || !srIsFinite(out.pdf)) {
@@ -228,8 +300,35 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
 SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLobe, float u1, float u2,
                                         float uChoice) {
     BsdfSample s;
-    const LobeWeights lw = computeLobes(mat);
     if (fabsf(wo.z) < 1e-6f) return s;
+
+    const float pCoat = coatPickProb(mat, wo);
+    if (pCoat > 1e-5f && uLobe < pCoat && wo.z > 0.0f) {
+        const float alphaC = roughnessToAlpha(mat.coatRoughness);
+        const float etaC = srMax(1.01f, mat.coatIor);
+        if (alphaC <= kDeltaAlpha) {
+            const Vec3 wi(-wo.x, -wo.y, wo.z);
+            if (wi.z <= 0.0f) return s;
+            s.wi = wi;
+            s.specular = true;
+            s.pdf = 1.0f;
+            const float F = fresnelDielectric(wo.z, etaC);
+            s.weight = Vec3(saturatef(mat.coat) * F / srMax(1e-4f, pCoat));
+            return s;
+        }
+        const Vec3 h = sampleGgxVndf(wo, alphaC, u1, u2);
+        const Vec3 wi = reflect(wo, h);
+        if (wi.z <= 0.0f) return s;
+        const BsdfEval e = bsdfEvalLocal(mat, wo, wi);
+        if (e.pdf <= 0.0f) return s;
+        s.wi = wi;
+        s.pdf = e.pdf;
+        s.weight = e.f * (wi.z / e.pdf);
+        return s;
+    }
+    if (pCoat > 1e-5f) uLobe = (uLobe - pCoat) / srMax(1e-6f, 1.0f - pCoat);
+
+    const LobeWeights lw = computeLobes(mat, wo);
     const float pDiffuse = lw.diffuse;
     const float pSpecular = lw.specular;
 
@@ -283,7 +382,8 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
     const float sin2ThetaI = srMax(0.0f, 1.0f - dotOH * dotOH);
     const float sin2ThetaT = sin2ThetaI / (eta * eta);
     const bool tir = sin2ThetaT >= 1.0f;
-    if (tir || uChoice < fr) {
+    const bool allowInternalReflect = mat.internalReflections > 0.5f || wo.z > 0.0f;
+    if (tir || (allowInternalReflect && uChoice < fr)) {
         Vec3 wi = reflect(wo, h);
         if (wi.z * wo.z <= 0.0f) wi.z = -wi.z;
         if (lw.delta) {

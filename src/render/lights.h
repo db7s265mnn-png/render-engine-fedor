@@ -47,11 +47,8 @@ constexpr float kVolumeProductGMin = 0.01f;
 constexpr float kVolumeProductHgFloor = 0.05f;
 
 SR_INL SR_HD int volumeRisCandidateCount(float g) {
-    const float ag = fabsf(g);
-    if (ag < 0.25f) return kRisCandidates;
-    if (ag < 0.55f) return 16;
-    if (ag < 0.80f) return 32;
-    return kVolumeRisMax;
+    (void)g;
+    return 1;  // pbrt: one light sample, no RIS
 }
 #endif
 
@@ -457,38 +454,51 @@ SR_INL SR_HD float lightPdfDirection(const SceneView& scene, int lightIndex, Vec
     }
 }
 
-// Approximate emitted flux used to pick lights (brighter / larger → more samples).
+// pbrt-v4 Φ: scene radius r (world AABB). Default r=1 when bounds are empty (tests).
+SR_INL SR_HD float sceneRadius(const SceneView& scene) {
+    const float r = scene.worldBounds.radius();
+    return r > 1e-3f ? r : 1.0f;
+}
+
 SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
     if (lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
     const LightData& l = scene.lights[lightIndex];
     const float intens = srMax(1e-8f, average(vmax(Vec3(0.0f), l.emittedRadiance())));
+    const Vec3 Le = vmax(Vec3(0.0f), lightRadiance(l));
+    const float lum = srMax(1e-8f, average(Le));
+    const float r = sceneRadius(scene);
+    const float piR2 = kPi * r * r;
     switch (l.type) {
-        case kLightDome:
+        case kLightDome: {
+            float integ = 4.0f * kPi;
             if (l.envIndex >= 0 && l.envIndex < scene.envMapCount && scene.envMaps[l.envIndex].sampled())
-                return intens * srMax(1e-4f, scene.envMaps[l.envIndex].integral);
-            return intens * 4.0f;
+                integ = srMax(1e-4f, scene.envMaps[l.envIndex].integral);
+            // Φ_env = (∫ L dω) · π r²
+            return intens * integ * piR2;
+        }
         case kLightRect:
-        case kLightDisk:
+        case kLightDisk: {
+            const float area = l.type == kLightRect ? rectLightArea(l) : diskLightArea(l);
+            // Φ_area = L · A · π · (two-sided ? 2 : 1)
+            return lum * srMax(1e-6f, area) * kPi * (l.twoSided ? 2.0f : 1.0f);
+        }
         case kLightSphere: {
-            // Normalize: intensity is size-independent power (Karma / USD). Multiplying
-            // by area again made a 4×3 key light ~12× likelier than the sun, so NEE
-            // of the distant light became a rare 1/pdf firefly (default scene).
-            if (l.normalize) return intens;
-            if (l.type == kLightRect) return intens * srMax(1e-6f, rectLightArea(l));
-            if (l.type == kLightDisk) return intens * srMax(1e-6f, diskLightArea(l));
-            const float r = sphereLightRadius(l);
-            return intens * srMax(1e-6f, 4.0f * kPi * r * r);
+            const float rad = sphereLightRadius(l);
+            const float area = 4.0f * kPi * rad * rad;
+            return lum * srMax(1e-6f, area) * kPi;
         }
         case kLightDistant: {
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
-            if (halfAngle < kDistantDeltaHalfRad) return intens;
-            // normalize=1: intensity is irradiance (Karma / Physical Sky). Multiplying
-            // by the disc solid angle underweights the sun vs a dome by ~1/ω (~15000×).
-            if (l.normalize) return intens;
-            return intens * srMax(1e-6f, kTwoPi * (1.0f - cosf(halfAngle)));
+            float E = intens;
+            if (halfAngle >= kDistantDeltaHalfRad && !l.normalize) {
+                const float omega = kTwoPi * (1.0f - cosf(halfAngle));
+                E = lum * srMax(1e-12f, omega);
+            }
+            // Φ_distant = E · π r²
+            return E * piR2;
         }
         case kLightPoint:
-            return intens;
+            return intens * 4.0f * kPi;
         default:
             return intens;
     }
@@ -551,27 +561,13 @@ SR_INL SR_HD float henyeyGreensteinFourPi(float cosTheta, float g) {
     return (1.0f - g2) / srMax(1e-6f, denom * sqrtf(srMax(1e-6f, denom)));
 }
 
-// Volume NEE light pick: flux × 4π·HG(wo, lightDir). Dome stays flux (HG averages
-// to 1/4π). Walk / continuation phase is unchanged — this is proposal only.
+// Volume NEE light pick: same LightSampler as surfaces. HG belongs in MIS, not here.
 SR_INL SR_HD float volumeLightSelectionWeight(const SceneView& scene, int lightIndex, Vec3 refP, Vec3 wo,
                                               float g) {
-    const float flux = lightFluxWeight(scene, lightIndex);
-    if (flux <= 0.0f) return 0.0f;
-    if (fabsf(g) < kVolumeProductGMin) return flux;
-    if (lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
-    const LightData& l = scene.lights[lightIndex];
-    if (l.type == kLightDome) return flux;
-    Vec3 toL(0.0f);
-    if (l.type == kLightDistant) {
-        toL = normalize(lightAxisZ(l));
-    } else {
-        toL = lightOrigin(l) - refP;
-        const float d2 = lengthSquared(toL);
-        if (d2 <= 1e-12f) return flux;
-        toL = toL * (1.0f / sqrtf(d2));
-    }
-    const float hg4 = henyeyGreensteinFourPi(clampf(dot(wo, toL), -1.0f, 1.0f), g);
-    return flux * srMax(kVolumeProductHgFloor, hg4);
+    (void)refP;
+    (void)wo;
+    (void)g;
+    return lightFluxWeight(scene, lightIndex);
 }
 #endif  // !SOLSTICE_OPTIX_KERNEL
 
@@ -654,17 +650,31 @@ SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
 // ---------------------------------------------------------------------------
 #if !defined(SOLSTICE_OPTIX_KERNEL)
 
-// Importance of a BVH node from refP. Uses distance to the AABB *center*
-// softened by the node's extent — not min-distance-to-box (that is zero under
-// the entire footprint and jumps at AABB faces → axis-aligned "bucket" noise
-// in caustic shadows on floors).
+// pbrt-v4 LightBounds::Importance: Φ · max(cos θ', 0) / d², zero when the
+// reference point is outside the emission cone (θ' ≥ θ_e + θ_u).
 SR_INL SR_HD float bvhNodeImportance(const LightBvhNode& node, Vec3 refP) {
     if (node.power <= 0.f) return 0.f;
-    const Vec3 center = (node.bMin + node.bMax) * 0.5f;
+    const Vec3 pc = (node.bMin + node.bMax) * 0.5f;
     const Vec3 ext = node.bMax - node.bMin;
-    const float r2 = 0.25f * (ext.x * ext.x + ext.y * ext.y + ext.z * ext.z) + 1e-4f;
-    const float d2 = lengthSquared(refP - center);
-    return node.power / (d2 + r2);
+    const float radius = 0.5f * sqrtf(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
+    Vec3 d = refP - pc;
+    float d2 = lengthSquared(d);
+    if (d2 <= radius * radius * 1.0002f) return node.power;
+    const float dist = sqrtf(srMax(d2, 1e-12f));
+    const Vec3 wi = d * (1.0f / dist);
+    float cosTheta = dot(node.coneAxis, wi);
+    if (node.twoSided) cosTheta = fabsf(cosTheta);
+    const float sinTheta = sqrtf(srMax(0.0f, 1.0f - cosTheta * cosTheta));
+    const float cosThetaO = node.cosThetaO;
+    const float sinThetaO = sqrtf(srMax(0.0f, 1.0f - cosThetaO * cosThetaO));
+    float cosThetaP = cosTheta * cosThetaO + sinTheta * sinThetaO;
+    if (cosTheta > cosThetaO) cosThetaP = 1.0f;
+    const float theta = acosf(clampf(cosTheta, -1.0f, 1.0f));
+    const float thetaO = acosf(clampf(cosThetaO, -1.0f, 1.0f));
+    const float thetaU = asinf(clampf(radius / dist, 0.0f, 1.0f));
+    const float thetaE = acosf(clampf(node.cosThetaE, -1.0f, 1.0f));
+    if (theta - thetaO - thetaU >= thetaE) return 0.f;
+    return node.power * srMax(0.0f, cosThetaP) / d2;
 }
 
 // Returns true if the BVH subtree rooted at `nodeIdx` contains `lightIdx`.
@@ -812,41 +822,16 @@ SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int
 #if !defined(SOLSTICE_OPTIX_KERNEL)
 SR_INL SR_HD int sampleVolumeLightIndex(const SceneView& scene, Vec3 refP, Vec3 wo, float g, float u,
                                         float& pdf) {
-    if (fabsf(g) < kVolumeProductGMin) return sampleLightIndex(scene, refP, u, pdf);
-    if (scene.lightCount <= 0) {
-        pdf = 0.0f;
-        return -1;
-    }
-    float total = 0.0f;
-    for (int i = 0; i < scene.lightCount; ++i)
-        total += volumeLightSelectionWeight(scene, i, refP, wo, g);
-    if (total <= 1e-20f) return sampleLightIndex(scene, refP, u, pdf);
-    float r = clampf(u, 0.0f, 0.999999f) * total;
-    for (int i = 0; i < scene.lightCount; ++i) {
-        const float w = volumeLightSelectionWeight(scene, i, refP, wo, g);
-        if (r < w) {
-            pdf = w / total;
-            return i;
-        }
-        r -= w;
-    }
-    pdf = volumeLightSelectionWeight(scene, scene.lightCount - 1, refP, wo, g) / total;
-    return scene.lightCount - 1;
+    (void)wo;
+    (void)g;
+    return sampleLightIndex(scene, refP, u, pdf);
 }
 
 SR_INL SR_HD float volumeLightSelectionPdfIndex(const SceneView& scene, Vec3 refP, Vec3 wo, float g,
                                                 int lightIndex) {
-    if (fabsf(g) < kVolumeProductGMin) return lightSelectionPdfIndex(scene, refP, lightIndex);
-    if (scene.lightCount <= 0 || lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
-    float total = 0.0f;
-    float chosen = 0.0f;
-    for (int i = 0; i < scene.lightCount; ++i) {
-        const float w = volumeLightSelectionWeight(scene, i, refP, wo, g);
-        total += w;
-        if (i == lightIndex) chosen = w;
-    }
-    if (total <= 1e-20f) return lightSelectionPdfIndex(scene, refP, lightIndex);
-    return chosen / total;
+    (void)wo;
+    (void)g;
+    return lightSelectionPdfIndex(scene, refP, lightIndex);
 }
 #endif  // !SOLSTICE_OPTIX_KERNEL
 

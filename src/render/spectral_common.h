@@ -9,6 +9,8 @@
 #include "render/spectrum.h"
 #include "render/spectrum_rgb.h"
 #include "render/spectrum_types.h"
+#include "render/volume.h"
+#include "render/volume_track.h"
 
 namespace sol {
 
@@ -52,6 +54,216 @@ struct SpectralBinBuffer {
 // MC path weights / NEE aggregates — energy-safe under multiply.
 inline SampledSpectrum upsampleRgb(Vec3 rgb, const SampledWavelengths& w) {
     return rgbToSpectrumLinear(rgb, w);
+}
+
+// pbrt null-scattering / delta tracking on the sampled wavelengths (hero = slot 0).
+inline MediumSample sampleMediumHomogeneousSpectral(const MediumData& m, float tMax, Rng& rng,
+                                                    SampledSpectrum& throughput,
+                                                    const SampledWavelengths& lambda) {
+    MediumSample out;
+    const SampledSpectrum sigA = upsampleRgb(mediumSigmaA(m), lambda);
+    const SampledSpectrum sigS = upsampleRgb(mediumSigmaS(m), lambda);
+    float majorant = 0.0f;
+    for (int i = 0; i < lambda.n; ++i) majorant = srMax(majorant, sigA[i] + sigS[i]);
+    if (majorant <= 1e-8f || tMax <= 0.0f || lambda.n <= 0) {
+        out.t = tMax;
+        return out;
+    }
+    const int hero = 0;
+    const float stHero = sigA[hero] + sigS[hero];
+    float t = 0.0f;
+    bool anyEvent = false;
+    constexpr int kNullCollisionMaxIters = 1 << 20;
+    for (int iter = 0; iter < kNullCollisionMaxIters; ++iter) {
+        const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
+        t += -logf(u) / majorant;
+        if (t >= tMax) {
+            if (!anyEvent) {
+                for (int i = 0; i < throughput.n && i < lambda.n; ++i) {
+                    const float st = sigA[i] + sigS[i];
+                    throughput[i] *= expf(-(st - stHero) * tMax);
+                }
+            }
+            out.t = tMax;
+            return out;
+        }
+        anyEvent = true;
+        const float pA = sigA[hero] / majorant;
+        const float pS = sigS[hero] / majorant;
+        const float uMode = rng.nextFloat();
+        if (uMode < pA) {
+            for (int i = 0; i < throughput.n; ++i) throughput[i] = 0.0f;
+            out.t = t;
+            out.absorbed = true;
+            return out;
+        }
+        if (uMode < pA + pS) {
+            const float sHero = srMax(sigS[hero], 1e-12f);
+            for (int i = 0; i < throughput.n && i < lambda.n; ++i) throughput[i] *= sigS[i] / sHero;
+            out.t = t;
+            out.scattered = true;
+            return out;
+        }
+        const float nHero = srMax(majorant - stHero, 1e-12f);
+        for (int i = 0; i < throughput.n && i < lambda.n; ++i) {
+            const float nI = majorant - sigA[i] - sigS[i];
+            throughput[i] *= nI / nHero;
+        }
+    }
+    out.t = tMax;
+    return out;
+}
+
+// Hero-λ absorb / scatter / null at a fog collision (occupancy-scaled σ).
+inline bool fogInteractSpectral(const MediumData& medium, float densityScale, float occupancy, float tHit,
+                                Rng& rng, SampledSpectrum& throughput, const SampledWavelengths& lambda,
+                                MediumSample& out) {
+    const float dens = srMax(0.0f, occupancy) * densityScale;
+    const SampledSpectrum sigA = upsampleRgb(medium.sigmaA * dens, lambda);
+    const SampledSpectrum sigS = upsampleRgb(medium.sigmaS * dens, lambda);
+    float majorant = 0.0f;
+    for (int i = 0; i < lambda.n; ++i) majorant = srMax(majorant, sigA[i] + sigS[i]);
+    if (majorant <= 1e-12f) return false;
+    const int hero = 0;
+    const float stHero = sigA[hero] + sigS[hero];
+    const float pA = sigA[hero] / majorant;
+    const float pS = sigS[hero] / majorant;
+    const float uMode = rng.nextFloat();
+    if (uMode < pA) {
+        for (int i = 0; i < throughput.n; ++i) throughput[i] = 0.0f;
+        out.t = tHit;
+        out.absorbed = true;
+        return true;
+    }
+    if (uMode < pA + pS) {
+        const float sHero = srMax(sigS[hero], 1e-12f);
+        for (int i = 0; i < throughput.n && i < lambda.n; ++i) throughput[i] *= sigS[i] / sHero;
+        out.t = tHit;
+        out.scattered = true;
+        return true;
+    }
+    const float nHero = srMax(majorant - stHero, 1e-12f);
+    for (int i = 0; i < throughput.n && i < lambda.n; ++i) {
+        const float nI = majorant - sigA[i] - sigS[i];
+        throughput[i] *= nI / nHero;
+    }
+    return false;
+}
+
+inline bool fogCollideSpectral(const MediumData& medium, float densityScale, float occupancy, float majorant,
+                               float tHit, Rng& rng, SampledSpectrum& throughput,
+                               const SampledWavelengths& lambda, MediumSample& out) {
+    const float dens = srMax(0.0f, occupancy) * densityScale;
+    const SampledSpectrum sigT = upsampleRgb((medium.sigmaA + medium.sigmaS) * dens, lambda);
+    float stHero = 0.0f;
+    for (int i = 0; i < lambda.n; ++i) stHero = srMax(stHero, sigT[i]);
+    if (rng.nextFloat() >= stHero / srMax(majorant, 1e-12f)) return false;
+    return fogInteractSpectral(medium, densityScale, occupancy, tHit, rng, throughput, lambda, out);
+}
+
+// Same piecewise-majorant walk as RGB fog, with spectral null-collision.
+template <typename Grid>
+inline MediumSample sampleHeterogeneousFogSpectral(const Grid& grid, const MediumData& medium, Vec3 origin,
+                                                   Vec3 direction, float tMax, Rng& rng,
+                                                   SampledSpectrum& throughput,
+                                                   const SampledWavelengths& lambda) {
+    MediumSample out;
+    if (tMax <= 0.0f) {
+        out.t = tMax;
+        return out;
+    }
+    float aabbEnter = 0.0f;
+    float aabbExit = tMax;
+    if (rayAabbInterval(origin, direction, grid.bmin(), grid.bmax(), aabbEnter, aabbExit))
+        tMax = srMin(tMax, srMax(0.0f, aabbExit));
+    if (tMax <= 0.0f) {
+        out.t = 0.0f;
+        return out;
+    }
+    float t = srMax(0.0f, aabbEnter);
+    if (t >= tMax) {
+        out.t = tMax;
+        return out;
+    }
+
+    const float densityScale = srMax(0.0f, medium.density);
+    const SampledSpectrum sigT0 = upsampleRgb(medium.sigmaA + medium.sigmaS, lambda);
+    float baseMaj = 0.0f;
+    for (int i = 0; i < lambda.n; ++i) baseMaj = srMax(baseMaj, sigT0[i]);
+    if (baseMaj <= 1e-12f || densityScale <= 0.0f) {
+        out.t = tMax;
+        return out;
+    }
+    const float st0 = baseMaj * densityScale;
+
+    for (int iter = 0; iter < kNullCollisionMaxIters && t < tMax; ++iter) {
+        const Vec3 pLook = origin + direction * (t + 1e-5f);
+        if (grid.hasMajorantBricks() && grid.brickEmpty(pLook)) {
+            const float tBr = grid.brickExitT(origin, direction, t, tMax);
+            t = (tBr > t) ? tBr : t + 1e-4f;
+            continue;
+        }
+        float minD = 0.0f;
+        float maxD = grid.majorant();
+        grid.occupancy(pLook, minD, maxD);
+        const float tCell = grid.hasMajorantGrid() ? grid.cellExitT(origin, direction, t, tMax) : tMax;
+        if (!(tCell > t)) {
+            t += 1e-4f;
+            continue;
+        }
+        if (maxD <= 1e-8f) {
+            t = tCell;
+            continue;
+        }
+        const float majorant = srMax(1e-8f, baseMaj * maxD * densityScale);
+        const bool homog = (maxD - minD) <= (1e-3f * srMax(maxD, 1e-6f) + 1e-4f);
+        if (homog) {
+            const float occ = 0.5f * (minD + maxD);
+            const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
+            const float tHit = t + (-logf(u) / majorant);
+            if (tHit >= tCell) {
+                t = tCell;
+                continue;
+            }
+            if (fogCollideSpectral(medium, densityScale, occ, majorant, tHit, rng, throughput, lambda, out))
+                return out;
+            t = tHit;
+            continue;
+        }
+        const float muC = st0 * srMax(0.0f, minD);
+        const float residualMaj = srMax(0.0f, majorant - muC);
+        float tLocal = t;
+        const float tCtrl =
+            (muC > 1e-8f) ? t + (-logf(srMax(1e-6f, 1.0f - rng.nextFloat())) / muC) : tCell + 1.0f;
+        bool leftCell = false;
+        while (iter < kNullCollisionMaxIters) {
+            float tRes = tCell + 1.0f;
+            if (residualMaj > 1e-8f) {
+                tLocal += -logf(srMax(1e-6f, 1.0f - rng.nextFloat())) / residualMaj;
+                tRes = tLocal;
+            }
+            const float tEvent = srMin(tCtrl, tRes);
+            if (tEvent >= tCell) {
+                t = tCell;
+                leftCell = true;
+                break;
+            }
+            if (tCtrl <= tRes) {
+                fogInteractSpectral(medium, densityScale, minD, tCtrl, rng, throughput, lambda, out);
+                return out;
+            }
+            const float occ = clampf(grid.sampleOcc(origin + direction * tRes), minD, maxD);
+            const float pReal = (st0 * occ - muC) / srMax(residualMaj, 1e-12f);
+            ++iter;
+            if (rng.nextFloat() >= clampf(pReal, 0.0f, 1.0f)) continue;
+            fogInteractSpectral(medium, densityScale, occ, tRes, rng, throughput, lambda, out);
+            return out;
+        }
+        if (leftCell) continue;
+        break;
+    }
+    out.t = tMax;
+    return out;
 }
 
 // Authored reflectance (textures / albedo on hit) — Jakob albedo table.

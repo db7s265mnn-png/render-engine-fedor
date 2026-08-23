@@ -412,48 +412,168 @@ void Scene::buildLightProxies() {
 // Light BVH construction helpers (host-only, scene.cpp internal)
 // ---------------------------------------------------------------------------
 
-// Approximate emitted power for one light (same formula as lightFluxWeight in lights.h).
+// pbrt-v4 Φ — keep in sync with lightFluxWeight in lights.h.
 static float lightPowerForBvh(const LightData& l,
-                               const std::vector<std::shared_ptr<EnvironmentMap>>& envMaps) {
-    const Vec3 emitted = l.emittedRadiance();
-    const float intens = std::max(1e-8f, (emitted.x + emitted.y + emitted.z) * (1.0f / 3.0f));
+                               const std::vector<std::shared_ptr<EnvironmentMap>>& envMaps,
+                               float sceneRadius) {
+    Vec3 e = l.emittedRadiance();
+    auto avg3 = [](Vec3 v) { return std::max(1e-8f, (v.x + v.y + v.z) * (1.0f / 3.0f)); };
+    const float intens = avg3(vmax(e, Vec3(0.0f)));
+    (void)intens;
+    const float r = std::max(sceneRadius, 1e-2f);
+    const float piR2 = kPi * r * r;
+    auto radianceLum = [&]() -> float {
+        Vec3 Le = e;
+        if (l.normalize) {
+            switch (l.type) {
+                case kLightRect: {
+                    const Vec3 ax = transformVector(l.xform, Vec3(l.width, 0.0f, 0.0f));
+                    const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.height, 0.0f));
+                    const float area = length(cross(ax, ay));
+                    if (area > 0.0f) Le = e / area;
+                    break;
+                }
+                case kLightDisk: {
+                    const Vec3 ax = transformVector(l.xform, Vec3(l.radius, 0.0f, 0.0f));
+                    const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.radius, 0.0f));
+                    const float area = kPi * length(cross(ax, ay));
+                    if (area > 0.0f) Le = e / area;
+                    break;
+                }
+                case kLightSphere: {
+                    const float sx = length(transformVector(l.xform, Vec3(1.0f, 0.0f, 0.0f)));
+                    const float sy = length(transformVector(l.xform, Vec3(0.0f, 1.0f, 0.0f)));
+                    const float sz = length(transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f)));
+                    const float rad = l.radius * (sx + sy + sz) * (1.0f / 3.0f);
+                    const float area = 4.0f * kPi * rad * rad;
+                    if (area > 0.0f) Le = e / area;
+                    break;
+                }
+                case kLightDistant: {
+                    const float halfAngle = (l.angle * kPi / 180.0f) * 0.5f;
+                    const float omega = kTwoPi * (1.0f - std::cos(halfAngle));
+                    if (omega > 1e-9f) Le = e / omega;
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+        return avg3(vmax(Le, Vec3(0.0f)));
+    };
+    const float lum = radianceLum();
     switch (l.type) {
-        case kLightDome:
+        case kLightDome: {
+            float integ = 4.0f * kPi;
             if (l.envIndex >= 0 && l.envIndex < int(envMaps.size()) && envMaps[l.envIndex] &&
                 envMaps[l.envIndex]->distribution.valid())
-                return intens * std::max(1e-4f, envMaps[l.envIndex]->distribution.integral());
-            return intens * 4.0f;
+                integ = std::max(1e-4f, envMaps[l.envIndex]->distribution.integral());
+            return avg3(vmax(e, Vec3(0.0f))) * integ * piR2;
+        }
         case kLightRect: {
-            if (l.normalize) return intens;
-            const Vec3 ax = transformVector(l.xform, Vec3(l.width,  0.0f, 0.0f));
+            const Vec3 ax = transformVector(l.xform, Vec3(l.width, 0.0f, 0.0f));
             const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.height, 0.0f));
-            return intens * std::max(1e-6f, length(cross(ax, ay)));
+            const float area = std::max(1e-6f, length(cross(ax, ay)));
+            return lum * area * kPi * (l.twoSided ? 2.0f : 1.0f);
         }
         case kLightDisk: {
-            if (l.normalize) return intens;
             const Vec3 ax = transformVector(l.xform, Vec3(l.radius, 0.0f, 0.0f));
             const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.radius, 0.0f));
-            return intens * std::max(1e-6f, kPi * length(cross(ax, ay)));
+            const float area = std::max(1e-6f, kPi * length(cross(ax, ay)));
+            return lum * area * kPi * (l.twoSided ? 2.0f : 1.0f);
         }
         case kLightSphere: {
-            if (l.normalize) return intens;
             const float sx = length(transformVector(l.xform, Vec3(1.0f, 0.0f, 0.0f)));
             const float sy = length(transformVector(l.xform, Vec3(0.0f, 1.0f, 0.0f)));
             const float sz = length(transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f)));
-            const float r = l.radius * (sx + sy + sz) * (1.0f / 3.0f);
-            return intens * std::max(1e-6f, 4.0f * kPi * r * r);
+            const float rad = l.radius * (sx + sy + sz) * (1.0f / 3.0f);
+            const float area = std::max(1e-6f, 4.0f * kPi * rad * rad);
+            return lum * area * kPi;
         }
         case kLightDistant: {
             const float halfAngle = (l.angle * kPi / 180.0f) * 0.5f;
-            if (halfAngle < 1e-8f) return intens;
-            // Keep in sync with lightFluxWeight in lights.h.
-            if (l.normalize) return intens;
-            return intens * std::max(1e-6f, kTwoPi * (1.0f - std::cos(halfAngle)));
+            float E = avg3(vmax(e, Vec3(0.0f)));
+            if (halfAngle >= 1e-8f && !l.normalize) {
+                const float omega = kTwoPi * (1.0f - std::cos(halfAngle));
+                E = lum * std::max(1e-12f, omega);
+            }
+            return E * piR2;
         }
         case kLightPoint:
         default:
-            return intens;
+            return avg3(vmax(e, Vec3(0.0f))) * 4.0f * kPi;
     }
+}
+
+static void setLeafEmissionCone(LightBvhNode& n, const LightData& l) {
+    n.twoSided = l.twoSided;
+    if (l.type == kLightSphere || l.type == kLightPoint) {
+        n.coneAxis = Vec3(0.0f, 0.0f, 1.0f);
+        n.cosThetaO = -1.0f;
+        n.cosThetaE = 0.0f;
+        n.twoSided = 1;
+        return;
+    }
+    Vec3 z = transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f));
+    const float len = length(z);
+    n.coneAxis = len > 1e-8f ? z * (-1.0f / len) : Vec3(0.0f, 0.0f, 1.0f);
+    n.cosThetaO = 1.0f;
+    n.cosThetaE = 0.0f;
+}
+
+static void unionEmissionCones(LightBvhNode& dst, const LightBvhNode& a, const LightBvhNode& b) {
+    dst.twoSided = (a.twoSided || b.twoSided) ? 1 : 0;
+    dst.cosThetaE = std::min(a.cosThetaE, b.cosThetaE);
+    if (a.cosThetaO <= -0.999f) {
+        dst.coneAxis = a.coneAxis;
+        dst.cosThetaO = -1.0f;
+        return;
+    }
+    if (b.cosThetaO <= -0.999f) {
+        dst.coneAxis = b.coneAxis;
+        dst.cosThetaO = -1.0f;
+        return;
+    }
+    Vec3 wa = a.coneAxis;
+    Vec3 wb = b.coneAxis;
+    const float la = length(wa);
+    const float lb = length(wb);
+    if (la > 1e-8f) wa = wa * (1.0f / la);
+    if (lb > 1e-8f) wb = wb * (1.0f / lb);
+    const float c = clampf(dot(wa, wb), -1.0f, 1.0f);
+    const float ta = std::acos(clampf(a.cosThetaO, -1.0f, 1.0f));
+    const float tb = std::acos(clampf(b.cosThetaO, -1.0f, 1.0f));
+    const float td = std::acos(c);
+    if (std::min(ta, tb) + td <= std::max(ta, tb) + 1e-4f) {
+        if (ta > tb) {
+            dst.coneAxis = wa;
+            dst.cosThetaO = a.cosThetaO;
+        } else {
+            dst.coneAxis = wb;
+            dst.cosThetaO = b.cosThetaO;
+        }
+        return;
+    }
+    const float to = 0.5f * (ta + tb + td);
+    if (to >= kPi - 1e-4f) {
+        dst.coneAxis = wa;
+        dst.cosThetaO = -1.0f;
+        return;
+    }
+    const float tr = to - ta;
+    Vec3 axis = cross(wa, wb);
+    if (lengthSquared(axis) < 1e-12f) {
+        dst.coneAxis = wa;
+        dst.cosThetaO = std::cos(std::min(to, kPi));
+        return;
+    }
+    axis = axis * (1.0f / length(axis));
+    const float ct = std::cos(tr);
+    const float st = std::sin(tr);
+    dst.coneAxis = wa * ct + cross(axis, wa) * st + axis * dot(axis, wa) * (1.0f - ct);
+    const float ln = length(dst.coneAxis);
+    if (ln > 1e-8f) dst.coneAxis = dst.coneAxis * (1.0f / ln);
+    dst.cosThetaO = std::cos(to);
 }
 
 // World-space AABB for a finite light (point, sphere, rect, disk).
@@ -513,9 +633,11 @@ void Scene::buildLightBvh() {
     std::vector<BuildEntry> finites;
     finites.reserve(lights.size());
 
+    const float sceneRadius = std::max(1e-2f, bounds_.radius());
+
     for (int i = 0; i < int(lights.size()); ++i) {
         const LightData& l = lights[i];
-        const float pw = lightPowerForBvh(l, envMaps);
+        const float pw = lightPowerForBvh(l, envMaps, sceneRadius);
         if (l.type == kLightDome || l.type == kLightDistant) {
             infiniteLightIndices_.push_back(i);
             infiniteLightPower_ += pw;
@@ -532,14 +654,8 @@ void Scene::buildLightBvh() {
 
     if (finites.empty()) return;
 
-    // Few finite lights: skip the BVH. Position-aware AABB importance
-    // (power / dist²_to_box) imprints axis-aligned "buckets" on diffuse floors
-    // under area lights — visible as square caustic sampling structure on every
-    // integrator. Flux-only selection is unbiased and cheaper for small N.
-    constexpr int kLightBvhMinFinites = 32;
-    if (int(finites.size()) < kLightBvhMinFinites) return;
-
-    // Pre-allocate: a full binary tree with N leaves has at most 2*N - 1 nodes.
+    // Always build (pbrt-v4 BVHLightSampler). Cone importance is 0 outside the
+    // emission cone, so small N does not imprint AABB buckets the way power/d² did.
     lightBvhNodes_.reserve(2 * finites.size());
 
     // Recursive median-split builder (iterative via std::function to avoid ABI issues).
@@ -562,6 +678,7 @@ void Scene::buildLightBvh() {
             lightBvhNodes_[nodeIdx].childOrLight = finites[first].lightIdx;
             lightBvhNodes_[nodeIdx].rightChild   = -1;
             lightBvhNodes_[nodeIdx].isLeaf       = 1;
+            setLeafEmissionCone(lightBvhNodes_[nodeIdx], lights[finites[first].lightIdx]);
             return nodeIdx;
         }
 
@@ -589,6 +706,7 @@ void Scene::buildLightBvh() {
         const int rightIdx = build(mid,   (first + count) - mid);
         lightBvhNodes_[nodeIdx].childOrLight = leftIdx;
         lightBvhNodes_[nodeIdx].rightChild   = rightIdx;
+        unionEmissionCones(lightBvhNodes_[nodeIdx], lightBvhNodes_[leftIdx], lightBvhNodes_[rightIdx]);
         return nodeIdx;
     };
 

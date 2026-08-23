@@ -1,4 +1,5 @@
 #include "render/volume_vdb.h"
+#include "render/spectral_common.h"
 #include "render/volume_track.h"
 
 #include "solstice_config.h"
@@ -146,6 +147,28 @@ MediumSample sampleMediumVdbFog(const VolumeGrid& grid, const MediumData& medium
     view.track = &track;
 #endif
     return sampleHeterogeneousFog(view, medium, origin, direction, tMax, rng, throughput);
+}
+
+MediumSample sampleMediumVdbFogSpectral(const VolumeGrid& grid, const MediumData& medium, Vec3 origin,
+                                        Vec3 direction, float tMax, Rng& rng, SampledSpectrum& throughput,
+                                        const SampledWavelengths& lambda) {
+    MediumSample out;
+    if (!grid.valid() || tMax <= 0.0f) {
+        out.t = tMax;
+        return out;
+    }
+    CpuFogGrid view;
+    view.grid = &grid;
+#if SOLSTICE_HAVE_OPENVDB
+    auto* vdb = static_cast<openvdb::FloatGrid*>(grid.nativeGrid());
+    if (!vdb) {
+        out.t = tMax;
+        return out;
+    }
+    FogTrackSampler track(*vdb, grid.sampleFilter() == VolumeSampleFilter::Nearest);
+    view.track = &track;
+#endif
+    return sampleHeterogeneousFogSpectral(view, medium, origin, direction, tMax, rng, throughput, lambda);
 }
 
 Vec3 mediumShadowTrVdb(const VolumeGrid& grid, const MediumData& medium, Vec3 origin, Vec3 direction,

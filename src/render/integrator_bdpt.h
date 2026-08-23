@@ -388,7 +388,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
                 const InstanceData& inst = scene.instances[si.instanceIndex];
                 if (count == 1 && !inst.visibleCamera) {
                     origin = offsetRayOrigin(si.p, si.ng, dir);
-                    if (++passThrough > 16) break;
+                    ++passThrough;
                     continue;
                 }
                 Vert v{};
@@ -414,7 +414,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         // Stochastic cutout — pass through without creating a vertex.
         if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
             origin = offsetRayOrigin(si.p, si.ng, dir);
-            if (++passThrough > 16) break;
+            ++passThrough;
             continue;
         }
 
@@ -951,55 +951,24 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         const LightData& l = scene.lights[li];
 
         if (l.type == kLightDome || l.type == kLightDistant) {
-            // PT-style env NEE with RIS (M HDR/sun candidates, one shadow) and the
-            // power heuristic (no deeper strategies exist). Outer `li` only gates
-            // env-vs-finite; candidates are i.i.d. light+direction samples.
-            LightSample cands[kRisCandidates];
-            int lis[kRisCandidates];
-            float selPdfs[kRisCandidates];
-            Vec3 rgb[kRisCandidates];
-            float bsdfPdfs[kRisCandidates];
-            float ws[kRisCandidates];
-            int nOk = 0;
-            for (int i = 0; i < kRisCandidates; ++i) {
-                float sp = 0.0f;
-                const int lii = sampleLightIndex(scene, E.p, rng.nextFloat(), sp);
-                if (lii < 0 || sp <= 0.0f) continue;
-                if (scene.lights[lii].type != kLightDome && scene.lights[lii].type != kLightDistant)
-                    continue;
-                LightSample ls;
-                if (!sampleLight(scene, lii, E.p, rng.nextFloat(), rng.nextFloat(), ls)) continue;
-                if (ls.pdf <= 0.0f || isBlack(ls.radiance)) continue;
-                const Vec3 f = bsdfF(E, E.wo, ls.wi);
-                if (isBlack(f)) continue;
-                const float lightPdf = ls.pdf * sp;
-                const Vec3 unshadowed =
-                    f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) / lightPdf);
-                const float wgt = luminance(vmax(unshadowed, Vec3(0.0f)));
-                if (wgt <= 1e-20f) continue;
-                cands[nOk] = ls;
-                lis[nOk] = lii;
-                selPdfs[nOk] = sp;
-                rgb[nOk] = unshadowed;
-                bsdfPdfs[nOk] = ls.delta ? 0.0f : bsdfPdfSa(E, E.wo, ls.wi);
-                ws[nOk] = wgt;
-                ++nOk;
-            }
-            float wSum = 0.0f;
-            const int pick = risPick(ws, nOk, rng.nextFloat(), wSum);
-            if (pick < 0) continue;
-            const LightSample& ls = cands[pick];
-            const int lii = lis[pick];
+            // pbrt: one LightSampler sample, MIS with BSDF (no RIS).
+            LightSample ls;
+            if (!sampleLight(scene, li, E.p, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
+                isBlack(ls.radiance))
+                continue;
+            const Vec3 f = bsdfF(E, E.wo, ls.wi);
+            if (isBlack(f)) continue;
+            const float lightPdf = ls.pdf * selectPdf;
+            const Vec3 unshadowed = f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) / lightPdf);
             float visibility = 1.0f;
-            if (scene.lights[lii].shadowEnable) {
+            if (scene.lights[li].shadowEnable) {
                 const Vec3 o = offsetRayOrigin(E.p, E.ng, ls.wi);
                 visibility = shadowVisibility(scene, tracer, o, ls.wi, 1.0e8f);
             }
             if (visibility <= 1e-5f) continue;
-            const float lightPdf = ls.pdf * selPdfs[pick];
-            const float w = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdfs[pick]);
-            const float risW = wSum / (float(kRisCandidates) * ws[pick]);
-            Vec3 local = rgb[pick] * (w * visibility * risW);
+            const float bsdfPdf = ls.delta ? 0.0f : bsdfPdfSa(E, E.wo, ls.wi);
+            const float w = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdf);
+            Vec3 local = unshadowed * (w * visibility);
             Vec3 c = E.beta * local;
             if (t >= 2) c = clampContribution(c, settings.clampDirect);
             if (E.nearSpec) c = clampContribution(c, causticFireflyCap(settings));

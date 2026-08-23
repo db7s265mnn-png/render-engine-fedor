@@ -1653,8 +1653,8 @@ SR_INL SR_HD void lensSample(int x, int y, int sampleIndex, float& u, float& v) 
 }
 
 // ---------------------------------------------------------------------------
-// Path-dimension Owen Sobol (PBRT / Cycles style). Attach AFTER camera jitter
-// so dims 0-3 stay free; path code consumes dim 4+.
+// Path-dimension Owen Sobol (PBRT / Cycles style). One stream from dimension 0:
+// camera jitter (when the pixel sampler is Sobol) then the rest of the path.
 // Per-pixel scramble via setPixel — do NOT share one sequence across the
 // frame (that printed a square lattice in an earlier experiment).
 // ---------------------------------------------------------------------------
@@ -1683,7 +1683,7 @@ SR_INL void attachPathSobol(Rng& rng, PathSobolStream& stream, int x, int y, int
     stream.sampleIndex = si + pixelOffset * 65536u;  // spp in low bits of each pixel's lane
     rng.qmcCtx = &stream;
     rng.qmcFn = &pathSobolQmcFn;
-    rng.sampleDim = 4u;
+    rng.sampleDim = 0u;  // pbrt: one stream from dimension 0 (camera then path)
 }
 
 }  // namespace sol

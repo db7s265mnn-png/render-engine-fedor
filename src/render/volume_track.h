@@ -90,19 +90,18 @@ SR_INL SR_HD bool fogInteract(const MediumData& medium, float densityScale, floa
     const Vec3 sigmaA = medium.sigmaA * dens;
     const Vec3 sigmaS = medium.sigmaS * dens;
     const Vec3 sigmaT = sigmaA + sigmaS;
-    const float saAvg = (sigmaA.x + sigmaA.y + sigmaA.z) * (1.0f / 3.0f);
-    const float ssAvg = (sigmaS.x + sigmaS.y + sigmaS.z) * (1.0f / 3.0f);
-    const float stSum = srMax(1e-8f, saAvg + ssAvg);
-    if (rng.nextFloat() < saAvg / stSum) {
+    const float majorant = srMax(sigmaT.x, srMax(sigmaT.y, sigmaT.z));
+    const int hero = rgbHeroChannel(sigmaT);
+    Vec3 w(1.0f);
+    const int mode = sampleHeroCollision(sigmaA, sigmaS, srMax(majorant, 1e-12f), rng.nextFloat(), hero, w);
+    if (mode == 0) {
         throughput = Vec3(0.0f);
         out.t = tHit;
         out.absorbed = true;
         return true;
     }
-    const Vec3 albedo(sigmaT.x > 1e-8f ? sigmaS.x / sigmaT.x : 0.0f,
-                      sigmaT.y > 1e-8f ? sigmaS.y / sigmaT.y : 0.0f,
-                      sigmaT.z > 1e-8f ? sigmaS.z / sigmaT.z : 0.0f);
-    throughput = throughput * albedo;
+    if (mode == 2) return false;  // null — keep tracking
+    throughput = throughput * w;
     out.t = tHit;
     out.scattered = true;
     return true;

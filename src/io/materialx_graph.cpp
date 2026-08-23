@@ -396,6 +396,17 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     material.subsurface = saturatef(material.subsurface);
     // Scale is metric (scene units); allow large values for cm-authored Radius maps.
     material.subsurfaceScale = srMax(0.0f, subsurfaceScale);
+
+    float coat = 0.0f, coatRoughness = 0.1f, coatIor = 1.5f, coatThickness = 0.0f;
+    setFloat("coat", coat);
+    setFloat("coat_roughness", coatRoughness);
+    setFloat("coat_IOR", coatIor);
+    setFloat("coat_thickness", coatThickness);
+    setColor("coat_color", material.coatColor);
+    material.coat = saturatef(coat);
+    material.coatRoughness = saturatef(coatRoughness);
+    material.coatIor = clampf(coatIor, 1.0f, 3.0f);
+    material.coatThickness = srMax(0.0f, coatThickness);
 }
 
 #endif  // SOLSTICE_HAVE_MATERIALX
@@ -668,6 +679,11 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"subsurface_color", "color3", "1, 0.75, 0.55"},
          {"subsurface_radius", "color3", "1, 0.35, 0.2"},
          {"subsurface_scale", "float", "1"},
+         {"coat", "float", "0"},
+         {"coat_roughness", "float", "0.1"},
+         {"coat_IOR", "float", "1.5"},
+         {"coat_thickness", "float", "0"},
+         {"coat_color", "color3", "1, 1, 1"},
          {"opacity", "color3", "1, 1, 1"}});
     add("triplanarprojection", "color3", "Texture",
         {{"file", "filename", {}},
@@ -845,6 +861,11 @@ QString createDefaultMaterialXDocument() {
     ss->setInputValue("subsurface_color", mx::Color3(1.0f, 0.75f, 0.55f));
     ss->setInputValue("subsurface_radius", mx::Color3(1.0f, 0.35f, 0.2f));
     ss->setInputValue("subsurface_scale", 1.0f);
+    ss->setInputValue("coat", 0.0f);
+    ss->setInputValue("coat_roughness", 0.1f);
+    ss->setInputValue("coat_IOR", 1.5f);
+    ss->setInputValue("coat_thickness", 0.0f);
+    ss->setInputValue("coat_color", mx::Color3(1.0f, 1.0f, 1.0f));
 
     // Place nodes left-to-right like Houdini Solaris MaterialX.
     ss->setAttribute("xpos", "0.0");
