@@ -1148,11 +1148,11 @@ public:
                                                            "wavefront PT) run together. Default schedule is "
                                                            "Overlap: GPU fills even spp until Embree finishes "
                                                            "one odd spp, then one add (no 1:1 wait). Mixture "
-                                                           "and Tile are usually slower than GPU-only — "
-                                                           "Mixture still waits on a full Embree spp plus a "
-                                                           "snapshot copy; Tile splits OptiX into 704² packs "
-                                                           "with a 1-spp barrier. Set XPU Schedule when this "
-                                                           "device is selected.\n"
+                                                           "is usually slower than GPU-only (it still waits "
+                                                           "on a full Embree spp plus a snapshot copy). Tile "
+                                                           "gives OptiX almost the full frame as one launch "
+                                                           "and Embree a small 32×32 strip. Set XPU Schedule "
+                                                           "when this device is selected.\n"
                                                            "XPU is Path Tracer only. BDPT, spectral, "
                                                            "wireframe, AO stay CPU (Embree).\n"
                                                            "If OptiX cannot start, GPU/XPU stop with an "
@@ -1173,10 +1173,11 @@ public:
                                       "adds them. GPU never waits to render, but each UI step still "
                                       "waits for one Embree spp and a snapshot copy, so wall time "
                                       "is often worse than GPU-only.\n"
-                                      "Tile (RenderMan / Cycles): 32×32 CPU microtiles and full 704² "
-                                      "GPU packs. One spp barrier — GPU cannot stack many spp while "
-                                      "CPU works. Edge leftovers stay on CPU so Embree never traces "
-                                      "a 500k-px pack."));
+                                      "Tile (RenderMan / Cycles): GPU traces one large exclusive "
+                                      "rect (almost the full frame, one OptiX launch). CPU traces a "
+                                      "small exclusive 32×32 strip in parallel. Same spp, no steal "
+                                      "and no leftover half-frame on Embree — that is what made "
+                                      "Tile much slower than GPU-only."));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
                                           "Ambient Occlusion", "PT Spectral", "BDPT Spectral",

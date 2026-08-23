@@ -403,7 +403,7 @@ SR_INL SR_HD bool renderDeviceIsXpu(int backend) { return backend == kBackendXpu
 // XPU work schedule (Render Settings → Engine, visible only when backend is XPU).
 // Overlap (default): GPU fills even spp until Embree finishes one odd spp, then one D2H add.
 // Mixture: Karma-style independent full-frame estimators, host blend, automatic spp share.
-// Tile: RenderMan 32×32 CPU buckets + ~500k-px GPU packs; GPU steals leftover 32×32.
+// Tile: one large GPU rect + a small exclusive 32×32 CPU strip (no steal).
 enum XpuSchedule : int {
     kXpuScheduleOverlap = 0,
     kXpuScheduleMixture = 1,

@@ -22,9 +22,10 @@ Intel Embree CPU device, the NVIDIA OptiX GPU device, or XPU (both together).
 * **Render Device** — `CPU (Embree)` uses Embree 4 with a tiled thread pool; `GPU (OptiX)` uses
   OptiX wavefront path tracing; `XPU (Embree+OptiX)` runs CPU and GPU together. **Overlap**
   (default) keeps the GPU filling even spp until Embree finishes one odd spp, then one film
-  add — faster GPU means more GPU spp per CPU spp. **Mixture** and **Tile** are optional
-  (Karma independent films / RenderMan 32×32 + ~704² packs) and are usually slower than
-  GPU-only. CPU keeps its full Path Tracer (MNEE, SSS, OpenPGL, N light samples, filters).
+  add — faster GPU means more GPU spp per CPU spp. **Mixture** is optional (Karma
+  independent films) and is usually slower than GPU-only. **Tile** gives the GPU one
+  large exclusive rect (almost the full frame) and Embree a small 32×32 strip.
+  CPU keeps its full Path Tracer (MNEE, SSS, OpenPGL, N light samples, filters).
   GPU and XPU are Path Tracer only; if OptiX cannot start they stop with an error instead of
   falling back to Embree.
 * **Node network** — a Solaris-like network where every node edits the stage flowing through

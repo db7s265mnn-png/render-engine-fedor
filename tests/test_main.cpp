@@ -550,13 +550,20 @@ void testXpuDevice() {
     coverOnce(1920, 80, "wide remainder strip covers once");
     {
         const XpuWorkLists hd = xpuBuildWorkLists(1920, 1080);
-        check(!hd.gpuPacks.empty(), "1080p has GPU packs");
-        check(hd.gpuPacks[0].width() <= kXpuGpuPackPx, "GPU pack width cap");
-        check(hd.gpuPacks[0].height() <= kXpuGpuPackPx, "GPU pack height cap");
-        check(!hd.cpuTiles.empty(), "1080p remainder is CPU 32x32 not stolen 704 packs");
+        check(hd.gpuPacks.size() == 1, "1080p GPU is one launch");
+        check(hd.gpuPacks[0].width() == 1920 && hd.gpuPacks[0].height() == 1048,
+              "1080p GPU owns all but a 32-px CPU strip");
+        check(!hd.cpuTiles.empty(), "1080p has a CPU 32x32 strip");
+        check(xpuAreaSum(hd.gpuPacks) > 10 * xpuAreaSum(hd.cpuTiles),
+              "1080p CPU strip is a small exclusive share");
+        check(xpuBounds(hd.cpuTiles).area() == xpuAreaSum(hd.cpuTiles),
+              "CPU tiles form a solid rect");
         const XpuWorkLists tiny = xpuBuildWorkLists(32, 32);
         check(tiny.gpuPacks.empty(), "32x32 is CPU tiles only");
         check(!tiny.cpuTiles.empty(), "32x32 has CPU tiles");
+        const XpuWorkLists uhd = xpuBuildWorkLists(3840, 2160);
+        check(uhd.cpuTiles.empty() && uhd.gpuPacks.size() == 1,
+              "4K 32-px strip exceeds Embree budget so Tile is one GPU launch");
     }
 
     Scene scene;

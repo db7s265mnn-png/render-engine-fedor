@@ -1,7 +1,7 @@
 // Hybrid CPU+GPU device. Three schedules:
 //   Overlap (default): GPU fills even spp until Embree finishes one odd spp, one D2H add.
 //   Mixture (Karma): independent full-frame films, persistent GPU worker, host blend.
-//   Tile (RenderMan / Cycles): 32×32 CPU microtiles + ~704² GPU packs.
+//   Tile (RenderMan / Cycles): one large GPU rect + a small exclusive 32×32 CPU strip.
 #include "render/render_device.h"
 
 #include "core/log.h"
@@ -13,7 +13,6 @@
 #include <condition_variable>
 #include <exception>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -413,45 +412,29 @@ private:
         gpuHost_.assign(n, Vec4{});
 
         if (!loggedMode_) {
-            logInfo("XPU Tile: 32×32 CPU microtiles (RenderMan) + ~704² GPU packs (~500k px), "
-                    "work stealing (Cycles); Embree keeps full PT");
+            logInfo("XPU Tile: one large GPU rect + a small exclusive 32×32 CPU strip "
+                    "(no steal; Embree keeps full PT)");
             loggedMode_ = true;
         }
 
         const XpuWorkLists lists = xpuBuildWorkLists(width, height);
-        std::atomic<size_t> gpuNext{0};
-        std::atomic<size_t> cpuNext{0};
-        std::atomic<bool> cpuDidWork{false};
         std::exception_ptr gpuEx;
         std::exception_ptr cpuEx;
 
-        auto steal = [&](std::atomic<size_t>& primary, const std::vector<XpuWorkRect>& first,
-                         std::atomic<size_t>& secondary, const std::vector<XpuWorkRect>& second)
-            -> std::optional<XpuWorkRect> {
-            const size_t i = primary.fetch_add(1, std::memory_order_relaxed);
-            if (i < first.size()) return first[i];
-            if (second.empty()) return std::nullopt;
-            const size_t j = secondary.fetch_add(1, std::memory_order_relaxed);
-            if (j < second.size()) return second[j];
-            return std::nullopt;
-        };
-
         std::thread gpuThread([&] {
             try {
-                for (;;) {
+                for (const XpuWorkRect& rect : lists.gpuPacks) {
                     if (cancel.load(std::memory_order_relaxed)) break;
-                    const std::optional<XpuWorkRect> rect = steal(gpuNext, lists.gpuPacks, cpuNext, lists.cpuTiles);
-                    if (!rect) break;
                     RenderSampleOptions gpuOpt;
                     gpuOpt.skipFramebufferStore = true;
                     gpuOpt.deferHostCopy = true;
-                    gpuOpt.clipX0 = rect->x0;
-                    gpuOpt.clipY0 = rect->y0;
-                    gpuOpt.clipX1 = rect->x1;
-                    gpuOpt.clipY1 = rect->y1;
+                    gpuOpt.clipX0 = rect.x0;
+                    gpuOpt.clipY0 = rect.y0;
+                    gpuOpt.clipX1 = rect.x1;
+                    gpuOpt.clipY1 = rect.y1;
                     gpu_->renderSample(fb, sampleIndex, cancel, RenderMidProgressFn{}, &gpuOpt);
-                    gpu_->downloadInternalAccumRect(gpuHost_.data(), width, rect->x0, rect->y0, rect->x1,
-                                                    rect->y1);
+                    gpu_->downloadInternalAccumRect(gpuHost_.data(), width, rect.x0, rect.y0, rect.x1,
+                                                    rect.y1);
                 }
             } catch (...) {
                 gpuEx = std::current_exception();
@@ -460,24 +443,15 @@ private:
 
         const auto cpuT0 = std::chrono::steady_clock::now();
         try {
-            bool first = true;
-            for (;;) {
-                if (cancel.load(std::memory_order_relaxed)) break;
-                const std::optional<XpuWorkRect> rect = steal(cpuNext, lists.cpuTiles, gpuNext, {});
-                if (!rect) break;
+            if (!lists.cpuTiles.empty() && !cancel.load(std::memory_order_relaxed)) {
+                const XpuWorkRect cpuRect = xpuBounds(lists.cpuTiles);
                 RenderSampleOptions cpuOpt;
-                cpuOpt.clipX0 = rect->x0;
-                cpuOpt.clipY0 = rect->y0;
-                cpuOpt.clipX1 = rect->x1;
-                cpuOpt.clipY1 = rect->y1;
-                cpuOpt.skipPhotonRebuild = !first;
-                cpuOpt.skipGuidingCommit = true;
-                cpu_->renderSample(cpuFb_, sampleIndex, cancel, first ? midProgress : RenderMidProgressFn{},
-                                   &cpuOpt);
-                first = false;
-                cpuDidWork.store(true, std::memory_order_relaxed);
+                cpuOpt.clipX0 = cpuRect.x0;
+                cpuOpt.clipY0 = cpuRect.y0;
+                cpuOpt.clipX1 = cpuRect.x1;
+                cpuOpt.clipY1 = cpuRect.y1;
+                cpu_->renderSample(cpuFb_, sampleIndex, cancel, midProgress, &cpuOpt);
             }
-            if (cpuDidWork.load(std::memory_order_relaxed)) cpu_->finishSample();
         } catch (...) {
             cpuEx = std::current_exception();
         }

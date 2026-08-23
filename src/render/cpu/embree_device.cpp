@@ -252,8 +252,6 @@ public:
                                  ? chooseFilmTileSize(width, height, pool_->threadCount())
                                  : std::clamp(settings.tileSize, 8, 256);
         const int tilesX = (width + tileSize - 1) / tileSize;
-        const int tilesY = (height + tileSize - 1) / tileSize;
-        const int tileCount = tilesX * tilesY;
 
         SceneView scene = view_;  // local copy: carries the progressive pass index
         scene.settings.progressiveSample = sampleIndex;
@@ -713,7 +711,18 @@ public:
                 fb.mergeFilmTile(tile);
             };
             runBootstrapOrFull([&](int bootstrapPhase, bool useBootstrap) {
-                pool_->parallelFor(tileCount, [&](int tileIndex, int threadId) {
+                const int tx0 = clipX0 / tileSize;
+                const int ty0 = clipY0 / tileSize;
+                const int tx1 = (clipX1 + tileSize - 1) / tileSize;
+                const int ty1 = (clipY1 + tileSize - 1) / tileSize;
+                const int clipTilesX = std::max(0, tx1 - tx0);
+                const int clipTilesY = std::max(0, ty1 - ty0);
+                const int clipTileCount = clipTilesX * clipTilesY;
+                if (clipTileCount <= 0) return;
+                pool_->parallelFor(clipTileCount, [&](int clipTileIndex, int threadId) {
+                    const int tdx = clipTileIndex % clipTilesX;
+                    const int tdy = clipTileIndex / clipTilesX;
+                    const int tileIndex = (ty0 + tdy) * tilesX + (tx0 + tdx);
                     renderOneTile(tileIndex, threadId, bootstrapPhase, useBootstrap);
                 });
             });
