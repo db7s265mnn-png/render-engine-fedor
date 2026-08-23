@@ -48,6 +48,8 @@ struct alignas(16) LaunchParams {
     GpuShadow* shadows = nullptr;
     int width = 0;
     int height = 0;
+    int pixelOffsetX = 0;
+    int pixelOffsetY = 0;
 
     int sampleIndex = 0;
     unsigned int frameSeed = 0;

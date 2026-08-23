@@ -265,6 +265,12 @@ void RenderSession::threadMain() {
     }
 
     auto fail = [&](const std::string& error) {
+        if (device_) {
+            try {
+                device_->finishRender();
+            } catch (...) {
+            }
+        }
         logError(error);
         {
             std::lock_guard<std::mutex> lock(progressMutex_);
@@ -372,7 +378,11 @@ void RenderSession::threadMain() {
 
         RenderSampleOptions xpuOpt;
         const bool xpu = scene->settings.backend == kBackendXpu;
-        if (xpu) xpuOpt.xpuRemainingSamples = targetSamples - sample;
+        if (xpu) {
+            xpuOpt.xpuRemainingSamples = targetSamples - sample;
+            xpuOpt.xpuTargetSamples = targetSamples;
+            xpuOpt.xpuSchedule = scene->settings.xpuSchedule;
+        }
 
         try {
             device_->renderSample(framebuffer_, sample, cancel_, midProgress, xpu ? &xpuOpt : nullptr);
@@ -409,6 +419,13 @@ void RenderSession::threadMain() {
             notifyUi(true);
         }
         sample += sampleStep;
+    }
+
+    if (device_) {
+        try {
+            device_->finishRender();
+        } catch (...) {
+        }
     }
 
     {

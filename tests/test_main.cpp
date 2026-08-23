@@ -1,6 +1,7 @@
 // Unit tests for the maths, sampling, node graph and renderer plumbing.
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <utility>
 #include <cstdio>
@@ -29,6 +30,7 @@
 #include "io/usd_loader.h"
 #include "nodes/node_graph.h"
 #include "nodes/node_registry.h"
+#include "nodes/parameter.h"
 #include "nodes/stage.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/film_tile.h"
@@ -505,17 +507,58 @@ void testGraphCook() {
 
 void testXpuDevice() {
     std::printf("xpu device\n");
-    check(xpuGpuOwnsSample(0), "GPU owns even spp 0");
-    check(!xpuGpuOwnsSample(1), "CPU owns odd spp 1");
-    check(xpuGpuOwnsSample(2), "GPU owns even spp 2");
-    check(!xpuGpuOwnsSample(3), "CPU owns odd spp 3");
     check(xpuEmbreeThreadCount(8) == 7, "XPU reserves one core for GPU submit");
     check(xpuEmbreeThreadCount(2) == 1, "XPU with 2 threads leaves 1 for GPU");
     check(xpuEmbreeThreadCount(1) == 1, "XPU keeps at least one Embree thread");
     check(xpuEmbreeThreadCount(0) >= 1, "XPU auto thread count is at least 1");
+    check(kXpuCpuTilePx == 32, "RenderMan CPU bucket is 32x32");
+    check(kXpuGpuPackPx == 704, "GPU pack edge is 22*32");
+    check(kXpuGpuPackPx * kXpuGpuPackPx >= 490000 && kXpuGpuPackPx * kXpuGpuPackPx <= 510000,
+          "GPU pack ~500k px like RenderMan");
+    check(kXpuScheduleMixture == 0 && kXpuScheduleTile == 1, "Mixture is default schedule 0");
+    check(xpuCpuSampleIndex(0) != 0, "CPU estimator uses a disjoint sample index");
+
+    auto coverOnce = [](int w, int h, const char* label) {
+        const XpuWorkLists lists = xpuBuildWorkLists(w, h);
+        std::vector<uint8_t> cov(size_t(w) * size_t(h), 0);
+        int marked = 0;
+        auto mark = [&](const std::vector<XpuWorkRect>& rects) {
+            for (const XpuWorkRect& r : rects) {
+                check(r.x0 >= 0 && r.y0 >= 0 && r.x1 <= w && r.y1 <= h, label);
+                check(r.x1 > r.x0 && r.y1 > r.y0, label);
+                for (int y = r.y0; y < r.y1; ++y) {
+                    for (int x = r.x0; x < r.x1; ++x) {
+                        const size_t i = size_t(y) * size_t(w) + size_t(x);
+                        check(cov[i] == 0, "XPU tiles do not overlap");
+                        cov[i] = 1;
+                        ++marked;
+                    }
+                }
+            }
+        };
+        mark(lists.gpuPacks);
+        mark(lists.cpuTiles);
+        check(marked == w * h, label);
+    };
+    coverOnce(1920, 1080, "1080p XPU tiles cover every pixel once");
+    coverOnce(32, 32, "32x32 XPU tiles cover once");
+    coverOnce(960, 540, "540p XPU tiles cover once");
+    coverOnce(40, 40, "40x40 remainder tiles cover once");
+    coverOnce(704, 704, "704x704 is one GPU pack");
+    coverOnce(1920, 80, "wide remainder strip covers once");
+    {
+        const XpuWorkLists hd = xpuBuildWorkLists(1920, 1080);
+        check(!hd.gpuPacks.empty(), "1080p has GPU packs");
+        check(hd.gpuPacks[0].width() <= kXpuGpuPackPx, "GPU pack width cap");
+        check(hd.gpuPacks[0].height() <= kXpuGpuPackPx, "GPU pack height cap");
+        const XpuWorkLists tiny = xpuBuildWorkLists(32, 32);
+        check(tiny.gpuPacks.empty(), "32x32 is CPU tiles only");
+        check(!tiny.cpuTiles.empty(), "32x32 has CPU tiles");
+    }
 
     Scene scene;
     scene.settings.backend = kBackendXpu;
+    scene.settings.xpuSchedule = kXpuScheduleMixture;
     scene.settings.lightSamples = 8;
     scene.settings.pathGuiding = 1;
     scene.settings.motionBlur = 1;
@@ -534,6 +577,7 @@ void testXpuDevice() {
     check(scene.settings.samplingEngine == kSamplingEngineProgressive, "XPU keeps sampling type");
     check(scene.camera.opticalModel == 1, "XPU keeps authored camera model");
     check(scene.materials[0].subsurface == 0.7f, "XPU keeps SSS on CPU samples");
+    check(scene.settings.xpuSchedule == kXpuScheduleMixture, "XPU default schedule is Mixture");
 
     registerBuiltinNodes();
     NodeGraph graph;
@@ -547,12 +591,28 @@ void testXpuDevice() {
     }
     check(settings != nullptr, "default graph has render settings");
     if (settings) {
+        const Parameter* sched = settings->findParameter(QLatin1String("xpuschedule"));
+        check(sched != nullptr, "xpuschedule parameter exists");
+        if (sched) {
+            check(sched->visibleWhen == QLatin1String("backend==2"), "xpuschedule only when XPU");
+            check(sched->group == QLatin1String("Engine"), "xpuschedule in Engine");
+            settings->setParameterValue("backend", 0);
+            check(!evaluateVisibleWhen(sched->visibleWhen, *settings), "XPU Schedule hidden on CPU");
+            settings->setParameterValue("backend", 2);
+            check(evaluateVisibleWhen(sched->visibleWhen, *settings), "XPU Schedule visible on XPU");
+        }
         settings->setParameterValue("backend", 2);
+        settings->setParameterValue("xpuschedule", 0);
         CookContext context;
         StagePtr stage = graph.cookDisplay(context);
         check(stage != nullptr, "XPU cook produces a stage");
         ScenePtr cooked = stage->toScene();
         check(cooked->settings.backend == kBackendXpu, "menu value 2 cooks to XPU");
+        check(cooked->settings.xpuSchedule == kXpuScheduleMixture, "xpuschedule 0 cooks to Mixture");
+        settings->setParameterValue("xpuschedule", 1);
+        stage = graph.cookDisplay(context);
+        cooked = stage->toScene();
+        check(cooked->settings.xpuSchedule == kXpuScheduleTile, "xpuschedule 1 cooks to Tile");
     }
 
     float jx = 0, jy = 0, lu = 0, lv = 0;

@@ -1143,13 +1143,13 @@ public:
                          .withTooltip(optixBackendCompiledIn()
                                           ? QStringLiteral("CPU (Embree): full feature set on the host.\n"
                                                            "GPU (OptiX): NVIDIA wavefront path tracer.\n"
-                                                           "XPU (Embree+OptiX): GPU keeps rendering even spp "
-                                                           "until Embree finishes one odd spp, then both are "
-                                                           "added to the film. Faster GPU means more GPU spp "
-                                                           "per CPU spp (no 1:1 wait). CPU keeps MNEE / SSS / "
-                                                           "OpenPGL / N light samples / pixel filters; GPU "
-                                                           "runs the OptiX wavefront PT (image maps + "
-                                                           "Lambert/GGX/glass, residual-ratio fog).\n"
+                                                           "XPU (Embree+OptiX): CPU (full PT: MNEE / SSS / "
+                                                           "OpenPGL / N lights / filters) and GPU (OptiX "
+                                                           "wavefront PT) run together. Schedule is Mixture "
+                                                           "(Karma: independent films, automatic spp share) "
+                                                           "or Tile (RenderMan 32×32 CPU + ~500k px GPU "
+                                                           "packs, Cycles work stealing). Set XPU Schedule "
+                                                           "when this device is selected.\n"
                                                            "XPU is Path Tracer only. BDPT, spectral, "
                                                            "wireframe, AO stay CPU (Embree).\n"
                                                            "If OptiX cannot start, GPU/XPU stop with an "
@@ -1157,6 +1157,18 @@ public:
                                           : QStringLiteral("This executable was built without OptiX/CUDA. "
                                                           "GPU (OptiX) and XPU will stop with an error — "
                                                           "they do not fall back to Embree.")));
+        addParameter(Parameter::makeMenu("xpuschedule", "XPU Schedule",
+                                         {"Mixture", "Tile"}, 0)
+                         .withGroup("Engine")
+                         .withVisibleWhen("backend==2")
+                         .withTooltip("Only when Render Device is XPU.\n"
+                                      "Mixture (Karma): CPU and GPU each render full-frame spp into "
+                                      "their own film; the host adds the two estimators. GPU never "
+                                      "waits for CPU. The spp share is automatic from how many each "
+                                      "device finishes.\n"
+                                      "Tile (RenderMan / Cycles): 32×32 CPU microtiles (RenderMan "
+                                      "bucket) and ~704² GPU packs (~500k px working set). Work "
+                                      "stealing — the faster device takes more tiles."));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
                                           "Ambient Occlusion", "PT Spectral", "BDPT Spectral",
@@ -1412,6 +1424,7 @@ public:
         settings.resolutionY = intValue("resy", 540);
         settings.samplesPerPixel = intValue("samples", 128);
         settings.backend = std::clamp(intValue("backend", 0), 0, 2);
+        settings.xpuSchedule = std::clamp(intValue("xpuschedule", 0), 0, 1);
         settings.integrator = std::clamp(intValue("integrator", 0), 0, 6);
         settings.maxDepth = std::clamp(intValue("maxdepth", 8), 1, 4096);
         settings.rrStartDepth = std::clamp(intValue("rrdepth", 3), 1, 4096);

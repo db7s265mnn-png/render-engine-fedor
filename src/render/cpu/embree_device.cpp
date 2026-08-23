@@ -238,7 +238,15 @@ public:
         const int width = fb.width();
         const int height = fb.height();
         if (width <= 0 || height <= 0) return;
-        (void)options;
+        const RenderSampleOptions opt = options ? *options : RenderSampleOptions{};
+        int clipX0 = 0, clipY0 = 0, clipX1 = width, clipY1 = height;
+        if (opt.clipX1 > opt.clipX0 && opt.clipY1 > opt.clipY0) {
+            clipX0 = std::max(0, opt.clipX0);
+            clipY0 = std::max(0, opt.clipY0);
+            clipX1 = std::min(width, opt.clipX1);
+            clipY1 = std::min(height, opt.clipY1);
+        }
+        const bool clipped = clipX0 > 0 || clipY0 > 0 || clipX1 < width || clipY1 < height;
 
         const int tileSize = settings.tileSize <= 0
                                  ? chooseFilmTileSize(width, height, pool_->threadCount())
@@ -293,21 +301,23 @@ public:
 
         const CausticPhotonMap* photonPtr = nullptr;
         if (usePhoton) {
-            // Rebuild each progressive pass (independent estimate averaged in the FB).
-            const uint32_t photonSeed =
-                hashCombine(uint32_t(settings.seed) * 9176u, uint32_t(sampleIndex) * 2654435761u);
-            EmbreeTracer photonTracer{topScene_};
-            photonTracer.time = scene.settings.motionBlur ? 0.5f : 0.0f;
-            photonMap_.build(scene, photonTracer, srMax(0, settings.photonCount), photonSeed);
+            if (!opt.skipPhotonRebuild) {
+                // Rebuild each progressive pass (independent estimate averaged in the FB).
+                const uint32_t photonSeed =
+                    hashCombine(uint32_t(settings.seed) * 9176u, uint32_t(sampleIndex) * 2654435761u);
+                EmbreeTracer photonTracer{topScene_};
+                photonTracer.time = scene.settings.motionBlur ? 0.5f : 0.0f;
+                photonMap_.build(scene, photonTracer, srMax(0, settings.photonCount), photonSeed);
+            }
             // Always pass the map when Photon engine is active — even if empty
             // (Contribute to Caustics off) — so the integrator suppresses BSDF
             // caustic hits instead of falling back to MNEE/BSDF leakage.
             photonPtr = &photonMap_;
-        } else {
+        } else if (!opt.skipPhotonRebuild) {
             photonMap_.clear();
         }
 
-        if (sampleIndex == 0) {
+        if (sampleIndex == 0 && !clipped) {
             if (useSpectralBdpt)
                 logInfo(std::string("Integrator: BDPT Spectral (hero λ=") +
                         std::to_string(std::clamp(settings.spectralSamples, 2, 16)) + ", bins=" +
@@ -630,7 +640,7 @@ public:
         constexpr int kBootstrapStep = 2;
 
         auto runBootstrapOrFull = [&](auto&& renderPass) {
-            if (sampleIndex == 0) {
+            if (sampleIndex == 0 && !clipped) {
                 const int phaseCount = kBootstrapStep * kBootstrapStep;
                 for (int phase = 0; phase < phaseCount; ++phase) {
                     if (cancel.load(std::memory_order_relaxed)) break;
@@ -646,10 +656,11 @@ public:
             // True progressive: one work item = one scanline (no FilmTile / no buckets).
             // Non-box filters use a 1-row FilmTile with border so neighbours stay local.
             runBootstrapOrFull([&](int bootstrapPhase, bool useBootstrap) {
-                pool_->parallelFor(height, [&](int y, int threadId) {
+                pool_->parallelFor(clipY1 - clipY0, [&](int yi, int threadId) {
+                    const int y = clipY0 + yi;
                     if (cancel.load(std::memory_order_relaxed)) return;
                     if (trivialBox) {
-                        for (int x = 0; x < width; ++x) {
+                        for (int x = clipX0; x < clipX1; ++x) {
                             if (useBootstrap) {
                                 if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
                                     bootstrapPhase)
@@ -659,8 +670,8 @@ public:
                             fb.addSample(x, y, ev.radiance);
                         }
                     } else {
-                        FilmTile tile(0, y, width, y + 1, filterBorder);
-                        for (int x = 0; x < width; ++x) {
+                        FilmTile tile(clipX0, y, clipX1, y + 1, filterBorder);
+                        for (int x = clipX0; x < clipX1; ++x) {
                             if (useBootstrap) {
                                 if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
                                     bootstrapPhase)
@@ -682,10 +693,15 @@ public:
                 const int y0 = ty * tileSize;
                 const int x1 = std::min(x0 + tileSize, width);
                 const int y1 = std::min(y0 + tileSize, height);
-                FilmTile tile(x0, y0, x1, y1, trivialBox ? 0 : filterBorder);
-                for (int y = y0; y < y1; ++y) {
+                const int rx0 = std::max(x0, clipX0);
+                const int ry0 = std::max(y0, clipY0);
+                const int rx1 = std::min(x1, clipX1);
+                const int ry1 = std::min(y1, clipY1);
+                if (rx0 >= rx1 || ry0 >= ry1) return;
+                FilmTile tile(rx0, ry0, rx1, ry1, trivialBox ? 0 : filterBorder);
+                for (int y = ry0; y < ry1; ++y) {
                     if (cancel.load(std::memory_order_relaxed)) break;
-                    for (int x = x0; x < x1; ++x) {
+                    for (int x = rx0; x < rx1; ++x) {
                         if (useBootstrap) {
                             if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
                                 bootstrapPhase)
@@ -704,7 +720,22 @@ public:
         }
 
 #if SOLSTICE_HAVE_OPENPGL
-        if (useGuiding) pathGuiding_->commitSample();
+        if (useGuiding) {
+            if (opt.skipGuidingCommit) guidingNeedsCommit_ = true;
+            else {
+                pathGuiding_->commitSample();
+                guidingNeedsCommit_ = false;
+            }
+        }
+#endif
+    }
+
+    void finishSample() override {
+#if SOLSTICE_HAVE_OPENPGL
+        if (guidingNeedsCommit_ && pathGuiding_) {
+            pathGuiding_->commitSample();
+            guidingNeedsCommit_ = false;
+        }
 #endif
     }
 
@@ -758,6 +789,7 @@ private:
     SpectralBinBuffer spectralBins_;
 #if SOLSTICE_HAVE_OPENPGL
     std::unique_ptr<PathGuiding> pathGuiding_;
+    bool guidingNeedsCommit_ = false;
 #endif
 };
 

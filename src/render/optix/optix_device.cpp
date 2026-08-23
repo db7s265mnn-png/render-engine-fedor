@@ -13,6 +13,7 @@
 #include <optix_stack_size.h>
 #include <optix_stubs.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -551,7 +552,27 @@ public:
                 CUDA_CHECK(cudaMemsetAsync(hitBuffer_.as<void>(), 0, hitBuffer_.size(), stream_));
                 CUDA_CHECK(cudaMemsetAsync(shadowBuffer_.as<void>(), 0, shadowBuffer_.size(), stream_));
             }
-            if (sampleIndex == 0 || opt.resetAccum) {
+            accumWidth_ = width;
+            accumHeight_ = height;
+            int offX = 0, offY = 0;
+            int launchW = width, launchH = height;
+            const bool clipped = opt.clipX1 > opt.clipX0 && opt.clipY1 > opt.clipY0;
+            if (clipped) {
+                offX = std::max(0, opt.clipX0);
+                offY = std::max(0, opt.clipY0);
+                const int x1 = std::min(width, opt.clipX1);
+                const int y1 = std::min(height, opt.clipY1);
+                launchW = std::max(0, x1 - offX);
+                launchH = std::max(0, y1 - offY);
+            }
+            if (launchW <= 0 || launchH <= 0) return;
+
+            if (clipped) {
+                CUDA_CHECK(cudaMemset2DAsync(
+                    accumBuffer_.as<Vec4>() + size_t(offY) * size_t(width) + size_t(offX),
+                    size_t(width) * sizeof(Vec4), 0, size_t(launchW) * sizeof(Vec4), unsigned(launchH),
+                    stream_));
+            } else if (sampleIndex == 0 || opt.resetAccum) {
                 CUDA_CHECK(cudaMemsetAsync(accumBuffer_.as<void>(), 0, accumBuffer_.size(), stream_));
             }
 
@@ -563,6 +584,8 @@ public:
             launchParams.shadows = shadowBuffer_.as<GpuShadow>();
             launchParams.width = width;
             launchParams.height = height;
+            launchParams.pixelOffsetX = offX;
+            launchParams.pixelOffsetY = offY;
             launchParams.sampleIndex = sampleIndex;
             launchParams.frameSeed = unsigned(scene_->settings.seed) * 9781u + unsigned(sampleIndex) * 6271u;
             launchParams.pixelSampler = scene_->settings.pixelSampler;
@@ -575,8 +598,6 @@ public:
             CUDA_CHECK(cudaMemcpyAsync(launchParamsBuffer_.as<void>(), &launchParams, sizeof(LaunchParams),
                                        cudaMemcpyHostToDevice, stream_));
 
-            const unsigned w = unsigned(width);
-            const unsigned h = unsigned(height);
             const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
             const int maxIters = maxDepth + 18;
 
@@ -585,7 +606,7 @@ public:
             // Queue every wavefront stage on `stream_` and sync once at the end.
             // Capturing optixLaunch into a CUDA graph (CaptureModeGlobal) returns
             // OPTIX_ERROR_CUDA_ERROR (7900) on current Windows OptiX/driver stacks.
-            launchBounceLoop(w, h, maxIters);
+            launchBounceLoop(unsigned(launchW), unsigned(launchH), maxIters);
             CUDA_CHECK(cudaEventRecord(gpuStopEvent_, stream_));
             if (!opt.deferHostCopy) {
                 if (opt.skipFramebufferStore) {
@@ -645,6 +666,23 @@ public:
         CUDA_CHECK(cudaSetDevice(0));
         CUDA_CHECK(cudaMemcpyAsync(dst, accumBuffer_.as<Vec4>(), count * sizeof(Vec4),
                                    cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+        return true;
+    }
+
+    bool downloadInternalAccumRect(Vec4* dst, int dstPitchPixels, int x0, int y0, int x1, int y1) override {
+        if (!dst || !stream_ || accumWidth_ <= 0 || dstPitchPixels <= 0) return false;
+        x0 = std::max(0, x0);
+        y0 = std::max(0, y0);
+        x1 = std::min(accumWidth_, x1);
+        y1 = std::min(accumHeight_, y1);
+        if (x1 <= x0 || y1 <= y0) return false;
+        CUDA_CHECK(cudaSetDevice(0));
+        CUDA_CHECK(cudaMemcpy2DAsync(
+            dst + size_t(y0) * size_t(dstPitchPixels) + size_t(x0), size_t(dstPitchPixels) * sizeof(Vec4),
+            accumBuffer_.as<Vec4>() + size_t(y0) * size_t(accumWidth_) + size_t(x0),
+            size_t(accumWidth_) * sizeof(Vec4), size_t(x1 - x0) * sizeof(Vec4), unsigned(y1 - y0),
+            cudaMemcpyDeviceToHost, stream_));
         CUDA_CHECK(cudaStreamSynchronize(stream_));
         return true;
     }
@@ -1013,6 +1051,8 @@ private:
     bool warnedOptics_ = false;
     bool warnedVolumes_ = false;
     double lastGpuSampleMs_ = 0.0;
+    int accumWidth_ = 0;
+    int accumHeight_ = 0;
     std::string deviceName_;
 
     OptixDeviceContext context_ = nullptr;

@@ -399,6 +399,14 @@ SR_INL SR_HD bool renderDeviceUsesCpu(int backend) {
     return backend == kBackendCpuEmbree || backend == kBackendXpu;
 }
 SR_INL SR_HD bool renderDeviceIsXpu(int backend) { return backend == kBackendXpu; }
+
+// XPU work schedule (Render Settings → Engine, visible only when backend is XPU).
+// Mixture: Karma-style independent full-frame estimators, host blend, automatic spp share.
+// Tile: RenderMan 32×32 CPU buckets + ~500k-px GPU packs, Cycles-style work stealing.
+enum XpuSchedule : int {
+    kXpuScheduleMixture = 0,
+    kXpuScheduleTile = 1,
+};
 // BDPT / spectral / wireframe are CPU / Embree only; GPU and XPU require Path Tracer
 // and stop with an error (no Embree fallback).
 // Menu order matches these values: Path Tracer, BDPT, Direct Lighting, AO,
@@ -541,6 +549,7 @@ struct RenderSettingsData {
     float filterRadius = 0.5f;  // pixels; 0 = use defaultFilterRadius(pixelFilter)
 
     int backend = kBackendCpuEmbree;
+    int xpuSchedule = kXpuScheduleMixture;  // ignored unless backend == XPU
     int envVisibleCamera = 1;
     int tileSize = 32;             // bucket size; 0 = PBRT-style auto
     int pixelSampler = kPixelSamplerSobol;  // camera AA / DoF generator
