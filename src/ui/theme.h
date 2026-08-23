@@ -20,6 +20,18 @@ inline QColor text() { return QColor(220, 222, 226); }
 inline QColor textDim() { return QColor(150, 154, 160); }
 inline QColor accent() { return QColor(255, 168, 46); }
 inline QColor selection() { return QColor(255, 200, 90); }
+
+// Checked / selected chrome — same as viewport Start/Stop: muted fill + orange
+// rim and light text. Not a solid #ffa82e slab.
+inline QColor checkedFill() { return QColor(255, 190, 90, 90); }
+inline QColor checkedFillHover() { return QColor(255, 190, 90, 120); }
+inline QColor checkedStroke() { return QColor(0xff, 0xbe, 0x5a); }
+inline QColor checkedText() { return QColor(255, 255, 255); }
+inline QString checkedCss() {
+    return QStringLiteral(
+        "background: rgba(255, 190, 90, 90); border-color: #ffbe5a; color: #ffffff;");
+}
+inline QString checkedHoverCss() { return QStringLiteral("background: rgba(255, 190, 90, 120);"); }
 inline QColor wire() { return QColor(150, 155, 165); }
 inline QColor wireActive() { return QColor(255, 190, 90); }
 inline QColor displayFlag() { return QColor(80, 170, 255); }

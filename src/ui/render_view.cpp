@@ -45,15 +45,13 @@ QString chromeToolButtonStyle(int minWidth) {
                "  font-size: 11px;"
                "  padding: 0 8px;"
                "}"
-               "QToolButton:checked {"
-               "  background: rgba(255, 190, 90, 90);"
-               "  border-color: #ffbe5a;"
-               "  color: #ffffff;"
-               "}"
+               "QToolButton:checked { %3 }"
                "QToolButton:hover { background: #474c54; }"
-               "QToolButton:checked:hover { background: rgba(255, 190, 90, 120); }")
+               "QToolButton:checked:hover { %4 }")
         .arg(minWidth)
-        .arg(kChromeButtonHeight);
+        .arg(kChromeButtonHeight)
+        .arg(theme::checkedCss())
+        .arg(theme::checkedHoverCss());
 }
 
 void fitChromeButton(QAbstractButton* button) {
@@ -319,14 +317,11 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         "  font-size: 11px;"
         "  padding: 0 4px;"
         "}"
-        "QToolButton:checked {"
-        "  background: rgba(80, 170, 255, 90);"
-        "  border-color: #50aaff;"
-        "  color: #ffffff;"
-        "}"
+        "QToolButton:checked { %1 }"
         "QToolButton:hover {"
         "  background: #474c54;"
-        "}");
+        "}")
+        .arg(theme::checkedCss());
     auto* stripLayout = new QHBoxLayout(toolStrip_);
     stripLayout->setContentsMargins(4, 4, 4, 4);
     stripLayout->setSpacing(4);
@@ -414,10 +409,9 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
             "  font-size: 11px; font-weight: 600;"
             "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
             "}"
-            "QToolButton:checked {"
-            "  background: rgba(255, 190, 90, 90); border-color: #ffbe5a; color: #ffffff;"
-            "}"
-            "QToolButton:hover { background: #474c54; }");
+            "QToolButton:checked { %1 }"
+            "QToolButton:hover { background: #474c54; }")
+            .arg(theme::checkedCss());
         spaceGroup->addButton(button);
         stripLayout->addWidget(button);
         fitChromeButton(button);

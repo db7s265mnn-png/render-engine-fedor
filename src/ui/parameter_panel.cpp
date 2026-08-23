@@ -813,7 +813,8 @@ void ParameterPanel::rebuildLop() {
         "QPushButton { background:#2a2e33; color:#d0d4da; border:1px solid #666b73;"
         " border-radius:2px; padding:0 8px; }"
         "QPushButton:hover { background:#3a3f46; color:#f0f2f5; }"
-        "QPushButton:checked { background:#ffa82e; color:#1a1c20; border-color:#ffa82e; }");
+        "QPushButton:checked { %1 }")
+        .arg(theme::checkedCss());
 
     int restore = 0;
     const QString previous = lastFolderByType_.value(node_->typeName());

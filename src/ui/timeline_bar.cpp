@@ -30,10 +30,10 @@ QColor frameBoxBg() { return QColor(0x1a, 0x1c, 0x20); }
 QColor frameBoxBorder() { return QColor(0x7a, 0x7e, 0x86); }
 QColor frameBoxText() { return QColor(0xd8, 0xda, 0xe0); }
 
-// Same chrome as selected tabs / checked buttons (#ffa82e on #1a1c20).
-QColor playheadFill() { return theme::accent(); }
-QColor playheadStroke() { return QColor(0xd4, 0x88, 0x18); }
-QColor playheadText() { return QColor(0x1a, 0x1c, 0x20); }
+// Same chrome as Start/Stop: muted orange fill, orange rim, light text.
+QColor playheadFill() { return theme::checkedFill(); }
+QColor playheadStroke() { return theme::checkedStroke(); }
+QColor playheadText() { return theme::checkedText(); }
 
 QFont frameNumberFont() {
     QFont font;
@@ -281,7 +281,7 @@ void TimelineScrubber::beginFrameEdit() {
     editor_->setFont(frameNumberFont());
     editor_->setTextMargins(0, 0, 0, 0);
     editor_->setStyleSheet(
-        "QLineEdit { background: #ffa82e; color: #1a1c20; border: 1px solid #d48818;"
+        "QLineEdit { background: rgba(255, 190, 90, 90); color: #ffffff; border: 1px solid #ffbe5a;"
         " border-radius: 2px; padding: 0px; font-size: 11px; font-weight: 700; }");
     editor_->move(playheadRect().toRect().topLeft());
     editor_->selectAll();
@@ -350,10 +350,8 @@ TimelineBar::TimelineBar(QWidget* parent) : QWidget(parent) {
         "}"
         "QToolButton:hover { background: #474c54; }"
         "QToolButton:pressed { background: #2a2d32; }"
-        "QToolButton:checked {"
-        "  background: rgba(80, 170, 255, 70);"
-        "  border-color: #50aaff;"
-        "}"));
+        "QToolButton:checked { %1 }")
+        .arg(theme::checkedCss()));
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(8, 3, 8, 3);

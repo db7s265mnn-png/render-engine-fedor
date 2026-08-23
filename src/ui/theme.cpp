@@ -138,8 +138,9 @@ void applyDarkTheme(QApplication& application) {
             min-width: 4em;
         }
         QTabBar::tab:selected {
-            background: #ffa82e;
-            color: #1a1c20;
+            background: rgba(255, 190, 90, 90);
+            color: #ffffff;
+            border: 1px solid #ffbe5a;
         }
         QTabBar::tab:hover:!selected {
             color: #e8eaed;
@@ -166,7 +167,7 @@ void applyDarkTheme(QApplication& application) {
         QSlider::handle:horizontal {
             background: #8a8f98; width: 10px; margin: -4px 0; border-radius: 5px;
         }
-        QSlider::handle:horizontal:hover { background: #ffa82e; }
+        QSlider::handle:horizontal:hover { background: #ffbe5a; }
         QStatusBar { background: #2e3136; }
         QHeaderView::section { background: #2e3136; padding: 3px; border: none; }
     )");
