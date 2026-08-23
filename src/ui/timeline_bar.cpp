@@ -30,6 +30,11 @@ QColor frameBoxBg() { return QColor(0x1a, 0x1c, 0x20); }
 QColor frameBoxBorder() { return QColor(0x7a, 0x7e, 0x86); }
 QColor frameBoxText() { return QColor(0xd8, 0xda, 0xe0); }
 
+// Same chrome as selected tabs / checked buttons (#ffa82e on #1a1c20).
+QColor playheadFill() { return theme::accent(); }
+QColor playheadStroke() { return QColor(0xd4, 0x88, 0x18); }
+QColor playheadText() { return QColor(0x1a, 0x1c, 0x20); }
+
 QFont frameNumberFont() {
     QFont font;
     font.setPixelSize(kFrameNumberPixelSize);
@@ -166,9 +171,15 @@ int TimelineScrubber::frameAtX(qreal x) const {
 }
 
 QRectF TimelineScrubber::playheadRect() const {
-    const qreal x = xForFrame(frame_);
-    return QRectF(x - kPlayheadWidth * 0.5, height() * 0.5 - kPlayheadHeight * 0.5, kPlayheadWidth,
-                  kPlayheadHeight);
+    // Inset 1px so the 1px stroke is fully inside the widget (AA + a flush
+    // rect clips the top/bottom/start-end edges and the frame looks broken).
+    const qreal w = kPlayheadWidth;
+    const qreal h = std::min(kPlayheadHeight, std::max(2.0, qreal(height()) - 2.0));
+    const qreal minX = 1.0;
+    const qreal maxX = std::max(minX, qreal(width()) - w - 1.0);
+    const qreal x = std::clamp(xForFrame(frame_) - w * 0.5, minX, maxX);
+    const qreal y = (qreal(height()) - h) * 0.5;
+    return QRectF(x, y, w, h);
 }
 
 void TimelineScrubber::paintEvent(QPaintEvent*) {
@@ -195,14 +206,15 @@ void TimelineScrubber::paintEvent(QPaintEvent*) {
         p.drawLine(QPointF(x, track.center().y() - h), QPointF(x, track.center().y() + h));
     }
 
-    // Playhead — same grey chrome as start/end boxes, no center stem.
+    // Playhead — orange like selected tabs / checked buttons, crisp inset frame.
     const QRectF head = playheadRect();
-    p.setPen(QPen(frameBoxBorder(), 1.0));
-    p.setBrush(frameBoxBg());
-    p.drawRoundedRect(head, 2.0, 2.0);
+    const QRectF box = head.adjusted(0.5, 0.5, -0.5, -0.5);
+    p.setPen(QPen(playheadStroke(), 1.0));
+    p.setBrush(playheadFill());
+    p.drawRoundedRect(box, 2.0, 2.0);
 
     p.setFont(frameNumberFont());
-    p.setPen(frameBoxText());
+    p.setPen(playheadText());
     p.drawText(head, Qt::AlignCenter, QString::number(frame_));
 }
 
@@ -269,7 +281,7 @@ void TimelineScrubber::beginFrameEdit() {
     editor_->setFont(frameNumberFont());
     editor_->setTextMargins(0, 0, 0, 0);
     editor_->setStyleSheet(
-        "QLineEdit { background: #1a1c20; color: #d8dae0; border: 1px solid #50aaff;"
+        "QLineEdit { background: #ffa82e; color: #1a1c20; border: 1px solid #d48818;"
         " border-radius: 2px; padding: 0px; font-size: 11px; font-weight: 700; }");
     editor_->move(playheadRect().toRect().topLeft());
     editor_->selectAll();
