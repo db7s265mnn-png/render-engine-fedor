@@ -23,8 +23,8 @@ Intel Embree CPU device, the NVIDIA OptiX GPU device, or XPU (both together).
   OptiX wavefront path tracing; `XPU (Embree+OptiX)` runs CPU and GPU together. **Overlap**
   (default) keeps the GPU filling even spp until Embree finishes one odd spp, then one film
   add — faster GPU means more GPU spp per CPU spp. **Mixture** is optional (Karma
-  independent films) and is usually slower than GPU-only. **Tile** gives the GPU one
-  large exclusive rect (almost the full frame) and Embree a small 32×32 strip.
+  independent films) and is usually slower than GPU-only. **Tile** splits the frame:
+  GPU large exclusive rects, Embree a 32×32 block (~1/8, then adapted so CPU ms ≈ GPU ms).
   CPU keeps its full Path Tracer (MNEE, SSS, OpenPGL, N light samples, filters).
   GPU and XPU are Path Tracer only; if OptiX cannot start they stop with an error instead of
   falling back to Embree.

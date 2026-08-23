@@ -548,22 +548,38 @@ void testXpuDevice() {
     coverOnce(40, 40, "40x40 remainder tiles cover once");
     coverOnce(704, 704, "704x704 is one GPU pack");
     coverOnce(1920, 80, "wide remainder strip covers once");
+    coverOnce(2560, 1440, "1440p XPU tiles cover once");
+    coverOnce(3840, 2160, "4K XPU tiles cover once");
     {
+        check(xpuDefaultTileCpuArea(1920, 1080) == 1920 * 1080 / 8, "1080p default CPU share is 1/8");
         const XpuWorkLists hd = xpuBuildWorkLists(1920, 1080);
         check(hd.gpuPacks.size() == 1, "1080p GPU is one launch");
-        check(hd.gpuPacks[0].width() == 1920 && hd.gpuPacks[0].height() == 1048,
-              "1080p GPU owns all but a 32-px CPU strip");
-        check(!hd.cpuTiles.empty(), "1080p has a CPU 32x32 strip");
-        check(xpuAreaSum(hd.gpuPacks) > 10 * xpuAreaSum(hd.cpuTiles),
-              "1080p CPU strip is a small exclusive share");
+        check(hd.gpuPacks[0].width() == 1920 && hd.gpuPacks[0].height() == 952,
+              "1080p GPU owns all but four 32-px CPU rows");
+        check(xpuAreaSum(hd.cpuTiles) == 1920 * 128, "1080p CPU gets ~1/8 as 32x32 tiles");
+        check(xpuAreaSum(hd.gpuPacks) > 5 * xpuAreaSum(hd.cpuTiles),
+              "1080p GPU still owns most of the frame");
         check(xpuBounds(hd.cpuTiles).area() == xpuAreaSum(hd.cpuTiles),
               "CPU tiles form a solid rect");
         const XpuWorkLists tiny = xpuBuildWorkLists(32, 32);
         check(tiny.gpuPacks.empty(), "32x32 is CPU tiles only");
         check(!tiny.cpuTiles.empty(), "32x32 has CPU tiles");
         const XpuWorkLists uhd = xpuBuildWorkLists(3840, 2160);
-        check(uhd.cpuTiles.empty() && uhd.gpuPacks.size() == 1,
-              "4K 32-px strip exceeds Embree budget so Tile is one GPU launch");
+        check(!uhd.cpuTiles.empty(), "4K still gives Embree an exclusive block");
+        check(uhd.gpuPacks.size() == 1, "4K GPU is one launch");
+        check(xpuAreaSum(uhd.cpuTiles) == 3840 * 256, "4K CPU gets eight 32-px rows (~1/8)");
+        const XpuWorkLists qhd = xpuBuildWorkLists(2560, 1440);
+        check(!qhd.cpuTiles.empty(), "1440p still gives Embree an exclusive block");
+        check(xpuAreaSum(qhd.cpuTiles) == 2560 * 160, "1440p CPU gets five 32-px rows");
+        const XpuWorkLists corner = xpuBuildWorkLists(1920, 1080, 32 * 32);
+        check(xpuAreaSum(corner.cpuTiles) == 32 * 32, "tiny CPU hint is one 32x32 tile");
+        check(corner.gpuPacks.size() == 2, "tiny CPU corner leaves two GPU rects");
+        check(xpuAdaptTileCpuArea(10000, 1920, 1080, 10.0, 40.0) > 10000,
+              "Tile grows Embree when GPU wall is longer");
+        check(xpuAdaptTileCpuArea(200000, 1920, 1080, 40.0, 10.0) < 200000,
+              "Tile shrinks Embree when CPU wall is longer");
+        check(xpuAdaptTileCpuArea(10000, 1920, 1080, 10.0, 10000.0) <= 1920 * 1080 / 3,
+              "Tile CPU share caps at 1/3");
     }
 
     Scene scene;

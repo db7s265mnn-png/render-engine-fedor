@@ -1,7 +1,7 @@
 // Hybrid CPU+GPU device. Three schedules:
 //   Overlap (default): GPU fills even spp until Embree finishes one odd spp, one D2H add.
 //   Mixture (Karma): independent full-frame films, persistent GPU worker, host blend.
-//   Tile (RenderMan / Cycles): one large GPU rect + a small exclusive 32×32 CPU strip.
+//   Tile (RenderMan / Cycles): large GPU rects + exclusive 32×32 CPU block (~1/8, then adapted).
 #include "render/render_device.h"
 
 #include "core/log.h"
@@ -119,6 +119,9 @@ private:
         reportedSpp_ = 0;
         batchIndex_ = 0;
         loggedMode_ = false;
+        tileCpuAreaTarget_ = 0;
+        tileW_ = 0;
+        tileH_ = 0;
     }
 
     void stopGpuWorker() {
@@ -411,17 +414,27 @@ private:
         cpuFb_.clear();
         gpuHost_.assign(n, Vec4{});
 
+        if (tileW_ != width || tileH_ != height) {
+            tileW_ = width;
+            tileH_ = height;
+            tileCpuAreaTarget_ = 0;
+        }
+
         if (!loggedMode_) {
-            logInfo("XPU Tile: one large GPU rect + a small exclusive 32×32 CPU strip "
-                    "(no steal; Embree keeps full PT)");
+            logInfo("XPU Tile: GPU exclusive rects + Embree 32×32 block (~1/8 of the frame, "
+                    "then resized so CPU ms ≈ GPU ms; no steal; Embree keeps full PT)");
             loggedMode_ = true;
         }
 
-        const XpuWorkLists lists = xpuBuildWorkLists(width, height);
+        const int cpuHint =
+            tileCpuAreaTarget_ > 0 ? tileCpuAreaTarget_ : xpuDefaultTileCpuArea(width, height);
+        const XpuWorkLists lists = xpuBuildWorkLists(width, height, cpuHint);
         std::exception_ptr gpuEx;
         std::exception_ptr cpuEx;
+        std::atomic<double> gpuMs{0.0};
 
         std::thread gpuThread([&] {
+            const auto gpuT0 = std::chrono::steady_clock::now();
             try {
                 for (const XpuWorkRect& rect : lists.gpuPacks) {
                     if (cancel.load(std::memory_order_relaxed)) break;
@@ -439,6 +452,9 @@ private:
             } catch (...) {
                 gpuEx = std::current_exception();
             }
+            gpuMs.store(
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gpuT0).count(),
+                std::memory_order_relaxed);
         });
 
         const auto cpuT0 = std::chrono::steady_clock::now();
@@ -461,15 +477,25 @@ private:
         if (gpuEx) std::rethrow_exception(gpuEx);
         if (cpuEx) std::rethrow_exception(cpuEx);
 
+        const int cpuArea = xpuAreaSum(lists.cpuTiles);
+        const int gpuArea = xpuAreaSum(lists.gpuPacks);
+        if (!cancel.load(std::memory_order_relaxed) && cpuArea > 0 && gpuArea > 0) {
+            tileCpuAreaTarget_ = xpuAdaptTileCpuArea(cpuArea, width, height, cpuMs,
+                                                     gpuMs.load(std::memory_order_relaxed));
+        }
+
         accumAdd(fb.data(), cpuFb_.data(), n);
         accumAdd(fb.data(), gpuHost_.data(), n);
         fb.markHasData();
         lastCompletedSamples_ = 1;
 
         if (batchIndex_ < 2 || batchIndex_ % 8 == 0) {
-            logInfo("XPU Tile spp " + std::to_string(sampleIndex) + ": GPU " +
-                    std::to_string(int(gpu_ ? gpu_->lastGpuSampleMs() : 0.0)) + " ms/pack, Embree " +
-                    std::to_string(int(cpuMs)) + " ms this spp");
+            const XpuWorkRect cpuRect = lists.cpuTiles.empty() ? XpuWorkRect{} : xpuBounds(lists.cpuTiles);
+            logInfo("XPU Tile spp " + std::to_string(sampleIndex) + ": GPU " + std::to_string(gpuArea) +
+                    " px " + std::to_string(int(gpuMs.load(std::memory_order_relaxed))) +
+                    " ms wall, Embree " + std::to_string(cpuRect.width()) + "x" +
+                    std::to_string(cpuRect.height()) + " " + std::to_string(int(cpuMs)) +
+                    " ms, next CPU area " + std::to_string(tileCpuAreaTarget_));
         }
         ++batchIndex_;
     }
@@ -492,6 +518,9 @@ private:
     int nextGpuSample_ = 0;
     int nextCpuSample_ = 1;
     bool loggedMode_ = false;
+    int tileCpuAreaTarget_ = 0;
+    int tileW_ = 0;
+    int tileH_ = 0;
     Framebuffer* fbPtr_ = nullptr;
     const std::atomic<bool>* cancelPtr_ = nullptr;
     std::thread gpuThread_;

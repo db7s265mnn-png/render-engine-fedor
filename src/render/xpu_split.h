@@ -4,6 +4,7 @@
 #include "scene/types.h"
 
 #include <algorithm>
+#include <cmath>
 #include <thread>
 #include <vector>
 
@@ -22,10 +23,10 @@ inline constexpr int kXpuGpuPackPx = 704;
 
 // Below this, a GPU launch is all overhead — give the whole frame to Embree.
 inline constexpr int kXpuTileMinGpuPx = 128 * 128;
-// Cap Embree's exclusive share so Tile wall time stays near GPU-only.
-// A full-width 32-px strip at 1080p is 61k px (~3%); at 4K/8K the strip
-// would be larger than this cap, so Tile becomes one GPU launch.
-inline constexpr int kXpuTileCpuAreaCap = 64 * 1024;
+// First spp: Embree gets ~1/8 of the frame (32×32 buckets). Then Tile
+// resizes that share so CPU ms ≈ GPU ms — both stay busy like RenderMan.
+inline constexpr int kXpuTileCpuShare = 8;
+inline constexpr int kXpuTileMaxCpuShare = 3;
 
 struct XpuWorkRect {
     int x0 = 0;
@@ -83,30 +84,96 @@ inline int xpuEmbreeThreadCount(int requested) {
 // Independent estimators: CPU Sobol/path RNG lives in a disjoint sample-index band.
 inline int xpuCpuSampleIndex(int cpuSpp) { return 0x40000000 + cpuSpp; }
 
-// Tile: GPU owns one large exclusive rect (almost the full frame — one OptiX
-// launch, not a 704² grid). CPU owns a 32-px exclusive strip of 32×32 buckets
-// only when that strip fits the Embree budget. No stealing: GPU 32×32 launches
-// cost a full bounce loop each, and Embree on a 704² pack is catastrophic.
-inline XpuWorkLists xpuBuildWorkLists(int width, int height) {
+inline int xpuTileMaxCpuArea(int width, int height) {
+    const int w = std::max(0, width);
+    const int h = std::max(0, height);
+    const long long total = 1LL * w * h;
+    const int minA = kXpuCpuTilePx * kXpuCpuTilePx;
+    if (total <= minA) return int(total);
+    const long long capShare = total / kXpuTileMaxCpuShare;
+    const long long capGpu = total - kXpuTileMinGpuPx;
+    const long long cap = std::max(1LL * minA, std::min(capShare, capGpu));
+    return int(std::min(cap, 0x7fffffffLL));
+}
+
+inline int xpuDefaultTileCpuArea(int width, int height) {
+    const int w = std::max(0, width);
+    const int h = std::max(0, height);
+    const long long total = 1LL * w * h;
+    const int minA = kXpuCpuTilePx * kXpuCpuTilePx;
+    if (total <= minA) return int(total);
+    const int maxA = xpuTileMaxCpuArea(w, h);
+    const int want = int(std::max(1LL * minA, total / kXpuTileCpuShare));
+    return std::clamp(want, minA, maxA);
+}
+
+// After each Tile spp: grow/shrink the Embree exclusive block so CPU wall ≈ GPU wall.
+inline int xpuAdaptTileCpuArea(int curArea, int width, int height, double cpuMs, double gpuMs) {
+    const int minA = kXpuCpuTilePx * kXpuCpuTilePx;
+    const int maxA = xpuTileMaxCpuArea(width, height);
+    if (curArea <= 0) return xpuDefaultTileCpuArea(width, height);
+    if (cpuMs < 1.0 || gpuMs < 1.0) return std::clamp(curArea, minA, maxA);
+    const int target = int(std::llround(double(curArea) * (gpuMs / cpuMs)));
+    const int blended = (curArea + std::clamp(target, minA, maxA)) / 2;
+    return std::clamp(blended, minA, maxA);
+}
+
+// Tile: GPU traces one or two large exclusive rects (few OptiX launches, not a
+// 704² grid). CPU traces a 32×32 exclusive block (~1/8 of the frame, then
+// adapted so Embree ms ≈ GPU ms). No steal — GPU 32×32 launches each cost a
+// full bounce loop, and Embree on a 704² pack is catastrophic.
+inline XpuWorkLists xpuBuildWorkLists(int width, int height, int cpuAreaHint = 0) {
     XpuWorkLists out;
     const int w = std::max(0, width);
     const int h = std::max(0, height);
     if (w <= 0 || h <= 0) return out;
 
-    if (w * h < kXpuTileMinGpuPx || w < kXpuCpuTilePx || h < kXpuCpuTilePx) {
+    const int tile = kXpuCpuTilePx;
+    const long long total = 1LL * w * h;
+    if (total < kXpuTileMinGpuPx || w < tile || h < tile) {
         xpuPushCpuTiles(out, 0, 0, w, h);
         return out;
     }
 
-    const int stripArea = w * kXpuCpuTilePx;
-    const int gpuH = h - kXpuCpuTilePx;
-    if (gpuH > 0 && stripArea <= kXpuTileCpuAreaCap && w * gpuH >= kXpuTileMinGpuPx) {
-        xpuPushGpuPack(out, 0, 0, w, gpuH);
-        xpuPushCpuTiles(out, 0, gpuH, w, h);
-        return out;
+    int cpuArea = cpuAreaHint > 0 ? cpuAreaHint : xpuDefaultTileCpuArea(w, h);
+    cpuArea = std::clamp(cpuArea, tile * tile, xpuTileMaxCpuArea(w, h));
+
+    int cpuW = w;
+    int cpuH = tile;
+    const int fullRow = w * tile;
+    if (fullRow > 0 && cpuArea >= fullRow) {
+        cpuH = std::min(h - tile, std::max(tile, (cpuArea / fullRow) * tile));
+        if (cpuH < tile) cpuH = tile;
+        if (h - cpuH < tile && h > tile) cpuH = h - tile;
+        cpuW = w;
+    } else {
+        const int nTiles = std::max(1, (cpuArea + tile * tile - 1) / (tile * tile));
+        const int maxTilesX = std::max(1, w / tile);
+        int tilesX = std::min(maxTilesX, nTiles);
+        int tilesY = 1;
+        if (tilesX * tile * tile < cpuArea) {
+            tilesY = std::min(std::max(1, (h / tile) - 1), (nTiles + tilesX - 1) / tilesX);
+            if (tilesY < 1) tilesY = 1;
+        }
+        cpuW = std::min(w, tilesX * tile);
+        cpuH = std::min(h, tilesY * tile);
+        if (cpuW >= w && cpuH >= h) {
+            cpuH = std::max(tile, h - tile);
+            cpuW = w;
+        }
     }
 
-    xpuPushGpuPack(out, 0, 0, w, h);
+    if (total - 1LL * cpuW * cpuH < kXpuTileMinGpuPx) {
+        cpuW = tile;
+        cpuH = tile;
+    }
+
+    const int cx0 = std::max(0, w - cpuW);
+    const int cy0 = std::max(0, h - cpuH);
+    xpuPushCpuTiles(out, cx0, cy0, w, h);
+    xpuPushGpuPack(out, 0, 0, w, cy0);
+    xpuPushGpuPack(out, 0, cy0, cx0, h);
+    if (out.gpuPacks.empty() && out.cpuTiles.empty()) xpuPushCpuTiles(out, 0, 0, w, h);
     return out;
 }
 
