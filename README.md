@@ -26,7 +26,9 @@ Intel Embree CPU device, the NVIDIA OptiX GPU device, or XPU (both together).
     independent films) and is usually slower than GPU-only. **Pixel Oracle** + **Noise Threshold**
   (Sampling, Karma XPU Variance): Variance (default) stops quiet pixels once relative
   luminance error is below the threshold (0 = off, default 0.01). Uniform always takes
-  every Samples Per Pixel.
+  every Samples Per Pixel. Overlay shows `noise off` vs `noise 0.01  N% skip`. At 0.01 a
+  noisy path/volume at 128 spp often stays at 0% skip (beauty matches Uniform); raise
+  the threshold or wait for large constant regions.
   CPU keeps its full Path Tracer (MNEE, SSS, OpenPGL, N light samples, filters).
   GPU and XPU are Path Tracer only; if OptiX cannot start they stop with an error instead of
   falling back to Embree.

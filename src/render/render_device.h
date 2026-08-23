@@ -16,6 +16,8 @@ namespace sol {
 struct RenderProgress {
     int samplesDone = 0;
     int samplesTarget = 0;
+    int noiseSkipCount = 0;   // Variance oracle: pixels that stopped taking samples
+    int noisePixelCount = 0;  // width*height; 0 if the film is empty
     double elapsedSeconds = 0.0;
     double samplesPerSecond = 0.0;
     double backendGpuMs = 0.0;  // CUDA time of last sample; 0 on Embree

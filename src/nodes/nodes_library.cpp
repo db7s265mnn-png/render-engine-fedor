@@ -1076,7 +1076,11 @@ public:
                              "Karma XPU pixel oracle.\n"
                              "Variance (default): after a few camera samples, quiet pixels stop "
                              "when their relative luminance error is below Noise Threshold.\n"
-                             "Uniform: always take every Samples Per Pixel (oracle off)."));
+                             "Uniform: always take every Samples Per Pixel (oracle off).\n"
+                             "The viewport overlay shows `noise off` (Uniform) or `noise 0.01  N% skip` "
+                             "(Variance). On a noisy path / volume at 128 spp and 0.01, N is often 0 — "
+                             "beauty looks identical until you raise the threshold or have large "
+                             "constant regions (sky, black)."));
         addParameter(Parameter::makeFloat("noisethreshold", "Noise Threshold", 0.01, 0.0, 1.0, true)
                          .withGroup("Sampling")
                          .withTooltip(
@@ -1086,6 +1090,9 @@ public:
                              "samples. Max samples is still Samples Per Pixel.\n"
                              "0.01 = Karma default. Lower = cleaner, slower. 0 = off "
                              "(always take every sample).\n"
+                             "Relative stderr of luminance: at 128 spp a pixel with ~30% sample noise "
+                             "is still above 0.01, so Variance will not stop it. Raise to 0.05 to see "
+                             "adaptive stop, or watch the overlay skip %. Sampling Debug forces off.\n"
                              "Used when Pixel Oracle is Variance. Uniform ignores this."));
         addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
                          .withGroup("Sampling")

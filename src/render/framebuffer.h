@@ -29,6 +29,7 @@ public:
     void refreshNoiseOracle(float threshold, int sppDone, int maxSpp);
     bool skipPixel(int x, int y) const;
     bool noiseOracleDone() const { return noiseDone_; }
+    int noiseOracleSkipCount() const { return skipCount_; }
     const std::vector<uint8_t>& skipMask() const { return skip_; }
     const std::vector<float>& lumSq() const { return lumSq_; }
 
@@ -125,6 +126,7 @@ private:
     std::vector<Vec4> accum_;
     std::vector<float> lumSq_;
     std::vector<uint8_t> skip_;
+    int skipCount_ = 0;
     bool noiseDone_ = false;
     std::unique_ptr<std::atomic<double>[]> splat_;  // 3 doubles per pixel
     std::atomic<int64_t> splatPaths_{0};

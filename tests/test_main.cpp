@@ -539,6 +539,58 @@ void testXpuDevice() {
         film.refreshNoiseOracle(0.01f, 8, 64);
         check(film.skipPixel(0, 0) && film.skipPixel(1, 1), "quiet constant film skips pixels");
         check(film.noiseOracleDone(), "constant 2x2 film converges");
+        check(film.noiseOracleSkipCount() == 4, "constant 2x2 skip count is 4");
+    }
+
+    // Uniform (threshold 0) never skips. Variance skips a constant block and
+    // keeps a noisy block. Typical path-tracing noise at 128 spp / 0.01 does
+    // not skip — that is why Uniform vs Variance looks identical on a volume.
+    {
+        const int nSpp = 16;
+        const int maxSpp = 64;
+        auto fill = [](Framebuffer& film, int x0, int x1, bool constant) {
+            for (int s = 0; s < nSpp; ++s) {
+                const Vec3 rgb = constant ? Vec3(1.0f, 1.0f, 1.0f)
+                                          : ((s & 1) ? Vec3(2.0f, 2.0f, 2.0f) : Vec3(0.0f, 0.0f, 0.0f));
+                for (int y = 0; y < 2; ++y) {
+                    for (int x = x0; x < x1; ++x) {
+                        film.addSample(x, y, rgb);
+                        film.addNoiseSample(x, y, rgb);
+                    }
+                }
+            }
+        };
+
+        Framebuffer uniform;
+        uniform.resize(8, 2);
+        fill(uniform, 0, 4, true);
+        fill(uniform, 4, 8, false);
+        uniform.refreshNoiseOracle(0.0f, nSpp, maxSpp);
+        check(uniform.noiseOracleSkipCount() == 0, "Uniform (threshold 0) skips nothing");
+        check(!uniform.skipPixel(1, 0) && !uniform.skipPixel(5, 0), "Uniform leaves constant and noisy pixels open");
+
+        Framebuffer variance;
+        variance.resize(8, 2);
+        fill(variance, 0, 4, true);
+        fill(variance, 4, 8, false);
+        variance.refreshNoiseOracle(0.01f, nSpp, maxSpp);
+        check(variance.skipPixel(1, 0) && variance.skipPixel(1, 1), "Variance skips interior constant pixels");
+        check(!variance.skipPixel(3, 0), "Variance keeps the constant/noisy boundary sampling");
+        check(!variance.skipPixel(5, 0) && !variance.skipPixel(7, 1), "Variance keeps noisy pixels sampling");
+        check(variance.noiseOracleSkipCount() > 0, "Variance skip count is non-zero on mixed film");
+        check(!variance.noiseOracleDone(), "mixed film does not finish early");
+    }
+
+    {
+        // σ/μ = 0.3 at 128 spp: rel stderr = 0.3/√128 ≈ 0.027 > 0.01 → stay open.
+        const int n = 128;
+        const float mean = 1.0f;
+        const float var = 0.09f;
+        const float lumSq = float(n) * (var + mean * mean);
+        check(!noiseOraclePixelQuiet(mean, mean, mean, lumSq, n, 0.01f),
+              "typical 128 spp path noise stays open at threshold 0.01");
+        check(noiseOraclePixelQuiet(mean, mean, mean, lumSq, n, 0.05f),
+              "same pixel is quiet if the threshold is raised to 0.05");
     }
 
     Scene scene;

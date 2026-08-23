@@ -17,6 +17,7 @@ void Framebuffer::resize(int width, int height) {
     accum_.assign(size_t(width_) * size_t(height_), Vec4(0.0f, 0.0f, 0.0f, 0.0f));
     lumSq_.assign(size_t(width_) * size_t(height_), 0.0f);
     skip_.assign(size_t(width_) * size_t(height_), 0);
+    skipCount_ = 0;
     noiseDone_ = false;
     const size_t n = size_t(width_) * size_t(height_) * 3;
     splat_ = n > 0 ? std::make_unique<std::atomic<double>[]>(n) : nullptr;
@@ -31,6 +32,7 @@ void Framebuffer::clear() {
     std::fill(accum_.begin(), accum_.end(), Vec4(0.0f, 0.0f, 0.0f, 0.0f));
     std::fill(lumSq_.begin(), lumSq_.end(), 0.0f);
     std::fill(skip_.begin(), skip_.end(), uint8_t(0));
+    skipCount_ = 0;
     noiseDone_ = false;
     const size_t n = size_t(width_) * size_t(height_) * 3;
     for (size_t i = 0; i < n && splat_; ++i) splat_[i].store(0.0, std::memory_order_relaxed);
@@ -49,6 +51,7 @@ void Framebuffer::release() {
     lumSq_.shrink_to_fit();
     skip_.clear();
     skip_.shrink_to_fit();
+    skipCount_ = 0;
     noiseDone_ = false;
     splat_.reset();
     splatPaths_.store(0, std::memory_order_relaxed);
@@ -99,6 +102,10 @@ void Framebuffer::addLumSq(const float* src, size_t count) {
 void Framebuffer::copySkipMask(const std::vector<uint8_t>& src) {
     if (src.size() != skip_.size()) return;
     skip_ = src;
+    skipCount_ = 0;
+    for (uint8_t v : skip_) {
+        if (v) ++skipCount_;
+    }
 }
 
 bool Framebuffer::skipPixel(int x, int y) const {
@@ -111,6 +118,7 @@ void Framebuffer::refreshNoiseOracle(float threshold, int sppDone, int maxSpp) {
     const size_t n = size_t(width_) * size_t(height_);
     if (!(threshold > 0.0f) || n == 0 || accum_.size() != n || lumSq_.size() != n) {
         skip_.assign(n, 0);
+        skipCount_ = 0;
         return;
     }
     if (skip_.size() != n) skip_.assign(n, 0);
@@ -156,6 +164,7 @@ void Framebuffer::refreshNoiseOracle(float threshold, int sppDone, int maxSpp) {
             ++skipped;
         }
     }
+    skipCount_ = skipped;
     noiseDone_ = skipped == int(n) && int(n) > 0;
     (void)quietCount;
 }

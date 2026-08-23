@@ -324,6 +324,8 @@ void RenderSession::threadMain() {
         progress_.elapsedSeconds = 0.0;
         progress_.samplesPerSecond = 0.0;
         progress_.backendGpuMs = 0.0;
+        progress_.noiseSkipCount = 0;
+        progress_.noisePixelCount = width * height;
     }
 
     const auto startTime = std::chrono::steady_clock::now();
@@ -414,6 +416,8 @@ void RenderSession::threadMain() {
             progress_.elapsedSeconds = elapsed;
             progress_.samplesPerSecond = elapsed > 0.0 ? double(sample + sampleStep) / elapsed : 0.0;
             progress_.backendGpuMs = device_ ? device_->lastGpuSampleMs() : 0.0;
+            progress_.noiseSkipCount = framebuffer_.noiseOracleSkipCount();
+            progress_.noisePixelCount = framebuffer_.width() * framebuffer_.height();
         }
 
         // Throttle UI notifications: early samples update immediately, later
