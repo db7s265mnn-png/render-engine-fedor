@@ -38,6 +38,7 @@ struct GpuPath {
     Vec3 origin{0.0f};
     Vec3 direction{0.0f, 0.0f, 1.0f};
     Vec3 throughput{1.0f, 1.0f, 1.0f};
+    Vec3 sampleRgb{0.0f, 0.0f, 0.0f};  // this-spp radiance for the variance oracle
     float bsdfPdf = 0.0f;
     int depth = 0;
     int hops = 0;

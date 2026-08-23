@@ -17,6 +17,14 @@ extern "C" __global__ void __raygen__init_from_camera() {
     GpuHit& hit = params.hits[pixel];
     GpuShadow& shadow = params.shadows[pixel];
 
+    path.sampleRgb = Vec3(0.0f);
+    if (params.skipMask && params.skipMask[pixel]) {
+        path.queue = kQueueDead;
+        hit = GpuHit{};
+        shadow = GpuShadow{};
+        return;
+    }
+
     path.rng = makePixelRng(x, y, params.sampleIndex, params.frameSeed);
     float jitterX = 0.5f, jitterY = 0.5f, lensU = 0.5f, lensV = 0.5f;
     sampleCameraPixelLens(params.pixelSampler, x, y, params.sampleIndex, params.width, params.frameSeed,

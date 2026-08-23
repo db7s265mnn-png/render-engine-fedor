@@ -27,12 +27,12 @@ struct RenderProgress {
 // Optional mid-sample preview hook (e.g. after each bootstrap phase).
 using RenderMidProgressFn = std::function<void()>;
 
-// XPU Mixture/Tile scheduling plus optional sub-rect launches.
+// XPU Mixture scheduling plus optional sub-rect launches.
 // Standalone devices leave remaining/target at 0 and clip empty.
 struct RenderSampleOptions {
     int xpuRemainingSamples = 0;        // spp left in the session (legacy cap)
     int xpuTargetSamples = 0;           // absolute spp target for Mixture GPU stop
-    int xpuSchedule = 0;                // XpuSchedule: 0 Overlap, 1 Mixture, 2 Tile
+    int xpuSchedule = 0;                // XpuSchedule: 0 Overlap, 1 Mixture
     int clipX0 = 0, clipY0 = 0, clipX1 = 0, clipY1 = 0;  // exclusive x1/y1; empty = full frame
     bool skipFramebufferStore = false;  // OptiX: keep this sample internal (XPU add)
     bool resetAccum = false;            // OptiX: memset accum before this sample
@@ -72,6 +72,7 @@ public:
                                            int /*x1*/, int /*y1*/) {
         return false;
     }
+    virtual bool downloadInternalLumSq(float* /*dst*/, size_t /*count*/) { return false; }
 
     // Embree: commit delayed OpenPGL training after a batch of clipped tiles.
     virtual void finishSample() {}

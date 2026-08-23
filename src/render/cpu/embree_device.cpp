@@ -664,7 +664,9 @@ public:
                                     bootstrapPhase)
                                     continue;
                             }
+                            if (fb.skipPixel(x, y)) continue;
                             const PixelEval ev = evaluatePixelSample(x, y, threadId);
+                            fb.addNoiseSample(x, y, ev.radiance);
                             fb.addSample(x, y, ev.radiance);
                         }
                     } else {
@@ -675,7 +677,10 @@ public:
                                     bootstrapPhase)
                                     continue;
                             }
-                            depositEval(tile, x, y, evaluatePixelSample(x, y, threadId));
+                            if (fb.skipPixel(x, y)) continue;
+                            const PixelEval ev = evaluatePixelSample(x, y, threadId);
+                            fb.addNoiseSample(x, y, ev.radiance);
+                            depositEval(tile, x, y, ev);
                         }
                         fb.mergeFilmTile(tile);
                     }
@@ -705,7 +710,10 @@ public:
                                 bootstrapPhase)
                                 continue;
                         }
-                        depositEval(tile, x, y, evaluatePixelSample(x, y, threadId));
+                        if (fb.skipPixel(x, y)) continue;
+                        const PixelEval ev = evaluatePixelSample(x, y, threadId);
+                        fb.addNoiseSample(x, y, ev.radiance);
+                        depositEval(tile, x, y, ev);
                     }
                 }
                 fb.mergeFilmTile(tile);

@@ -402,6 +402,10 @@ void RenderSession::threadMain() {
 
         const int sampleStep = std::max(1, device_ ? device_->lastCompletedSamples() : 1);
         framebuffer_.setSampleCount(sample + sampleStep);
+        const float noiseT = scene->settings.samplingDebug != 0 ? 0.0f : scene->settings.noiseThreshold;
+        if (noiseT > 0.0f) {
+            framebuffer_.refreshNoiseOracle(noiseT, sample + sampleStep, targetSamples);
+        }
         const auto now = std::chrono::steady_clock::now();
         const double elapsed = std::chrono::duration<double>(now - sampleStartTime).count();
         {
@@ -415,10 +419,16 @@ void RenderSession::threadMain() {
         // Throttle UI notifications: early samples update immediately, later
         // ones at roughly 10 Hz.
         const double sinceNotify = std::chrono::duration<double>(now - lastNotify).count();
-        if (sample < 4 || sinceNotify > 0.1 || sample + sampleStep >= targetSamples) {
+        if (sample < 4 || sinceNotify > 0.1 || sample + sampleStep >= targetSamples ||
+            framebuffer_.noiseOracleDone()) {
             notifyUi(true);
         }
         sample += sampleStep;
+        if (framebuffer_.noiseOracleDone()) {
+            std::lock_guard<std::mutex> lock(progressMutex_);
+            progress_.samplesDone = targetSamples;
+            break;
+        }
     }
 
     if (device_) {

@@ -1,8 +1,10 @@
 #include "render/framebuffer.h"
 #include "render/film_tile.h"
+#include "render/pixel_oracle.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include "io/ocio_util.h"
 
@@ -13,6 +15,9 @@ void Framebuffer::resize(int width, int height) {
     width_ = width > 0 ? width : 0;
     height_ = height > 0 ? height : 0;
     accum_.assign(size_t(width_) * size_t(height_), Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+    lumSq_.assign(size_t(width_) * size_t(height_), 0.0f);
+    skip_.assign(size_t(width_) * size_t(height_), 0);
+    noiseDone_ = false;
     const size_t n = size_t(width_) * size_t(height_) * 3;
     splat_ = n > 0 ? std::make_unique<std::atomic<double>[]>(n) : nullptr;
     for (size_t i = 0; i < n; ++i) splat_[i].store(0.0, std::memory_order_relaxed);
@@ -24,6 +29,9 @@ void Framebuffer::resize(int width, int height) {
 void Framebuffer::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::fill(accum_.begin(), accum_.end(), Vec4(0.0f, 0.0f, 0.0f, 0.0f));
+    std::fill(lumSq_.begin(), lumSq_.end(), 0.0f);
+    std::fill(skip_.begin(), skip_.end(), uint8_t(0));
+    noiseDone_ = false;
     const size_t n = size_t(width_) * size_t(height_) * 3;
     for (size_t i = 0; i < n && splat_; ++i) splat_[i].store(0.0, std::memory_order_relaxed);
     splatPaths_.store(0, std::memory_order_relaxed);
@@ -37,6 +45,11 @@ void Framebuffer::release() {
     height_ = 0;
     accum_.clear();
     accum_.shrink_to_fit();
+    lumSq_.clear();
+    lumSq_.shrink_to_fit();
+    skip_.clear();
+    skip_.shrink_to_fit();
+    noiseDone_ = false;
     splat_.reset();
     splatPaths_.store(0, std::memory_order_relaxed);
     samples_.store(0, std::memory_order_relaxed);
@@ -65,6 +78,86 @@ void Framebuffer::mergeFilmTile(const FilmTile& tile) {
         }
     }
     if (wrote) hasData_.store(true, std::memory_order_relaxed);
+}
+
+void Framebuffer::addNoiseSample(int x, int y, Vec3 radiance, float count) {
+    if (x < 0 || y < 0 || x >= width_ || y >= height_ || !(count > 0.0f) || lumSq_.empty()) return;
+    const float L = pixelLuminance(radiance.x, radiance.y, radiance.z);
+    lumSq_[size_t(y) * size_t(width_) + size_t(x)] += L * L * count;
+}
+
+void Framebuffer::copyLumSq(const float* src, size_t count) {
+    if (!src || lumSq_.size() != count) return;
+    std::memcpy(lumSq_.data(), src, count * sizeof(float));
+}
+
+void Framebuffer::addLumSq(const float* src, size_t count) {
+    if (!src || lumSq_.size() != count) return;
+    for (size_t i = 0; i < count; ++i) lumSq_[i] += src[i];
+}
+
+void Framebuffer::copySkipMask(const std::vector<uint8_t>& src) {
+    if (src.size() != skip_.size()) return;
+    skip_ = src;
+}
+
+bool Framebuffer::skipPixel(int x, int y) const {
+    if (skip_.empty() || x < 0 || y < 0 || x >= width_ || y >= height_) return false;
+    return skip_[size_t(y) * size_t(width_) + size_t(x)] != 0;
+}
+
+void Framebuffer::refreshNoiseOracle(float threshold, int sppDone, int maxSpp) {
+    noiseDone_ = false;
+    const size_t n = size_t(width_) * size_t(height_);
+    if (!(threshold > 0.0f) || n == 0 || accum_.size() != n || lumSq_.size() != n) {
+        skip_.assign(n, 0);
+        return;
+    }
+    if (skip_.size() != n) skip_.assign(n, 0);
+    const int minS = noiseOracleMinSamples(maxSpp);
+    if (sppDone < minS) return;
+
+    std::vector<uint8_t> quiet(n, 0);
+    int quietCount = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (skip_[i]) {
+            quiet[i] = 1;
+            ++quietCount;
+            continue;
+        }
+        const Vec4& px = accum_[i];
+        const int w = int(px.w + 0.5f);
+        if (w < minS) continue;
+        const float inv = 1.0f / px.w;
+        if (noiseOraclePixelQuiet(px.x * inv, px.y * inv, px.z * inv, lumSq_[i], w, threshold)) {
+            quiet[i] = 1;
+            ++quietCount;
+        }
+    }
+    // Karma: also look at adjacent pixels so edges / isolated noisy pixels keep sampling.
+    // Pixels that already stopped stay stopped — restarting them wastes spp.
+    int skipped = 0;
+    for (int y = 0; y < height_; ++y) {
+        for (int x = 0; x < width_; ++x) {
+            const size_t i = size_t(y) * size_t(width_) + size_t(x);
+            if (skip_[i]) {
+                ++skipped;
+                continue;
+            }
+            if (!quiet[i]) continue;
+            auto neighborNoisy = [&](int nx, int ny) {
+                if (nx < 0 || ny < 0 || nx >= width_ || ny >= height_) return false;
+                return quiet[size_t(ny) * size_t(width_) + size_t(nx)] == 0;
+            };
+            if (neighborNoisy(x - 1, y) || neighborNoisy(x + 1, y) || neighborNoisy(x, y - 1) ||
+                neighborNoisy(x, y + 1))
+                continue;
+            skip_[i] = 1;
+            ++skipped;
+        }
+    }
+    noiseDone_ = skipped == int(n) && int(n) > 0;
+    (void)quietCount;
 }
 
 Image Framebuffer::resolveLinear() const {

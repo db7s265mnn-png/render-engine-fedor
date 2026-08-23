@@ -540,6 +540,11 @@ public:
                 destroyGraph();
                 accumBuffer_.alloc(pixelCount * sizeof(Vec4));
                 CUDA_CHECK(cudaMemsetAsync(accumBuffer_.as<void>(), 0, accumBuffer_.size(), stream_));
+                lumSqBuffer_.alloc(pixelCount * sizeof(float));
+                CUDA_CHECK(cudaMemsetAsync(lumSqBuffer_.as<void>(), 0, lumSqBuffer_.size(), stream_));
+            } else if (lumSqBuffer_.size() != pixelCount * sizeof(float)) {
+                lumSqBuffer_.alloc(pixelCount * sizeof(float));
+                CUDA_CHECK(cudaMemsetAsync(lumSqBuffer_.as<void>(), 0, lumSqBuffer_.size(), stream_));
             }
             if (pathBuffer_.size() != pixelCount * sizeof(GpuPath) ||
                 hitBuffer_.size() != pixelCount * sizeof(GpuHit) ||
@@ -574,11 +579,20 @@ public:
                     stream_));
             } else if (sampleIndex == 0 || opt.resetAccum) {
                 CUDA_CHECK(cudaMemsetAsync(accumBuffer_.as<void>(), 0, accumBuffer_.size(), stream_));
+                if (lumSqBuffer_.size() == pixelCount * sizeof(float)) {
+                    CUDA_CHECK(cudaMemsetAsync(lumSqBuffer_.as<void>(), 0, lumSqBuffer_.size(), stream_));
+                }
             }
 
             LaunchParams launchParams{};
             launchParams.scene = deviceScene_;
             launchParams.accumBuffer = accumBuffer_.as<Vec4>();
+            launchParams.lumSq = lumSqBuffer_.as<float>();
+            launchParams.skipMask = nullptr;
+            if (scene_->settings.noiseThreshold > 0.0f && fb.skipMask().size() == pixelCount) {
+                skipMaskBuffer_.upload(fb.skipMask());
+                launchParams.skipMask = skipMaskBuffer_.as<unsigned char>();
+            }
             launchParams.paths = pathBuffer_.as<GpuPath>();
             launchParams.hits = hitBuffer_.as<GpuHit>();
             launchParams.shadows = shadowBuffer_.as<GpuShadow>();
@@ -611,11 +625,23 @@ public:
             if (!opt.deferHostCopy) {
                 if (opt.skipFramebufferStore) {
                     hostAccum_.resize(pixelCount);
+                    hostLumSq_.resize(pixelCount);
                     CUDA_CHECK(cudaMemcpyAsync(hostAccum_.data(), accumBuffer_.as<Vec4>(),
                                                pixelCount * sizeof(Vec4), cudaMemcpyDeviceToHost, stream_));
+                    if (lumSqBuffer_.size() == pixelCount * sizeof(float)) {
+                        CUDA_CHECK(cudaMemcpyAsync(hostLumSq_.data(), lumSqBuffer_.as<float>(),
+                                                   pixelCount * sizeof(float), cudaMemcpyDeviceToHost,
+                                                   stream_));
+                    }
                 } else {
                     CUDA_CHECK(cudaMemcpyAsync(fb.data(), accumBuffer_.as<Vec4>(), pixelCount * sizeof(Vec4),
                                                cudaMemcpyDeviceToHost, stream_));
+                    hostLumSq_.resize(pixelCount);
+                    if (lumSqBuffer_.size() == pixelCount * sizeof(float)) {
+                        CUDA_CHECK(cudaMemcpyAsync(hostLumSq_.data(), lumSqBuffer_.as<float>(),
+                                                   pixelCount * sizeof(float), cudaMemcpyDeviceToHost,
+                                                   stream_));
+                    }
                 }
             }
             CUDA_CHECK(cudaEventSynchronize(gpuStopEvent_));
@@ -636,7 +662,10 @@ public:
                 logInfo(msg.str());
             }
 
-            if (!opt.skipFramebufferStore && !opt.deferHostCopy) fb.markHasData();
+            if (!opt.skipFramebufferStore && !opt.deferHostCopy) {
+                fb.markHasData();
+                if (!hostLumSq_.empty()) fb.copyLumSq(hostLumSq_.data(), hostLumSq_.size());
+            }
             if (midProgress) midProgress();
         } catch (const std::exception& e) {
             lastGpuSampleMs_ = 0.0;
@@ -665,6 +694,15 @@ public:
         if (!dst || !stream_ || accumBuffer_.size() != count * sizeof(Vec4)) return false;
         CUDA_CHECK(cudaSetDevice(0));
         CUDA_CHECK(cudaMemcpyAsync(dst, accumBuffer_.as<Vec4>(), count * sizeof(Vec4),
+                                   cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+        return true;
+    }
+
+    bool downloadInternalLumSq(float* dst, size_t count) override {
+        if (!dst || !stream_ || lumSqBuffer_.size() != count * sizeof(float)) return false;
+        CUDA_CHECK(cudaSetDevice(0));
+        CUDA_CHECK(cudaMemcpyAsync(dst, lumSqBuffer_.as<float>(), count * sizeof(float),
                                    cudaMemcpyDeviceToHost, stream_));
         CUDA_CHECK(cudaStreamSynchronize(stream_));
         return true;
@@ -997,6 +1035,8 @@ private:
         scene_.reset();
         hostAccum_.clear();
         hostAccum_.shrink_to_fit();
+        hostLumSq_.clear();
+        hostLumSq_.shrink_to_fit();
     }
 
     void shutdown() {
@@ -1015,6 +1055,8 @@ private:
             stream_ = nullptr;
         }
         accumBuffer_.free();
+        lumSqBuffer_.free();
+        skipMaskBuffer_.free();
         pathBuffer_.free();
         hitBuffer_.free();
         shadowBuffer_.free();
@@ -1073,7 +1115,7 @@ private:
     int graphIters_ = 0;
 
     DeviceBuffer raygenRecordBuffer_, missRecordBuffer_, hitRecordBuffer_;
-    DeviceBuffer launchParamsBuffer_, accumBuffer_;
+    DeviceBuffer launchParamsBuffer_, accumBuffer_, lumSqBuffer_, skipMaskBuffer_;
     DeviceBuffer pathBuffer_, hitBuffer_, shadowBuffer_;
     DeviceBuffer meshViewBuffer_, instanceBuffer_, materialBuffer_, lightBuffer_, envViewBuffer_;
     DeviceBuffer textureViewBuffer_;
@@ -1091,6 +1133,7 @@ private:
     ScenePtr scene_;
     SceneView deviceScene_;
     std::vector<Vec4> hostAccum_;
+    std::vector<float> hostLumSq_;
 };
 
 enum class OptixRuntimeState { Unknown, Ok, Fail };

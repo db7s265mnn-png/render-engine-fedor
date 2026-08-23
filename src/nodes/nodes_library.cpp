@@ -1069,6 +1069,15 @@ public:
         // --- Sampling -----------------------------------------------------------------
         addParameter(Parameter::makeInt("samples", "Samples Per Pixel", 128, 1, 100000, false)
                          .withGroup("Sampling"));
+        addParameter(Parameter::makeFloat("noisethreshold", "Noise Threshold", 0.01, 0.0, 1.0, false)
+                         .withGroup("Sampling")
+                         .withTooltip(
+                             "Karma XPU-style variance pixel oracle.\n"
+                             "After a few camera samples, pixels whose relative luminance error "
+                             "(and their 4-neighbours) is below this value stop receiving more "
+                             "samples. Max samples is still Samples Per Pixel.\n"
+                             "0.01 = Karma default. Lower = cleaner, slower. 0 = off "
+                             "(always take every sample)."));
         addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
                          .withGroup("Sampling")
                          .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
@@ -1149,11 +1158,8 @@ public:
                                                            "Overlap: GPU fills even spp until Embree finishes "
                                                            "one odd spp, then one add (no 1:1 wait). Mixture "
                                                            "is usually slower than GPU-only (it still waits "
-                                                           "on a full Embree spp plus a snapshot copy). Tile "
-                                                           "splits the frame: OptiX large exclusive rects, "
-                                                           "Embree a 32×32 block (~1/8, then resized so both "
-                                                           "stay busy). Set XPU Schedule when this device "
-                                                           "is selected.\n"
+                                                           "on a full Embree spp plus a snapshot copy). Set "
+                                                           "XPU Schedule when this device is selected.\n"
                                                            "XPU is Path Tracer only. BDPT, spectral, "
                                                            "wireframe, AO stay CPU (Embree).\n"
                                                            "If OptiX cannot start, GPU/XPU stop with an "
@@ -1162,7 +1168,7 @@ public:
                                                           "GPU (OptiX) and XPU will stop with an error — "
                                                           "they do not fall back to Embree.")));
         addParameter(Parameter::makeMenu("xpuschedule", "XPU Schedule",
-                                         {"Overlap", "Mixture", "Tile"}, 0)
+                                         {"Overlap", "Mixture"}, 0)
                          .withGroup("Engine")
                          .withVisibleWhen("backend==2")
                          .withTooltip("Only when Render Device is XPU.\n"
@@ -1173,12 +1179,7 @@ public:
                                       "Mixture (Karma): CPU and GPU each own a full-frame film; host "
                                       "adds them. GPU never waits to render, but each UI step still "
                                       "waits for one Embree spp and a snapshot copy, so wall time "
-                                      "is often worse than GPU-only.\n"
-                                      "Tile (RenderMan / Cycles): GPU traces one or two large "
-                                      "exclusive rects (few OptiX launches). CPU traces an exclusive "
-                                      "32×32 block — about 1/8 of the frame at first, then grown or "
-                                      "shrunk so Embree ms ≈ GPU ms. Same spp, no steal. Both stay "
-                                      "busy (RenderMan-style), including 1440p / 4K."));
+                                      "is often worse than GPU-only."));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
                                           "Ambient Occlusion", "PT Spectral", "BDPT Spectral",
@@ -1433,8 +1434,13 @@ public:
         settings.resolutionX = intValue("resx", 960);
         settings.resolutionY = intValue("resy", 540);
         settings.samplesPerPixel = intValue("samples", 128);
+        settings.noiseThreshold = std::max(0.0f, float(floatValue("noisethreshold", 0.01)));
         settings.backend = std::clamp(intValue("backend", 0), 0, 2);
-        settings.xpuSchedule = std::clamp(intValue("xpuschedule", 0), 0, 2);
+        {
+            int sched = intValue("xpuschedule", 0);
+            if (sched >= 2) sched = 0;  // retired Tile schedule
+            settings.xpuSchedule = std::clamp(sched, 0, 1);
+        }
         settings.integrator = std::clamp(intValue("integrator", 0), 0, 6);
         settings.maxDepth = std::clamp(intValue("maxdepth", 8), 1, 4096);
         settings.rrStartDepth = std::clamp(intValue("rrdepth", 3), 1, 4096);

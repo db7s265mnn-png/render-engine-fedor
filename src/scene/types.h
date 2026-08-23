@@ -403,11 +403,9 @@ SR_INL SR_HD bool renderDeviceIsXpu(int backend) { return backend == kBackendXpu
 // XPU work schedule (Render Settings → Engine, visible only when backend is XPU).
 // Overlap (default): GPU fills even spp until Embree finishes one odd spp, then one D2H add.
 // Mixture: Karma-style independent full-frame estimators, host blend, automatic spp share.
-// Tile: exclusive GPU rects + Embree 32×32 block (~1/8 of the frame, then CPU ms ≈ GPU ms).
 enum XpuSchedule : int {
     kXpuScheduleOverlap = 0,
     kXpuScheduleMixture = 1,
-    kXpuScheduleTile = 2,
 };
 // BDPT / spectral / wireframe are CPU / Embree only; GPU and XPU require Path Tracer
 // and stop with an error (no Embree fallback).
@@ -549,6 +547,9 @@ struct RenderSettingsData {
     // Film reconstruction filter (Box = current 1-pixel behaviour).
     int pixelFilter = kPixelFilterBox;
     float filterRadius = 0.5f;  // pixels; 0 = use defaultFilterRadius(pixelFilter)
+    // Karma XPU variance oracle. 0 = off (always take Samples Per Pixel).
+    // Default 0.01 matches Karma's Variance Threshold.
+    float noiseThreshold = 0.01f;
 
     int backend = kBackendCpuEmbree;
     int xpuSchedule = kXpuScheduleOverlap;  // ignored unless backend == XPU

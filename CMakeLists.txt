@@ -581,6 +581,7 @@ set(SOLSTICE_LIB_HEADERS
     src/render/framebuffer.h
     src/render/render_device.h
     src/render/xpu_split.h
+    src/render/pixel_oracle.h
     src/render/camera_sample.h
     src/render/render_session.h
     src/render/scene_picker.h

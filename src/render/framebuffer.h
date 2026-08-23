@@ -20,6 +20,18 @@ public:
     // Drop accumulation storage entirely (Render teardown).
     void release();
 
+    // Karma-style variance oracle: Σ L(sample)² + skip mask. Thread-safe for
+    // disjoint pixels (same rule as addSample).
+    void addNoiseSample(int x, int y, Vec3 radiance, float count = 1.0f);
+    void copyLumSq(const float* src, size_t count);
+    void addLumSq(const float* src, size_t count);
+    void copySkipMask(const std::vector<uint8_t>& src);
+    void refreshNoiseOracle(float threshold, int sppDone, int maxSpp);
+    bool skipPixel(int x, int y) const;
+    bool noiseOracleDone() const { return noiseDone_; }
+    const std::vector<uint8_t>& skipMask() const { return skip_; }
+    const std::vector<float>& lumSq() const { return lumSq_; }
+
     int width() const { return width_; }
     int height() const { return height_; }
     int sampleCount() const { return samples_.load(std::memory_order_relaxed); }
@@ -111,6 +123,9 @@ private:
     int width_ = 0;
     int height_ = 0;
     std::vector<Vec4> accum_;
+    std::vector<float> lumSq_;
+    std::vector<uint8_t> skip_;
+    bool noiseDone_ = false;
     std::unique_ptr<std::atomic<double>[]> splat_;  // 3 doubles per pixel
     std::atomic<int64_t> splatPaths_{0};
     std::atomic<int> samples_{0};

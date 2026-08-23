@@ -43,6 +43,8 @@ struct alignas(16) LaunchParams {
     int volumeCount = 0;
 
     Vec4* accumBuffer = nullptr;  // width * height, rgb + sample weight
+    float* lumSq = nullptr;       // Σ L(sample)² for the variance oracle
+    const unsigned char* skipMask = nullptr;  // 1 = pixel already quiet
     GpuPath* paths = nullptr;
     GpuHit* hits = nullptr;
     GpuShadow* shadows = nullptr;

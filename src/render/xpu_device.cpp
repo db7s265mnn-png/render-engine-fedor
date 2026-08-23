@@ -1,7 +1,6 @@
-// Hybrid CPU+GPU device. Three schedules:
+// Hybrid CPU+GPU device. Two schedules:
 //   Overlap (default): GPU fills even spp until Embree finishes one odd spp, one D2H add.
 //   Mixture (Karma): independent full-frame films, persistent GPU worker, host blend.
-//   Tile (RenderMan / Cycles): large GPU rects + exclusive 32×32 CPU block (~1/8, then adapted).
 #include "render/render_device.h"
 
 #include "core/log.h"
@@ -27,15 +26,6 @@ void blendAdd(Vec4* dst, const Vec4* a, const Vec4* b, size_t n) {
         dst[i].y = a[i].y + b[i].y;
         dst[i].z = a[i].z + b[i].z;
         dst[i].w = a[i].w + b[i].w;
-    }
-}
-
-void accumAdd(Vec4* dst, const Vec4* src, size_t n) {
-    for (size_t i = 0; i < n; ++i) {
-        dst[i].x += src[i].x;
-        dst[i].y += src[i].y;
-        dst[i].z += src[i].z;
-        dst[i].w += src[i].w;
     }
 }
 
@@ -79,11 +69,6 @@ public:
         if (fb.width() <= 0 || fb.height() <= 0) return;
 
         const RenderSampleOptions opt = options ? *options : RenderSampleOptions{};
-        if (opt.xpuSchedule == kXpuScheduleTile) {
-            stopGpuWorker();
-            renderTile(fb, sampleIndex, cancel, midProgress);
-            return;
-        }
         if (opt.xpuSchedule == kXpuScheduleMixture) {
             renderMixture(fb, sampleIndex, cancel, midProgress, opt);
             return;
@@ -119,9 +104,6 @@ private:
         reportedSpp_ = 0;
         batchIndex_ = 0;
         loggedMode_ = false;
-        tileCpuAreaTarget_ = 0;
-        tileW_ = 0;
-        tileH_ = 0;
     }
 
     void stopGpuWorker() {
@@ -307,6 +289,10 @@ private:
                     dst[i].w += gpuHost_[i].w;
                 }
                 fb.markHasData();
+                gpuLumSq_.resize(pixelCount);
+                if (gpu_->downloadInternalLumSq(gpuLumSq_.data(), pixelCount)) {
+                    fb.addLumSq(gpuLumSq_.data(), pixelCount);
+                }
             }
         }
 
@@ -325,6 +311,13 @@ private:
         if (gpuHost_.size() != n) gpuHost_.assign(n, Vec4{});
         blendAdd(fb.data(), cpuFb_.data(), gpuHost_.data(), n);
         fb.markHasData();
+        gpuLumSq_.resize(n);
+        if (gpu_->downloadInternalLumSq(gpuLumSq_.data(), n)) {
+            fb.copyLumSq(cpuFb_.lumSq().data(), n);
+            fb.addLumSq(gpuLumSq_.data(), n);
+        } else if (cpuFb_.lumSq().size() == n) {
+            fb.copyLumSq(cpuFb_.lumSq().data(), n);
+        }
     }
 
     void renderMixture(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
@@ -366,6 +359,7 @@ private:
         try {
             if (!cancel.load(std::memory_order_relaxed) &&
                 cpuSpp_.load(std::memory_order_relaxed) + gpuSpp_.load(std::memory_order_relaxed) < target) {
+                cpuFb_.copySkipMask(fb.skipMask());
                 const int cpuIndex = xpuCpuSampleIndex(cpuSpp_.load(std::memory_order_relaxed));
                 cpu_->renderSample(cpuFb_, cpuIndex, cancel, wrappedMid, nullptr);
                 cpuSpp_.fetch_add(1, std::memory_order_relaxed);
@@ -405,105 +399,11 @@ private:
         ++batchIndex_;
     }
 
-    void renderTile(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
-                    const RenderMidProgressFn& midProgress) {
-        const int width = fb.width();
-        const int height = fb.height();
-        const size_t n = size_t(width) * size_t(height);
-        cpuFb_.resize(width, height);
-        cpuFb_.clear();
-        gpuHost_.assign(n, Vec4{});
-
-        if (tileW_ != width || tileH_ != height) {
-            tileW_ = width;
-            tileH_ = height;
-            tileCpuAreaTarget_ = 0;
-        }
-
-        if (!loggedMode_) {
-            logInfo("XPU Tile: GPU exclusive rects + Embree 32×32 block (~1/8 of the frame, "
-                    "then resized so CPU ms ≈ GPU ms; no steal; Embree keeps full PT)");
-            loggedMode_ = true;
-        }
-
-        const int cpuHint =
-            tileCpuAreaTarget_ > 0 ? tileCpuAreaTarget_ : xpuDefaultTileCpuArea(width, height);
-        const XpuWorkLists lists = xpuBuildWorkLists(width, height, cpuHint);
-        std::exception_ptr gpuEx;
-        std::exception_ptr cpuEx;
-        std::atomic<double> gpuMs{0.0};
-
-        std::thread gpuThread([&] {
-            const auto gpuT0 = std::chrono::steady_clock::now();
-            try {
-                for (const XpuWorkRect& rect : lists.gpuPacks) {
-                    if (cancel.load(std::memory_order_relaxed)) break;
-                    RenderSampleOptions gpuOpt;
-                    gpuOpt.skipFramebufferStore = true;
-                    gpuOpt.deferHostCopy = true;
-                    gpuOpt.clipX0 = rect.x0;
-                    gpuOpt.clipY0 = rect.y0;
-                    gpuOpt.clipX1 = rect.x1;
-                    gpuOpt.clipY1 = rect.y1;
-                    gpu_->renderSample(fb, sampleIndex, cancel, RenderMidProgressFn{}, &gpuOpt);
-                    gpu_->downloadInternalAccumRect(gpuHost_.data(), width, rect.x0, rect.y0, rect.x1,
-                                                    rect.y1);
-                }
-            } catch (...) {
-                gpuEx = std::current_exception();
-            }
-            gpuMs.store(
-                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gpuT0).count(),
-                std::memory_order_relaxed);
-        });
-
-        const auto cpuT0 = std::chrono::steady_clock::now();
-        try {
-            if (!lists.cpuTiles.empty() && !cancel.load(std::memory_order_relaxed)) {
-                const XpuWorkRect cpuRect = xpuBounds(lists.cpuTiles);
-                RenderSampleOptions cpuOpt;
-                cpuOpt.clipX0 = cpuRect.x0;
-                cpuOpt.clipY0 = cpuRect.y0;
-                cpuOpt.clipX1 = cpuRect.x1;
-                cpuOpt.clipY1 = cpuRect.y1;
-                cpu_->renderSample(cpuFb_, sampleIndex, cancel, midProgress, &cpuOpt);
-            }
-        } catch (...) {
-            cpuEx = std::current_exception();
-        }
-        const double cpuMs =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cpuT0).count();
-        gpuThread.join();
-        if (gpuEx) std::rethrow_exception(gpuEx);
-        if (cpuEx) std::rethrow_exception(cpuEx);
-
-        const int cpuArea = xpuAreaSum(lists.cpuTiles);
-        const int gpuArea = xpuAreaSum(lists.gpuPacks);
-        if (!cancel.load(std::memory_order_relaxed) && cpuArea > 0 && gpuArea > 0) {
-            tileCpuAreaTarget_ = xpuAdaptTileCpuArea(cpuArea, width, height, cpuMs,
-                                                     gpuMs.load(std::memory_order_relaxed));
-        }
-
-        accumAdd(fb.data(), cpuFb_.data(), n);
-        accumAdd(fb.data(), gpuHost_.data(), n);
-        fb.markHasData();
-        lastCompletedSamples_ = 1;
-
-        if (batchIndex_ < 2 || batchIndex_ % 8 == 0) {
-            const XpuWorkRect cpuRect = lists.cpuTiles.empty() ? XpuWorkRect{} : xpuBounds(lists.cpuTiles);
-            logInfo("XPU Tile spp " + std::to_string(sampleIndex) + ": GPU " + std::to_string(gpuArea) +
-                    " px " + std::to_string(int(gpuMs.load(std::memory_order_relaxed))) +
-                    " ms wall, Embree " + std::to_string(cpuRect.width()) + "x" +
-                    std::to_string(cpuRect.height()) + " " + std::to_string(int(cpuMs)) +
-                    " ms, next CPU area " + std::to_string(tileCpuAreaTarget_));
-        }
-        ++batchIndex_;
-    }
-
     RenderDevicePtr cpu_;
     RenderDevicePtr gpu_;
     Framebuffer cpuFb_;
     std::vector<Vec4> gpuHost_;
+    std::vector<float> gpuLumSq_;
     std::mutex gpuHostMutex_;
     std::condition_variable snapshotCv_;
     std::atomic<bool> snapshotWanted_{false};
@@ -518,9 +418,6 @@ private:
     int nextGpuSample_ = 0;
     int nextCpuSample_ = 1;
     bool loggedMode_ = false;
-    int tileCpuAreaTarget_ = 0;
-    int tileW_ = 0;
-    int tileH_ = 0;
     Framebuffer* fbPtr_ = nullptr;
     const std::atomic<bool>* cancelPtr_ = nullptr;
     std::thread gpuThread_;
@@ -542,7 +439,7 @@ RenderDevicePtr createXpuDevice(int threadCount) {
         logError("XPU (Embree+OptiX) cannot start: OptiX GPU is unavailable");
         return nullptr;
     }
-    logInfo("XPU: Overlap (default), Mixture, or Tile; Embree threads=" + std::to_string(cpuThreads));
+    logInfo("XPU: Overlap (default) or Mixture; Embree threads=" + std::to_string(cpuThreads));
     return std::make_shared<XpuDevice>(std::move(cpu), std::move(gpu));
 }
 

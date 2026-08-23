@@ -22,12 +22,27 @@ __device__ inline Vec3 clampFirefly(Vec3 contrib, float clampValue) {
     return contrib;
 }
 
+__device__ inline float wavefrontLuminance(Vec3 c) {
+    return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+}
+
 __device__ inline void addRadiance(int pixel, Vec3 c) {
     if (!isFinite(c)) return;
-    Vec4& a = launchParams().accumBuffer[pixel];
+    const LaunchParams& p = launchParams();
+    Vec4& a = p.accumBuffer[pixel];
     a.x += c.x;
     a.y += c.y;
     a.z += c.z;
+    if (!p.paths) return;
+    GpuPath& path = p.paths[pixel];
+    if (p.lumSq) {
+        const float oldL = wavefrontLuminance(path.sampleRgb);
+        path.sampleRgb += c;
+        const float newL = wavefrontLuminance(path.sampleRgb);
+        p.lumSq[pixel] += newL * newL - oldL * oldL;
+    } else {
+        path.sampleRgb += c;
+    }
 }
 
 __device__ inline Vec3 offsetRay(Vec3 p, Vec3 n, Vec3 dir) {

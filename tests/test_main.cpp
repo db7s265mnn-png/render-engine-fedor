@@ -45,6 +45,7 @@
 #include "render/shading.h"
 #include "render/volume_vdb.h"
 #include "render/xpu_split.h"
+#include "render/pixel_oracle.h"
 #include "render/camera_sample.h"
 #include "render/spectrum.h"
 #include "render/spectrum_rgb.h"
@@ -511,75 +512,31 @@ void testXpuDevice() {
     check(xpuEmbreeThreadCount(2) == 1, "XPU with 2 threads leaves 1 for GPU");
     check(xpuEmbreeThreadCount(1) == 1, "XPU keeps at least one Embree thread");
     check(xpuEmbreeThreadCount(0) >= 1, "XPU auto thread count is at least 1");
-    check(kXpuCpuTilePx == 32, "RenderMan CPU bucket is 32x32");
-    check(kXpuGpuPackPx == 704, "GPU pack edge is 22*32");
-    check(kXpuGpuPackPx * kXpuGpuPackPx >= 490000 && kXpuGpuPackPx * kXpuGpuPackPx <= 510000,
-          "GPU pack ~500k px like RenderMan");
-    check(kXpuScheduleOverlap == 0 && kXpuScheduleMixture == 1 && kXpuScheduleTile == 2,
-          "Overlap is default schedule 0");
+    check(kXpuScheduleOverlap == 0 && kXpuScheduleMixture == 1, "Overlap is default schedule 0");
     check(xpuGpuOwnsSample(0) && !xpuGpuOwnsSample(1), "Overlap: even spp GPU, odd spp CPU");
     check(xpuCpuSampleIndex(0) != 0, "CPU estimator uses a disjoint sample index");
+    check(noiseOracleMinSamples(64) >= 4, "oracle waits for a few camera samples");
+    check(!noiseOraclePixelQuiet(0.5f, 0.5f, 0.5f, 0.0f, 8, 0.01f), "oracle stays open without L²");
+    check(noiseOraclePixelQuiet(0.0f, 0.0f, 0.0f, 0.0f, 8, 0.01f), "black pixels with no L² are quiet");
+    check(noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 8.0f, 8, 0.01f), "constant L² matches mean² → quiet");
+    check(!noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 80.0f, 8, 0.01f), "high L² variance stays noisy");
+    check(!noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 8.0f, 8, 0.0f), "threshold 0 disables the oracle");
 
-    auto coverOnce = [](int w, int h, const char* label) {
-        const XpuWorkLists lists = xpuBuildWorkLists(w, h);
-        std::vector<uint8_t> cov(size_t(w) * size_t(h), 0);
-        int marked = 0;
-        auto mark = [&](const std::vector<XpuWorkRect>& rects) {
-            for (const XpuWorkRect& r : rects) {
-                check(r.x0 >= 0 && r.y0 >= 0 && r.x1 <= w && r.y1 <= h, label);
-                check(r.x1 > r.x0 && r.y1 > r.y0, label);
-                for (int y = r.y0; y < r.y1; ++y) {
-                    for (int x = r.x0; x < r.x1; ++x) {
-                        const size_t i = size_t(y) * size_t(w) + size_t(x);
-                        check(cov[i] == 0, "XPU tiles do not overlap");
-                        cov[i] = 1;
-                        ++marked;
-                    }
+    {
+        Framebuffer film;
+        film.resize(2, 2);
+        const Vec3 white(1.0f, 1.0f, 1.0f);
+        for (int s = 0; s < 8; ++s) {
+            for (int y = 0; y < 2; ++y) {
+                for (int x = 0; x < 2; ++x) {
+                    film.addSample(x, y, white);
+                    film.addNoiseSample(x, y, white);
                 }
             }
-        };
-        mark(lists.gpuPacks);
-        mark(lists.cpuTiles);
-        check(marked == w * h, label);
-    };
-    coverOnce(1920, 1080, "1080p XPU tiles cover every pixel once");
-    coverOnce(32, 32, "32x32 XPU tiles cover once");
-    coverOnce(960, 540, "540p XPU tiles cover once");
-    coverOnce(40, 40, "40x40 remainder tiles cover once");
-    coverOnce(704, 704, "704x704 is one GPU pack");
-    coverOnce(1920, 80, "wide remainder strip covers once");
-    coverOnce(2560, 1440, "1440p XPU tiles cover once");
-    coverOnce(3840, 2160, "4K XPU tiles cover once");
-    {
-        check(xpuDefaultTileCpuArea(1920, 1080) == 1920 * 1080 / 8, "1080p default CPU share is 1/8");
-        const XpuWorkLists hd = xpuBuildWorkLists(1920, 1080);
-        check(hd.gpuPacks.size() == 1, "1080p GPU is one launch");
-        check(hd.gpuPacks[0].width() == 1920 && hd.gpuPacks[0].height() == 952,
-              "1080p GPU owns all but four 32-px CPU rows");
-        check(xpuAreaSum(hd.cpuTiles) == 1920 * 128, "1080p CPU gets ~1/8 as 32x32 tiles");
-        check(xpuAreaSum(hd.gpuPacks) > 5 * xpuAreaSum(hd.cpuTiles),
-              "1080p GPU still owns most of the frame");
-        check(xpuBounds(hd.cpuTiles).area() == xpuAreaSum(hd.cpuTiles),
-              "CPU tiles form a solid rect");
-        const XpuWorkLists tiny = xpuBuildWorkLists(32, 32);
-        check(tiny.gpuPacks.empty(), "32x32 is CPU tiles only");
-        check(!tiny.cpuTiles.empty(), "32x32 has CPU tiles");
-        const XpuWorkLists uhd = xpuBuildWorkLists(3840, 2160);
-        check(!uhd.cpuTiles.empty(), "4K still gives Embree an exclusive block");
-        check(uhd.gpuPacks.size() == 1, "4K GPU is one launch");
-        check(xpuAreaSum(uhd.cpuTiles) == 3840 * 256, "4K CPU gets eight 32-px rows (~1/8)");
-        const XpuWorkLists qhd = xpuBuildWorkLists(2560, 1440);
-        check(!qhd.cpuTiles.empty(), "1440p still gives Embree an exclusive block");
-        check(xpuAreaSum(qhd.cpuTiles) == 2560 * 160, "1440p CPU gets five 32-px rows");
-        const XpuWorkLists corner = xpuBuildWorkLists(1920, 1080, 32 * 32);
-        check(xpuAreaSum(corner.cpuTiles) == 32 * 32, "tiny CPU hint is one 32x32 tile");
-        check(corner.gpuPacks.size() == 2, "tiny CPU corner leaves two GPU rects");
-        check(xpuAdaptTileCpuArea(10000, 1920, 1080, 10.0, 40.0) > 10000,
-              "Tile grows Embree when GPU wall is longer");
-        check(xpuAdaptTileCpuArea(200000, 1920, 1080, 40.0, 10.0) < 200000,
-              "Tile shrinks Embree when CPU wall is longer");
-        check(xpuAdaptTileCpuArea(10000, 1920, 1080, 10.0, 10000.0) <= 1920 * 1080 / 3,
-              "Tile CPU share caps at 1/3");
+        }
+        film.refreshNoiseOracle(0.01f, 8, 64);
+        check(film.skipPixel(0, 0) && film.skipPixel(1, 1), "quiet constant film skips pixels");
+        check(film.noiseOracleDone(), "constant 2x2 film converges");
     }
 
     Scene scene;
@@ -642,7 +599,19 @@ void testXpuDevice() {
         settings->setParameterValue("xpuschedule", 2);
         stage = graph.cookDisplay(context);
         cooked = stage->toScene();
-        check(cooked->settings.xpuSchedule == kXpuScheduleTile, "xpuschedule 2 cooks to Tile");
+        check(cooked->settings.xpuSchedule == kXpuScheduleOverlap, "retired Tile value cooks to Overlap");
+        const Parameter* noise = settings->findParameter(QLatin1String("noisethreshold"));
+        check(noise != nullptr, "noisethreshold parameter exists");
+        if (noise) {
+            check(noise->group == QLatin1String("Sampling"), "noisethreshold in Sampling");
+        }
+        settings->setParameterValue("noisethreshold", 0.05);
+        stage = graph.cookDisplay(context);
+        cooked = stage->toScene();
+        check(std::fabs(cooked->settings.noiseThreshold - 0.05f) < 1e-5f, "noisethreshold cooks");
+        if (sched) {
+            check(sched->menuItems.size() == 2, "XPU Schedule menu is Overlap / Mixture");
+        }
     }
 
     float jx = 0, jy = 0, lu = 0, lv = 0;
@@ -682,7 +651,9 @@ void testRenderSettingsFolders() {
     check(indexOf("filterradius") == indexOf("pixelfilter") + 1, "filterradius after pixelfilter");
 
     check(groupOf("lightsamples") == QLatin1String("Sampling"), "lightsamples in Sampling");
-    check(indexOf("lightsamples") == indexOf("samples") + 1, "lightsamples after samples");
+    check(groupOf("noisethreshold") == QLatin1String("Sampling"), "noisethreshold in Sampling");
+    check(indexOf("noisethreshold") == indexOf("samples") + 1, "noisethreshold after samples");
+    check(indexOf("lightsamples") == indexOf("noisethreshold") + 1, "lightsamples after noisethreshold");
 
     check(groupOf("maxdepth") == QLatin1String("Depth"), "maxdepth in Depth");
     check(groupOf("rrdepth") == QLatin1String("Depth"), "rrdepth in Depth");
