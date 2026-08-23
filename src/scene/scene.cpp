@@ -420,7 +420,8 @@ static float lightPowerForBvh(const LightData& l,
     auto avg3 = [](Vec3 v) { return std::max(1e-8f, (v.x + v.y + v.z) * (1.0f / 3.0f)); };
     const float intens = avg3(vmax(e, Vec3(0.0f)));
     (void)intens;
-    const float r = std::max(sceneRadius, 1e-2f);
+    // Same empty-bounds rule as lights.h sceneRadius(): r=1, not a 1cm floor.
+    const float r = sceneRadius > 1e-3f ? sceneRadius : 1.0f;
     const float piR2 = kPi * r * r;
     auto radianceLum = [&]() -> float {
         Vec3 Le = e;
@@ -633,7 +634,9 @@ void Scene::buildLightBvh() {
     std::vector<BuildEntry> finites;
     finites.reserve(lights.size());
 
-    const float sceneRadius = std::max(1e-2f, bounds_.radius());
+    // pbrt-v4 / lights.h: empty world AABB → r=1 so Φ_distant and Φ_env stay defined.
+    const float worldR = bounds_.radius();
+    const float sceneRadius = worldR > 1e-3f ? worldR : 1.0f;
 
     for (int i = 0; i < int(lights.size()); ++i) {
         const LightData& l = lights[i];
