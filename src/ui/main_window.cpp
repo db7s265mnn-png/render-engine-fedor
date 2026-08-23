@@ -1654,6 +1654,10 @@ void MainWindow::updateStatusBar() {
         const char* engine = "Buckets";
         if (rs.samplingEngine == kSamplingEngineProgressive) engine = "Progressive";
         overlay += QString("   %1 · PathSobol · %2").arg(sampler, engine);
+        if (rs.noiseThreshold > 0.0f)
+            overlay += QString("   noise %1").arg(double(rs.noiseThreshold), 0, 'g', 3);
+        else
+            overlay += QStringLiteral("   noise off");
         if (rs.pixelSampler == kPixelSamplerManualTest)
             overlay += QString("  mult=%1").arg(rs.manualTestMult, 0, 'f', 2);
     }

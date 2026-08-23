@@ -23,9 +23,10 @@ Intel Embree CPU device, the NVIDIA OptiX GPU device, or XPU (both together).
   OptiX wavefront path tracing; `XPU (Embree+OptiX)` runs CPU and GPU together. **Overlap**
   (default) keeps the GPU filling even spp until Embree finishes one odd spp, then one film
   add — faster GPU means more GPU spp per CPU spp. **Mixture** is optional (Karma
-    independent films) and is usually slower than GPU-only. **Noise Threshold** (Sampling)
-  is a Karma XPU-style variance pixel oracle: quiet pixels stop receiving camera samples
-  once relative luminance error is below the threshold (0 = off, default 0.01).
+    independent films) and is usually slower than GPU-only. **Pixel Oracle** + **Noise Threshold**
+  (Sampling, Karma XPU Variance): Variance (default) stops quiet pixels once relative
+  luminance error is below the threshold (0 = off, default 0.01). Uniform always takes
+  every Samples Per Pixel.
   CPU keeps its full Path Tracer (MNEE, SSS, OpenPGL, N light samples, filters).
   GPU and XPU are Path Tracer only; if OptiX cannot start they stop with an error instead of
   falling back to Embree.

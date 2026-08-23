@@ -1069,15 +1069,24 @@ public:
         // --- Sampling -----------------------------------------------------------------
         addParameter(Parameter::makeInt("samples", "Samples Per Pixel", 128, 1, 100000, false)
                          .withGroup("Sampling"));
-        addParameter(Parameter::makeFloat("noisethreshold", "Noise Threshold", 0.01, 0.0, 1.0, false)
+        addParameter(Parameter::makeMenu("pixeloracle", "Pixel Oracle",
+                                         {"Uniform", "Variance"}, 1)
                          .withGroup("Sampling")
                          .withTooltip(
-                             "Karma XPU-style variance pixel oracle.\n"
+                             "Karma XPU pixel oracle.\n"
+                             "Variance (default): after a few camera samples, quiet pixels stop "
+                             "when their relative luminance error is below Noise Threshold.\n"
+                             "Uniform: always take every Samples Per Pixel (oracle off)."));
+        addParameter(Parameter::makeFloat("noisethreshold", "Noise Threshold", 0.01, 0.0, 1.0, true)
+                         .withGroup("Sampling")
+                         .withTooltip(
+                             "Karma XPU Variance Threshold (this engine labels it Noise Threshold).\n"
                              "After a few camera samples, pixels whose relative luminance error "
                              "(and their 4-neighbours) is below this value stop receiving more "
                              "samples. Max samples is still Samples Per Pixel.\n"
                              "0.01 = Karma default. Lower = cleaner, slower. 0 = off "
-                             "(always take every sample)."));
+                             "(always take every sample).\n"
+                             "Used when Pixel Oracle is Variance. Uniform ignores this."));
         addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
                          .withGroup("Sampling")
                          .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
@@ -1434,7 +1443,14 @@ public:
         settings.resolutionX = intValue("resx", 960);
         settings.resolutionY = intValue("resy", 540);
         settings.samplesPerPixel = intValue("samples", 128);
-        settings.noiseThreshold = std::max(0.0f, float(floatValue("noisethreshold", 0.01)));
+        {
+            // Pixel Oracle: Uniform (0) always takes every sample; Variance (1) uses
+            // Noise Threshold (Karma XPU Variance Threshold).
+            const int oracle = intValue("pixeloracle", 1);
+            float noise = std::max(0.0f, float(floatValue("noisethreshold", 0.01)));
+            if (oracle == 0) noise = 0.0f;
+            settings.noiseThreshold = noise;
+        }
         settings.backend = std::clamp(intValue("backend", 0), 0, 2);
         {
             int sched = intValue("xpuschedule", 0);

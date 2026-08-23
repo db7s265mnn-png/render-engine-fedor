@@ -12,6 +12,8 @@
 #include <QColor>
 #include <QDir>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <QFile>
 #include <QFileInfo>
@@ -600,15 +602,27 @@ void testXpuDevice() {
         stage = graph.cookDisplay(context);
         cooked = stage->toScene();
         check(cooked->settings.xpuSchedule == kXpuScheduleOverlap, "retired Tile value cooks to Overlap");
+        const Parameter* oracle = settings->findParameter(QLatin1String("pixeloracle"));
+        check(oracle != nullptr, "pixeloracle parameter exists");
+        if (oracle) {
+            check(oracle->group == QLatin1String("Sampling"), "pixeloracle in Sampling");
+            check(oracle->menuItems.size() == 2, "Pixel Oracle is Uniform / Variance");
+        }
         const Parameter* noise = settings->findParameter(QLatin1String("noisethreshold"));
         check(noise != nullptr, "noisethreshold parameter exists");
         if (noise) {
             check(noise->group == QLatin1String("Sampling"), "noisethreshold in Sampling");
+            check(noise->visibleWhen.isEmpty(), "noisethreshold always listed in Sampling");
         }
         settings->setParameterValue("noisethreshold", 0.05);
         stage = graph.cookDisplay(context);
         cooked = stage->toScene();
         check(std::fabs(cooked->settings.noiseThreshold - 0.05f) < 1e-5f, "noisethreshold cooks");
+        settings->setParameterValue("pixeloracle", 0);
+        stage = graph.cookDisplay(context);
+        cooked = stage->toScene();
+        check(cooked->settings.noiseThreshold == 0.0f, "Uniform oracle disables noise threshold");
+        settings->setParameterValue("pixeloracle", 1);
         if (sched) {
             check(sched->menuItems.size() == 2, "XPU Schedule menu is Overlap / Mixture");
         }
@@ -651,8 +665,10 @@ void testRenderSettingsFolders() {
     check(indexOf("filterradius") == indexOf("pixelfilter") + 1, "filterradius after pixelfilter");
 
     check(groupOf("lightsamples") == QLatin1String("Sampling"), "lightsamples in Sampling");
+    check(groupOf("pixeloracle") == QLatin1String("Sampling"), "pixeloracle in Sampling");
     check(groupOf("noisethreshold") == QLatin1String("Sampling"), "noisethreshold in Sampling");
-    check(indexOf("noisethreshold") == indexOf("samples") + 1, "noisethreshold after samples");
+    check(indexOf("pixeloracle") == indexOf("samples") + 1, "pixeloracle after samples");
+    check(indexOf("noisethreshold") == indexOf("pixeloracle") + 1, "noisethreshold after pixeloracle");
     check(indexOf("lightsamples") == indexOf("noisethreshold") + 1, "lightsamples after noisethreshold");
 
     check(groupOf("maxdepth") == QLatin1String("Depth"), "maxdepth in Depth");
@@ -694,6 +710,43 @@ void testRenderSettingsFolders() {
                                QStringLiteral("Displacement"), QStringLiteral("Film"),
                                QStringLiteral("Diagnostic")};
     check(groups == expected, "render settings tab order");
+
+    // Older scene files omit noisethreshold / pixeloracle; ctor defaults must remain.
+    {
+        NodeGraph saved;
+        Node* rs = saved.createNode("rendersettings", "rs1");
+        check(rs != nullptr, "create rendersettings for json merge");
+        QJsonObject json = saved.toJson();
+        QJsonArray nodes = json.value("nodes").toArray();
+        for (int i = 0; i < nodes.size(); ++i) {
+            QJsonObject nodeJson = nodes[i].toObject();
+            if (nodeJson.value("type").toString() != QLatin1String("rendersettings")) continue;
+            QJsonArray params = nodeJson.value("parameters").toArray();
+            QJsonArray stripped;
+            for (const QJsonValue& v : params) {
+                const QString n = v.toObject().value("name").toString();
+                if (n == QLatin1String("noisethreshold") || n == QLatin1String("pixeloracle")) continue;
+                stripped.append(v);
+            }
+            nodeJson["parameters"] = stripped;
+            nodes[i] = nodeJson;
+        }
+        json["nodes"] = nodes;
+        NodeGraph loaded;
+        QString error;
+        check(loaded.fromJson(json, error), "old scene json loads without noisethreshold");
+        Node* loadedSettings = loaded.findNode("rs1");
+        check(loadedSettings != nullptr, "reloaded rendersettings");
+        if (loadedSettings) {
+            const Parameter* noise = loadedSettings->findParameter(QLatin1String("noisethreshold"));
+            check(noise != nullptr, "noisethreshold survives load of older scene files");
+            check(std::fabs(loadedSettings->floatValue("noisethreshold", -1.0) - 0.01) < 1e-6,
+                  "noisethreshold default 0.01 on old files");
+            const Parameter* oracle = loadedSettings->findParameter(QLatin1String("pixeloracle"));
+            check(oracle != nullptr, "pixeloracle survives load of older scene files");
+            check(loadedSettings->intValue("pixeloracle", -1) == 1, "pixeloracle defaults to Variance");
+        }
+    }
 }
 
 void testRender() {
