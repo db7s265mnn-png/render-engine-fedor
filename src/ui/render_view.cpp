@@ -301,27 +301,28 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     toolStrip_ = new QWidget(chromeBar_);
     toolStrip_->setObjectName("viewportTransformStrip");
     toolStrip_->setStyleSheet(
-        "QWidget#viewportTransformStrip {"
-        "  background: transparent;"
-        "  border: none;"
-        "}"
-        "QToolButton {"
-        "  color: #e8eaed;"
-        "  background: #3a3e44;"
-        "  border: 1px solid #4a4f57;"
-        "  border-radius: 6px;"
-        "  min-width: 28px;"
-        "  min-height: 24px;"
-        "  max-height: 24px;"
-        "  font-weight: 700;"
-        "  font-size: 11px;"
-        "  padding: 0 4px;"
-        "}"
-        "QToolButton:checked { %1 }"
-        "QToolButton:hover {"
-        "  background: #474c54;"
-        "}")
-        .arg(theme::checkedCss());
+        QStringLiteral(
+            "QWidget#viewportTransformStrip {"
+            "  background: transparent;"
+            "  border: none;"
+            "}"
+            "QToolButton {"
+            "  color: #e8eaed;"
+            "  background: #3a3e44;"
+            "  border: 1px solid #4a4f57;"
+            "  border-radius: 6px;"
+            "  min-width: 28px;"
+            "  min-height: 24px;"
+            "  max-height: 24px;"
+            "  font-weight: 700;"
+            "  font-size: 11px;"
+            "  padding: 0 4px;"
+            "}"
+            "QToolButton:checked { %1 }"
+            "QToolButton:hover {"
+            "  background: #474c54;"
+            "}")
+            .arg(theme::checkedCss()));
     auto* stripLayout = new QHBoxLayout(toolStrip_);
     stripLayout->setContentsMargins(4, 4, 4, 4);
     stripLayout->setSpacing(4);
@@ -404,14 +405,15 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         button->setToolTip(tip);
         button->setAutoRaise(true);
         button->setStyleSheet(
-            "QToolButton {"
-            "  min-width: 42px; min-height: 24px; max-height: 24px;"
-            "  font-size: 11px; font-weight: 600;"
-            "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
-            "}"
-            "QToolButton:checked { %1 }"
-            "QToolButton:hover { background: #474c54; }")
-            .arg(theme::checkedCss());
+            QStringLiteral(
+                "QToolButton {"
+                "  min-width: 42px; min-height: 24px; max-height: 24px;"
+                "  font-size: 11px; font-weight: 600;"
+                "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
+                "}"
+                "QToolButton:checked { %1 }"
+                "QToolButton:hover { background: #474c54; }")
+                .arg(theme::checkedCss()));
         spaceGroup->addButton(button);
         stripLayout->addWidget(button);
         fitChromeButton(button);
