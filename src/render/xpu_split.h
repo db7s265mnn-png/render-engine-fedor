@@ -1,5 +1,4 @@
-// XPU tile geometry (RenderMan / Cycles) and host-thread split.
-// Mixture mode does not use these rects — CPU and GPU each own a full-frame film.
+// XPU work split: Overlap (even GPU / odd CPU spp), Mixture films, Tile rects.
 #pragma once
 
 #include "scene/types.h"
@@ -9,6 +8,10 @@
 #include <vector>
 
 namespace sol {
+
+// Overlap: even sample indices on GPU, odd on CPU. GPU may consume many even
+// spp while Embree finishes one odd spp.
+SR_INL SR_HD bool xpuGpuOwnsSample(int sampleIndex) { return (sampleIndex & 1) == 0; }
 
 // RenderMan CPU bucket: 1024 px → 32×32. Cycles CPU tiles are the same order.
 inline constexpr int kXpuCpuTilePx = 32;
@@ -40,7 +43,8 @@ inline int xpuEmbreeThreadCount(int requested) {
 // Independent estimators: CPU Sobol/path RNG lives in a disjoint sample-index band.
 inline int xpuCpuSampleIndex(int cpuSpp) { return 0x40000000 + cpuSpp; }
 
-// Non-overlapping partition: large GPU packs where they fit, else 32×32 CPU tiles.
+// Full 704² blocks go to the GPU. Edge leftovers become 32×32 CPU tiles so
+// Embree never path-traces a ~500k-px pack (that is why Tile lost to GPU-only).
 inline XpuWorkLists xpuBuildWorkLists(int width, int height) {
     XpuWorkLists out;
     const int w = std::max(0, width);
@@ -52,7 +56,7 @@ inline XpuWorkLists xpuBuildWorkLists(int width, int height) {
         int x = 0;
         while (x < w) {
             const int packW = std::min(kXpuGpuPackPx, w - x);
-            if (packW >= 64 && packH >= 64) {
+            if (packW >= kXpuGpuPackPx && packH >= kXpuGpuPackPx) {
                 out.gpuPacks.push_back({x, y, x + packW, y + packH});
             } else {
                 for (int ty = y; ty < y + packH; ty += kXpuCpuTilePx) {

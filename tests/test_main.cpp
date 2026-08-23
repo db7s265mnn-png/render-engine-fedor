@@ -515,7 +515,9 @@ void testXpuDevice() {
     check(kXpuGpuPackPx == 704, "GPU pack edge is 22*32");
     check(kXpuGpuPackPx * kXpuGpuPackPx >= 490000 && kXpuGpuPackPx * kXpuGpuPackPx <= 510000,
           "GPU pack ~500k px like RenderMan");
-    check(kXpuScheduleMixture == 0 && kXpuScheduleTile == 1, "Mixture is default schedule 0");
+    check(kXpuScheduleOverlap == 0 && kXpuScheduleMixture == 1 && kXpuScheduleTile == 2,
+          "Overlap is default schedule 0");
+    check(xpuGpuOwnsSample(0) && !xpuGpuOwnsSample(1), "Overlap: even spp GPU, odd spp CPU");
     check(xpuCpuSampleIndex(0) != 0, "CPU estimator uses a disjoint sample index");
 
     auto coverOnce = [](int w, int h, const char* label) {
@@ -551,6 +553,7 @@ void testXpuDevice() {
         check(!hd.gpuPacks.empty(), "1080p has GPU packs");
         check(hd.gpuPacks[0].width() <= kXpuGpuPackPx, "GPU pack width cap");
         check(hd.gpuPacks[0].height() <= kXpuGpuPackPx, "GPU pack height cap");
+        check(!hd.cpuTiles.empty(), "1080p remainder is CPU 32x32 not stolen 704 packs");
         const XpuWorkLists tiny = xpuBuildWorkLists(32, 32);
         check(tiny.gpuPacks.empty(), "32x32 is CPU tiles only");
         check(!tiny.cpuTiles.empty(), "32x32 has CPU tiles");
@@ -558,7 +561,7 @@ void testXpuDevice() {
 
     Scene scene;
     scene.settings.backend = kBackendXpu;
-    scene.settings.xpuSchedule = kXpuScheduleMixture;
+    scene.settings.xpuSchedule = kXpuScheduleOverlap;
     scene.settings.lightSamples = 8;
     scene.settings.pathGuiding = 1;
     scene.settings.motionBlur = 1;
@@ -577,7 +580,7 @@ void testXpuDevice() {
     check(scene.settings.samplingEngine == kSamplingEngineProgressive, "XPU keeps sampling type");
     check(scene.camera.opticalModel == 1, "XPU keeps authored camera model");
     check(scene.materials[0].subsurface == 0.7f, "XPU keeps SSS on CPU samples");
-    check(scene.settings.xpuSchedule == kXpuScheduleMixture, "XPU default schedule is Mixture");
+    check(scene.settings.xpuSchedule == kXpuScheduleOverlap, "XPU default schedule is Overlap");
 
     registerBuiltinNodes();
     NodeGraph graph;
@@ -608,11 +611,15 @@ void testXpuDevice() {
         check(stage != nullptr, "XPU cook produces a stage");
         ScenePtr cooked = stage->toScene();
         check(cooked->settings.backend == kBackendXpu, "menu value 2 cooks to XPU");
-        check(cooked->settings.xpuSchedule == kXpuScheduleMixture, "xpuschedule 0 cooks to Mixture");
+        check(cooked->settings.xpuSchedule == kXpuScheduleOverlap, "xpuschedule 0 cooks to Overlap");
         settings->setParameterValue("xpuschedule", 1);
         stage = graph.cookDisplay(context);
         cooked = stage->toScene();
-        check(cooked->settings.xpuSchedule == kXpuScheduleTile, "xpuschedule 1 cooks to Tile");
+        check(cooked->settings.xpuSchedule == kXpuScheduleMixture, "xpuschedule 1 cooks to Mixture");
+        settings->setParameterValue("xpuschedule", 2);
+        stage = graph.cookDisplay(context);
+        cooked = stage->toScene();
+        check(cooked->settings.xpuSchedule == kXpuScheduleTile, "xpuschedule 2 cooks to Tile");
     }
 
     float jx = 0, jy = 0, lu = 0, lv = 0;

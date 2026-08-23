@@ -32,7 +32,7 @@ using RenderMidProgressFn = std::function<void()>;
 struct RenderSampleOptions {
     int xpuRemainingSamples = 0;        // spp left in the session (legacy cap)
     int xpuTargetSamples = 0;           // absolute spp target for Mixture GPU stop
-    int xpuSchedule = 0;                // XpuSchedule: 0 Mixture, 1 Tile
+    int xpuSchedule = 0;                // XpuSchedule: 0 Overlap, 1 Mixture, 2 Tile
     int clipX0 = 0, clipY0 = 0, clipX1 = 0, clipY1 = 0;  // exclusive x1/y1; empty = full frame
     bool skipFramebufferStore = false;  // OptiX: keep this sample internal (XPU add)
     bool resetAccum = false;            // OptiX: memset accum before this sample

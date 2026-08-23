@@ -1,6 +1,7 @@
-// Hybrid CPU+GPU device. Two schedules:
+// Hybrid CPU+GPU device. Three schedules:
+//   Overlap (default): GPU fills even spp until Embree finishes one odd spp, one D2H add.
 //   Mixture (Karma): independent full-frame films, persistent GPU worker, host blend.
-//   Tile (RenderMan / Cycles): 32×32 CPU microtiles + ~704² GPU packs, work stealing.
+//   Tile (RenderMan / Cycles): 32×32 CPU microtiles + ~704² GPU packs.
 #include "render/render_device.h"
 
 #include "core/log.h"
@@ -84,7 +85,12 @@ public:
             renderTile(fb, sampleIndex, cancel, midProgress);
             return;
         }
-        renderMixture(fb, sampleIndex, cancel, midProgress, opt);
+        if (opt.xpuSchedule == kXpuScheduleMixture) {
+            renderMixture(fb, sampleIndex, cancel, midProgress, opt);
+            return;
+        }
+        stopGpuWorker();
+        renderOverlap(fb, sampleIndex, cancel, midProgress, opt);
     }
 
     void finishRender() override { stopGpuWorker(); }
@@ -107,6 +113,8 @@ public:
 
 private:
     void resetFrame() {
+        nextGpuSample_ = 0;
+        nextCpuSample_ = 1;
         cpuSpp_.store(0, std::memory_order_relaxed);
         gpuSpp_.store(0, std::memory_order_relaxed);
         reportedSpp_ = 0;
@@ -214,6 +222,98 @@ private:
             gpuSpp_.load(std::memory_order_relaxed) > 0) {
             takeGpuSnapshot();
         }
+    }
+
+    // GPU launches even spp into device accum until Embree's odd spp returns,
+    // then one D2H add. No 1:1 barrier — a faster GPU does more even spp.
+    void renderOverlap(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
+                       const RenderMidProgressFn& midProgress, const RenderSampleOptions& opt) {
+        const int width = fb.width();
+        const int height = fb.height();
+        if (sampleIndex <= 0) {
+            nextGpuSample_ = 0;
+            nextCpuSample_ = 1;
+        }
+
+        int remaining = opt.xpuRemainingSamples;
+        if (remaining <= 0) remaining = 2;
+        const bool runCpu = remaining >= 2;
+        const int maxGpu = runCpu ? remaining - 1 : remaining;
+        if (maxGpu <= 0 && !runCpu) return;
+
+        if (!loggedMode_) {
+            logInfo("XPU Overlap: GPU fills even spp until Embree finishes one odd spp, then one D2H add; "
+                    "Embree keeps MNEE / SSS / OpenPGL / N lights / filters");
+            loggedMode_ = true;
+        }
+
+        std::atomic<bool> cpuDone{false};
+        std::atomic<int> gpuCount{0};
+        std::exception_ptr gpuEx;
+
+        std::thread gpuThread([&] {
+            try {
+                RenderSampleOptions gpuOpt;
+                gpuOpt.skipFramebufferStore = true;
+                gpuOpt.deferHostCopy = true;
+                for (;;) {
+                    if (cancel.load(std::memory_order_relaxed)) break;
+                    const int done = gpuCount.load(std::memory_order_relaxed);
+                    if (done >= maxGpu) break;
+                    if (done > 0 && cpuDone.load(std::memory_order_relaxed)) break;
+                    gpuOpt.resetAccum = (done == 0);
+                    gpu_->renderSample(fb, nextGpuSample_, cancel, RenderMidProgressFn{}, &gpuOpt);
+                    nextGpuSample_ += 2;
+                    gpuCount.fetch_add(1, std::memory_order_relaxed);
+                }
+            } catch (...) {
+                gpuEx = std::current_exception();
+                cpuDone.store(true, std::memory_order_relaxed);
+            }
+        });
+
+        const auto cpuT0 = std::chrono::steady_clock::now();
+        try {
+            if (runCpu && !cancel.load(std::memory_order_relaxed)) {
+                cpu_->renderSample(fb, nextCpuSample_, cancel, midProgress, nullptr);
+                nextCpuSample_ += 2;
+            }
+        } catch (...) {
+            cpuDone.store(true, std::memory_order_relaxed);
+            gpuThread.join();
+            throw;
+        }
+        const double cpuMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - cpuT0).count();
+        cpuDone.store(true, std::memory_order_relaxed);
+        gpuThread.join();
+        if (gpuEx) std::rethrow_exception(gpuEx);
+
+        const int g = gpuCount.load(std::memory_order_relaxed);
+        const int c = runCpu ? 1 : 0;
+        lastCompletedSamples_ = std::max(1, g + c);
+
+        if (g > 0) {
+            const size_t pixelCount = size_t(width) * size_t(height);
+            gpuHost_.resize(pixelCount);
+            if (gpu_->downloadInternalAccum(gpuHost_.data(), pixelCount)) {
+                Vec4* dst = fb.data();
+                for (size_t i = 0; i < pixelCount; ++i) {
+                    dst[i].x += gpuHost_[i].x;
+                    dst[i].y += gpuHost_[i].y;
+                    dst[i].z += gpuHost_[i].z;
+                    dst[i].w += gpuHost_[i].w;
+                }
+                fb.markHasData();
+            }
+        }
+
+        if (batchIndex_ < 2 || batchIndex_ % 8 == 0) {
+            logInfo("XPU Overlap: GPU " + std::to_string(g) + " spp (" +
+                    std::to_string(int(gpu_ ? gpu_->lastGpuSampleMs() : 0.0)) + " ms/spp) + Embree " +
+                    std::to_string(c) + " spp (" + std::to_string(int(cpuMs)) + " ms)");
+        }
+        ++batchIndex_;
     }
 
     void presentMixture(Framebuffer& fb) {
@@ -330,6 +430,7 @@ private:
             -> std::optional<XpuWorkRect> {
             const size_t i = primary.fetch_add(1, std::memory_order_relaxed);
             if (i < first.size()) return first[i];
+            if (second.empty()) return std::nullopt;
             const size_t j = secondary.fetch_add(1, std::memory_order_relaxed);
             if (j < second.size()) return second[j];
             return std::nullopt;
@@ -339,8 +440,7 @@ private:
             try {
                 for (;;) {
                     if (cancel.load(std::memory_order_relaxed)) break;
-                    const std::optional<XpuWorkRect> rect =
-                        steal(gpuNext, lists.gpuPacks, cpuNext, lists.cpuTiles);
+                    const std::optional<XpuWorkRect> rect = steal(gpuNext, lists.gpuPacks, cpuNext, lists.cpuTiles);
                     if (!rect) break;
                     RenderSampleOptions gpuOpt;
                     gpuOpt.skipFramebufferStore = true;
@@ -363,8 +463,7 @@ private:
             bool first = true;
             for (;;) {
                 if (cancel.load(std::memory_order_relaxed)) break;
-                const std::optional<XpuWorkRect> rect =
-                    steal(cpuNext, lists.cpuTiles, gpuNext, lists.gpuPacks);
+                const std::optional<XpuWorkRect> rect = steal(cpuNext, lists.cpuTiles, gpuNext, {});
                 if (!rect) break;
                 RenderSampleOptions cpuOpt;
                 cpuOpt.clipX0 = rect->x0;
@@ -416,6 +515,8 @@ private:
     int reportedSpp_ = 0;
     int lastCompletedSamples_ = 1;
     int batchIndex_ = 0;
+    int nextGpuSample_ = 0;
+    int nextCpuSample_ = 1;
     bool loggedMode_ = false;
     Framebuffer* fbPtr_ = nullptr;
     const std::atomic<bool>* cancelPtr_ = nullptr;
@@ -438,8 +539,7 @@ RenderDevicePtr createXpuDevice(int threadCount) {
         logError("XPU (Embree+OptiX) cannot start: OptiX GPU is unavailable");
         return nullptr;
     }
-    logInfo("XPU: Mixture (Karma, default) or Tile (RenderMan/Cycles); Embree threads=" +
-            std::to_string(cpuThreads));
+    logInfo("XPU: Overlap (default), Mixture, or Tile; Embree threads=" + std::to_string(cpuThreads));
     return std::make_shared<XpuDevice>(std::move(cpu), std::move(gpu));
 }
 

@@ -20,12 +20,13 @@ Intel Embree CPU device, the NVIDIA OptiX GPU device, or XPU (both together).
 * **Path guiding** — Intel OpenPGL on the CPU backend (enabled by default in Render Settings)
   learns incident radiance while rendering and guides BSDF samples with MIS.
 * **Render Device** — `CPU (Embree)` uses Embree 4 with a tiled thread pool; `GPU (OptiX)` uses
-  OptiX wavefront path tracing; `XPU (Embree+OptiX)` runs CPU and GPU together. **Mixture**
-  (Karma, default) keeps independent full-frame films and blends them on the host — GPU never
-  waits for CPU; the spp share is however many each device finishes. **Tile** (RenderMan /
-  Cycles) uses 32×32 CPU microtiles and ~704² GPU packs with work stealing. CPU keeps its full
-  Path Tracer (MNEE, SSS, OpenPGL, N light samples, filters). GPU and XPU are Path Tracer only;
-  if OptiX cannot start they stop with an error instead of falling back to Embree.
+  OptiX wavefront path tracing; `XPU (Embree+OptiX)` runs CPU and GPU together. **Overlap**
+  (default) keeps the GPU filling even spp until Embree finishes one odd spp, then one film
+  add — faster GPU means more GPU spp per CPU spp. **Mixture** and **Tile** are optional
+  (Karma independent films / RenderMan 32×32 + ~704² packs) and are usually slower than
+  GPU-only. CPU keeps its full Path Tracer (MNEE, SSS, OpenPGL, N light samples, filters).
+  GPU and XPU are Path Tracer only; if OptiX cannot start they stop with an error instead of
+  falling back to Embree.
 * **Node network** — a Solaris-like network where every node edits the stage flowing through
   it: geometry sources, transforms, material assignment by prim pattern, lights, camera and
   render settings. Display flags, bypass flags, a Tab menu and a scene graph tree included.
