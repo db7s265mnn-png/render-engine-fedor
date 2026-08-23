@@ -29,8 +29,8 @@ inline bool noiseOraclePixelQuiet(float meanR, float meanG, float meanB, float l
     if (!(lumSqSum > 0.0f)) return meanL <= 1.0e-3f;
     const float invN = 1.0f / float(n);
     const float var = std::max(0.0f, lumSqSum * invN - meanL * meanL);
-    const float stderr = std::sqrt(var * invN);
-    const float rel = stderr / std::max(meanL, 1.0e-3f);
+    const float stdError = std::sqrt(var * invN);
+    const float rel = stdError / std::max(meanL, 1.0e-3f);
     return rel <= threshold;
 }
 
