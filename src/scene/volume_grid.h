@@ -71,6 +71,7 @@ public:
     VolumeGridKind kind() const { return kind_; }
     VolumeSampleFilter sampleFilter() const { return sampleFilter_; }
     void setSampleFilter(VolumeSampleFilter f) { sampleFilter_ = f; }
+    void setKind(VolumeGridKind k) { kind_ = k; }
     const std::string& name() const { return name_; }
     void setName(std::string n) { name_ = std::move(n); }
     Bounds3 worldBounds() const { return bounds_; }

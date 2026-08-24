@@ -5589,6 +5589,45 @@ void testWireframeCausticsOn() {
     check(sum > 0.0, "Wireframe+caustics produces visible edges");
 }
 
+// Spectral PT used to shade the fog AABB as a surface (rainbow noise on Embree).
+// Enter/leave must toggle the medium without depending on OpenVDB voxels.
+void testFogAabbProxyEnterExit() {
+    std::printf("fog AABB proxy enter/exit\n");
+    VolumeGrid fog;
+    fog.setKind(VolumeGridKind::Fog);
+    const VolumeGrid* const grids[] = {&fog};
+    SceneView scene{};
+    scene.volumes = grids;
+    scene.volumeCount = 1;
+
+    InstanceData inst{};
+    inst.volumeIndex = 0;
+    inst.mediumIndex = 4;
+
+    RayHit hit{};
+    hit.t = 1.0f;
+    SurfaceInteraction si{};
+    si.p = Vec3(0.0f, 0.0f, 0.0f);
+    si.ng = Vec3(0.0f, 0.0f, 1.0f);
+    si.ns = si.ng;
+
+    Vec3 origin(-1.0f, 0.0f, 0.0f);
+    const Vec3 direction(1.0f, 0.0f, 0.0f);
+    int medium = -1;
+    check(consumeVolumeProxyHit(scene, kIntegratorPathTracer, inst, hit, si, origin, direction, medium),
+          "fog AABB enter continues the ray");
+    check(medium == 4, "fog AABB enter sets currentMedium");
+
+    check(consumeVolumeProxyHit(scene, kIntegratorPathTracer, inst, hit, si, origin, direction, medium),
+          "fog AABB leave continues the ray");
+    check(medium == -1, "fog AABB leave clears currentMedium");
+
+    medium = -1;
+    check(!consumeVolumeProxyHit(scene, kIntegratorWireframe, inst, hit, si, origin, direction, medium),
+          "wireframe keeps the AABB silhouette");
+    check(medium == -1, "wireframe does not enter fog");
+}
+
 void testNgonTriangulateAndVdb() {
     std::printf("n-gon triangulate + OpenVDB\n");
     // Concave quad (arrowhead) — fan would flip; earcut should keep area positive.
@@ -5980,8 +6019,17 @@ void testNgonTriangulateAndVdb() {
         proxy->computeBounds();
         const int meshIndex = scene->addMesh(proxy);
         Material mat;
-        mat.baseColor = Vec3(0.85f, 0.75f, 0.65f);
-        mat.roughness = 0.45f;
+        if (kind == VolumeGridKind::Fog) {
+            // Black proxy: shading the AABB as a surface stays dark. Spectral PT
+            // must enter the medium (the Embree regression was rainbow box noise).
+            mat.baseColor = Vec3(0.0f);
+            mat.roughness = 1.0f;
+            mat.metallic = 0.0f;
+            mat.specular = 0.0f;
+        } else {
+            mat.baseColor = Vec3(0.85f, 0.75f, 0.65f);
+            mat.roughness = 0.45f;
+        }
         const int materialIndex = scene->addMaterial(mat);
         InstanceData inst;
         inst.meshIndex = meshIndex;
@@ -6038,7 +6086,7 @@ void testNgonTriangulateAndVdb() {
     check(sdfPtOff > 1.0, "SDF PathTracer (caustics off) renders the volume");
     check(sdfPtOn > 1.0, "SDF PathTracer (caustics on / MNEE) renders the volume");
     check(sdfDl > 1.0, "SDF Direct Lighting renders the volume");
-    check(fogPtOff > 0.5, "Fog PathTracer renders the volume");
+    check(fogPtOff > 0.5, "Fog PathTracer (spectral) renders the volume, not the AABB");
     check(fogDl > 0.5, "Fog Direct Lighting renders the volume");
     check(fogBdpt > 0.5, "Fog with BDPT selected still renders (falls back to PT)");
     {
@@ -6478,6 +6526,7 @@ int main() {
     }
     if (getenv("SOL_ONLY_VDB")) {
         registerBuiltinNodes();
+        testFogAabbProxyEnterExit();
         testNgonTriangulateAndVdb();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
@@ -6571,6 +6620,7 @@ int main() {
     testMaterialXUdimCubeAsset();
     testBdptShadersAndSss();
     testBinaryUsdLoad();
+    testFogAabbProxyEnterExit();
     testNgonTriangulateAndVdb();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
