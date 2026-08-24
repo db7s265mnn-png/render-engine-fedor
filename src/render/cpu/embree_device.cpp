@@ -268,9 +268,10 @@ public:
             settings.integrator == kIntegratorAmbientOcclusion ||
             settings.integrator == kIntegratorDirectLighting ||
             settings.integrator == kIntegratorWireframe;
-        // pbrt: Path Tracer and BDPT are spectral (hero-λ). Volumes + BDPT fall
-        // back to spectral PT (no new volume integrator). Do not mix MNEE/photon
-        // into the spectral kernels: Path Tracer + caustics uses PathMneeIntegrator.
+        // pbrt: Path Tracer and BDPT are spectral (hero-λ). Path Tracer + VDB
+        // stays on SpectralPathIntegrator (AABB enter/exit + heterogeneous fog
+        // walk — the density field, not the bounds proxy). BDPT + volumes falls
+        // back to the same spectral PT. MNEE/photon stay off volumes.
         const bool usePhoton =
             !diagnosticIntegrator && !hasVolumes && causticsUsePhotonMap(settings, &scene);
         const bool useMnee =
