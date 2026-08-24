@@ -24,6 +24,23 @@ function Info([string]$Message) {
     Write-Host $Message -ForegroundColor Cyan
 }
 
+# Grendizer_Render keeps tbb12.dll / embree loaded. A full rebuild already
+# wrote the new exe; failing Copy-Item after that is a false BUILD FAILED.
+function Copy-RuntimeFile([string]$Src, [string]$DestDir) {
+    $name = [IO.Path]::GetFileName($Src)
+    $dest = Join-Path $DestDir $name
+    try {
+        Copy-Item -LiteralPath $Src -Destination $DestDir -Force -ErrorAction Stop
+        Info ("Copied " + $name)
+    } catch {
+        if (Test-Path -LiteralPath $dest) {
+            Write-Host ("Warning: " + $name + " is in use (close Grendizer_Render / TX Tools). Left the existing DLL.") -ForegroundColor Yellow
+        } else {
+            Fail ("Could not copy " + $name + " to " + $DestDir + ": " + $_.Exception.Message)
+        }
+    }
+}
+
 function Find-VsWhere {
     $pf86 = ${env:ProgramFiles(x86)}
     $p = Join-Path $pf86 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -1002,10 +1019,7 @@ $cudartDir = Join-Path $Cuda 'bin'
 if (Test-Path -LiteralPath $cudartDir) {
     $Cudart = Get-ChildItem -LiteralPath $cudartDir -Filter 'cudart64_*.dll' -ErrorAction SilentlyContinue
     if ($Cudart) {
-        $Cudart | ForEach-Object {
-            Copy-Item -LiteralPath $_.FullName -Destination $Bin -Force
-            Info ("Copied " + $_.Name)
-        }
+        $Cudart | ForEach-Object { Copy-RuntimeFile $_.FullName $Bin }
     }
 }
 if ($script:DepsPrefix) {
@@ -1017,8 +1031,7 @@ if ($script:DepsPrefix) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
         foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll', 'OpenColorIO*.dll')) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
-                Copy-Item -LiteralPath $_.FullName -Destination $Bin -Force
-                Info ("Copied " + $_.Name)
+                Copy-RuntimeFile $_.FullName $Bin
             }
         }
     }
