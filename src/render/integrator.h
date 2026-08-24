@@ -411,66 +411,6 @@ SR_INL SR_HD Vec3 offsetRayOrigin(Vec3 p, Vec3 n, Vec3 dir) {
     return dot(dir, n) > 0.0f ? p + offset : p - offset;
 }
 
-#if !defined(__CUDACC__)
-// Camera / ray origin inside a fog AABB (matches OptiX init_from_camera).
-SR_INL int startingFogMediumIndex(const SceneView& scene, Vec3 p) {
-    if (!scene.volumes || scene.volumeCount <= 0 || !scene.media) return -1;
-    for (int vi = 0; vi < scene.volumeCount; ++vi) {
-        const VolumeGrid* g = scene.volumes[vi];
-        if (!g || !g->valid() || g->kind() != VolumeGridKind::Fog) continue;
-        const Bounds3 b = g->worldBounds();
-        if (!b.valid()) continue;
-        if (p.x < b.lo.x || p.x > b.hi.x || p.y < b.lo.y || p.y > b.hi.y || p.z < b.lo.z ||
-            p.z > b.hi.z)
-            continue;
-        for (int mi = 0; mi < scene.mediumCount; ++mi) {
-            if (scene.media[mi].volumeIndex != vi) continue;
-            if (mediumIsActive(scene, mi)) return mi;
-        }
-    }
-    return -1;
-}
-
-// Fog AABB enter/exit and SDF sphere-trace on the triangle proxy.
-// Wireframe keeps the bounds silhouette. Returns true if the ray should
-// continue without surface shading (caller increments passThrough).
-SR_INL bool consumeVolumeProxyHit(const SceneView& scene, int integrator, const InstanceData& inst,
-                                  RayHit& hit, SurfaceInteraction& si, Vec3& origin, Vec3 direction,
-                                  int& currentMedium) {
-    if (integrator == kIntegratorWireframe) return false;
-    if (inst.volumeIndex < 0 || inst.volumeIndex >= scene.volumeCount || !scene.volumes) return false;
-    if (!scene.volumes[inst.volumeIndex]) return false;
-    const VolumeGrid& vol = *scene.volumes[inst.volumeIndex];
-    if (vol.kind() == VolumeGridKind::Fog) {
-        if (currentMedium == inst.mediumIndex) {
-            currentMedium = -1;
-            origin = offsetRayOrigin(si.p, si.ng, direction);
-        } else {
-            currentMedium = inst.mediumIndex;
-            origin = offsetRayOrigin(si.p, -si.ng, direction);
-        }
-        return true;
-    }
-    if (vol.kind() == VolumeGridKind::Sdf) {
-        float tSdf = hit.t;
-        Vec3 nSdf;
-        const float tNear = srMax(0.0f, hit.t - vol.voxelSize());
-        if (intersectSdfVolume(vol, origin, direction, tNear, hit.t + 1.0e6f, tSdf, nSdf)) {
-            hit.t = tSdf;
-            si.p = origin + direction * tSdf;
-            si.ng = nSdf;
-            si.ns = nSdf;
-            si.nObject = transformVector(inst.xformInv, nSdf);
-            si.pObject = transformPoint(inst.xformInv, si.p);
-            return false;
-        }
-        origin = offsetRayOrigin(si.p, si.ng, direction);
-        return true;
-    }
-    return false;
-}
-#endif
-
 SR_INL SR_HD bool materialSupportsSss(const Material& mat) {
     return saturatef(mat.subsurface) > 1e-4f && mat.transmission <= 1e-4f && mat.metallic < 0.999f;
 }
@@ -1057,12 +997,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     bool volumePhaseMis = false;
     Vec3 volumeMisWo{0.0f, 1.0f, 0.0f};
     float volumeMisG = 0.0f;
-    // Homogeneous / VDB fog medium currently surrounding the ray (-1 = vacuum).
+    // Homogeneous medium currently surrounding the ray (-1 = vacuum).
     int currentMedium = -1;
-#if !defined(__CUDACC__)
-    if (scene.settings.integrator != kIntegratorWireframe)
-        currentMedium = startingFogMediumIndex(scene, origin);
-#endif
     // Arnold ray_switch: incoming ray type selects the surfaceshader port.
     RayShadeKind rayKind = RayShadeKind::Camera;
     const RenderSettingsData& settings = scene.settings;
@@ -1295,10 +1231,41 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #if !defined(__CUDACC__)
         // Direct VDB rendering: SDF level-set surface or fog volume entry/exit.
         // Wireframe stays on the triangle proxy (bounds silhouette).
-        if (consumeVolumeProxyHit(scene, settings.integrator, inst, hit, si, origin, direction,
-                                  currentMedium)) {
-            ++passThrough;
-            continue;
+        if (settings.integrator != kIntegratorWireframe && inst.volumeIndex >= 0 &&
+            inst.volumeIndex < scene.volumeCount && scene.volumes && scene.volumes[inst.volumeIndex]) {
+            const VolumeGrid& vol = *scene.volumes[inst.volumeIndex];
+            if (vol.kind() == VolumeGridKind::Fog) {
+                if (currentMedium == inst.mediumIndex) {
+                    // Second hit on the AABB proxy = leaving the volume.
+                    currentMedium = -1;
+                    origin = offsetRayOrigin(si.p, si.ng, direction);
+                } else {
+                    // Enter the medium. Empty AABB corners are OK (dens≈0 → null collisions);
+                    // container silhouettes are softened by boundary feather in fromPolygons.
+                    currentMedium = inst.mediumIndex;
+                    origin = offsetRayOrigin(si.p, -si.ng, direction);
+                }
+                ++passThrough;
+                continue;
+            }
+            if (vol.kind() == VolumeGridKind::Sdf) {
+                float tSdf = hit.t;
+                Vec3 nSdf;
+                // Sphere-trace from near the AABB entry; far bound is analytical AABB exit.
+                const float tNear = srMax(0.0f, hit.t - vol.voxelSize());
+                if (intersectSdfVolume(vol, origin, direction, tNear, hit.t + 1.0e6f, tSdf, nSdf)) {
+                    hit.t = tSdf;
+                    si.p = origin + direction * tSdf;
+                    si.ng = nSdf;
+                    si.ns = nSdf;
+                    si.nObject = transformVector(inst.xformInv, nSdf);
+                    si.pObject = transformPoint(inst.xformInv, si.p);
+                } else {
+                    origin = offsetRayOrigin(si.p, si.ng, direction);
+                    ++passThrough;
+                    continue;
+                }
+            }
         }
 #endif
 

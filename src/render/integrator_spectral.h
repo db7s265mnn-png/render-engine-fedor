@@ -45,12 +45,10 @@ public:
         bool causticSuffix = false;
         int depth = 0;
         int passThrough = 0;
+        int currentMedium = -1;
         int volumeScatterCount = 0;
         Vec3 origin = ctx.origin;
         Vec3 direction = ctx.direction;
-        int currentMedium = -1;
-        if (settings.integrator != kIntegratorWireframe)
-            currentMedium = startingFogMediumIndex(scene, origin);
         RayShadeKind rayKind = RayShadeKind::Camera;
         const int maxDepth = srMax(1, settings.maxDepth);
 
@@ -92,13 +90,6 @@ public:
                     causticSuffix = false;
                     ++depth;
                     ++volumeScatterCount;
-                    continue;
-                }
-                // Exited the fog AABB (analytical) before hitting any surface — leave the medium.
-                if (medWalk.type == 2 && (!didHit || ms.t + 1e-4f < hit.t)) {
-                    origin = origin + direction * ms.t;
-                    currentMedium = -1;
-                    ++passThrough;
                     continue;
                 }
             }
@@ -151,12 +142,6 @@ public:
             SurfaceInteraction si;
             if (!buildSurfaceInteraction(scene, hit, origin, direction, si)) break;
             const InstanceData& inst = scene.instances[si.instanceIndex];
-
-            if (consumeVolumeProxyHit(scene, settings.integrator, inst, hit, si, origin, direction,
-                                      currentMedium)) {
-                ++passThrough;
-                continue;
-            }
 
             if (si.lightIndex >= 0 && depth == 0 && !inst.visibleCamera) {
                 origin = offsetRayOrigin(si.p, si.ng, direction);
