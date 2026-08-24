@@ -627,7 +627,8 @@ MaterialNetworkGraphView::MaterialNetworkGraphView(QWidget* parent) : QGraphicsV
     setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
     // Full updates avoid antialiased trails while dragging MaterialX nodes.
     setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
-    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    setTransformationAnchor(QGraphicsView::NoAnchor);
+    setResizeAnchor(QGraphicsView::NoAnchor);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setDragMode(QGraphicsView::RubberBandDrag);
@@ -1367,22 +1368,9 @@ void MaterialNetworkGraphView::frameGraph() {
 }
 
 void MaterialNetworkGraphView::wheelEvent(QWheelEvent* event) {
-    const QPoint delta = event->angleDelta().y() != 0 ? event->angleDelta() : event->pixelDelta();
-    const qreal steps = qreal(delta.y()) / 120.0;
-    if (std::abs(steps) < 1e-4) {
-        event->accept();
-        return;
-    }
-    const qreal factor = std::pow(1.08, steps);
-    const double newScale = transform().m11() * factor;
-    if (newScale < 0.16 || newScale > 4.0) {
-        event->accept();
-        return;
-    }
-    const QPoint viewPos = graphicsViewWheelPos(this, event);
-    const auto saved = transformationAnchor();
-    zoomGraphicsViewAt(this, factor, viewPos, panning_ ? &lastPanPoint_ : nullptr);
-    if (!panning_) setTransformationAnchor(saved);
+    const qreal factor = graphicsViewWheelZoomFactor(event);
+    zoomGraphicsViewAtCursor(this, factor, event->globalPosition(),
+                             panning_ ? &panScenePoint_ : nullptr, 0.16, 4.0);
     event->accept();
 }
 
@@ -1735,7 +1723,7 @@ void MaterialNetworkGraphView::mousePressEvent(QMouseEvent* event) {
     clickImageNode_.clear();
 
     if (shouldBeginPan(event)) {
-        beginPan(event->pos());
+        beginPan(event->globalPosition());
         event->accept();
         return;
     }
@@ -1845,7 +1833,7 @@ void MaterialNetworkGraphView::mouseMoveEvent(QMouseEvent* event) {
     if (QLineF(event->pos(), mousePressPoint_).length() > 4.0) mouseMovedSincePress_ = true;
 
     if (panning_) {
-        updatePan(event->pos());
+        updatePan(event->globalPosition());
         event->accept();
         return;
     }
@@ -2038,28 +2026,22 @@ bool MaterialNetworkGraphView::shouldBeginPan(const QMouseEvent* event) const {
     return false;
 }
 
-void MaterialNetworkGraphView::beginPan(const QPoint& viewPosition) {
+void MaterialNetworkGraphView::beginPan(const QPointF& globalPos) {
     panning_ = true;
-    lastPanPoint_ = viewPosition;
     savedDragMode_ = dragMode();
     savedAnchor_ = transformationAnchor();
     setDragMode(QGraphicsView::NoDrag);
-    // NoAnchor keeps 1:1 hand-drag — AnchorUnderMouse would warp the pan.
     setTransformationAnchor(QGraphicsView::NoAnchor);
-    // Grab the viewport (not the view): coords stay viewport-local and match
-    // mapToScene / mouse*Event. Grabbing QGraphicsView itself breaks pan.
+    setResizeAnchor(QGraphicsView::NoAnchor);
     viewport()->grabMouse();
     viewport()->setCursor(Qt::ClosedHandCursor);
     setFocus(Qt::MouseFocusReason);
+    panScenePoint_ = mapToScene(graphicsViewViewportPos(this, globalPos));
 }
 
-void MaterialNetworkGraphView::updatePan(const QPoint& viewPosition) {
+void MaterialNetworkGraphView::updatePan(const QPointF& globalPos) {
     if (!panning_) return;
-    if (viewPosition == lastPanPoint_) return;
-    // Sticky hand: keep the scene point under the cursor glued to it.
-    const QPointF delta = mapToScene(viewPosition) - mapToScene(lastPanPoint_);
-    translate(delta.x(), delta.y());
-    lastPanPoint_ = viewPosition;
+    glueGraphicsViewPan(this, panScenePoint_, globalPos);
 }
 
 void MaterialNetworkGraphView::endPan() {
@@ -2417,7 +2399,7 @@ public:
     }
 
 private:
-    QRectF bodyRect() const { return QRectF(-48.0, -36.0, 96.0, 72.0); }
+    QRectF bodyRect() const { return QRectF(-60.0, -30.0, 120.0, 60.0); }
     Node* node_ = nullptr;
 };
 
@@ -2437,7 +2419,8 @@ MaterialContainerGraphView::MaterialContainerGraphView(QWidget* parent) : QGraph
     setScene(graphScene_);
     setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
     setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
-    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    setTransformationAnchor(QGraphicsView::NoAnchor);
+    setResizeAnchor(QGraphicsView::NoAnchor);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     setDragMode(QGraphicsView::RubberBandDrag);
@@ -2545,22 +2528,9 @@ void MaterialContainerGraphView::frameGraph() {
 }
 
 void MaterialContainerGraphView::wheelEvent(QWheelEvent* event) {
-    const QPoint delta = event->angleDelta().y() != 0 ? event->angleDelta() : event->pixelDelta();
-    const qreal steps = qreal(delta.y()) / 120.0;
-    if (std::abs(steps) < 1e-4) {
-        event->accept();
-        return;
-    }
-    const qreal factor = std::pow(1.08, steps);
-    const double newScale = transform().m11() * factor;
-    if (newScale < 0.16 || newScale > 4.0) {
-        event->accept();
-        return;
-    }
-    const QPoint viewPos = graphicsViewWheelPos(this, event);
-    const auto saved = transformationAnchor();
-    zoomGraphicsViewAt(this, factor, viewPos, panning_ ? &lastPanPoint_ : nullptr);
-    if (!panning_) setTransformationAnchor(saved);
+    const qreal factor = graphicsViewWheelZoomFactor(event);
+    zoomGraphicsViewAtCursor(this, factor, event->globalPosition(),
+                             panning_ ? &panScenePoint_ : nullptr, 0.16, 4.0);
     event->accept();
 }
 
@@ -2604,28 +2574,22 @@ bool MaterialContainerGraphView::shouldBeginPan(const QMouseEvent* event) const 
     return false;
 }
 
-void MaterialContainerGraphView::beginPan(const QPoint& viewPosition) {
+void MaterialContainerGraphView::beginPan(const QPointF& globalPos) {
     panning_ = true;
-    lastPanPoint_ = viewPosition;
     savedDragMode_ = dragMode();
     savedAnchor_ = transformationAnchor();
     setDragMode(QGraphicsView::NoDrag);
-    // NoAnchor keeps 1:1 hand-drag — AnchorUnderMouse would warp the pan.
     setTransformationAnchor(QGraphicsView::NoAnchor);
-    // Grab the viewport (not the view): coords stay viewport-local and match
-    // mapToScene / mouse*Event. Grabbing QGraphicsView itself breaks pan.
+    setResizeAnchor(QGraphicsView::NoAnchor);
     viewport()->grabMouse();
     viewport()->setCursor(Qt::ClosedHandCursor);
     setFocus(Qt::MouseFocusReason);
+    panScenePoint_ = mapToScene(graphicsViewViewportPos(this, globalPos));
 }
 
-void MaterialContainerGraphView::updatePan(const QPoint& viewPosition) {
+void MaterialContainerGraphView::updatePan(const QPointF& globalPos) {
     if (!panning_) return;
-    if (viewPosition == lastPanPoint_) return;
-    // Sticky hand: keep the scene point under the cursor glued to it.
-    const QPointF delta = mapToScene(viewPosition) - mapToScene(lastPanPoint_);
-    translate(delta.x(), delta.y());
-    lastPanPoint_ = viewPosition;
+    glueGraphicsViewPan(this, panScenePoint_, globalPos);
 }
 
 void MaterialContainerGraphView::endPan() {
@@ -2639,7 +2603,7 @@ void MaterialContainerGraphView::endPan() {
 
 void MaterialContainerGraphView::mousePressEvent(QMouseEvent* event) {
     if (shouldBeginPan(event)) {
-        beginPan(event->pos());
+        beginPan(event->globalPosition());
         event->accept();
         return;
     }
@@ -2648,7 +2612,7 @@ void MaterialContainerGraphView::mousePressEvent(QMouseEvent* event) {
 
 void MaterialContainerGraphView::mouseMoveEvent(QMouseEvent* event) {
     if (panning_) {
-        updatePan(event->pos());
+        updatePan(event->globalPosition());
         event->accept();
         return;
     }

@@ -112,8 +112,8 @@ private:
     QPointF snapWireEndpoint(QPoint viewPosition, bool draggingFromOutput);
     void updateDragWire(QPoint viewPosition);
     bool shouldBeginPan(const QMouseEvent* event) const;
-    void beginPan(const QPoint& viewPos);
-    void updatePan(const QPoint& viewPos);
+    void beginPan(const QPointF& globalPos);
+    void updatePan(const QPointF& globalPos);
     void endPan();
     qreal zoomFactorFromWheel(const QWheelEvent* event) const;
 
@@ -124,10 +124,10 @@ private:
     bool panning_ = false;
     bool spaceHeld_ = false;
     bool pendingFrameAll_ = true;
-    QPoint lastPanPoint_;
+    QPointF panScenePoint_;
     QPointF lastScenePosition_;
     QGraphicsView::DragMode savedDragMode_ = QGraphicsView::RubberBandDrag;
-    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::AnchorUnderMouse;
+    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::NoAnchor;
 
     // Wire dragging state.
     NodeItem* dragSource_ = nullptr;

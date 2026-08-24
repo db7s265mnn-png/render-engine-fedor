@@ -226,7 +226,8 @@ NodeGraphView::NodeGraphView(QWidget* parent) : QGraphicsView(parent) {
     setScene(graphScene_);
     setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
     setDragMode(QGraphicsView::RubberBandDrag);
-    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    setTransformationAnchor(QGraphicsView::NoAnchor);
+    setResizeAnchor(QGraphicsView::NoAnchor);
     // Full updates avoid antialiased icon/shadow trails while dragging nodes.
     setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -457,16 +458,9 @@ NodeItem* NodeGraphView::nodeItemAt(QPoint viewPosition) const {
 }
 
 void NodeGraphView::wheelEvent(QWheelEvent* event) {
-    const qreal factor = zoomFactorFromWheel(event);
-    const double newScale = transform().m11() * factor;
-    if (newScale < 0.12 || newScale > 4.0) {
-        event->accept();
-        return;
-    }
-    const QPoint viewPos = graphicsViewWheelPos(this, event);
-    const auto saved = transformationAnchor();
-    zoomGraphicsViewAt(this, factor, viewPos, panning_ ? &lastPanPoint_ : nullptr);
-    if (!panning_) setTransformationAnchor(saved);
+    const qreal factor = graphicsViewWheelZoomFactor(event);
+    zoomGraphicsViewAtCursor(this, factor, event->globalPosition(),
+                             panning_ ? &panScenePoint_ : nullptr, 0.12, 4.0);
     event->accept();
 }
 
@@ -481,29 +475,21 @@ bool NodeGraphView::shouldBeginPan(const QMouseEvent* event) const {
     return false;
 }
 
-void NodeGraphView::beginPan(const QPoint& viewPos) {
+void NodeGraphView::beginPan(const QPointF& globalPos) {
     panning_ = true;
-    lastPanPoint_ = viewPos;
     savedDragMode_ = dragMode();
     savedAnchor_ = transformationAnchor();
     setDragMode(QGraphicsView::NoDrag);
-    // NoAnchor keeps 1:1 hand-drag — AnchorUnderMouse would warp the pan.
     setTransformationAnchor(QGraphicsView::NoAnchor);
-    // Grab the viewport (not the view): coords stay viewport-local and match
-    // mapToScene / mouse*Event. Grabbing QGraphicsView itself breaks pan.
+    setResizeAnchor(QGraphicsView::NoAnchor);
     viewport()->grabMouse();
     viewport()->setCursor(Qt::ClosedHandCursor);
+    panScenePoint_ = mapToScene(graphicsViewViewportPos(this, globalPos));
 }
 
-void NodeGraphView::updatePan(const QPoint& viewPos) {
+void NodeGraphView::updatePan(const QPointF& globalPos) {
     if (!panning_) return;
-    if (viewPos == lastPanPoint_) return;
-
-    // Sticky hand: keep the scene point that was under the cursor glued to it.
-    // mapToScene delta is already in scene units, so no manual /scale needed.
-    const QPointF delta = mapToScene(viewPos) - mapToScene(lastPanPoint_);
-    translate(delta.x(), delta.y());
-    lastPanPoint_ = viewPos;
+    glueGraphicsViewPan(this, panScenePoint_, globalPos);
 }
 
 void NodeGraphView::endPan() {
@@ -584,7 +570,7 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
     lastScenePosition_ = mapToScene(event->pos());
 
     if (shouldBeginPan(event)) {
-        beginPan(event->pos());
+        beginPan(event->globalPosition());
         event->accept();
         return;
     }
@@ -648,7 +634,7 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
 
 void NodeGraphView::mouseMoveEvent(QMouseEvent* event) {
     if (panning_) {
-        updatePan(event->pos());
+        updatePan(event->globalPosition());
         event->accept();
         return;
     }

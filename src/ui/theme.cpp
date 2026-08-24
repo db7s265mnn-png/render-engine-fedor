@@ -130,6 +130,13 @@ void applyDarkTheme(QApplication& application) {
             titlebar-normal-icon: none;
             font-weight: bold;
         }
+        QDockWidget::float-button, QDockWidget::close-button {
+            width: 0px;
+            height: 0px;
+            padding: 0px;
+            margin: 0px;
+            image: none;
+        }
         QTabBar { padding-right: 28px; }
         QDockWidget::title {
             background: #2e3136;
