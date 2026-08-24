@@ -870,9 +870,12 @@ SR_INL SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec
         const Vec3 Le = lightRadiance(l);
         float weight = 1.0f;
         if (!specularBounce) {
-            const float lp = lightPdfDirection(scene, i, origin, wi, origin, wi) *
-                             lightSelectionPdfIndexMaybeVolume(scene, origin, i, volumePhaseMis, volumeWo,
-                                                               volumeG);
+            // Distant cone pdf inlined so OptiX shade_background does not pull the
+            // full lightPdfDirection switch (nvcc/cicc hung 10 min on that TU).
+            const float denom = kTwoPi * (1.0f - cosThetaMax);
+            const float lightPdf = denom > 0.0f ? 1.0f / denom : 0.0f;
+            const float lp = lightPdf * lightSelectionPdfIndexMaybeVolume(
+                                             scene, origin, i, volumePhaseMis, volumeWo, volumeG);
             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
         }
         sum += Le * weight;

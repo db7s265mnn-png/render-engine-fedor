@@ -87,26 +87,32 @@ def run_cmd(log, cmd, timeout, label):
     log.write("exec %s" % " ".join(cmd))
     hb = Heartbeat(log, label)
     hb.start()
-    popen_kw = {
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.STDOUT,
-        "universal_newlines": True,
-        "bufsize": 1,
-    }
-    if os.name == "nt":
-        popen_kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_kw["start_new_session"] = True
+    popen_kw = {}
+    # Windows: do not CREATE_NEW_PROCESS_GROUP and do not pipe nvcc. cicc hangs
+    # for minutes on lights.h when stdout is a pipe under a new process group
+    # (shade_background sat until the 600s cap). Inherit the console like ninja.
+    if os.name != "nt":
+        popen_kw = {
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "universal_newlines": True,
+            "bufsize": 1,
+            "start_new_session": True,
+        }
     t0 = time.time()
     proc = subprocess.Popen(cmd, **popen_kw)
     timed_out = False
+    out = ""
     try:
         out, _ = proc.communicate(timeout=timeout)
+        if out is None:
+            out = ""
     except subprocess.TimeoutExpired:
         timed_out = True
         log.write("TIMEOUT after %ss: %s" % (timeout, label))
         kill_tree(proc)
-        out, _ = proc.communicate()
+        more, _ = proc.communicate()
+        out = more or ""
     hb.stop_evt.set()
     hb.join(1.0)
     log.write_raw(out)
