@@ -268,18 +268,18 @@ public:
             settings.integrator == kIntegratorAmbientOcclusion ||
             settings.integrator == kIntegratorDirectLighting ||
             settings.integrator == kIntegratorWireframe;
-        // pbrt: Path Tracer and BDPT are spectral (hero-λ). Volumes + BDPT fall
-        // back to spectral PT (no new volume integrator). Do not mix MNEE/photon
-        // into the spectral kernels: Path Tracer + caustics uses PathMneeIntegrator.
+        // Surfaces: Path Tracer / BDPT are spectral (hero-λ). VDB fog/SDF stay on
+        // RGB PathIntegrator — it walks the density field (the cloud). Spectral PT
+        // has no AABB enter/exit and would shade the bounds proxy as a solid box.
+        // MNEE/photon stay off volumes. BDPT + volumes falls back to the same RGB PT.
         const bool usePhoton =
             !diagnosticIntegrator && !hasVolumes && causticsUsePhotonMap(settings, &scene);
         const bool useMnee =
             !diagnosticIntegrator && !hasVolumes && causticsUseMnee(settings, &scene);
         const bool causticSpecialized = usePhoton || useMnee;
         const bool useSpectralBdpt = wantBdpt && !hasVolumes && !diagnosticIntegrator;
-        const bool useSpectralPt = !diagnosticIntegrator && !(pathTracer && causticSpecialized) &&
-                                   (settings.integrator == kIntegratorSpectralPath || pathTracer ||
-                                    (wantBdpt && hasVolumes));
+        const bool useSpectralPt = !diagnosticIntegrator && !hasVolumes && !causticSpecialized &&
+                                   (settings.integrator == kIntegratorSpectralPath || pathTracer);
         const bool useSpectral = useSpectralPt || useSpectralBdpt;
         const bool useBdpt = wantBdpt;
         const bool useBdptPath = false;
@@ -347,6 +347,8 @@ public:
                 logInfo(std::string("Caustics: MNEE (manifold next-event, refractive)") +
                         (settings.causticsEngine == kCausticsEngineAuto ? " [MNEE+Photon→delta]" : "") +
                         (useGuiding ? " + OpenPGL guiding" : ""));
+            else if (pathTracer && hasVolumes)
+                logInfo("Integrator: Path Tracer (VDB fog)");
             else if (pathTracer)
                 logInfo("Caustics: off (dark shadows through glass; shadow_opacity fakes)");
             else if (settings.integrator == kIntegratorWireframe)

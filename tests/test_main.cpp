@@ -5980,8 +5980,17 @@ void testNgonTriangulateAndVdb() {
         proxy->computeBounds();
         const int meshIndex = scene->addMesh(proxy);
         Material mat;
-        mat.baseColor = Vec3(0.85f, 0.75f, 0.65f);
-        mat.roughness = 0.45f;
+        if (kind == VolumeGridKind::Fog) {
+            // Black proxy: shading the AABB as a surface stays dark. The cloud
+            // must come from the density field, not the bounds container.
+            mat.baseColor = Vec3(0.0f);
+            mat.roughness = 1.0f;
+            mat.metallic = 0.0f;
+            mat.specular = 0.0f;
+        } else {
+            mat.baseColor = Vec3(0.85f, 0.75f, 0.65f);
+            mat.roughness = 0.45f;
+        }
         const int materialIndex = scene->addMaterial(mat);
         InstanceData inst;
         inst.meshIndex = meshIndex;
@@ -6038,7 +6047,7 @@ void testNgonTriangulateAndVdb() {
     check(sdfPtOff > 1.0, "SDF PathTracer (caustics off) renders the volume");
     check(sdfPtOn > 1.0, "SDF PathTracer (caustics on / MNEE) renders the volume");
     check(sdfDl > 1.0, "SDF Direct Lighting renders the volume");
-    check(fogPtOff > 0.5, "Fog PathTracer renders the volume");
+    check(fogPtOff > 0.5, "Fog PathTracer renders the cloud, not the AABB container");
     check(fogDl > 0.5, "Fog Direct Lighting renders the volume");
     check(fogBdpt > 0.5, "Fog with BDPT selected still renders (falls back to PT)");
     {
