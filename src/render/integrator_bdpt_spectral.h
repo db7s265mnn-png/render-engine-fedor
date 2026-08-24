@@ -364,7 +364,6 @@ inline Vec3 traceRadianceBdptSpectral(
     SampledSpectrum* outSpectrum = nullptr) {
     using namespace bdpt;
     const RenderSettingsData& settings = scene.settings;
-    const RGBColorSpace& filmCs = colorSpaceById(settings.spectralColorSpace);
     int maxVerts = std::clamp(settings.maxDepth + 1, 2, kMaxVerts);
     const bool causticsOn = settings.caustics != 0;
     const bool photonEngine = photons != nullptr;
@@ -388,15 +387,15 @@ inline Vec3 traceRadianceBdptSpectral(
         if (startLightPath(scene, rng, light[0], emitDir, pdfDirSa)) {
             nLight = 1;
             if (light[0].lightIndex >= 0) {
-                lightBeta[0] = lightEmissionSpectrum(scene.lights[light[0].lightIndex], waves, filmCs);
+                lightBeta[0] = lightEmissionSpectrum(scene.lights[light[0].lightIndex], waves);
                 const float rgbLum = length(light[0].beta);
-                const Vec3 sRgb = spectrumToRgb(lightBeta[0], waves, filmCs);
+                const Vec3 sRgb = spectrumToRgb(lightBeta[0], waves);
                 const float sLum = length(sRgb);
                 if (sLum > 1e-8f && rgbLum > 0.0f) lightBeta[0] *= rgbLum / sLum;
             } else {
-                lightBeta[0] = upsampleEmission(light[0].beta, waves, filmCs);
+                lightBeta[0] = upsampleEmission(light[0].beta, waves);
             }
-            light[0].beta = spectrumToRgb(lightBeta[0], waves, filmCs);
+            light[0].beta = spectrumToRgb(lightBeta[0], waves);
             lightOriginDelta =
                 light[0].lightIndex >= 0 && scene.lights[light[0].lightIndex].type == kLightPoint;
             spectral_bdpt::WalkConfig cfg;
@@ -512,7 +511,7 @@ inline Vec3 traceRadianceBdptSpectral(
                 if (front || v.mat.doubleSided) {
                     SampledSpectrum c =
                         eyeBeta[t - 1] *
-                        upsampleEmission(v.mat.emissionColor * v.mat.emissionStrength, waves, filmCs);
+                        upsampleEmission(v.mat.emissionColor * v.mat.emissionStrength, waves);
                     if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
                     if (spectrumIsFinite(c)) radiance += c;
                 }

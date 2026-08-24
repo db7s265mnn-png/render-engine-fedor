@@ -9,7 +9,7 @@ constexpr float kCieLambdaMin = 360.f;
 constexpr float kCieLambdaMax = 830.f;
 constexpr float kCieLambdaStep = 5.f;
 // ∫ CMF(λ) dλ over 360..830 nm at 1 nm (same linear interp as cieXyzAtLambdaTabulated).
-// Y matches pbrt-v4 CIE_Y_integral; X/Z are the matching 1 nm integrals.
+// Y matches pbrt-v4; X/Z computed consistently for equal-energy white balance.
 constexpr float kCieXIntegral1nm = 106.86543690f;
 constexpr float kCieYIntegral1nm = 106.85691710f;
 constexpr float kCieZIntegral1nm = 106.89210852f;

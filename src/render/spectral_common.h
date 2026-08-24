@@ -266,38 +266,36 @@ inline MediumSample sampleHeterogeneousFogSpectral(const Grid& grid, const Mediu
     return out;
 }
 
-// Authored reflectance (textures / albedo on hit) — pbrt RGBAlbedoSpectrum.
+// Authored reflectance (textures / albedo on hit) — Jakob albedo table.
 inline SampledSpectrum upsampleAlbedo(Vec3 rgb, const SampledWavelengths& w) {
     return rgbToSpectrumReflectance(rgb, w);
 }
 
-// Authored emission / lights / HDR env — pbrt RGBIlluminantSpectrum (× D65/D60).
-inline SampledSpectrum upsampleEmission(Vec3 rgb, const SampledWavelengths& w,
-                                        const RGBColorSpace& cs = colorSpaceSrgb()) {
-    return rgbToSpectrumEmission(rgb, w, cs);
+// Authored emission / lights / env — Jakob illuminant table.
+inline SampledSpectrum upsampleEmission(Vec3 rgb, const SampledWavelengths& w) {
+    return rgbToSpectrumEmission(rgb, w);
 }
 
-// Light spectrum: optional blackbody CCT, else RGBIlluminantSpectrum of emittedRadiance().
-inline SampledSpectrum lightEmissionSpectrum(const LightData& light, const SampledWavelengths& w,
-                                            const RGBColorSpace& cs = colorSpaceSrgb()) {
+// Light spectrum: optional blackbody CCT, else Jakob illuminant of emittedRadiance().
+inline SampledSpectrum lightEmissionSpectrum(const LightData& light, const SampledWavelengths& w) {
     const Vec3 rgb = light.emittedRadiance();
     if (light.colorTemperatureK > 50.0f) {
         BlackbodySpectrum bb(light.colorTemperatureK);
         SampledSpectrum s = bb.sample(w);
-        const Vec3 bbRgb = spectrumToRgb(s, w, cs);
+        const Vec3 bbRgb = spectrumToRgb(s, w);
         const float bbLum = 0.2126f * bbRgb.x + 0.7152f * bbRgb.y + 0.0722f * bbRgb.z;
         const float wantLum = 0.2126f * rgb.x + 0.7152f * rgb.y + 0.0722f * rgb.z;
         s *= wantLum / srMax(bbLum, 1e-8f);
         const Vec3 tint = light.color;
         if (fabsf(tint.x - 1.0f) > 1e-4f || fabsf(tint.y - 1.0f) > 1e-4f ||
             fabsf(tint.z - 1.0f) > 1e-4f) {
-            SampledSpectrum t = rgbToSpectrumEmission(tint, w, cs);
+            SampledSpectrum t = rgbToSpectrumEmission(tint, w);
             const float tAvg = srMax(spectrumAvg(t), 1e-8f);
             for (int i = 0; i < s.n; ++i) s.values[i] *= t.values[i] / tAvg;
         }
         return s;
     }
-    return upsampleEmission(rgb, w, cs);
+    return upsampleEmission(rgb, w);
 }
 
 inline SampledSpectrum clampSpectrumIndirect(SampledSpectrum s, float clampValue) {
@@ -333,13 +331,10 @@ struct BsdfSampleSpectral {
 };
 
 // Opaque / metal / thin-film lift of an RGB BSDF weight (not for glass dielectrics).
-// Textures are filtered in RGB (evaluateTexturedMaterial); the book converts that
-// RGB to a spectrum at lookup. The BSDF is still RGB, so the weight already holds
-// the filtered colour — RGBUnboundedSpectrum is pbrt's conversion for that RGB.
 inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, Vec3 wo, Vec3 wi,
                                       Vec3 rgbWeight, const SampledWavelengths& w, float /*baseIor*/,
                                       int /*heroIdx*/) {
-    SampledSpectrum base = rgbToSpectrumUnbounded(rgbWeight, w);
+    SampledSpectrum base = rgbToSpectrumLinear(rgbWeight, w);
     const bool useConductor =
         mat.metallic >= 0.5f && (mat.conductorK.x + mat.conductorK.y + mat.conductorK.z) > 1e-4f;
     if (useConductor) {
@@ -399,7 +394,7 @@ inline SampledSpectrum bsdfEvalSpectralDielectric(const Material& mat, Vec3 wo, 
 
     const float tw = saturatef(mat.transmission) * (1.0f - saturatef(mat.metallic));
     const bool reflecting = wo.z * wi.z > 0.0f;
-    const SampledSpectrum tint = rgbToSpectrumReflectance(lw.transmissionTint, w);
+    const SampledSpectrum tint = rgbToSpectrumLinear(lw.transmissionTint, w);
 
     if (reflecting) {
         Vec3 h = wo + wi;
@@ -464,8 +459,7 @@ inline SampledSpectrum bsdfEvalSpectral(const Material& mat, Vec3 ng, Vec3 ns, V
         SampledSpectrum f = bsdfEvalSpectralDielectric(mat, wo, wi, w, baseIor);
         Material matOpaque = matNd;
         matOpaque.transmission = 0.0f;
-        f += liftBsdfWeight(matOpaque, frame, woW, wiW, bsdfEvalLocal(matOpaque, wo, wi).f, w,
-                            baseIor, 0);
+        f += rgbToSpectrumLinear(bsdfEvalLocal(matOpaque, wo, wi).f, w);
         return f;
     }
 
@@ -511,7 +505,7 @@ inline BsdfSampleSpectral bsdfSampleSpectral(const Material& mat, Vec3 woLocal, 
     }
 
     const float tw = saturatef(mat.transmission) * (1.0f - saturatef(mat.metallic));
-    const SampledSpectrum tint = rgbToSpectrumReflectance(lw.transmissionTint, w);
+    const SampledSpectrum tint = rgbToSpectrumLinear(lw.transmissionTint, w);
     const float heroEtaAbs =
         spectralAbsoluteIor(baseIor, mat.dispersionAbbe, w.lambda[heroIdx]);
     const float heroEta = woLocal.z > 0.0f ? heroEtaAbs : 1.0f / heroEtaAbs;

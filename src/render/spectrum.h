@@ -173,13 +173,58 @@ inline Xyz spectrumToXyz(const SampledSpectrum& s, const SampledWavelengths& w) 
     return Xyz(X * scale, Y * scale, Z * scale);
 }
 
-// SampledSpectrum → RGB (pbrt SampledSpectrum::ToRGB): ToXYZ / CIE_Y, then
-// the working-space matrix. No illuminant-E white balance — sRGB white is D65,
-// so lights must be RGBIlluminantSpectrum (Jakob × D65), not equal-energy.
+// SampledSpectrum → RGB via tabulated CIE CMFs + RGBColorSpace.
+//
+// White balance:
+//   • Multi-λ (secondaries alive): sample-matched ∫CMF estimator — equal-energy
+//     maps to (1,1,1) for the same wavelength samples (honest MC, not RGB align).
+//   • After TerminateSecondary / singular CMF: fixed illuminant-E integrals.
+// No per-sample RGB gamut clamp (negatives average in the film).
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
                           const RGBColorSpace& cs = colorSpaceSrgb()) {
     if (s.n <= 0 || w.n <= 0) return Vec3(0.0f);
-    return cs.toRgb(spectrumToXyz(s, w));
+    const int n = std::min(s.n, w.n);
+    float X = 0.0f, Y = 0.0f, Z = 0.0f;
+    float Xw = 0.0f, Yw = 0.0f, Zw = 0.0f;
+    int active = 0;
+    for (int i = 0; i < n; ++i) {
+        float cx, cy, cz;
+        cieXyzAtLambda(w.lambda[i], cx, cy, cz);
+        const float invPdf = safeDivSpectrum(1.0f, w.pdf[i]);
+        if (w.pdf[i] > 0.0f) ++active;
+        X += s.values[i] * cx * invPdf;
+        Y += s.values[i] * cy * invPdf;
+        Z += s.values[i] * cz * invPdf;
+        Xw += cx * invPdf;
+        Yw += cy * invPdf;
+        Zw += cz * invPdf;
+    }
+    const float invN = 1.0f / float(n);
+    X *= invN;
+    Y *= invN;
+    Z *= invN;
+    Xw *= invN;
+    Yw *= invN;
+    Zw *= invN;
+
+    const bool sampleWbOk = active >= 2 && Xw > 1e-5f && Yw > 1e-5f && Zw > 1e-5f &&
+                            !w.secondaryTerminated();
+    if (sampleWbOk) {
+        X /= Xw;
+        Y /= Yw;
+        Z /= Zw;
+    } else {
+        X /= cie_tab::kCieXIntegral1nm;
+        Y /= cie_tab::kCieYIntegral1nm;
+        Z /= cie_tab::kCieZIntegral1nm;
+    }
+
+    Vec3 rgb = cs.toRgb(Xyz(X, Y, Z));
+    const Vec3 whiteRgb = cs.toRgb(Xyz(1.0f, 1.0f, 1.0f));
+    rgb.x /= srMax(1e-8f, whiteRgb.x);
+    rgb.y /= srMax(1e-8f, whiteRgb.y);
+    rgb.z /= srMax(1e-8f, whiteRgb.z);
+    return rgb;
 }
 
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w, int colorSpaceId) {
