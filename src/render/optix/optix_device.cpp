@@ -484,10 +484,23 @@ public:
             deviceScene_.mediumCount = int(scene_->media.size());
             deviceScene_.volumes = nullptr;
             deviceScene_.volumeCount = int(scene_->volumes.size());
-            deviceScene_.lightBvh = nullptr;
-            deviceScene_.lightBvhNodeCount = 0;
-            deviceScene_.infiniteLightIndices = nullptr;
-            deviceScene_.infiniteLightCount = 0;
+            if (hostView.lightBvh && hostView.lightBvhNodeCount > 0) {
+                lightBvhBuffer_.upload(hostView.lightBvh, size_t(hostView.lightBvhNodeCount));
+                deviceScene_.lightBvh = lightBvhBuffer_.as<const LightBvhNode>();
+                deviceScene_.lightBvhNodeCount = hostView.lightBvhNodeCount;
+            } else {
+                deviceScene_.lightBvh = nullptr;
+                deviceScene_.lightBvhNodeCount = 0;
+            }
+            if (hostView.infiniteLightIndices && hostView.infiniteLightCount > 0) {
+                infiniteLightIndexBuffer_.upload(hostView.infiniteLightIndices,
+                                                 size_t(hostView.infiniteLightCount));
+                deviceScene_.infiniteLightIndices = infiniteLightIndexBuffer_.as<const int>();
+                deviceScene_.infiniteLightCount = hostView.infiniteLightCount;
+            } else {
+                deviceScene_.infiniteLightIndices = nullptr;
+                deviceScene_.infiniteLightCount = 0;
+            }
             deviceScene_.motionXforms = nullptr;
             deviceScene_.cameraMotionXforms = nullptr;
             gpuVolumeCount_ = int(volumeViews.size());
@@ -1122,6 +1135,8 @@ private:
     DeviceBuffer proceduralBuffer_;
     DeviceBuffer mediaBuffer_;
     DeviceBuffer volumeViewBuffer_;
+    DeviceBuffer lightBvhBuffer_;
+    DeviceBuffer infiniteLightIndexBuffer_;
     std::vector<DeviceBuffer> volumeDensityBuffers_;
     int gpuVolumeCount_ = 0;
     DeviceBuffer instanceDescBuffer_;

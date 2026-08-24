@@ -189,11 +189,6 @@ function(solstice_optix_kernel name source symbol)
     if(K_LIGHTS)
         list(APPEND extra "-DSOLSTICE_OPTIX_KERNEL=1")
     endif()
-    # cicc hangs 10 min on shade_background at -O1 (loop over lightCount in the
-    # sun-disc helper). -O0 plus SR_NO_UNROLL keeps that TU in seconds.
-    if(name STREQUAL "shade_background")
-        list(APPEND extra "-O0")
-    endif()
     set_property(DIRECTORY APPEND PROPERTY SOLSTICE_OPTIX_KERNELS ${name})
     set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_SRC_${name} "${source}")
     set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_SYM_${name} "${symbol}")
@@ -233,9 +228,18 @@ solstice_optix_kernel(intersect_shadow
     solsticeOptixIntersectShadowIr
     DEPENDS ${_solstice_optix_base} ${_solstice_optix_dir}/optix_trace.cuh)
 
-# shade_background before shade_surface: the last green Windows job compiled
-# the small kernels, then hung after the large shade_surface embed. Putting
-# background first means a cicc hang there is visible in ptx_steps.log.
+solstice_optix_kernel(shade_surface
+    ${_solstice_optix_dir}/optix_shade_surface.cu
+    solsticeOptixShadeSurfaceIr
+    LIGHTS
+    DEPENDS ${_solstice_optix_base}
+            ${_solstice_optix_dir}/optix_geom.cuh
+            ${_solstice_optix_dir}/optix_bsdf.cuh
+            ${_solstice_optix_dir}/optix_volume.cuh
+            ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
+
 solstice_optix_kernel(shade_background
     ${_solstice_optix_dir}/optix_shade_background.cu
     solsticeOptixShadeBackgroundIr
@@ -259,18 +263,6 @@ solstice_optix_kernel(shade_volume
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h
             ${CMAKE_SOURCE_DIR}/src/render/lights.h)
-
-solstice_optix_kernel(shade_surface
-    ${_solstice_optix_dir}/optix_shade_surface.cu
-    solsticeOptixShadeSurfaceIr
-    LIGHTS
-    DEPENDS ${_solstice_optix_base}
-            ${_solstice_optix_dir}/optix_geom.cuh
-            ${_solstice_optix_dir}/optix_bsdf.cuh
-            ${_solstice_optix_dir}/optix_volume.cuh
-            ${CMAKE_SOURCE_DIR}/src/render/lights.h
-            ${CMAKE_SOURCE_DIR}/src/render/volume.h
-            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
 get_property(_solstice_optix_kernels DIRECTORY PROPERTY SOLSTICE_OPTIX_KERNELS)
 get_property(SOLSTICE_OPTIX_EMBED_SOURCES DIRECTORY PROPERTY SOLSTICE_OPTIX_EMBED_SOURCES)

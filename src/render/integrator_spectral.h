@@ -74,13 +74,10 @@ public:
                 if (ms.scattered) {
                     origin = origin + direction * ms.t;
                     const Vec3 woVol = -direction;
-                    const float pNee = volumeNeeRouletteP(depth);
-                    if ((pNee >= 1.0f || rng.nextFloat() < pNee) && scene.lightCount > 0 &&
-                        depth < maxDepth) {
+                    if (scene.lightCount > 0 && depth < maxDepth) {
                         const Vec3 volDirect =
                             nextEventEstimationVolumeOnce(scene, tracer, origin, woVol, medWalk, rng);
-                        SampledSpectrum contrib =
-                            throughput * upsampleRgb(volDirect, waves) * (1.0f / srMax(pNee, 1e-8f));
+                        SampledSpectrum contrib = throughput * upsampleRgb(volDirect, waves);
                         if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                         radiance += contrib;
                     }

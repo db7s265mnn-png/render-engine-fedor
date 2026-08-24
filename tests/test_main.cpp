@@ -295,27 +295,6 @@ void testSampling() {
             check(jClamp <= 0.999999f && jClamp >= 0.0f, "Manual-Test clamps outside pixel");
         }
     }
-
-    // RIS: pick i ∝ w_i. Zero-weight slots are never chosen.
-    {
-        check(kRisCandidates == 8, "RIS uses 8 light candidates");
-        const float w[3] = {1.0f, 3.0f, 0.0f};
-        int counts[3] = {0, 0, 0};
-        Rng rngRis(3u, 5u);
-        constexpr int kN = 20000;
-        int badPick = 0;
-        for (int i = 0; i < kN; ++i) {
-            float wSum = 0.0f;
-            const int p = risPick(w, 3, rngRis.nextFloat(), wSum);
-            if (p < 0 || p > 1 || std::fabs(wSum - 4.0f) > 1e-5f) ++badPick;
-            else ++counts[p];
-        }
-        check(badPick == 0, "risPick skips the zero-weight slot");
-        checkNear(float(counts[0]) / float(kN), 0.25f, 0.03f, "risPick P(w=1) ≈ 1/4");
-        checkNear(float(counts[1]) / float(kN), 0.75f, 0.03f, "risPick P(w=3) ≈ 3/4");
-        float emptySum = 1.0f;
-        check(risPick(w, 0, 0.5f, emptySum) < 0, "risPick empty set");
-    }
 }
 
 void testLightSelectionDistantRect() {
@@ -394,6 +373,23 @@ void testLightSelectionDistantRect() {
     check(std::fabs(pSun3 - 1.0f / 3.0f) < 1e-4f, "sun is one of two infinite slots");
     check(std::fabs(pDome3 - 1.0f / 3.0f) < 1e-4f, "dome is the other infinite slot");
     check(std::fabs(pRect3 - 1.0f / 3.0f) < 1e-4f, "rect is the finite slot");
+
+    {
+        ScenePtr scene = std::make_shared<Scene>();
+        scene->lights.push_back(lights[0]);
+        scene->lights.push_back(lights[1]);
+        scene->finalize();
+        const SceneView v = scene->view();
+        check(v.lightBvh != nullptr && v.lightBvhNodeCount > 0,
+              "pbrt: finite lights always get a cone BVH");
+        check(v.infiniteLightCount == 1, "distant light is outside the BVH");
+        float pdf = 0.0f;
+        const int idx = sampleLightIndex(v, Vec3(0.0f, 0.0f, 1.0f), 0.8f, pdf);
+        check(idx >= 0 && pdf > 0.0f, "position-aware light pick uses the BVH");
+        checkNear(volumeLightSelectionPdfIndex(v, Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f), 0.9f, 1),
+                  lightSelectionPdfIndex(v, Vec3(0.0f), 1), 1e-6f,
+                  "volume selection pdf equals the surface LightSampler");
+    }
 }
 
 void testBsdf() {
@@ -6049,9 +6045,6 @@ void testNgonTriangulateAndVdb() {
         const float ratio = float(fogBdpt / srMax(fogPtOff, 1e-8));
         check(ratio > 0.5f && ratio < 2.0f, "Fog BDPT fallback energy matches Path Tracer");
     }
-    check(volumeRisCandidateCount(0.0f) == 1, "volume NEE uses one candidate (no RIS)");
-    check(volumeRisCandidateCount(0.9f) == 1, "anisotropic volume NEE still M=1");
-    check(volumeRisCandidateCount(-0.9f) == 1, "|g| does not enable volume RIS");
 
     // Indirect Guides + dense fog: OpenPGL used to Reserve(128) path segments.
     // A walk past that (Windows ACCESS_VIOLATION at 0xFFFFFFFFFFFFFFFF) plus

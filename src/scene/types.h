@@ -540,7 +540,7 @@ struct RenderSettingsData {
     int samplesPerPixel = 64;
     int maxDepth = 8;       // surfaces + volume scatters; UI up to 4096 for dense MS
     int rrStartDepth = 3;   // raise near maxDepth for deep volume multiple scattering
-    int lightSamples = 2;          // NEE samples per bounce (MIS with BSDF)
+    int lightSamples = 2;          // UI; integrators take one NEE sample (pbrt-v4)
     int seed = 0;
     int integrator = kIntegratorPathTracer;
 
@@ -681,7 +681,7 @@ struct SceneView {
     int cameraMotionKeyCount = 1;
 
     // Light BVH for position-aware light selection (finite lights only).
-    // Null on the OptiX GPU path — sampling falls back to the flux-only code.
+    // Uploaded to OptiX; flux-only fallback if the tree is empty.
     const LightBvhNode* lightBvh          = nullptr;
     int                 lightBvhNodeCount  = 0;
     // Infinite lights (dome, distant) are kept outside the BVH.

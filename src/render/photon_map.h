@@ -67,7 +67,7 @@ public:
     // Estimate reflected radiance at a diffuse-ish shading point (W/m²/sr).
     Vec3 gather(Vec3 p, Vec3 n, Vec3 wo, const Material& mat, float radius) const {
         if (photons_.empty() || radius <= 1e-8f) return Vec3(0.0f);
-        const LobeWeights lw = computeLobes(mat);
+        const LobeWeights lw = computeLobes(mat, Frame(n).toLocal(wo));
         if (lw.diffuse < 1e-4f && !lw.delta) {
             // Still allow rough dielectrics with a diffuse leftover; pure delta skips.
         }
@@ -226,7 +226,7 @@ private:
                 continue;
             }
 
-            const LobeWeights lw = computeLobes(mat);
+            const LobeWeights lw = computeLobes(mat, Frame(si.ns).toLocal(-d));
             // Photon map owns all refractive casters (any roughness) plus near-spec
             // mirrors — not only α ≤ kCausticAlpha. Otherwise Auto→Photon picked for
             // rough glass while emit skipped those lobes → empty map + BSDF leak.

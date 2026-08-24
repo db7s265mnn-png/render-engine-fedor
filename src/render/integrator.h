@@ -1087,21 +1087,13 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 // Direct Clamp (0 = off) applies to β · NEE / pNee — the pixel deposit —
                 // matching env miss. Clamping raw NEE first left spikes of clamp·β/pNee.
                 if (scene.lightCount > 0 && depth < maxDepth) {
-                    const float pNee = volumeNeeRouletteP(depth);
-                    const bool takeNee = pNee >= 1.0f || rng.nextFloat() < pNee;
-                    if (takeNee) {
-                            const int nLight = 1;
-                            Vec3 volDirect(0.0f);
-                            for (int lsIdx = 0; lsIdx < nLight; ++lsIdx) {
-                                volDirect += nextEventEstimationVolumeOnce(scene, tracer, origin, woVol,
-                                                                           medWalk, rng, guiding);
-                            }
-                            volDirect = volDirect * (1.0f / (float(nLight) * pNee));
-                            radiance += clampContribution(throughput * volDirect, settings.clampDirect);
+                    const Vec3 volDirect =
+                        nextEventEstimationVolumeOnce(scene, tracer, origin, woVol, medWalk, rng,
+                                                      guiding);
+                    radiance += clampContribution(throughput * volDirect, settings.clampDirect);
 #if !defined(__CUDACC__)
-                            if (guiding && guiding->active()) guiding->addScattered(volDirect);
+                    if (guiding && guiding->active()) guiding->addScattered(volDirect);
 #endif
-                    }
                 }
 
                 // Continue: HG, mixed with OpenPGL volume×HG when Indirect Guides is on.

@@ -32,10 +32,7 @@ extern "C" __global__ void __raygen__shade_surface() {
         const GpuVolumeGrid& vol = params.volumes[volInst.volumeIndex];
         if (!vol.density) {
             path.origin = offsetRay(si.p, si.ng, path.direction);
-            if (++path.hops > 32) {
-                path.queue = kQueueDead;
-                return;
-            }
+            ++path.hops;
             path.queue = kQueueIntersectClosest;
             return;
         }
@@ -47,10 +44,7 @@ extern "C" __global__ void __raygen__shade_surface() {
                 path.mediumIndex = volInst.mediumIndex;
                 path.origin = offsetRay(si.p, si.ng * -1.0f, path.direction);
             }
-            if (++path.hops > 32) {
-                path.queue = kQueueDead;
-                return;
-            }
+            ++path.hops;
             path.queue = kQueueIntersectClosest;
             return;
         }
@@ -64,10 +58,7 @@ extern "C" __global__ void __raygen__shade_surface() {
                 si.ns = nSdf;
             } else {
                 path.origin = offsetRay(si.p, si.ng, path.direction);
-                if (++path.hops > 32) {
-                    path.queue = kQueueDead;
-                    return;
-                }
+                ++path.hops;
                 path.queue = kQueueIntersectClosest;
                 return;
             }
@@ -78,10 +69,7 @@ extern "C" __global__ void __raygen__shade_surface() {
         const InstanceData& inst = scene.instances[si.instanceIndex];
         if (!inst.visibleCamera) {
             path.origin = offsetRay(si.p, si.ng, path.direction);
-            if (++path.hops > 16) {
-                path.queue = kQueueDead;
-                return;
-            }
+            ++path.hops;
             path.queue = kQueueIntersectClosest;
             return;
         }
@@ -125,10 +113,7 @@ extern "C" __global__ void __raygen__shade_surface() {
     }
     if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && path.rng.nextFloat() > mat.opacity)) {
         path.origin = offsetRay(si.p, si.ng, path.direction);
-        if (++path.hops > 32) {
-            path.queue = kQueueDead;
-            return;
-        }
+        ++path.hops;
         path.queue = kQueueIntersectClosest;
         return;
     }

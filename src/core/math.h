@@ -11,15 +11,9 @@
 #  else
 #    define SR_INL inline
 #  endif
-#  define SR_NO_UNROLL _Pragma("unroll 1")
-#  define SR_NOINLINE __noinline__
 #else
 #  define SR_HD
 #  define SR_INL inline
-#  define SR_NO_UNROLL
-// Header helpers tagged SR_NOINLINE must still be `inline` on the host so
-// Embree TUs that include lights.h do not emit duplicate strong symbols.
-#  define SR_NOINLINE inline
 #endif
 
 #include <cmath>
