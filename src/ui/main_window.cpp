@@ -1697,18 +1697,11 @@ void MainWindow::updateStatusBar() {
     const RenderProgress progress = session_.progress();
     QString overlay = QString("%1 / %2 spp").arg(progress.samplesDone).arg(progress.samplesTarget);
     if (progress.elapsedSeconds > 0.0) overlay += QStringLiteral("   %1").arg(formatElapsedHms(progress.elapsedSeconds));
-    // Always show which camera sampler / engine is live — catches "I swear I
-    // switched to White but still see BN tiles" mismatches.
     if (scene_) {
         const RenderSettingsData& rs = scene_->settings;
-        const char* sampler = "Sobol";
-        if (rs.pixelSampler == kPixelSamplerBlueNoise) sampler = "BN";
-        else if (rs.pixelSampler == kPixelSamplerXorshift) sampler = "Xorshift";
-        else if (rs.pixelSampler == kPixelSamplerGenPnt2D) sampler = "GenPnt2D";
-        else if (rs.pixelSampler == kPixelSamplerManualTest) sampler = "ManualTest";
         const char* engine = "Buckets";
         if (rs.samplingEngine == kSamplingEngineProgressive) engine = "Progressive";
-        overlay += QString("   %1 · PathSobol · %2").arg(sampler, engine);
+        overlay += QString("   OwenSobol · %1").arg(engine);
         if (rs.noiseThreshold > 0.0f) {
             overlay += QString("   noise %1").arg(double(rs.noiseThreshold), 0, 'g', 3);
             if (progress.noisePixelCount > 0) {
@@ -1720,8 +1713,6 @@ void MainWindow::updateStatusBar() {
         } else {
             overlay += QStringLiteral("   noise off");
         }
-        if (rs.pixelSampler == kPixelSamplerManualTest)
-            overlay += QString("  mult=%1").arg(rs.manualTestMult, 0, 'f', 2);
     }
     if (!progress.message.empty()) {
         overlay += QStringLiteral("   %1").arg(QString::fromStdString(progress.message));

@@ -214,7 +214,8 @@ solstice_optix_kernel(init_from_camera
     DEPENDS ${_solstice_optix_base}
             ${_solstice_optix_dir}/optix_geom.cuh
             ${_solstice_optix_dir}/optix_volume.cuh
-            ${CMAKE_SOURCE_DIR}/src/render/blue_noise.h
+            ${CMAKE_SOURCE_DIR}/src/render/camera_sample.h
+            ${CMAKE_SOURCE_DIR}/src/render/sobol.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 

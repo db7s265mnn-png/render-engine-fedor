@@ -620,8 +620,6 @@ public:
             launchParams.pixelOffsetY = offY;
             launchParams.sampleIndex = sampleIndex;
             launchParams.frameSeed = unsigned(scene_->settings.seed) * 9781u + unsigned(sampleIndex) * 6271u;
-            launchParams.pixelSampler = scene_->settings.pixelSampler;
-            launchParams.manualTestMult = scene_->settings.manualTestMult;
             fillSpectralLaunch(launchParams);
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
             launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();

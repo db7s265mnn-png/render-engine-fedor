@@ -1634,8 +1634,7 @@ struct SobolSampler {
     }
 };
 
-// Drop-in replacements for blueNoisePixelJitter / blueNoiseLensSample
-// (see embree_device.cpp). Dims 0-1 and 2-3 respectively.
+// Camera AA (dims 0–1) and lens (dims 2–3). PBRT4 Owen-scrambled Sobol.
 SR_INL SR_HD void pixelSample(int x, int y, int sampleIndex, float& u, float& v) {
     SobolSampler s;
     s.setPixel(x, y);
@@ -1654,7 +1653,7 @@ SR_INL SR_HD void lensSample(int x, int y, int sampleIndex, float& u, float& v) 
 
 // ---------------------------------------------------------------------------
 // Path-dimension Owen Sobol (PBRT / Cycles style). One stream from dimension 0:
-// camera jitter (when the pixel sampler is Sobol) then the rest of the path.
+// camera jitter then the rest of the path.
 // Per-pixel scramble via setPixel — do NOT share one sequence across the
 // frame (that printed a square lattice in an earlier experiment).
 // ---------------------------------------------------------------------------

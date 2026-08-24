@@ -1,7 +1,6 @@
 // Cycles analogue: integrator_init_from_camera.
 // Pinhole + thin-lens DoF. Polynomial optics stay on Embree.
 // Samples hero wavelengths the same way as SpectralPathIntegrator.
-#include "render/blue_noise.h"
 #include "render/camera_sample.h"
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_spectral_film.cuh"
@@ -33,8 +32,7 @@ extern "C" __global__ void __raygen__init_from_camera() {
 
     path.rng = makePixelRng(x, y, params.sampleIndex, params.frameSeed);
     float jitterX = 0.5f, jitterY = 0.5f, lensU = 0.5f, lensV = 0.5f;
-    sampleCameraPixelLens(params.pixelSampler, x, y, params.sampleIndex, params.width, params.frameSeed,
-                          params.manualTestMult, jitterX, jitterY, lensU, lensV);
+    sampleCameraPixelLens(x, y, params.sampleIndex, jitterX, jitterY, lensU, lensV);
 
     cameraRay(params.scene, float(x) + jitterX, float(y) + jitterY, lensU, lensV, path.origin, path.direction);
     samplePathWavelengths(path, params.spec);

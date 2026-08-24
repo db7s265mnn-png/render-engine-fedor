@@ -9,11 +9,8 @@
 
 #include "core/log.h"
 #include "core/thread_pool.h"
-#include "render/blue_noise.h"
-#include "render/camera_sample.h"
 #include "render/film_tile.h"
 #include "render/pixel_filter.h"
-#include "render/rsequence.h"
 #include "render/sobol.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
@@ -358,11 +355,6 @@ public:
             else if (settings.integrator == kIntegratorDirectLighting)
                 logInfo("Integrator: Direct Lighting");
 
-            const char* samplerName = "Sobol";
-            if (settings.pixelSampler == kPixelSamplerBlueNoise) samplerName = "BlueNoise64";
-            else if (settings.pixelSampler == kPixelSamplerXorshift) samplerName = "Xorshift";
-            else if (settings.pixelSampler == kPixelSamplerGenPnt2D) samplerName = "GenPnt2D";
-            else if (settings.pixelSampler == kPixelSamplerManualTest) samplerName = "ManualTest";
             const char* engineName = "Buckets";
             if (settings.samplingEngine == kSamplingEngineProgressive) engineName = "Progressive";
             std::string engineDetail = engineName;
@@ -373,7 +365,7 @@ public:
                 engineDetail += " (scanlines)";
             }
             logInfo(std::string("Sampling Type: ") + engineDetail +
-                    "; Pixel Sampler: " + samplerName + "; Path: OwenSobol");
+                    "; Sampler: Owen-scrambled Sobol (PBRT4)");
             if (useGuiding && hasVolumes)
                 logInfo("OpenPGL: volume phase mixed with HG product (Indirect Guides)");
             if (settings.samplingDebug != kSamplingDebugOff) {
@@ -412,19 +404,13 @@ public:
             float jx = 0.5f, jy = 0.5f;
             float lensU = 0.5f, lensV = 0.5f;
 
-            // pbrt: one Owen-Sobol stream from dimension 0. Camera consumes 0–3
-            // when the pixel sampler is Sobol; other pixel samplers stay independent.
+            // pbrt: one Owen-Sobol stream from dimension 0. Camera consumes 0–3.
             PathSobolStream pathSobol{};
             if (usePathSobol) attachPathSobol(rng, pathSobol, x, y, sampleIndex);
-            if (usePathSobol && settings.pixelSampler == kPixelSamplerSobol) {
-                jx = rng.nextFloat();
-                jy = rng.nextFloat();
-                lensU = rng.nextFloat();
-                lensV = rng.nextFloat();
-            } else {
-                sampleCameraPixelLens(settings.pixelSampler, x, y, sampleIndex, width, frameSeed,
-                                      settings.manualTestMult, jx, jy, lensU, lensV);
-            }
+            jx = rng.nextFloat();
+            jy = rng.nextFloat();
+            lensU = rng.nextFloat();
+            lensV = rng.nextFloat();
 
             auto done = [&](Vec3 L) -> PixelEval { return PixelEval{L, jx, jy}; };
 
@@ -573,9 +559,6 @@ public:
 
             auto sampleShutter = [&](Rng& r) -> float {
                 if (scene.settings.motionBlur == 0) return 0.0f;
-                if (settings.pixelSampler == kPixelSamplerGenPnt2D) {
-                    return r2ShutterSample(x, y, sampleIndex, width, kR2IndexSpp);
-                }
                 return r.nextFloat();
             };
 

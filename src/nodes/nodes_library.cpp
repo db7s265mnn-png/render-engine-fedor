@@ -1020,7 +1020,7 @@ public:
                                       "look blocky when zoomed.\n"
                                       "Triangle / Gaussian / Mitchell: softer AA; softens the "
                                       "visible pixel grid at low spp.\n"
-                                      "Does not change the Pixel Sampler (Sobol / GenPnt2D / …)."));
+                                      "Does not change the camera sampler (Owen-scrambled Sobol)."));
         addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.5, 0.0, 8.0, false)
                          .withGroup("Image")
                          .withTooltip("Filter support in pixels. Changing Pixel Filter fills the "
@@ -1084,31 +1084,6 @@ public:
                          .withGroup("Sampling")
                          .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
                                       "Higher = less light/reflection noise, slower."));
-        addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
-                                         {"Sobol (Owen)", "Blue Noise", "Xorshift", "GenPnt2D",
-                                          "Manual-Test"},
-                                         0)
-                         .withGroup("Sampling")
-                         .withTooltip(
-                             "Camera AA / DoF / shutter primary samples.\n"
-                             "Path bounces always use Owen-scrambled Sobol (PBRT4).\n"
-                             "Sobol: stratified per pixel — recommended.\n"
-                             "Blue Noise: CP dither from a 64×64 mask with per-tile phase.\n"
-                             "Xorshift: Marsaglia xorshift32 white jitter.\n"
-                             "GenPnt2D: plastic-number R2 (Roberts), n = sampleIndex + "
-                             "per-pixel CP phase; shutter uses golden 1D.\n"
-                             "Manual-Test: sample at pixel center, then add U(-1,1)×Mult "
-                             "per axis (clamped to the pixel). For grid diagnostics.\n"
-                             "Active sampler is shown in the viewport spp overlay."));
-        addParameter(Parameter::makeFloat("manualtestmult", "Manual-Test Mult", 0.0, 0.0, 2.0, false)
-                         .withGroup("Sampling")
-                         .withVisibleWhen("pixelsampler==4")
-                         .withTooltip("Manual-Test only. Pixel jitter = 0.5 + U(-1,1)×Mult on X and Y "
-                                      "(same Mult), then clamped to [0,1).\n"
-                                      "0 = exact pixel center. Raise to scatter samples inside "
-                                      "(and, if Mult>0.5, would leave the pixel — but we clamp)."));
-        // Hidden: marks menus that include Manual-Test (index 4). Older files used 4/5 for R2 modes.
-        addParameter(Parameter::makeBool("_pixel_sampler_manual_v1", "", true));
         // Hidden: old menu was Legacy / FilmTile / Progressive (0/1/2).
         addParameter(Parameter::makeBool("_sampling_type_v2", "", true));
         addParameter(Parameter::makeMenu("samplingengine", "Sampling Type",
@@ -1415,8 +1390,8 @@ public:
                          .withGroup("Diagnostic")
                          .withTooltip("Replace beauty with a sampling/seed visualisation "
                                       "(no light transport).\n"
-                                      "Pixel Jitter XY: R=jx G=jy from Pixel Sampler — Blue Noise "
-                                      "shows a 64px period; Sobol/Xorshift/GenPnt2D should not.\n"
+                                      "Pixel Jitter XY: R=jx G=jy from Owen-scrambled Sobol "
+                                      "(PBRT4 camera dims 0–1).\n"
                                       "Path RNG u0: first Owen-Sobol / PCG float — look for "
                                       "faint seams from correlated seeds.\n"
                                       "Bucket ID: color by Bucket Size tiles (threading only).\n"
@@ -1461,13 +1436,6 @@ public:
         settings.seed = intValue("seed", 0);
         settings.threads = intValue("threads", 0);
         settings.tileSize = std::clamp(intValue("tilesize", 32), 0, 256);
-        // Pixel Sampler. Before Manual-Test, indices 4/5 were R2 salt/linear → GenPnt2D.
-        {
-            int ps = intValue("pixelsampler", 0);
-            if (!boolValue("_pixel_sampler_manual_v1", false) && ps >= 4) ps = 3;
-            settings.pixelSampler = std::clamp(ps, 0, 4);
-        }
-        settings.manualTestMult = float(floatValue("manualtestmult", 0.0));
         // Sampling Type v2: Buckets=0 / Progressive=1.
         // Old menu was Legacy=0 / FilmTile=1 / Progressive=2.
         if (!boolValue("_sampling_type_v2", false)) {

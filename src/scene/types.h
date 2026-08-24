@@ -447,16 +447,6 @@ enum CausticsEngine : int {
     kCausticsEnginePhoton = 2,
 };
 
-// Camera AA / DoF primary samples. Path bounce dims use Owen-scrambled Sobol (PBRT4).
-enum PixelSampler : int {
-    kPixelSamplerSobol = 0,        // Owen-scrambled Sobol
-    kPixelSamplerBlueNoise = 1,    // 64×64 BN CP tile
-    kPixelSamplerXorshift = 2,     // Marsaglia xorshift32 white jitter
-    kPixelSamplerGenPnt2D = 3,     // plastic-number R2 (Roberts), n = sampleIndex
-    // Diagnostic: pixel center + U(-1,1)*manualTestMult per axis, clamped to [0,1).
-    kPixelSamplerManualTest = 4,
-};
-
 // How the image is scheduled / written (Render Settings → Sampling Type).
 enum SamplingEngine : int {
     // PBRT-style FilmTile buckets: local accum + mergeFilmTile, strong (x,y,spp) seed.
@@ -468,7 +458,7 @@ enum SamplingEngine : int {
 // Render Settings → Diagnostic: replace beauty with a sampling/seed field.
 enum SamplingDebug : int {
     kSamplingDebugOff = 0,
-    kSamplingDebugPixelJitter = 1,  // R=jx G=jy — shows BN period vs Sobol/Xorshift
+    kSamplingDebugPixelJitter = 1,  // R=jx G=jy — Owen-Sobol camera jitter
     kSamplingDebugPathRng = 2,      // first path-RNG float as gray — seed seams
     kSamplingDebugBucket = 3,       // color by render bucket (tileSize)
     kSamplingDebugPixelHash = 4,    // RGB from hashPixelSample(x,y,spp,seed)
@@ -568,9 +558,6 @@ struct RenderSettingsData {
     int xpuSchedule = kXpuScheduleOverlap;  // ignored unless backend == XPU
     int envVisibleCamera = 1;
     int tileSize = 32;             // bucket size; 0 = PBRT-style auto
-    int pixelSampler = kPixelSamplerSobol;  // camera AA / DoF generator
-    // Manual-Test only: pixel jitter = 0.5 + U(-1,1)*mult, clamped to [0,1).
-    float manualTestMult = 0.0f;
     int samplingEngine = kSamplingEngineBuckets;  // Buckets / Progressive
     int threads = 0;               // 0 = hardware concurrency
 
