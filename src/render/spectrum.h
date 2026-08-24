@@ -191,43 +191,13 @@ inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
     if (active >= 2 && !w.secondaryTerminated())
         return cs.toRgb(spectrumToXyz(s, w));
 
-    float X = 0.0f, Y = 0.0f, Z = 0.0f;
-    float Xw = 0.0f, Yw = 0.0f, Zw = 0.0f;
-    for (int i = 0; i < n; ++i) {
-        float cx, cy, cz;
-        cieXyzAtLambda(w.lambda[i], cx, cy, cz);
-        const float invPdf = safeDivSpectrum(1.0f, w.pdf[i]);
-        X += s.values[i] * cx * invPdf;
-        Y += s.values[i] * cy * invPdf;
-        Z += s.values[i] * cz * invPdf;
-        Xw += cx * invPdf;
-        Yw += cy * invPdf;
-        Zw += cz * invPdf;
-    }
-    const float invN = 1.0f / float(n);
-    X *= invN;
-    Y *= invN;
-    Z *= invN;
-    Xw *= invN;
-    Yw *= invN;
-    Zw *= invN;
-
-    if (Xw > 1e-5f && Yw > 1e-5f && Zw > 1e-5f) {
-        X /= Xw;
-        Y /= Yw;
-        Z /= Zw;
-    } else {
-        X /= cie_tab::kCieXIntegral1nm;
-        Y /= cie_tab::kCieYIntegral1nm;
-        Z /= cie_tab::kCieZIntegral1nm;
-    }
-
-    Vec3 rgb = cs.toRgb(Xyz(X, Y, Z));
-    const Vec3 whiteRgb = cs.toRgb(Xyz(1.0f, 1.0f, 1.0f));
-    rgb.x /= srMax(1e-8f, whiteRgb.x);
-    rgb.y /= srMax(1e-8f, whiteRgb.y);
-    rgb.z /= srMax(1e-8f, whiteRgb.z);
-    return rgb;
+    // One live λ (TerminateSecondary): CMF chromaticity is a spectral-locus
+    // spike (and ȳ/z̄ can be ~0 in the tails, so X/Xw is unsafe). Emit grey at
+    // s(λ) — same as sample-matched E when all CMF channels are non-zero.
+    float hero = 0.0f;
+    for (int i = 0; i < n; ++i)
+        if (w.pdf[i] > 0.0f) hero = s.values[i];
+    return Vec3(hero, hero, hero);
 }
 
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w, int colorSpaceId) {

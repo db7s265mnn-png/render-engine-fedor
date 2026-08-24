@@ -6627,6 +6627,11 @@ int main() {
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
+    if (getenv("SOL_ONLY_SPECTRAL")) {
+        testSpectralHeroBasics();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (getenv("SOL_ONLY_TESS")) {
         registerBuiltinNodes();
         testTessellationTriangleBudget();
