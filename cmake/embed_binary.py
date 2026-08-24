@@ -41,7 +41,8 @@ def main(argv):
         'extern "C" const unsigned long long %sSize = %dull;\n' % (symbol, len(data))
     ).encode("ascii")
     Path(dst).write_bytes(bytes(out))
-    print("-- embed %s: %d bytes -> %s" % (symbol, len(data), dst))
+    sys.stdout.write("-- embed %s: %d bytes -> %s\n" % (symbol, len(data), dst))
+    sys.stdout.flush()
     return 0
 
 

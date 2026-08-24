@@ -160,6 +160,13 @@ set(_solstice_optix_base
     ${CMAKE_SOURCE_DIR}/src/core/math.h
     ${CMAKE_SOURCE_DIR}/src/core/rng.h)
 
+# Never use the Windows `py` launcher: cmake -P + py.exe hangs after the script
+# prints (pipe/handle leak) and starved ninja so shade_background never started.
+find_program(SOLSTICE_EMBED_PYTHON NAMES python3 python python3.exe python.exe
+    REQUIRED
+    DOC "Python used to embed OptiX PTX (not the Windows py launcher)")
+message(STATUS "OptiX PTX embed python: ${SOLSTICE_EMBED_PYTHON}")
+
 set(SOLSTICE_OPTIX_EMBED_SOURCES "")
 
 function(solstice_optix_kernel name source symbol)
@@ -185,13 +192,14 @@ function(solstice_optix_kernel name source symbol)
     )
     add_custom_command(
         OUTPUT ${embed}
-        COMMAND ${CMAKE_COMMAND}
-                -DINPUT=${ptx}
-                -DOUTPUT=${embed}
-                -DSYMBOL=${symbol}
-                -P ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
+        COMMAND ${CMAKE_COMMAND} -E echo "embed PTX ${name} start"
+        COMMAND ${SOLSTICE_EMBED_PYTHON}
+                ${CMAKE_SOURCE_DIR}/cmake/embed_binary.py
+                ${ptx}
+                ${embed}
+                ${symbol}
+        COMMAND ${CMAKE_COMMAND} -E echo "embed PTX ${name} done"
         DEPENDS ${ptx}
-                ${CMAKE_SOURCE_DIR}/cmake/embed_binary.cmake
                 ${CMAKE_SOURCE_DIR}/cmake/embed_binary.py
         COMMENT "Embedding OptiX PTX (${name})"
         VERBATIM

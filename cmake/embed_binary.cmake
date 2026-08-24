@@ -24,8 +24,10 @@ endif()
 file(SIZE "${INPUT}" BYTE_COUNT)
 message(STATUS "embed ${SYMBOL}: ${BYTE_COUNT} bytes via python")
 
+# Do not probe `py`: the Windows launcher hangs under cmake -P after the script
+# exits, which left ninja waiting so later kernels never launched.
 set(_embed_python "")
-foreach(_cand IN ITEMS python3 python py)
+foreach(_cand IN ITEMS python3 python python3.exe python.exe)
     execute_process(
         COMMAND ${_cand} --version
         RESULT_VARIABLE _py_rc
