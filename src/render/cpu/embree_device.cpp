@@ -269,15 +269,19 @@ public:
             settings.integrator == kIntegratorDirectLighting ||
             settings.integrator == kIntegratorWireframe;
         // pbrt: Path Tracer and BDPT are spectral (hero-λ). Volumes + BDPT fall
-        // back to spectral PT (no new volume integrator). Skip MNEE/photon mix.
+        // back to spectral PT (no new volume integrator). Do not mix MNEE/photon
+        // into the spectral kernels: Path Tracer + caustics uses PathMneeIntegrator.
+        const bool usePhoton =
+            !diagnosticIntegrator && !hasVolumes && causticsUsePhotonMap(settings, &scene);
+        const bool useMnee =
+            !diagnosticIntegrator && !hasVolumes && causticsUseMnee(settings, &scene);
+        const bool causticSpecialized = usePhoton || useMnee;
         const bool useSpectralBdpt = wantBdpt && !hasVolumes && !diagnosticIntegrator;
-        const bool useSpectralPt = !diagnosticIntegrator &&
+        const bool useSpectralPt = !diagnosticIntegrator && !(pathTracer && causticSpecialized) &&
                                    (settings.integrator == kIntegratorSpectralPath || pathTracer ||
                                     (wantBdpt && hasVolumes));
         const bool useSpectral = useSpectralPt || useSpectralBdpt;
         const bool useBdpt = wantBdpt;
-        const bool usePhoton = false;
-        const bool useMnee = false;
         const bool useBdptPath = false;
 #if SOLSTICE_HAVE_OPENPGL
         // OpenPGL guides eye-path diffuse sampling on PT and BDPT (RGB + Spectral).

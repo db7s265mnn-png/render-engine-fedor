@@ -40,6 +40,9 @@ public:
         SampledSpectrum throughput = SampledSpectrum::constant(waves.n, 1.0f);
         float bsdfPdf = 0.0f;
         bool specularBounce = true;
+        bool suppressCausticLight = false;
+        bool sawNonSpecular = false;
+        bool causticSuffix = false;
         int depth = 0;
         int passThrough = 0;
         int currentMedium = -1;
@@ -86,14 +89,17 @@ public:
                                                        phasePdf);
                     bsdfPdf = phasePdf;
                     specularBounce = false;
+                    sawNonSpecular = true;
+                    causticSuffix = false;
                     ++depth;
                     ++volumeScatterCount;
                     continue;
                 }
             }
             if (!didHit) {
-                if (scene.domeLightIndex >= 0) {
+                if (!suppressCausticLight && scene.domeLightIndex >= 0) {
                     const LightData& dome = scene.lights[scene.domeLightIndex];
+                    if (!(causticSuffix && !lightContributesCaustics(dome))) {
                     const bool primary = depth == 0 && passThrough == 0;
                     if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
                         Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
@@ -119,13 +125,14 @@ public:
                             radiance += contrib;
                         }
                     }
+                    }
                 }
-                {
+                if (!suppressCausticLight) {
                     const bool primarySun = depth == 0 && passThrough == 0;
                     if (!(primarySun && !settings.envVisibleCamera)) {
                         const Vec3 sunL =
                             cameraSunDiscRadiance(scene, origin, direction, bsdfPdf, specularBounce,
-                                                  primarySun, false);
+                                                  primarySun, causticSuffix);
                         if (!isBlack(sunL)) {
                             SampledSpectrum contrib = throughput * upsampleEmission(sunL, waves);
                             radiance += contrib;
@@ -146,7 +153,9 @@ public:
             }
 
             if (si.lightIndex >= 0) {
+                if (suppressCausticLight) break;
                 const LightData& light = scene.lights[si.lightIndex];
+                if (causticSuffix && !lightContributesCaustics(light)) break;
                 const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
                 Vec3 emitted = areaLightEmission(scene, light, direction, lightN);
                 if (!isBlack(emitted)) {
@@ -195,14 +204,111 @@ public:
 
             const Vec3 wo = -direction;
             const Frame frame(si.ns);
-
             const float baseIor = mat.ior;
-            // NEE stays RGB (glass specular contributes ~0); upsample aggregate.
-            const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng);
-            if (!isBlack(nee)) {
-                SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
-                if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
-                radiance += contrib;
+
+            // Arnold Standard Surface mix: stochastic SSS vs complementary BRDF.
+            const float sssWeight = saturatef(mat.subsurface);
+            if (materialSupportsSss(mat) && rng.nextFloat() < sssWeight) {
+                Material specMat = sssSpecularEntryMaterial(mat);
+                const Vec3 woLocalEntry = frame.toLocal(wo);
+                const LobeWeights specLw = computeLobes(specMat, woLocalEntry);
+                const float pSpec = sssEntrySpecularProb(specMat, woLocalEntry);
+
+                if (pSpec > 0.0f && !(suppressCausticLight && !specularBounce)) {
+                    const Vec3 nee =
+                        nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, currentMedium);
+                    if (!isBlack(nee)) {
+                        SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
+                        if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                        radiance += contrib;
+                    }
+                }
+
+                if (pSpec > 0.0f && rng.nextFloat() < pSpec) {
+                    throughput *= (1.0f / pSpec);
+                    const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
+                    BsdfSampleSpectral specBs =
+                        bsdfSampleSpectral(specMat, woLocalEntry, uSpec, rng.nextFloat(), rng.nextFloat(),
+                                           rng.nextFloat(), waves, specMat.ior, heroIdx);
+                    if (specBs.valid && specBs.pdf > 0.0f) {
+                        const Vec3 wiWorld = normalize(frame.toWorld(specBs.wi));
+                        throughput *= specBs.weight;
+                        origin = offsetRayOrigin(si.p, si.ng, wiWorld);
+                        direction = wiWorld;
+                        bsdfPdf = specBs.pdf;
+                        specularBounce = specBs.specular;
+                        BsdfSample bs{};
+                        bs.wi = specBs.wi;
+                        bs.pdf = specBs.pdf;
+                        bs.specular = specBs.specular;
+                        bs.transmitted = specBs.transmitted;
+                        bs.weight = Vec3(1.0f);
+                        rayKind = nextRayShadeKind(bs, specLw);
+                        if (shouldTerminateSecondaryWavelengths(bs, specLw) &&
+                            !waves.secondaryTerminated())
+                            waves.terminateSecondary();
+                        const bool causticBounce = specBs.specular || isNearSpecularLobe(specLw);
+                        if (settings.caustics == 0 && causticBounce && sawNonSpecular)
+                            suppressCausticLight = true;
+                        if (causticBounce && sawNonSpecular) causticSuffix = true;
+                        if (!causticBounce) {
+                            sawNonSpecular = true;
+                            causticSuffix = false;
+                        }
+                        ++depth;
+                        continue;
+                    }
+                    break;
+                }
+                if (pSpec > 0.0f && pSpec < 0.999f) throughput *= (1.0f / (1.0f - pSpec));
+
+                const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
+                if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
+                Material lambert = sssExitLambertMaterial();
+                SurfaceInteraction ssSi = si;
+                ssSi.p = walk.exitP;
+                ssSi.ns = walk.exitN;
+                ssSi.ng = walk.exitN;
+                const Frame ssFrame(walk.exitN);
+                if (!(suppressCausticLight && !specularBounce)) {
+                    const Vec3 nee = nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame,
+                                                         walk.exitWo, rng, currentMedium);
+                    if (!isBlack(nee)) {
+                        SampledSpectrum contrib =
+                            throughput * upsampleRgb(walk.pathWeight * nee, waves);
+                        if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                        radiance += contrib;
+                    }
+                }
+                const BsdfSample ssBs =
+                    bsdfSampleLocal(lambert, ssFrame.toLocal(walk.exitWo), rng.nextFloat(),
+                                    rng.nextFloat(), rng.nextFloat(), rng.nextFloat());
+                if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
+                    const Vec3 wiWorld = normalize(ssFrame.toWorld(ssBs.wi));
+                    throughput *= upsampleRgb(walk.pathWeight * ssBs.weight, waves);
+                    origin = offsetRayOrigin(walk.exitP, walk.exitN, wiWorld);
+                    direction = wiWorld;
+                    bsdfPdf = ssBs.pdf;
+                    specularBounce = false;
+                    rayKind = nextRayShadeKind(ssBs, computeLobes(lambert, ssFrame.toLocal(walk.exitWo)));
+                    if (!waves.secondaryTerminated()) waves.terminateSecondary();
+                    sawNonSpecular = true;
+                    causticSuffix = false;
+                    ++depth;
+                    continue;
+                }
+                break;
+            }
+
+            if (!(suppressCausticLight && !specularBounce)) {
+                // NEE stays RGB (glass specular contributes ~0); upsample aggregate.
+                const Vec3 nee =
+                    nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, currentMedium);
+                if (!isBlack(nee)) {
+                    SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
+                    if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                    radiance += contrib;
+                }
             }
 
             const Vec3 woLocal = frame.toLocal(wo);
@@ -224,9 +330,8 @@ public:
             bs.specular = ss.specular;
             bs.transmitted = ss.transmitted;
             bs.weight = Vec3(1.0f);  // unused after spectral weight
-            rayKind = nextRayShadeKind(bs, computeLobes(mat, woLocal));
-
             const LobeWeights lw = computeLobes(mat, woLocal);
+            rayKind = nextRayShadeKind(bs, lw);
             if (shouldTerminateSecondaryWavelengths(bs, lw) && !waves.secondaryTerminated())
                 waves.terminateSecondary();
 
@@ -235,6 +340,13 @@ public:
             if (ss.transmitted && inst.mediumIndex >= 0 && mediumIsActive(scene, inst.mediumIndex)) {
                 const bool entering = dot(si.ng, wiWorld) < 0.0f;
                 currentMedium = entering ? inst.mediumIndex : -1;
+            }
+            const bool causticBounce = ss.specular || isNearSpecularLobe(lw);
+            if (settings.caustics == 0 && causticBounce && sawNonSpecular) suppressCausticLight = true;
+            if (causticBounce && sawNonSpecular) causticSuffix = true;
+            if (!causticBounce) {
+                sawNonSpecular = true;
+                causticSuffix = false;
             }
             ++depth;
 

@@ -40,8 +40,8 @@ struct WalkConfig {
 };
 
 // Extend a BDPT subpath while carrying wavelength-sampled throughput in a
-// parallel array. SSS body walks are intentionally not part of spectral BDPT
-// v1; the Fresnel entry reflection remains available.
+// parallel array. Eye-path SSS uses the same Chiang random-walk + Christensen–
+// Burley fallback as the path tracer (light subpaths keep the specular entry).
 template <typename Tracer>
 SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bdpt::Vert* path,
                       SampledSpectrum* betaPath, int count, Vec3 origin, Vec3 dir, float pdfDirSa,
@@ -200,27 +200,57 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
             Material specMat = sssSpecularEntryMaterial(cur.mat);
             const LobeWeights specLw = computeLobes(specMat, woLocal);
             const float pSpec = sssEntrySpecularProb(specMat, woLocal);
-            if (pSpec <= 0.0f || rng.nextFloat() >= pSpec) break;
-            beta *= 1.0f / pSpec;
-            cur.mat = specMat;
-            cur.delta = specLw.delta && specLw.diffuse < 1e-4f;
-            cur.connectable = !cur.delta;
-            cur.nearSpec = cur.delta || isNearSpecularLobe(specLw) || isPhotonCausticCasterLobe(specLw);
-            cur.beta = spectrumToRgb(beta, waves);
-            betaPath[count - 1] = beta;
-            const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
-            BsdfSampleSpectral ss =
-                bsdfSampleSpectral(specMat, woLocal, uSpec, rng.nextFloat(), rng.nextFloat(),
-                                   rng.nextFloat(), waves, specMat.ior, heroIdx);
-            if (!ss.valid) break;
-            bs.wi = ss.wi;
-            bs.pdf = ss.pdf;
-            bs.specular = ss.specular;
-            bs.transmitted = ss.transmitted;
-            bs.weight = Vec3(1.0f);
-            weight = ss.weight;
-            wiWorld = normalize(frame.toWorld(bs.wi));
-            haveSample = true;
+
+            if (pSpec > 0.0f && rng.nextFloat() < pSpec) {
+                beta *= 1.0f / pSpec;
+                cur.mat = specMat;
+                cur.delta = specLw.delta && specLw.diffuse < 1e-4f;
+                cur.connectable = !cur.delta;
+                cur.nearSpec = cur.delta || isNearSpecularLobe(specLw) || isPhotonCausticCasterLobe(specLw);
+                cur.beta = spectrumToRgb(beta, waves);
+                betaPath[count - 1] = beta;
+                const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
+                BsdfSampleSpectral ss =
+                    bsdfSampleSpectral(specMat, woLocal, uSpec, rng.nextFloat(), rng.nextFloat(),
+                                       rng.nextFloat(), waves, specMat.ior, heroIdx);
+                if (!ss.valid) break;
+                bs.wi = ss.wi;
+                bs.pdf = ss.pdf;
+                bs.specular = ss.specular;
+                bs.transmitted = ss.transmitted;
+                bs.weight = Vec3(1.0f);
+                weight = ss.weight;
+                wiWorld = normalize(frame.toWorld(bs.wi));
+                haveSample = true;
+            } else if (!cfg.eyePath) {
+                // Light subpath: no volume walk — stop diffuse transport into SSS.
+                break;
+            } else {
+                if (pSpec > 0.0f && pSpec < 0.999f) beta *= 1.0f / (1.0f - pSpec);
+                const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, -dir, mat, rng);
+                if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
+                cur.p = walk.exitP;
+                cur.ng = walk.exitN;
+                cur.ns = walk.exitN;
+                cur.wo = walk.exitWo;
+                cur.mat = sssExitLambertMaterial();
+                cur.delta = false;
+                cur.connectable = true;
+                cur.nearSpec = false;
+                beta *= upsampleRgb(walk.pathWeight, waves);
+                cur.beta = spectrumToRgb(beta, waves);
+                betaPath[count - 1] = beta;
+
+                const Frame ssFrame(cur.ns);
+                const Vec3 ssWoLocal = ssFrame.toLocal(cur.wo);
+                bs = bsdfSampleLocal(cur.mat, ssWoLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                     rng.nextFloat());
+                if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
+                wiWorld = normalize(ssFrame.toWorld(bs.wi));
+                weight = upsampleRgb(bs.weight, waves);
+                bs.weight = Vec3(1.0f);
+                haveSample = true;
+            }
         }
 
 #if SOLSTICE_HAVE_OPENPGL
