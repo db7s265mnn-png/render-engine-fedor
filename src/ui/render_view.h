@@ -226,6 +226,7 @@ private:
     QString dragParameterName_;
     bool gizmoDidEdit_ = false;
 
+    QWidget* chromeRow_ = nullptr;
     QWidget* chromeBar_ = nullptr;
     QWidget* renderControlStrip_ = nullptr;
     QWidget* toolStrip_ = nullptr;

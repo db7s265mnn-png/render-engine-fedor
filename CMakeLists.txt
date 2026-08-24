@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.2 LANGUAGES CXX)
+project(Solstice VERSION 0.9.3 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -98,7 +98,7 @@ if(MSVC)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
         add_compile_options(/MP)
     endif()
-    add_compile_definitions(_USE_MATH_DEFINES NOMINMAX WIN32_LEAN_AND_MEAN)
+    add_compile_definitions(_USE_MATH_DEFINES NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
     # TinyUSDZ ships the same template instantiations in two .cc files; MSVC then
     # prints thousands of LNK4006 lines and the link looks hung in cmd.exe.
     add_link_options(/IGNORE:4006)

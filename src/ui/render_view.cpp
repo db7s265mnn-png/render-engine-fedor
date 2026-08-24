@@ -9,6 +9,7 @@
 #include <QFileInfo>
 #include <QFontMetrics>
 #include <QHBoxLayout>
+#include <QLayout>
 #include <QKeyEvent>
 #include <QAbstractButton>
 #include <QAction>
@@ -269,29 +270,42 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     pal.setColor(QPalette::Window, theme::gridDark());
     setPalette(pal);
 
-    // Chrome strip above the framebuffer — matches app chrome (docks / status bar).
-    chromeBar_ = new QWidget(this);
-    chromeBar_->setObjectName("viewportChromeBar");
-    chromeBar_->setFixedHeight(theme::chromeBarHeight());
-    chromeBar_->setStyleSheet(
-        "QWidget#viewportChromeBar {"
+    // Chrome strip above the framebuffer. Detach lives in a 28px column on the
+    // RIGHT of this row so it cannot sit at (0,0) over Start.
+    chromeRow_ = new QWidget(this);
+    chromeRow_->setObjectName("viewportChromeRow");
+    chromeRow_->setFixedHeight(theme::chromeBarHeight());
+    chromeRow_->setStyleSheet(
+        "QWidget#viewportChromeRow {"
         "  background: #2e3136;"
         "  border-bottom: 1px solid #22242a;"
         "}");
+    auto* chromeRowLayout = new QHBoxLayout(chromeRow_);
+    chromeRowLayout->setContentsMargins(0, 0, 0, 0);
+    chromeRowLayout->setSpacing(0);
 
-    detachSlot_ = new QWidget(this);
+    chromeBar_ = new QWidget(chromeRow_);
+    chromeBar_->setObjectName("viewportChromeBar");
+    chromeBar_->setStyleSheet(
+        "QWidget#viewportChromeBar { background: transparent; border: none; }");
+
+    detachSlot_ = new QWidget(chromeRow_);
     detachSlot_->setObjectName("viewportDetachSlot");
+    detachSlot_->setFixedWidth(28);
     detachSlot_->setStyleSheet(
-        "QWidget#viewportDetachSlot {"
-        "  background: #2e3136;"
-        "  border-bottom: 1px solid #22242a;"
-        "}");
-    detachSlot_->hide();
+        "QWidget#viewportDetachSlot { background: transparent; border: none; }");
+    auto* detachSlotLayout = new QHBoxLayout(detachSlot_);
+    detachSlotLayout->setContentsMargins(0, 0, 6, 0);
+    detachSlotLayout->setSpacing(0);
     detachButton_ = new DockDetachButton(detachSlot_);
-    detachButton_->hide();
+    detachSlotLayout->addWidget(detachButton_, 0, Qt::AlignVCenter | Qt::AlignRight);
     connect(detachButton_, &QToolButton::clicked, this, [this] {
         if (onDetach_) onDetach_();
     });
+    chromeRowLayout->addWidget(chromeBar_, 1);
+    chromeRowLayout->addWidget(detachSlot_, 0);
+    detachSlot_->hide();
+    detachButton_->hide();
 
     renderControlStrip_ = new QWidget(chromeBar_);
     renderControlStrip_->setObjectName("viewportRenderControls");
@@ -684,23 +698,22 @@ void RenderView::setFocusPickActive(bool active) {
 void RenderView::layoutToolStrip() {
     if (!chromeBar_ || !toolStrip_) return;
     const int chromeH = theme::chromeBarHeight();
-    constexpr int kDetachColumn = 28;
-    const bool showDetach = detachButton_ && detachButton_->isVisible();
-    const int slotW = showDetach ? kDetachColumn : 0;
-    chromeBar_->setGeometry(0, 0, std::max(0, width() - slotW), chromeH);
-    if (detachSlot_) {
-        if (showDetach) {
-            detachSlot_->setGeometry(width() - slotW, 0, slotW, chromeH);
-            detachSlot_->show();
-            detachSlot_->raise();
-            const int y = std::max(0, (chromeH - detachButton_->height()) / 2);
-            const int x = std::max(0, (slotW - detachButton_->width()) / 2);
-            detachButton_->move(x, y);
-            detachButton_->raise();
-        } else {
-            detachSlot_->hide();
-        }
+    // QWidget::isVisible() is false while any ancestor is hidden, so it cannot
+    // drive this layout (slot stays hidden forever, or the button sits at 0,0).
+    const bool showDetach = bool(onDetach_);
+    if (chromeRow_) {
+        chromeRow_->setGeometry(0, 0, width(), chromeH);
+    } else {
+        chromeBar_->setGeometry(0, 0, width(), chromeH);
     }
+    if (detachSlot_) {
+        detachSlot_->setFixedWidth(showDetach ? 28 : 0);
+        detachSlot_->setVisible(showDetach);
+    }
+    if (chromeRow_) {
+        if (QLayout* rowLayout = chromeRow_->layout()) rowLayout->activate();
+    }
+    if (detachButton_) detachButton_->setVisible(showDetach);
     int left = 0;
     if (renderControlStrip_) {
         renderControlStrip_->adjustSize();
@@ -713,13 +726,12 @@ void RenderView::layoutToolStrip() {
     const int x = std::max(left, (available - toolStrip_->width()) / 2);
     const int y = std::max(0, (chromeH - toolStrip_->height()) / 2);
     toolStrip_->move(x, y);
-    chromeBar_->raise();
+    if (chromeRow_)
+        chromeRow_->raise();
+    else
+        chromeBar_->raise();
     if (renderControlStrip_) renderControlStrip_->raise();
     toolStrip_->raise();
-    if (detachSlot_ && showDetach) {
-        detachSlot_->raise();
-        detachButton_->raise();
-    }
 }
 
 void RenderView::attachRenderActions(QAction* start, QAction* stop) {
@@ -740,10 +752,7 @@ void RenderView::attachRenderActions(QAction* start, QAction* stop) {
 
 void RenderView::setOnDetach(std::function<void()> onDetach) {
     onDetach_ = std::move(onDetach);
-    if (detachButton_) {
-        detachButton_->setVisible(bool(onDetach_));
-        detachButton_->setToolTip(QStringLiteral("Detach"));
-    }
+    if (detachButton_) detachButton_->setToolTip(QStringLiteral("Detach"));
     layoutToolStrip();
 }
 

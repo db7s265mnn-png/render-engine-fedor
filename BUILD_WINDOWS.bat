@@ -6,6 +6,7 @@ echo.
 echo Double-click this file to compile (Release + OptiX, MINIMAL).
 echo Visual Studio 2026 needs CUDA 13.2. CUDA 12.0 can stay installed.
 echo Output: C:\gz-build
+echo Close Grendizer_Render first or the linker cannot overwrite the exe (LNK1168).
 echo This is the fast GPU OptiX build (no VDB/MaterialX/Alembic/...).
 echo Full app: BUILD_WINDOWS_FULL.bat  -^>  C:\gz-full
 echo Keep %%LOCALAPPDATA%%\grendizer-deps (Embree cache).

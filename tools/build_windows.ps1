@@ -800,7 +800,7 @@ $embreeRoot = Resolve-EmbreePrefix
 $BuildDir = Resolve-BuildDir
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 if (-not (Test-Path -LiteralPath (Join-Path $BuildDir 'CMakeCache.txt'))) {
-    Info "No CMake cache in $BuildDir — clean configure (expected after deleting the build folder)."
+    Info "No CMake cache in $BuildDir - clean configure (expected after deleting the build folder)."
 }
 
 $Prefix = "$Qt;$script:DepsPrefix;$embreeRoot"
@@ -945,47 +945,6 @@ if (-not (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_OPTIX 1' -Quiet)) {
 }
 Info 'OptiX is compiled into this build (SOLSTICE_HAVE_OPTIX 1).'
 
-function Invoke-LoggedCMakeBuild([string[]]$BuildArgs) {
-    Info 'Ninja PTX has NO percent. The seconds counter is a timer, not 0-100 progress.'
-    Info 'Watch cicc cpu= in this log: the number must grow. If cpu= stays the same, it is hung.'
-    $p = Start-Process -FilePath $CMake -ArgumentList $BuildArgs -NoNewWindow -PassThru
-    $t0 = Get-Date
-    $lastCpu = -1
-    $idleTicks = 0
-    while (-not $p.HasExited) {
-        Start-Sleep -Seconds 20
-        $alive = @(Get-Process -Name nvcc,cicc,cudafe++,ptxas,cl -ErrorAction SilentlyContinue)
-        $sec = [int]((Get-Date) - $t0).TotalSeconds
-        if ($alive.Count -gt 0) {
-            $bits = @()
-            $cpuSum = 0
-            foreach ($proc in $alive) {
-                $cpuSec = 0
-                try { $cpuSec = [int]$proc.TotalProcessorTime.TotalSeconds } catch { }
-                $cpuSum = $cpuSum + $cpuSec
-                $mb = [int]($proc.WorkingSet64 / 1MB)
-                $bits += ($proc.ProcessName + ' cpu=' + $cpuSec + 's ram=' + $mb + 'MB')
-            }
-            if ($cpuSum -eq $lastCpu) { $idleTicks = $idleTicks + 1 } else { $idleTicks = 0 }
-            $lastCpu = $cpuSum
-            $line = "  timer ${sec}s   " + ($bits -join ' | ')
-            if ($idleTicks -ge 3) {
-                $line = $line + '   *** CPU not moving, probably hung ***'
-            }
-            Info $line
-        } else {
-            Info ("  timer ${sec}s   (no nvcc/cicc this tick - link or wait)")
-            $lastCpu = -1
-            $idleTicks = 0
-        }
-    }
-    # HasExited can be true before ExitCode is filled; [int]$null is 0, which
-    # hid ninja failures and then the script searched for the exe / ran deploy.
-    $p.WaitForExit()
-    if ($null -eq $p.ExitCode) { return 1 }
-    return [int]$p.ExitCode
-}
-
 function Find-RenderExe([string]$Dir) {
     $binRoot = Join-Path $Dir 'bin'
     $dirs = @(
@@ -1012,21 +971,52 @@ function Find-RenderExe([string]$Dir) {
     return $null
 }
 
+function Try-UnlockRenderExe([string]$Dir) {
+    $old = Find-RenderExe $Dir
+    if (-not $old) { return }
+    try {
+        Remove-Item -LiteralPath $old.FullName -Force -ErrorAction Stop
+        Info ("Removed old exe so the linker can write it: " + $old.Name)
+    } catch {
+        Fail @"
+Cannot overwrite $($old.FullName)
+Close Grendizer_Render (and TX Tools) and run the bat again. This is LNK1168, not nvcc/sobol.
+"@
+    }
+}
+
 Write-Host ''
 Info 'Building in parallel: nvcc PTX uses 1 core; MSVC compiles the rest on the other cores.'
 Info 'GPU OptiX is wavefront modules (init/intersect/shade), not integrator.h. ninja compiles them in parallel.'
-Info 'Ninja [0/N] on PTX is a timer, not a percent. cicc cpu= must grow. 3% on a 14900K = one thread at 100%.'
+Info 'Ninja [n/N] is real progress. Do not close Grendizer_Render while linking (LNK1168).'
 $j = $env:NUMBER_OF_PROCESSORS
 if (-not $j) { $j = '8' }
-$code = Invoke-LoggedCMakeBuild @('--build', $BuildDir, '--parallel', "$j")
+Try-UnlockRenderExe $BuildDir
+# Call cmake in-process. Start-Process left ExitCode $null after the last
+# link step, and the script printed BUILD FAILED with no LNK line even when
+# ninja had already written bin\Grendizer_Render-*.exe.
+$buildStarted = Get-Date
+& $CMake --build $BuildDir --parallel $j
+$code = 0
+if ($null -ne $LASTEXITCODE) { $code = [int]$LASTEXITCODE }
+$ExeAfter = Find-RenderExe $BuildDir
 if ($code -ne 0) {
-    Fail @"
-Compile failed (ninja/nvcc). Scroll up to the first error (often sobol.h / undefined in device code).
-No exe until that is fixed. Deleting the build folder is OK — the next run recreates $BuildDir.
-If type_traits / aligned_storage: CUDA 12.0 was used, need 13.2 + compute_75.
-If cicc cpu= stopped growing: hung.
-Keep %LOCALAPPDATA%\grendizer-deps.
+    $fresh = $false
+    if ($ExeAfter) {
+        $fresh = $ExeAfter.LastWriteTime -ge $buildStarted.AddSeconds(-5)
+    }
+    if ($fresh) {
+        Info ("cmake exit code $code but ninja wrote a fresh exe - continuing: " + $ExeAfter.Name)
+    } else {
+        Fail @"
+Compile/link failed (ninja exit $code). Scroll up for the first error from cl/link/nvcc.
+C4244 / C4996 above are warnings, not the failure.
+If the last line was Linking CXX executable: close Grendizer_Render and retry (exe locked).
+If sobol.h / undefined in device code: that nvcc bug is already fixed in this zip.
+Look in $BuildDir\bin for Grendizer_Render-0.9.3-*.exe - a false FAIL used to hide a finished link.
+Deleting $BuildDir is OK. Keep %LOCALAPPDATA%\grendizer-deps.
 "@
+    }
 }
 
 $Exe = Find-RenderExe $BuildDir
