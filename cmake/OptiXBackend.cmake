@@ -131,8 +131,13 @@ if(WIN32)
 endif()
 
 # Cycles: each integrator stage is its own kernel (intersect_closest, shade_surface,
-# …) so cicc never sees optixTrace + BSDF + lights in one megakernel. ninja compiles
-# these TUs in parallel. -O1: OptiX re-optimizes at optixModuleCreate.
+# …) so cicc never sees optixTrace + BSDF + lights in one megakernel. -O1: OptiX
+# re-optimizes at optixModuleCreate.
+#
+# Do NOT give ninja 16 separate custom commands. On Windows CI, after the
+# shade_surface embed finished, ninja never started [15/16] (shade_background)
+# and the step sat silent until the 45-minute cap. One Python process compiles
+# and embeds every kernel in order, with flushed timestamps and a heartbeat.
 set(_solstice_nvcc_ptx_common
     ${_solstice_nvcc_ccbin}
     -ptx
@@ -167,46 +172,34 @@ find_program(SOLSTICE_EMBED_PYTHON NAMES python3 python python3.exe python.exe
     DOC "Python used to embed OptiX PTX (not the Windows py launcher)")
 message(STATUS "OptiX PTX embed python: ${SOLSTICE_EMBED_PYTHON}")
 
-set(SOLSTICE_OPTIX_EMBED_SOURCES "")
+function(_solstice_json_escape out str)
+    string(REPLACE "\\" "\\\\" str "${str}")
+    string(REPLACE "\"" "\\\"" str "${str}")
+    string(REPLACE "\t" "\\t" str "${str}")
+    string(REPLACE "\n" "\\n" str "${str}")
+    string(REPLACE "\r" "\\r" str "${str}")
+    set(${out} "${str}" PARENT_SCOPE)
+endfunction()
 
 function(solstice_optix_kernel name source symbol)
     cmake_parse_arguments(K "LIGHTS" "" "DEPENDS" ${ARGN})
     set(ptx "${CMAKE_BINARY_DIR}/generated/optix_${name}.ptx")
     set(embed "${CMAKE_BINARY_DIR}/generated/solstice_optix_${name}_ir.cpp")
-    set(defs)
+    set(defs "")
     if(K_LIGHTS)
-        list(APPEND defs -DSOLSTICE_OPTIX_KERNEL=1)
+        set(defs "-DSOLSTICE_OPTIX_KERNEL=1")
     endif()
-    add_custom_command(
-        OUTPUT ${ptx}
-        COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX ${name} start"
-        COMMAND ${CMAKE_CUDA_COMPILER}
-                ${_solstice_nvcc_ptx_common}
-                ${defs}
-                -o ${ptx}
-                ${source}
-        COMMAND ${CMAKE_COMMAND} -E echo "nvcc PTX ${name} done"
-        DEPENDS ${source} ${K_DEPENDS}
-        COMMENT "nvcc OptiX PTX (${name})"
-        VERBATIM
-    )
-    add_custom_command(
-        OUTPUT ${embed}
-        COMMAND ${CMAKE_COMMAND} -E echo "embed PTX ${name} start"
-        COMMAND ${SOLSTICE_EMBED_PYTHON}
-                ${CMAKE_SOURCE_DIR}/cmake/embed_binary.py
-                ${ptx}
-                ${embed}
-                ${symbol}
-        COMMAND ${CMAKE_COMMAND} -E echo "embed PTX ${name} done"
-        DEPENDS ${ptx}
-                ${CMAKE_SOURCE_DIR}/cmake/embed_binary.py
-        COMMENT "Embedding OptiX PTX (${name})"
-        VERBATIM
-    )
-    set(_acc "${SOLSTICE_OPTIX_EMBED_SOURCES}")
-    list(APPEND _acc ${embed})
-    set(SOLSTICE_OPTIX_EMBED_SOURCES "${_acc}" PARENT_SCOPE)
+    set_property(DIRECTORY APPEND PROPERTY SOLSTICE_OPTIX_KERNELS ${name})
+    set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_SRC_${name} "${source}")
+    set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_SYM_${name} "${symbol}")
+    set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_PTX_${name} "${ptx}")
+    set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_EMBED_${name} "${embed}")
+    set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_DEFS_${name} "${defs}")
+    set_property(DIRECTORY APPEND PROPERTY SOLSTICE_OPTIX_ALL_DEPS "${source}")
+    foreach(_d IN LISTS K_DEPENDS)
+        set_property(DIRECTORY APPEND PROPERTY SOLSTICE_OPTIX_ALL_DEPS "${_d}")
+    endforeach()
+    set_property(DIRECTORY APPEND PROPERTY SOLSTICE_OPTIX_EMBED_SOURCES "${embed}")
     set_source_files_properties(${embed} PROPERTIES GENERATED TRUE)
 endfunction()
 
@@ -235,18 +228,9 @@ solstice_optix_kernel(intersect_shadow
     solsticeOptixIntersectShadowIr
     DEPENDS ${_solstice_optix_base} ${_solstice_optix_dir}/optix_trace.cuh)
 
-solstice_optix_kernel(shade_surface
-    ${_solstice_optix_dir}/optix_shade_surface.cu
-    solsticeOptixShadeSurfaceIr
-    LIGHTS
-    DEPENDS ${_solstice_optix_base}
-            ${_solstice_optix_dir}/optix_geom.cuh
-            ${_solstice_optix_dir}/optix_bsdf.cuh
-            ${_solstice_optix_dir}/optix_volume.cuh
-            ${CMAKE_SOURCE_DIR}/src/render/lights.h
-            ${CMAKE_SOURCE_DIR}/src/render/volume.h
-            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
-
+# shade_background before shade_surface: the last green Windows job compiled
+# the small kernels, then hung after the large shade_surface embed. Putting
+# background first means a cicc hang there is visible in ptx_steps.log.
 solstice_optix_kernel(shade_background
     ${_solstice_optix_dir}/optix_shade_background.cu
     solsticeOptixShadeBackgroundIr
@@ -271,7 +255,105 @@ solstice_optix_kernel(shade_volume
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h
             ${CMAKE_SOURCE_DIR}/src/render/lights.h)
 
-add_custom_target(solstice_optix_programs DEPENDS ${SOLSTICE_OPTIX_EMBED_SOURCES})
+solstice_optix_kernel(shade_surface
+    ${_solstice_optix_dir}/optix_shade_surface.cu
+    solsticeOptixShadeSurfaceIr
+    LIGHTS
+    DEPENDS ${_solstice_optix_base}
+            ${_solstice_optix_dir}/optix_geom.cuh
+            ${_solstice_optix_dir}/optix_bsdf.cuh
+            ${_solstice_optix_dir}/optix_volume.cuh
+            ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
+
+get_property(_solstice_optix_kernels DIRECTORY PROPERTY SOLSTICE_OPTIX_KERNELS)
+get_property(SOLSTICE_OPTIX_EMBED_SOURCES DIRECTORY PROPERTY SOLSTICE_OPTIX_EMBED_SOURCES)
+get_property(_solstice_optix_all_deps DIRECTORY PROPERTY SOLSTICE_OPTIX_ALL_DEPS)
+if(_solstice_optix_all_deps)
+    list(REMOVE_DUPLICATES _solstice_optix_all_deps)
+endif()
+
+set(_solstice_json_flags "")
+foreach(_f IN LISTS _solstice_nvcc_ptx_common)
+    _solstice_json_escape(_ef "${_f}")
+    if(_solstice_json_flags STREQUAL "")
+        set(_solstice_json_flags "\"${_ef}\"")
+    else()
+        string(APPEND _solstice_json_flags ", \"${_ef}\"")
+    endif()
+endforeach()
+
+set(_solstice_json_kernels "")
+set(_solstice_first_kernel TRUE)
+foreach(_name IN LISTS _solstice_optix_kernels)
+    get_property(_src DIRECTORY PROPERTY SOLSTICE_OPTIX_SRC_${_name})
+    get_property(_sym DIRECTORY PROPERTY SOLSTICE_OPTIX_SYM_${_name})
+    get_property(_ptx DIRECTORY PROPERTY SOLSTICE_OPTIX_PTX_${_name})
+    get_property(_embed DIRECTORY PROPERTY SOLSTICE_OPTIX_EMBED_${_name})
+    get_property(_defs DIRECTORY PROPERTY SOLSTICE_OPTIX_DEFS_${_name})
+    _solstice_json_escape(_ename "${_name}")
+    _solstice_json_escape(_esrc "${_src}")
+    _solstice_json_escape(_esym "${_sym}")
+    _solstice_json_escape(_eptx "${_ptx}")
+    _solstice_json_escape(_eembed "${_embed}")
+    if(_defs STREQUAL "")
+        set(_eflags "[]")
+    else()
+        _solstice_json_escape(_edefs "${_defs}")
+        set(_eflags "[\"${_edefs}\"]")
+    endif()
+    if(NOT _solstice_first_kernel)
+        string(APPEND _solstice_json_kernels ",\n")
+    endif()
+    set(_solstice_first_kernel FALSE)
+    string(APPEND _solstice_json_kernels
+        "    {\"name\": \"${_ename}\", \"source\": \"${_esrc}\", \"ptx\": \"${_eptx}\", \"embed\": \"${_eembed}\", \"symbol\": \"${_esym}\", \"extra_flags\": ${_eflags}}")
+endforeach()
+
+_solstice_json_escape(_envcc "${CMAKE_CUDA_COMPILER}")
+_solstice_json_escape(_epy "${SOLSTICE_EMBED_PYTHON}")
+_solstice_json_escape(_eembed_py "${CMAKE_SOURCE_DIR}/cmake/embed_binary.py")
+set(_solstice_ptx_log "${CMAKE_BINARY_DIR}/generated/ptx_steps.log")
+_solstice_json_escape(_elog "${_solstice_ptx_log}")
+
+set(_solstice_manifest "${CMAKE_BINARY_DIR}/generated/optix_ptx_manifest.json")
+set(_solstice_manifest_tmp "${CMAKE_BINARY_DIR}/generated/optix_ptx_manifest.json.tmp")
+file(WRITE "${_solstice_manifest_tmp}"
+"{
+  \"nvcc\": \"${_envcc}\",
+  \"python\": \"${_epy}\",
+  \"embed_script\": \"${_eembed_py}\",
+  \"log\": \"${_elog}\",
+  \"timeout_sec\": 600,
+  \"common_flags\": [${_solstice_json_flags}],
+  \"kernels\": [
+${_solstice_json_kernels}
+  ]
+}
+")
+execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${_solstice_manifest_tmp}" "${_solstice_manifest}")
+file(REMOVE "${_solstice_manifest_tmp}")
+
+set(_solstice_ptx_stamp "${CMAKE_BINARY_DIR}/generated/optix_ptx.stamp")
+add_custom_command(
+    OUTPUT ${SOLSTICE_OPTIX_EMBED_SOURCES} ${_solstice_ptx_stamp}
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONUNBUFFERED=1
+            ${SOLSTICE_EMBED_PYTHON}
+            ${CMAKE_SOURCE_DIR}/cmake/build_optix_ptx.py
+            --manifest ${_solstice_manifest}
+            --stamp ${_solstice_ptx_stamp}
+    DEPENDS
+        ${_solstice_optix_all_deps}
+        ${_solstice_manifest}
+        ${CMAKE_SOURCE_DIR}/cmake/build_optix_ptx.py
+        ${CMAKE_SOURCE_DIR}/cmake/embed_binary.py
+    COMMENT "OptiX PTX: sequential nvcc + embed"
+    VERBATIM
+    USES_TERMINAL
+)
+add_custom_target(solstice_optix_programs DEPENDS ${SOLSTICE_OPTIX_EMBED_SOURCES} ${_solstice_ptx_stamp})
 set_source_files_properties(${SOLSTICE_OPTIX_EMBED_SOURCES} PROPERTIES GENERATED TRUE)
 
 set(SOLSTICE_HAVE_OPTIX_01 1)

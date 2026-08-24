@@ -320,7 +320,17 @@ jobs:
 
       - name: Compile OptiX PTX
         timeout-minutes: 45
+        env:
+          PYTHONUNBUFFERED: "1"
         run: cmake --build build --target solstice_optix_programs --verbose
+
+      - name: Upload OptiX PTX log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: optix-ptx-steps
+          path: build/generated/ptx_steps.log
+          if-no-files-found: warn
 
       - name: Prove OptiX IR is embedded
         shell: pwsh
@@ -330,9 +340,10 @@ jobs:
             @{ Ptx = 'optix_init_from_camera.ptx'; Embed = 'solstice_optix_init_from_camera_ir.cpp'; Sym = 'solsticeOptixInitIr' },
             @{ Ptx = 'optix_intersect_closest.ptx'; Embed = 'solstice_optix_intersect_closest_ir.cpp'; Sym = 'solsticeOptixIntersectClosestIr' },
             @{ Ptx = 'optix_intersect_shadow.ptx'; Embed = 'solstice_optix_intersect_shadow_ir.cpp'; Sym = 'solsticeOptixIntersectShadowIr' },
-            @{ Ptx = 'optix_shade_surface.ptx'; Embed = 'solstice_optix_shade_surface_ir.cpp'; Sym = 'solsticeOptixShadeSurfaceIr' },
             @{ Ptx = 'optix_shade_background.ptx'; Embed = 'solstice_optix_shade_background_ir.cpp'; Sym = 'solsticeOptixShadeBackgroundIr' },
-            @{ Ptx = 'optix_shade_shadow.ptx'; Embed = 'solstice_optix_shade_shadow_ir.cpp'; Sym = 'solsticeOptixShadeShadowIr' }
+            @{ Ptx = 'optix_shade_shadow.ptx'; Embed = 'solstice_optix_shade_shadow_ir.cpp'; Sym = 'solsticeOptixShadeShadowIr' },
+            @{ Ptx = 'optix_shade_volume.ptx'; Embed = 'solstice_optix_shade_volume_ir.cpp'; Sym = 'solsticeOptixShadeVolumeIr' },
+            @{ Ptx = 'optix_shade_surface.ptx'; Embed = 'solstice_optix_shade_surface_ir.cpp'; Sym = 'solsticeOptixShadeSurfaceIr' }
           )
           foreach ($m in $modules) {
             $ptx = Join-Path 'build/generated' $m.Ptx
