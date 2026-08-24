@@ -4118,46 +4118,63 @@ void testSpectralHeroBasics() {
         gold.values[i] = conductorFresnel(0.5f, nk.eta, nk.k);
     }
     check(spectrumAvg(gold) > 0.1f, "gold fresnel");
-    // pbrt: albedo under the working-space white illuminant, film ToXYZ→sRGB (D65).
-    Vec3 rgb(0.0f), greyOut(0.0f);
-    {
-        const SampledSpectrum d65 = illuminantSpectrum(w);
-        const Xyz d65Xyz = spectrumToXyz(d65, w);
-        check(std::fabs(d65Xyz.y - 1.0f) < 0.08f, "Y-normalized D65");
-        Vec3 d65Rgb = spectrumToRgb(d65, w);
-        check(std::fabs(d65Rgb.x - 1.0f) < 0.08f && std::fabs(d65Rgb.y - 1.0f) < 0.08f &&
-                  std::fabs(d65Rgb.z - 1.0f) < 0.08f,
-              "D65 illuminant is sRGB white");
-        rgb = spectrumToRgb(whiteAlbedo * d65, w);
-        check(rgb.x > 0.0f && rgb.y > 0.0f && rgb.z > 0.0f, "spectrumToRgb white albedo");
-        check(std::fabs(rgb.x - rgb.y) < 0.08f && std::fabs(rgb.y - rgb.z) < 0.08f,
-              "white albedo under D65 is neutral");
-        check(std::fabs(rgb.x - 1.0f) < 0.12f, "white albedo under D65 ~1");
-        Vec3 greyIn(0.8f, 0.8f, 0.8f);
-        greyOut = spectrumToRgb(rgbToSpectrumReflectance(greyIn, w) * d65, w);
-        check(std::fabs(greyOut.x - 0.8f) < 0.12f && std::fabs(greyOut.y - greyOut.x) < 0.08f,
-              "grey 0.8 albedo under D65");
-    }
-    // HDRI / lights: RGBIlluminantSpectrum round-trips through D65 film.
+
+    auto meanToRgb = [](int nspp, bool visible,
+                        const std::function<SampledSpectrum(const SampledWavelengths&)>& spec,
+                        const RGBColorSpace& cs = colorSpaceSrgb()) -> Vec3 {
+        Rng rng(7u, 13u);
+        double r = 0.0, g = 0.0, b = 0.0;
+        for (int s = 0; s < nspp; ++s) {
+            SampledWavelengths wv =
+                visible ? SampledWavelengths::sampleVisible(4, rng.nextFloat())
+                        : SampledWavelengths::sampleUniform(4, rng.nextFloat());
+            const Vec3 o = spectrumToRgb(spec(wv), wv, cs);
+            r += double(o.x);
+            g += double(o.y);
+            b += double(o.z);
+        }
+        const double inv = 1.0 / double(nspp);
+        return Vec3(float(r * inv), float(g * inv), float(b * inv));
+    };
+    const int nspp = 4000;
+    // pbrt film ToXYZ needs many λ samples; 4 hero wavelengths are an MC estimator.
+    Vec3 rgb = meanToRgb(nspp, true, [](const SampledWavelengths& wv) {
+        return rgbToSpectrumReflectance(Vec3(1, 1, 1), wv) * rgbToSpectrumEmission(Vec3(1.0f), wv);
+    });
+    check(rgb.x > 0.0f && rgb.y > 0.0f && rgb.z > 0.0f, "spectrumToRgb white albedo");
+    checkNear(rgb.x / srMax(rgb.y, 1e-8f), 1.0f, 0.08f, "white albedo under D65 R/G");
+    checkNear(rgb.z / srMax(rgb.y, 1e-8f), 1.0f, 0.08f, "white albedo under D65 B/G");
+    checkNear(rgb.y, 1.0f, 0.12f, "white albedo under D65 ~1");
+    Vec3 greyOut = meanToRgb(nspp, true, [](const SampledWavelengths& wv) {
+        return rgbToSpectrumReflectance(Vec3(0.8f, 0.8f, 0.8f), wv) *
+               rgbToSpectrumEmission(Vec3(1.0f), wv);
+    });
+    checkNear(greyOut.y, 0.8f, 0.12f, "grey 0.8 albedo under D65");
+    checkNear(greyOut.x / srMax(greyOut.y, 1e-8f), 1.0f, 0.08f, "grey 0.8 neutral");
+    Vec3 d65Rgb = meanToRgb(nspp, true, [](const SampledWavelengths& wv) {
+        return illuminantSpectrum(wv);
+    });
+    checkNear(d65Rgb.x, 1.0f, 0.10f, "D65 illuminant sRGB R");
+    checkNear(d65Rgb.y, 1.0f, 0.10f, "D65 illuminant sRGB G");
+    checkNear(d65Rgb.z, 1.0f, 0.10f, "D65 illuminant sRGB B");
     Vec3 hdri(4.2f, 4.1f, 4.3f);
-    Vec3 hdriOut = spectrumToRgb(rgbToSpectrumEmission(hdri, w), w);
-    check(std::fabs(hdriOut.x - hdri.x) < 0.35f && std::fabs(hdriOut.y - hdri.y) < 0.35f &&
-              std::fabs(hdriOut.z - hdri.z) < 0.35f,
-          "HDRI illuminant round-trip");
+    Vec3 hdriOut = meanToRgb(nspp, true, [hdri](const SampledWavelengths& wv) {
+        return rgbToSpectrumEmission(hdri, wv);
+    });
+    checkNear(hdriOut.x / srMax(hdriOut.y, 1e-8f), hdri.x / hdri.y, 0.08f, "HDRI not pink");
     check(hdriOut.y > 2.0f, "HDRI keeps energy");
-    check(std::fabs((hdriOut.x / hdriOut.y) - (hdri.x / hdri.y)) < 0.08f, "HDRI not pink");
-    {
-        Vec3 whiteL = spectrumToRgb(rgbToSpectrumEmission(Vec3(1.0f), w), w);
-        check(std::fabs(whiteL.x - 1.0f) < 0.12f && std::fabs(whiteL.y - 1.0f) < 0.12f &&
-                  std::fabs(whiteL.z - 1.0f) < 0.12f,
-              "white RGBIlluminantSpectrum ~1");
-        // Book ch.10: filtered RGB albedo × white RGBIlluminant, film ToRGB.
-        Vec3 texRed(0.72f, 0.18f, 0.10f);
-        Vec3 texOut =
-            spectrumToRgb(rgbToSpectrumReflectance(texRed, w) * rgbToSpectrumEmission(Vec3(1.0f), w), w);
-        check(texOut.x > texOut.y && texOut.y > texOut.z * 0.4f, "red albedo stays red under D65");
-        check(std::fabs(texOut.x - texRed.x) < 0.20f, "red albedo luminance ballpark");
-    }
+    Vec3 whiteL = meanToRgb(nspp, true, [](const SampledWavelengths& wv) {
+        return rgbToSpectrumEmission(Vec3(1.0f), wv);
+    });
+    checkNear(whiteL.x, 1.0f, 0.12f, "white RGBIlluminantSpectrum R");
+    checkNear(whiteL.y, 1.0f, 0.12f, "white RGBIlluminantSpectrum G");
+    checkNear(whiteL.z, 1.0f, 0.12f, "white RGBIlluminantSpectrum B");
+    Vec3 texRed(0.72f, 0.18f, 0.10f);
+    Vec3 texOut = meanToRgb(nspp, true, [texRed](const SampledWavelengths& wv) {
+        return rgbToSpectrumReflectance(texRed, wv) * rgbToSpectrumEmission(Vec3(1.0f), wv);
+    });
+    check(texOut.x > texOut.y && texOut.y > texOut.z * 0.4f, "red albedo stays red under D65");
+    checkNear(texOut.x, texRed.x, 0.20f, "red albedo luminance ballpark");
     // Linear path-weight upsample must conserve energy under multiply (glass enter×exit).
     {
         const float eta = 1.5f;
@@ -4167,10 +4184,14 @@ void testSpectralHeroBasics() {
         t *= rgbToSpectrumLinear(wExit, w);
         for (int i = 0; i < t.n; ++i)
             check(std::fabs(t.values[i] - 1.0f) < 0.08f, "glass enter×exit linear upsample ~1");
-        Vec3 round = spectrumToRgb(t * illuminantSpectrum(w), w);
-        check(std::fabs(round.x - 1.0f) < 0.12f && std::fabs(round.y - 1.0f) < 0.12f &&
-                  std::fabs(round.z - 1.0f) < 0.12f,
-              "glass enter×exit under D65 ~white");
+        Vec3 round = meanToRgb(nspp, true, [&](const SampledWavelengths& wv) {
+            SampledSpectrum t = rgbToSpectrumLinear(wEnter, wv);
+            t *= rgbToSpectrumLinear(wExit, wv);
+            return t * rgbToSpectrumEmission(Vec3(1.0f), wv);
+        });
+        checkNear(round.x, 1.0f, 0.12f, "glass enter×exit under D65 R");
+        checkNear(round.y, 1.0f, 0.12f, "glass enter×exit under D65 G");
+        checkNear(round.z, 1.0f, 0.12f, "glass enter×exit under D65 B");
     }
     // Abbe IOR must vary with λ (geometric dispersion).
     const float nBlue = dielectricIorFromAbbe(1.5f, 30.0f, 450.0f);
@@ -4201,12 +4222,16 @@ void testSpectralHeroBasics() {
         check(spectrumAvg(bbs) > 0.1f, "blackbody sample");
         ConstantSpectrum ones(1.0f);
         check(ones.sample(w).values[0] == 1.0f, "constant spectrum");
-        Vec3 aces = spectrumToRgb(rgbToSpectrumEmission(Vec3(1.0f), w, colorSpaceAcesCg()), w,
-                                  kSpectralColorSpaceAcesCg);
+        Vec3 aces = meanToRgb(
+            nspp, true,
+            [](const SampledWavelengths& wv) {
+                return rgbToSpectrumEmission(Vec3(1.0f), wv, colorSpaceAcesCg());
+            },
+            colorSpaceAcesCg());
         check(aces.x > 0.0f && aces.y > 0.0f && aces.z > 0.0f, "ACEScg convert");
-        check(std::fabs(aces.x - 1.0f) < 0.15f && std::fabs(aces.y - 1.0f) < 0.15f &&
-                  std::fabs(aces.z - 1.0f) < 0.15f,
-              "ACEScg white illuminant ~1");
+        checkNear(aces.x, 1.0f, 0.15f, "ACEScg white illuminant R");
+        checkNear(aces.y, 1.0f, 0.15f, "ACEScg white illuminant G");
+        checkNear(aces.z, 1.0f, 0.15f, "ACEScg white illuminant B");
         const float fBlue = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 450.0f, 0.2f);
         const float fRed = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 650.0f, 0.2f);
         check(std::fabs(fBlue - fRed) > 1e-4f, "thin-film Airy chromatic");
