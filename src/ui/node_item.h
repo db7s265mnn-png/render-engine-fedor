@@ -17,8 +17,8 @@ public:
     enum { Type = UserType + 1 };
     enum class Hit { None, Body, Output, Input, DisplayFlag, BypassFlag };
 
-    static constexpr qreal kWidth = 86.0;
-    static constexpr qreal kHeight = kWidth * 0.5;  // 2:1 width:height
+    static constexpr qreal kWidth = 120.0;
+    static constexpr qreal kHeight = kWidth * 0.5;  // 2:1 — wide pancake tile
     static constexpr qreal kPortRadius = 5.5;
     static constexpr qreal kPortHitRadius = 18.0;
     static constexpr qreal kCornerRadius = 6.0;

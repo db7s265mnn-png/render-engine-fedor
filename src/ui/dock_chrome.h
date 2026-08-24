@@ -73,17 +73,23 @@ public:
             "  border: none;"
             "}");
         auto* layout = new QHBoxLayout(this);
-        // Right margin reserved for the overlay detach square so title text
-        // never runs under it.
-        layout->setContentsMargins(10, 0, 18 + 12, 0);
+        layout->setContentsMargins(10, 0, 0, 0);
         layout->setSpacing(6);
         auto* label = new QLabel(title, this);
         // Let the dock shrink below the title string; the label elides.
         label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
         label->setMinimumWidth(0);
         layout->addWidget(label, 1);
-        detach_ = new DockDetachButton(this);
+        auto* slot = new QWidget(this);
+        slot->setFixedWidth(28);
+        slot->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+        auto* slotLayout = new QHBoxLayout(slot);
+        slotLayout->setContentsMargins(0, 0, 6, 0);
+        slotLayout->setSpacing(0);
+        detach_ = new DockDetachButton(slot);
         detach_->setToolTip(QStringLiteral("Detach"));
+        slotLayout->addWidget(detach_, 0, Qt::AlignVCenter | Qt::AlignRight);
+        layout->addWidget(slot, 0);
         if (dock_) {
             connect(dock_, &QDockWidget::windowTitleChanged, label, &QLabel::setText);
             connect(dock_, &QDockWidget::topLevelChanged, this, [this](bool floating) {
@@ -94,7 +100,6 @@ public:
         connect(detach_, &QToolButton::clicked, this, [this] {
             if (onDetach_) onDetach_();
         });
-        layoutDetachButton();
     }
 
     void setOnDetach(std::function<void()> onDetach) { onDetach_ = std::move(onDetach); }
@@ -107,24 +112,8 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override { event->ignore(); }
     void mouseMoveEvent(QMouseEvent* event) override { event->ignore(); }
     void mouseDoubleClickEvent(QMouseEvent* event) override { event->ignore(); }
-    void resizeEvent(QResizeEvent* event) override {
-        QWidget::resizeEvent(event);
-        layoutDetachButton();
-    }
-    void showEvent(QShowEvent* event) override {
-        QWidget::showEvent(event);
-        layoutDetachButton();
-    }
 
 private:
-    void layoutDetachButton() {
-        if (!detach_) return;
-        constexpr int kMargin = 6;
-        const int y = qMax(0, (height() - detach_->height()) / 2);
-        detach_->move(width() - detach_->width() - kMargin, y);
-        detach_->raise();
-    }
-
     std::function<void()> onDetach_;
     QDockWidget* dock_ = nullptr;
     DockDetachButton* detach_ = nullptr;

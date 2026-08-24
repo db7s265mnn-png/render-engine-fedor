@@ -125,7 +125,12 @@ void applyDarkTheme(QApplication& application) {
 
     application.setStyleSheet(R"(
         QToolTip { color: #dcdee2; background-color: #3a3e44; border: 1px solid #22242a; }
-        QDockWidget { titlebar-close-icon: none; font-weight: bold; }
+        QDockWidget {
+            titlebar-close-icon: none;
+            titlebar-normal-icon: none;
+            font-weight: bold;
+        }
+        QTabBar { padding-right: 28px; }
         QDockWidget::title {
             background: #2e3136;
             padding: 0 10px;

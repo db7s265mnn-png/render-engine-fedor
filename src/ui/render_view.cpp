@@ -279,7 +279,15 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         "  border-bottom: 1px solid #22242a;"
         "}");
 
-    detachButton_ = new DockDetachButton(this);
+    detachSlot_ = new QWidget(this);
+    detachSlot_->setObjectName("viewportDetachSlot");
+    detachSlot_->setStyleSheet(
+        "QWidget#viewportDetachSlot {"
+        "  background: #2e3136;"
+        "  border-bottom: 1px solid #22242a;"
+        "}");
+    detachSlot_->hide();
+    detachButton_ = new DockDetachButton(detachSlot_);
     detachButton_->hide();
     connect(detachButton_, &QToolButton::clicked, this, [this] {
         if (onDetach_) onDetach_();
@@ -676,13 +684,22 @@ void RenderView::setFocusPickActive(bool active) {
 void RenderView::layoutToolStrip() {
     if (!chromeBar_ || !toolStrip_) return;
     const int chromeH = theme::chromeBarHeight();
-    chromeBar_->setGeometry(0, 0, width(), chromeH);
-    int rightReserve = 0;
-    if (detachButton_ && detachButton_->isVisible()) {
-        constexpr int kMargin = 6;
-        const int y = std::max(0, (chromeH - detachButton_->height()) / 2);
-        detachButton_->move(width() - detachButton_->width() - kMargin, y);
-        rightReserve = detachButton_->width() + kMargin * 2;
+    constexpr int kDetachColumn = 28;
+    const bool showDetach = detachButton_ && detachButton_->isVisible();
+    const int slotW = showDetach ? kDetachColumn : 0;
+    chromeBar_->setGeometry(0, 0, std::max(0, width() - slotW), chromeH);
+    if (detachSlot_) {
+        if (showDetach) {
+            detachSlot_->setGeometry(width() - slotW, 0, slotW, chromeH);
+            detachSlot_->show();
+            detachSlot_->raise();
+            const int y = std::max(0, (chromeH - detachButton_->height()) / 2);
+            const int x = std::max(0, (slotW - detachButton_->width()) / 2);
+            detachButton_->move(x, y);
+            detachButton_->raise();
+        } else {
+            detachSlot_->hide();
+        }
     }
     int left = 0;
     if (renderControlStrip_) {
@@ -692,14 +709,17 @@ void RenderView::layoutToolStrip() {
         left = renderControlStrip_->width() + 4;
     }
     toolStrip_->adjustSize();
-    const int available = std::max(0, chromeBar_->width() - rightReserve);
+    const int available = std::max(0, chromeBar_->width());
     const int x = std::max(left, (available - toolStrip_->width()) / 2);
     const int y = std::max(0, (chromeH - toolStrip_->height()) / 2);
     toolStrip_->move(x, y);
     chromeBar_->raise();
     if (renderControlStrip_) renderControlStrip_->raise();
     toolStrip_->raise();
-    if (detachButton_ && detachButton_->isVisible()) detachButton_->raise();
+    if (detachSlot_ && showDetach) {
+        detachSlot_->raise();
+        detachButton_->raise();
+    }
 }
 
 void RenderView::attachRenderActions(QAction* start, QAction* stop) {

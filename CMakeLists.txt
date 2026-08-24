@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.0 LANGUAGES CXX)
+project(Solstice VERSION 0.9.1 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -21,7 +21,9 @@ option(SOLSTICE_BUILD_TX_TOOLS_ALPHA "Build TX Tools Alpha (Qt viewport)" ON)
 option(SOLSTICE_BUILD_TX_TOOLS_OMEGA "Build TX Tools Omega (DX12 viewport, Windows)" ON)
 
 # Build identity: PROJECT_VERSION + short git SHA so exe / Help can be traced.
-set(SOLSTICE_GIT_SHA "unknown")
+# GitHub source zips have no .git — without a fallback the title stays
+# "0.9.x-unknown" and looks like the previous build.
+set(SOLSTICE_GIT_SHA "srczip")
 set(SOLSTICE_GIT_DIRTY "")
 find_package(Git QUIET)
 if(GIT_FOUND AND EXISTS "${CMAKE_SOURCE_DIR}/.git")

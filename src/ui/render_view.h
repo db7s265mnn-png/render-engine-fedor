@@ -229,6 +229,7 @@ private:
     QWidget* chromeBar_ = nullptr;
     QWidget* renderControlStrip_ = nullptr;
     QWidget* toolStrip_ = nullptr;
+    QWidget* detachSlot_ = nullptr;
     QToolButton* detachButton_ = nullptr;
     std::function<void()> onDetach_;
     QToolButton* startButton_ = nullptr;
