@@ -58,16 +58,15 @@ public:
             RayHit hit;
             const bool didHit = tracer.intersect(origin, direction, kFloatMax, hit);
             if (const MediumData* med = getMedium(scene, currentMedium)) {
-                const float tMax = didHit ? hit.t : 1.0e6f;
+                float tMax = didHit ? hit.t : 1.0e6f;
                 MediumData medWalk = *med;
                 if (settings.volumeSimilarity != 0)
                     medWalk = mediumWithVolumeSimilarity(*med, volumeScatterCount);
                 MediumSample ms;
-                if (medWalk.type == 2 && medWalk.volumeIndex >= 0 &&
-                    medWalk.volumeIndex < scene.volumeCount && scene.volumes &&
-                    scene.volumes[medWalk.volumeIndex]) {
-                    const VolumeGrid& fogVol = *scene.volumes[medWalk.volumeIndex];
-                    ms = sampleMediumVdbFogSpectral(fogVol, medWalk, origin, direction, tMax, rng,
+                if (const VolumeGrid* fogVol =
+                        (medWalk.type == 2) ? fogGridForMedium(scene, medWalk) : nullptr) {
+                    tMax = clipTMaxToFogAabb(*fogVol, origin, direction, tMax);
+                    ms = sampleMediumVdbFogSpectral(*fogVol, medWalk, origin, direction, tMax, rng,
                                                     throughput, waves);
                 } else {
                     ms = sampleMediumHomogeneousSpectral(medWalk, tMax, rng, throughput, waves);
@@ -75,6 +74,8 @@ public:
                 if (ms.absorbed || spectrumMaxComponent(throughput) < 1e-20f) break;
                 if (ms.scattered) {
                     origin = origin + direction * ms.t;
+                    if (!isBlack(med->emission))
+                        radiance += throughput * upsampleRgb(med->emission, waves);
                     const Vec3 woVol = -direction;
                     if (scene.lightCount > 0 && depth < maxDepth) {
                         const Vec3 volDirect =
@@ -92,6 +93,11 @@ public:
                     causticSuffix = false;
                     ++depth;
                     ++volumeScatterCount;
+                    if (depth >= settings.rrStartDepth) {
+                        const float q = clampf(spectrumMaxComponent(throughput), 0.05f, 1.0f);
+                        if (rng.nextFloat() > q) break;
+                        throughput *= (1.0f / q);
+                    }
                     continue;
                 }
                 // Exited the fog AABB (analytical) before hitting any surface — leave the medium.

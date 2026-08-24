@@ -7,8 +7,42 @@
 #include "scene/volume_grid.h"
 #include "render/spectrum.h"
 #include "render/volume.h"
+#include "render/volume_track.h"
 
 namespace sol {
+
+inline const VolumeGrid* fogGridAt(const SceneView& scene, int volumeIndex) {
+    if (!scene.volumes || volumeIndex < 0 || volumeIndex >= scene.volumeCount ||
+        !scene.volumes[volumeIndex])
+        return nullptr;
+    if (scene.volumes[volumeIndex]->kind() != VolumeGridKind::Fog) return nullptr;
+    return scene.volumes[volumeIndex];
+}
+
+// MediumData::volumeIndex should be Scene::volumes. If it was overwritten as a
+// volumePaths slot, fall back to the only fog grid in the scene.
+inline const VolumeGrid* fogGridForMedium(const SceneView& scene, const MediumData& m) {
+    if (const VolumeGrid* g = fogGridAt(scene, m.volumeIndex)) return g;
+    const VolumeGrid* only = nullptr;
+    int nFog = 0;
+    for (int i = 0; i < scene.volumeCount; ++i) {
+        if (const VolumeGrid* g = fogGridAt(scene, i)) {
+            only = g;
+            ++nFog;
+        }
+    }
+    return nFog == 1 ? only : nullptr;
+}
+
+inline float clipTMaxToFogAabb(const VolumeGrid& fog, Vec3 origin, Vec3 direction, float tMax) {
+    const Bounds3 bb = fog.worldBounds();
+    if (!bb.valid()) return tMax;
+    float tEnter = 0.0f;
+    float tExit = tMax;
+    if (rayAabbInterval(origin, direction, bb.lo, bb.hi, tEnter, tExit) && tExit >= 0.0f)
+        return srMin(tMax, tExit);
+    return tMax;
+}
 
 // Raymarch an SDF level set (sphere tracing). Returns true on a zero crossing.
 // (SDF is a surface hit — not a PBRT participating medium.)

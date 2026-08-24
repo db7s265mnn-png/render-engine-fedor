@@ -353,7 +353,9 @@ int Scene::addMedium(const MediumData& medium, const std::string& vdbPath) {
             vi = int(volumePaths.size());
             volumePaths.push_back(vdbPath);
         }
-        m.volumeIndex = vi;
+        // volumePaths is file identity. Sampling uses Scene::volumes — keep an
+        // already-authored volumes index (Stage::toScene / addVolume).
+        if (m.volumeIndex < 0) m.volumeIndex = vi;
 #if !SOLSTICE_HAVE_OPENVDB
         // Without OpenVDB, type-2 media still use the authored homogeneous σa/σs.
         logWarning("OpenVDB not in this build — volume '" + vdbPath +

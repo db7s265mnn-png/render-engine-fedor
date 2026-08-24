@@ -5626,6 +5626,14 @@ void testFogAabbProxyEnterExit() {
     check(!consumeVolumeProxyHit(scene, kIntegratorWireframe, inst, hit, si, origin, direction, medium),
           "wireframe keeps the AABB silhouette");
     check(medium == -1, "wireframe does not enter fog");
+
+    scene.volumes = nullptr;
+    scene.volumeCount = 0;
+    medium = -1;
+    origin = Vec3(-1.0f, 0.0f, 0.0f);
+    check(consumeVolumeProxyHit(scene, kIntegratorPathTracer, inst, hit, si, origin, direction, medium),
+          "missing fog grid still skips the AABB proxy");
+    check(medium == -1, "missing grid does not enter a medium");
 }
 
 void testNgonTriangulateAndVdb() {

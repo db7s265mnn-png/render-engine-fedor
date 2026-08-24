@@ -438,8 +438,12 @@ SR_INL bool consumeVolumeProxyHit(const SceneView& scene, int integrator, const 
                                   RayHit& hit, SurfaceInteraction& si, Vec3& origin, Vec3 direction,
                                   int& currentMedium) {
     if (integrator == kIntegratorWireframe) return false;
-    if (inst.volumeIndex < 0 || inst.volumeIndex >= scene.volumeCount || !scene.volumes) return false;
-    if (!scene.volumes[inst.volumeIndex]) return false;
+    if (inst.volumeIndex < 0) return false;
+    // Bounds proxy is never a surface. Missing grid → skip through (OptiX empty density).
+    if (inst.volumeIndex >= scene.volumeCount || !scene.volumes || !scene.volumes[inst.volumeIndex]) {
+        origin = offsetRayOrigin(si.p, si.ng, direction);
+        return true;
+    }
     const VolumeGrid& vol = *scene.volumes[inst.volumeIndex];
     if (vol.kind() == VolumeGridKind::Fog) {
         if (currentMedium == inst.mediumIndex) {
@@ -1080,46 +1084,10 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             if (settings.volumeSimilarity != 0)
                 medWalk = mediumWithVolumeSimilarity(*med, volumeScatterCount);
 #if !defined(__CUDACC__)
-            if (medWalk.type == 2 && medWalk.volumeIndex >= 0 && medWalk.volumeIndex < scene.volumeCount &&
-                scene.volumes && scene.volumes[medWalk.volumeIndex]) {
-                // Prefer analytical AABB exit over Embree proxy (exit face is easy to miss).
-                const VolumeGrid& fogVol = *scene.volumes[medWalk.volumeIndex];
-                const Bounds3 bb = fogVol.worldBounds();
-                if (bb.valid()) {
-                    float tEnter = 0.0f;
-                    float tExit = tMax;
-                    const float* o = &origin.x;
-                    const float* d = &direction.x;
-                    const float* lo = &bb.lo.x;
-                    const float* hi = &bb.hi.x;
-                    bool hitAabb = true;
-                    for (int axis = 0; axis < 3; ++axis) {
-                        const float od = d[axis];
-                        if (fabsf(od) < 1e-20f) {
-                            if (o[axis] < lo[axis] || o[axis] > hi[axis]) {
-                                hitAabb = false;
-                                break;
-                            }
-                            continue;
-                        }
-                        float inv = 1.0f / od;
-                        float ta = (lo[axis] - o[axis]) * inv;
-                        float tb = (hi[axis] - o[axis]) * inv;
-                        if (ta > tb) {
-                            const float tmp = ta;
-                            ta = tb;
-                            tb = tmp;
-                        }
-                        tEnter = srMax(tEnter, ta);
-                        tExit = srMin(tExit, tb);
-                        if (tEnter > tExit) {
-                            hitAabb = false;
-                            break;
-                        }
-                    }
-                    if (hitAabb && tExit >= 0.0f) tMax = srMin(tMax, tExit);
-                }
-                ms = sampleMediumVdbFog(fogVol, medWalk, origin, direction, tMax, rng, throughput);
+            if (const VolumeGrid* fogVol =
+                    (medWalk.type == 2) ? fogGridForMedium(scene, medWalk) : nullptr) {
+                tMax = clipTMaxToFogAabb(*fogVol, origin, direction, tMax);
+                ms = sampleMediumVdbFog(*fogVol, medWalk, origin, direction, tMax, rng, throughput);
             } else {
                 ms = sampleMediumHomogeneous(medWalk, tMax, rng, throughput);
             }
