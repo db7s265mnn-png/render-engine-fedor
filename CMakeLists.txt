@@ -522,6 +522,7 @@ set(SOLSTICE_LIB_SOURCES
     src/io/materialx_compile.cpp
     src/render/framebuffer.cpp
     src/render/rgb_spectrum_tables.cpp
+    src/render/rgb_spectrum_tables_aces.cpp
     src/render/render_session.cpp
     src/render/scene_picker.cpp
     src/render/motion_blur.cpp

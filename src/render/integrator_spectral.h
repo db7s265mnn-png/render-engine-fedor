@@ -1,6 +1,7 @@
 // PT Spectral — hero-wavelength unidirectional path tracer (CPU / Embree).
-// RGB BSDF sampling reused; authored colours via Jakob; MC weights linear.
-// Wavelength PDF + TerminateSecondary after first scattering (pbrt-v4).
+// Textures filter in RGB; albedo → RGBAlbedoSpectrum, lights/env → RGBIlluminantSpectrum
+// (Jakob × D65/D60). MC weights stay linear. Film is pbrt ToXYZ → working-space RGB
+// while secondaries are alive; TerminateSecondary keeps illuminant-E WB (grey fireflies).
 #pragma once
 
 #include <algorithm>
@@ -25,6 +26,7 @@ public:
         Tracer& tracer = *ctx.tracer;
         Rng& rng = *ctx.rng;
         const RenderSettingsData& settings = scene.settings;
+        const RGBColorSpace& filmCs = pathColorSpace(settings);
 
         const int nLambda = std::clamp(settings.spectralSamples, 2, kMaxSpectrumSamples);
         SampledWavelengths waves =
@@ -75,7 +77,7 @@ public:
                 if (ms.scattered) {
                     origin = origin + direction * ms.t;
                     if (!isBlack(med->emission))
-                        radiance += throughput * upsampleRgb(med->emission, waves);
+                        radiance += throughput * upsampleEmission(med->emission, waves, filmCs);
                     const Vec3 woVol = -direction;
                     if (scene.lightCount > 0 && depth < maxDepth) {
                         const Vec3 volDirect =
@@ -124,13 +126,13 @@ public:
                                     lightSelectionPdfIndex(scene, origin, scene.domeLightIndex);
                                 weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                             }
-                            // Env: RGB texture → Jakob illuminant (or blackbody if CCT set).
+                            // Env map: RGB texture → RGBIlluminantSpectrum (Jakob × D65/D60).
                             SampledSpectrum envS =
                                 (dome.colorTemperatureK > 50.0f)
-                                    ? lightEmissionSpectrum(dome, waves) *
+                                    ? lightEmissionSpectrum(dome, waves, filmCs) *
                                           (length(envL) /
                                            srMax(1e-6f, length(dome.emittedRadiance())))
-                                    : upsampleEmission(envL, waves);
+                                    : upsampleEmission(envL, waves, filmCs);
                             SampledSpectrum contrib = throughput * envS * weight;
                             if (depth > 0 && !specularBounce)
                                 contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
@@ -146,7 +148,7 @@ public:
                             cameraSunDiscRadiance(scene, origin, direction, bsdfPdf, specularBounce,
                                                   primarySun, causticSuffix);
                         if (!isBlack(sunL)) {
-                            SampledSpectrum contrib = throughput * upsampleEmission(sunL, waves);
+                            SampledSpectrum contrib = throughput * upsampleEmission(sunL, waves, filmCs);
                             radiance += contrib;
                         }
                     }
@@ -184,7 +186,7 @@ public:
                             lightSelectionPdfIndex(scene, origin, si.lightIndex);
                         weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                     }
-                    SampledSpectrum Le = lightEmissionSpectrum(light, waves);
+                    SampledSpectrum Le = lightEmissionSpectrum(light, waves, filmCs);
                     // areaLightEmission may include cosine/visibility scaling vs emittedRadiance.
                     const float rgbScale =
                         length(emitted) / srMax(1e-6f, length(light.emittedRadiance()));
@@ -209,7 +211,8 @@ public:
                 const bool frontFacing = dot(si.ns, -direction) > 0.0f;
                 if (frontFacing || mat.doubleSided)
                     radiance += throughput *
-                                upsampleEmission(mat.emissionColor * mat.emissionStrength, waves);
+                                upsampleEmission(mat.emissionColor * mat.emissionStrength, waves,
+                                                 filmCs);
             }
 
             if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
@@ -247,7 +250,7 @@ public:
                     const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
                     BsdfSampleSpectral specBs =
                         bsdfSampleSpectral(specMat, woLocalEntry, uSpec, rng.nextFloat(), rng.nextFloat(),
-                                           rng.nextFloat(), waves, specMat.ior, heroIdx);
+                                           rng.nextFloat(), waves, specMat.ior, heroIdx, filmCs);
                     if (specBs.valid && specBs.pdf > 0.0f) {
                         const Vec3 wiWorld = normalize(frame.toWorld(specBs.wi));
                         throughput *= specBs.weight;
@@ -335,7 +338,8 @@ public:
             const float u2 = rng.nextFloat();
             const float uChoice = rng.nextFloat();
             BsdfSampleSpectral ss =
-                bsdfSampleSpectral(mat, woLocal, uLobe, u1, u2, uChoice, waves, baseIor, heroIdx);
+                bsdfSampleSpectral(mat, woLocal, uLobe, u1, u2, uChoice, waves, baseIor, heroIdx,
+                                   filmCs);
             if (!ss.valid || ss.pdf <= 0.0f) break;
 
             const Vec3 wiWorld = normalize(frame.toWorld(ss.wi));
@@ -377,7 +381,7 @@ public:
         }
 
         if (bins) bins->addSample(x, y, radiance, waves);
-        Vec3 rgb = spectrumToRgb(radiance, waves, settings.spectralColorSpace);
+        Vec3 rgb = spectrumToRgb(radiance, waves, filmCs);
         return isFinite(rgb) ? rgb : Vec3(0.0f);
     }
 };

@@ -621,8 +621,8 @@ struct RenderSettingsData {
     int spectralSamples = 4;      // hero λ count (UI: 2..16)
     int spectralBins = 16;        // fixed bins for multilayer spectral EXR (8..32)
     int spectralExr = 0;          // write spectral multilayer EXR on save when set
-    // Beauty conversion color space (default linear sRGB). See SpectralColorSpace.
-    int spectralColorSpace = 0;   // kSpectralColorSpaceSrgb
+    // Beauty conversion color space. Default ACEScg — same as workingSpace.
+    int spectralColorSpace = 1;   // kSpectralColorSpaceAcesCg
     // Wavelength sampling: 0 = visible importance (pbrt), 1 = uniform stratified.
     int spectralWavelengthSampling = 0;
     // Film: false-color debug from spectral bins (PT Spectral). Diagnostic group.

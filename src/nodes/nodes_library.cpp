@@ -1217,11 +1217,13 @@ public:
                          .withTooltip("When saving EXR with a spectral integrator, also write "
                                       "fixed spectral bin layers (S0..Sn)."));
         addParameter(Parameter::makeMenu("spectralcolorspace", "Spectral Color Space",
-                                         {"sRGB Linear", "ACEScg", "Rec.2020", "Display P3"}, 0)
+                                         {"sRGB Linear", "ACEScg", "Rec.2020", "Display P3"}, 1)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==4||integrator==5")
-                         .withTooltip("Color space for spectral → beauty RGB (default sRGB Linear).\n"
-                                      "Uses tabulated CIE XYZ + RGBColorSpace matrices."));
+                         .withTooltip("Color space for spectral → beauty RGB.\n"
+                                      "ACEScg (default) matches Film working space so sky/HDRI "
+                                      "match OptiX. Overridden to ACEScg whenever working space "
+                                      "is ACEScg."));
         addParameter(Parameter::makeMenu("spectralwavesamp", "Wavelength Sampling",
                                          {"Visible (importance)", "Uniform"}, 0)
                          .withGroup("Engine")
@@ -1500,7 +1502,7 @@ public:
         settings.spectralSamples = std::clamp(intValue("spectralsamples", 4), 2, 16);
         settings.spectralBins = std::clamp(intValue("spectralbins", 16), 8, 32);
         settings.spectralExr = boolValue("spectralexr", false) ? 1 : 0;
-        settings.spectralColorSpace = std::clamp(intValue("spectralcolorspace", 0), 0, 3);
+        settings.spectralColorSpace = std::clamp(intValue("spectralcolorspace", 1), 0, 3);
         settings.spectralWavelengthSampling = std::clamp(intValue("spectralwavesamp", 0), 0, 1);
         settings.workingSpace = std::clamp(intValue("workingspace", 1), 0, 1);
         {

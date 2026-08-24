@@ -30,6 +30,10 @@ RgbSigmoidPolynomial fetchAlbedo(Vec3 rgb);
 // Look up coefficients for linear sRGB in [0,1] (illuminant / emission gamut).
 RgbSigmoidPolynomial fetchIlluminant(Vec3 rgb);
 
+// ACEScg (AP1) tables fitted under CIE D60 (see rgb_spectrum_tables_aces.cpp).
+RgbSigmoidPolynomial fetchAlbedoAces(Vec3 rgb);
+RgbSigmoidPolynomial fetchIlluminantAces(Vec3 rgb);
+
 // Evaluate a fetched polynomial at hero wavelengths.
 inline SampledSpectrum evalPolynomial(const RgbSigmoidPolynomial& p, const SampledWavelengths& w,
                                       float scale = 1.0f) {

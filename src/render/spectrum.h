@@ -173,25 +173,30 @@ inline Xyz spectrumToXyz(const SampledSpectrum& s, const SampledWavelengths& w) 
     return Xyz(X * scale, Y * scale, Z * scale);
 }
 
-// SampledSpectrum → RGB via tabulated CIE CMFs + RGBColorSpace.
+// SampledSpectrum → RGB.
 //
-// White balance:
-//   • Multi-λ (secondaries alive): sample-matched ∫CMF estimator — equal-energy
-//     maps to (1,1,1) for the same wavelength samples (honest MC, not RGB align).
-//   • After TerminateSecondary / singular CMF: fixed illuminant-E integrals.
-// No per-sample RGB gamut clamp (negatives average in the film).
+//   • Multi-λ (secondaries alive): pbrt ToXYZ / CIE_Y, then the working-space
+//     matrix. ACEScg(D60) → (1,1,1). No illuminant-E white balance — that
+//     would pink-cast a D60 sky when the viewport expects ACEScg.
+//   • After TerminateSecondary / single λ: sample-matched E (X/Xw = s(λ)) so
+//     the lone wavelength is grey, not a CMF spike (volume fireflies).
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
                           const RGBColorSpace& cs = colorSpaceSrgb()) {
     if (s.n <= 0 || w.n <= 0) return Vec3(0.0f);
     const int n = std::min(s.n, w.n);
+    int active = 0;
+    for (int i = 0; i < n; ++i)
+        if (w.pdf[i] > 0.0f) ++active;
+
+    if (active >= 2 && !w.secondaryTerminated())
+        return cs.toRgb(spectrumToXyz(s, w));
+
     float X = 0.0f, Y = 0.0f, Z = 0.0f;
     float Xw = 0.0f, Yw = 0.0f, Zw = 0.0f;
-    int active = 0;
     for (int i = 0; i < n; ++i) {
         float cx, cy, cz;
         cieXyzAtLambda(w.lambda[i], cx, cy, cz);
         const float invPdf = safeDivSpectrum(1.0f, w.pdf[i]);
-        if (w.pdf[i] > 0.0f) ++active;
         X += s.values[i] * cx * invPdf;
         Y += s.values[i] * cy * invPdf;
         Z += s.values[i] * cz * invPdf;
@@ -207,9 +212,7 @@ inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
     Yw *= invN;
     Zw *= invN;
 
-    const bool sampleWbOk = active >= 2 && Xw > 1e-5f && Yw > 1e-5f && Zw > 1e-5f &&
-                            !w.secondaryTerminated();
-    if (sampleWbOk) {
+    if (Xw > 1e-5f && Yw > 1e-5f && Zw > 1e-5f) {
         X /= Xw;
         Y /= Yw;
         Z /= Zw;

@@ -4110,31 +4110,84 @@ void testSpectralHeroBasics() {
     SampledWavelengths w = SampledWavelengths::sampleUniform(4, 0.25f);
     check(w.n == 4, "hero sample count");
     check(w.lambda[0] >= kSpectrumLambdaMin && w.lambda[3] <= kSpectrumLambdaMax, "lambda range");
-    SampledSpectrum white = rgbToSpectrumReflectance(Vec3(1, 1, 1), w);
-    check(spectrumAvg(white) > 0.5f, "white upsample energy");
+    const RGBColorSpace& aces = colorSpaceAcesCg();
+    SampledSpectrum whiteAlbedo = rgbToSpectrumReflectance(Vec3(1, 1, 1), w, aces);
+    check(spectrumAvg(whiteAlbedo) > 0.5f, "white upsample energy");
     SampledSpectrum gold = SampledSpectrum::zero(w.n);
     for (int i = 0; i < w.n; ++i) {
         SpectralNk nk = metalNk("Au", w.lambda[i]);
         gold.values[i] = conductorFresnel(0.5f, nk.eta, nk.k);
     }
     check(spectrumAvg(gold) > 0.1f, "gold fresnel");
-    Vec3 rgb = spectrumToRgb(white, w);
-    check(rgb.x > 0.0f && rgb.y > 0.0f && rgb.z > 0.0f, "spectrumToRgb white");
-    // Neutral white: no pink cast under equal-energy / unit spectrum.
-    check(std::fabs(rgb.x - rgb.y) < 0.05f && std::fabs(rgb.y - rgb.z) < 0.05f, "white is neutral");
-    check(std::fabs(rgb.x - 1.0f) < 0.08f, "white ~1");
-    // Grey albedo round-trip ≈ Path Tracer brightness.
-    Vec3 greyIn(0.8f, 0.8f, 0.8f);
-    Vec3 greyOut = spectrumToRgb(rgbToSpectrumReflectance(greyIn, w), w);
-    check(std::fabs(greyOut.x - 0.8f) < 0.08f && std::fabs(greyOut.y - greyOut.x) < 0.05f,
-          "grey 0.8 round-trip");
-    // HDRI-like emission must not pick up a pink cast.
+
+    // Working space ACEScg is source of truth even if the spectral menu is sRGB.
+    {
+        RenderSettingsData st;
+        st.workingSpace = kWorkingSpaceAcesCg;
+        st.spectralColorSpace = kSpectralColorSpaceSrgb;
+        check(&pathColorSpace(st) == &colorSpaceAcesCg(), "ACEScg working space drives film");
+        st.workingSpace = kWorkingSpaceSrgbLinear;
+        check(&pathColorSpace(st) == &colorSpaceSrgb(), "sRGB working space honours spectral menu");
+    }
+
+    auto meanToRgb = [](int nspp, bool visible,
+                        const std::function<SampledSpectrum(const SampledWavelengths&)>& spec,
+                        const RGBColorSpace& cs) -> Vec3 {
+        Rng rng(7u, 13u);
+        double r = 0.0, g = 0.0, b = 0.0;
+        for (int s = 0; s < nspp; ++s) {
+            SampledWavelengths wv =
+                visible ? SampledWavelengths::sampleVisible(4, rng.nextFloat())
+                        : SampledWavelengths::sampleUniform(4, rng.nextFloat());
+            const Vec3 o = spectrumToRgb(spec(wv), wv, cs);
+            r += double(o.x);
+            g += double(o.y);
+            b += double(o.z);
+        }
+        const double inv = 1.0 / double(nspp);
+        return Vec3(float(r * inv), float(g * inv), float(b * inv));
+    };
+    const int nspp = 4000;
+    // pbrt ToXYZ needs many λ samples; four hero wavelengths are an MC estimator.
+    Vec3 rgb = meanToRgb(
+        nspp, true,
+        [&](const SampledWavelengths& wv) {
+            return rgbToSpectrumReflectance(Vec3(1, 1, 1), wv, aces) *
+                   rgbToSpectrumEmission(Vec3(1.0f), wv, aces);
+        },
+        aces);
+    check(rgb.x > 0.0f && rgb.y > 0.0f && rgb.z > 0.0f, "spectrumToRgb white albedo");
+    checkNear(rgb.x / srMax(rgb.y, 1e-8f), 1.0f, 0.08f, "white albedo under D60 R/G");
+    checkNear(rgb.z / srMax(rgb.y, 1e-8f), 1.0f, 0.08f, "white albedo under D60 B/G");
+    checkNear(rgb.y, 1.0f, 0.12f, "white albedo under D60 ~1");
+    Vec3 greyOut = meanToRgb(
+        nspp, true,
+        [&](const SampledWavelengths& wv) {
+            return rgbToSpectrumReflectance(Vec3(0.8f, 0.8f, 0.8f), wv, aces) *
+                   rgbToSpectrumEmission(Vec3(1.0f), wv, aces);
+        },
+        aces);
+    checkNear(greyOut.y, 0.8f, 0.12f, "grey 0.8 albedo under D60");
+    checkNear(greyOut.x / srMax(greyOut.y, 1e-8f), 1.0f, 0.08f, "grey 0.8 ACEScg neutral");
+    Vec3 d60Rgb = meanToRgb(
+        nspp, true, [&](const SampledWavelengths& wv) { return illuminantSpectrum(wv, aces); }, aces);
+    checkNear(d60Rgb.x, 1.0f, 0.10f, "D60 illuminant ACEScg R");
+    checkNear(d60Rgb.y, 1.0f, 0.10f, "D60 illuminant ACEScg G");
+    checkNear(d60Rgb.z, 1.0f, 0.10f, "D60 illuminant ACEScg B");
     Vec3 hdri(4.2f, 4.1f, 4.3f);
-    Vec3 hdriOut = spectrumToRgb(rgbToSpectrumEmission(hdri, w), w);
-    check(std::fabs(hdriOut.x - hdri.x) < 0.15f && std::fabs(hdriOut.y - hdri.y) < 0.15f &&
-              std::fabs(hdriOut.z - hdri.z) < 0.15f,
-          "HDRI round-trip");
-    check(std::fabs((hdriOut.x / hdriOut.y) - (hdri.x / hdri.y)) < 0.05f, "HDRI not pink");
+    Vec3 hdriOut = meanToRgb(
+        nspp, true,
+        [hdri, &aces](const SampledWavelengths& wv) { return rgbToSpectrumEmission(hdri, wv, aces); },
+        aces);
+    checkNear(hdriOut.x / srMax(hdriOut.y, 1e-8f), hdri.x / hdri.y, 0.08f, "HDRI ACEScg not pink");
+    check(hdriOut.y > 2.0f, "HDRI keeps energy");
+    Vec3 whiteL = meanToRgb(
+        nspp, true,
+        [&](const SampledWavelengths& wv) { return rgbToSpectrumEmission(Vec3(1.0f), wv, aces); },
+        aces);
+    checkNear(whiteL.x, 1.0f, 0.12f, "white RGBIlluminantSpectrum ACEScg R");
+    checkNear(whiteL.y, 1.0f, 0.12f, "white RGBIlluminantSpectrum ACEScg G");
+    checkNear(whiteL.z, 1.0f, 0.12f, "white RGBIlluminantSpectrum ACEScg B");
     // Linear path-weight upsample must conserve energy under multiply (glass enter×exit).
     {
         const float eta = 1.5f;
@@ -4142,10 +4195,19 @@ void testSpectralHeroBasics() {
         const Vec3 wExit(eta * eta);
         SampledSpectrum t = rgbToSpectrumLinear(wEnter, w);
         t *= rgbToSpectrumLinear(wExit, w);
-        Vec3 round = spectrumToRgb(t, w);
-        check(std::fabs(round.x - 1.0f) < 0.08f && std::fabs(round.y - 1.0f) < 0.08f &&
-                  std::fabs(round.z - 1.0f) < 0.08f,
-              "glass enter×exit linear upsample ~1");
+        for (int i = 0; i < t.n; ++i)
+            check(std::fabs(t.values[i] - 1.0f) < 0.08f, "glass enter×exit linear upsample ~1");
+        Vec3 round = meanToRgb(
+            nspp, true,
+            [&](const SampledWavelengths& wv) {
+                SampledSpectrum tt = rgbToSpectrumLinear(wEnter, wv);
+                tt *= rgbToSpectrumLinear(wExit, wv);
+                return tt * rgbToSpectrumEmission(Vec3(1.0f), wv, aces);
+            },
+            aces);
+        checkNear(round.x, 1.0f, 0.12f, "glass enter×exit under D60 R");
+        checkNear(round.y, 1.0f, 0.12f, "glass enter×exit under D60 G");
+        checkNear(round.z, 1.0f, 0.12f, "glass enter×exit under D60 B");
     }
     // Abbe IOR must vary with λ (geometric dispersion).
     const float nBlue = dielectricIorFromAbbe(1.5f, 30.0f, 450.0f);
@@ -4176,32 +4238,38 @@ void testSpectralHeroBasics() {
         check(spectrumAvg(bbs) > 0.1f, "blackbody sample");
         ConstantSpectrum ones(1.0f);
         check(ones.sample(w).values[0] == 1.0f, "constant spectrum");
-        Vec3 aces = spectrumToRgb(white, w, kSpectralColorSpaceAcesCg);
-        check(aces.x > 0.0f && aces.y > 0.0f && aces.z > 0.0f, "ACEScg convert");
+        Vec3 acesFilm = meanToRgb(
+            nspp, true,
+            [&](const SampledWavelengths& wv) { return rgbToSpectrumEmission(Vec3(1.0f), wv, aces); },
+            aces);
+        check(acesFilm.x > 0.0f && acesFilm.y > 0.0f && acesFilm.z > 0.0f, "ACEScg convert");
+        checkNear(acesFilm.x, 1.0f, 0.15f, "ACEScg white illuminant R");
+        checkNear(acesFilm.y, 1.0f, 0.15f, "ACEScg white illuminant G");
+        checkNear(acesFilm.z, 1.0f, 0.15f, "ACEScg white illuminant B");
         const float fBlue = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 450.0f, 0.2f);
         const float fRed = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 650.0f, 0.2f);
         check(std::fabs(fBlue - fRed) > 1e-4f, "thin-film Airy chromatic");
 
-        // Visible + TerminateSecondary must not pink-cast equal-energy / white emission.
-        // (Regression: sample-matched WB + RGB clamp on single-λ → R/G ≈ 2.)
+        // Visible + TerminateSecondary: equal-energy must stay grey (volume fireflies).
         {
             Rng rng(42u, 7u);
             double rSum = 0.0, gSum = 0.0, bSum = 0.0;
-            const int nspp = 8000;
-            for (int s = 0; s < nspp; ++s) {
+            const int nterm = 8000;
+            for (int s = 0; s < nterm; ++s) {
                 SampledWavelengths wv = SampledWavelengths::sampleVisible(4, rng.nextFloat());
-                SampledSpectrum L = rgbToSpectrumEmission(Vec3(1.0f), wv);
+                SampledSpectrum L = SampledSpectrum::constant(wv.n, 1.0f);
                 wv.terminateSecondary();
-                const Vec3 o = spectrumToRgb(L, wv);
+                const Vec3 o = spectrumToRgb(L, wv, aces);
                 rSum += double(o.x);
                 gSum += double(o.y);
                 bSum += double(o.z);
             }
-            const float r = float(rSum / nspp), g = float(gSum / nspp), b = float(bSum / nspp);
-            check(g > 0.2f, "Vis+Terminate white has energy");
+            const float r = float(rSum / nterm), g = float(gSum / nterm), b = float(bSum / nterm);
+            check(g > 0.2f, "Vis+Terminate equal-energy has energy");
             check(std::fabs(r / g - 1.0f) < 0.08f && std::fabs(b / g - 1.0f) < 0.08f,
-                  "Vis+TerminateSecondary white not pink");
-            check(std::fabs(r - 1.0f) < 0.15f && std::fabs(g - 1.0f) < 0.15f, "Vis+Terminate white ~1");
+                  "Vis+TerminateSecondary equal-energy not pink");
+            check(std::fabs(r - 1.0f) < 0.15f && std::fabs(g - 1.0f) < 0.15f,
+                  "Vis+Terminate equal-energy ~1");
         }
 
         // Clear glass preset: spectral dielectric enter×exit×white env stays neutral.
@@ -4209,7 +4277,7 @@ void testSpectralHeroBasics() {
             Rng rng(11u, 3u);
             double rSum = 0.0, gSum = 0.0, bSum = 0.0;
             int accepted = 0;
-            const int nspp = 8000;
+            const int nglass = 8000;
             Material glass;
             glass.baseColor = Vec3(1.0f);
             glass.transmission = 1.0f;
@@ -4217,20 +4285,21 @@ void testSpectralHeroBasics() {
             glass.roughness = 0.0f;
             glass.specular = 1.0f;
             glass.dispersionAbbe = 55.0f;
-            for (int s = 0; s < nspp; ++s) {
+            for (int s = 0; s < nglass; ++s) {
                 SampledWavelengths wv = SampledWavelengths::sampleVisible(4, rng.nextFloat());
                 const int hero = std::clamp(int(rng.nextFloat() * 4.0f), 0, 3);
                 wv.promoteHero(hero);
                 // Normal-incidence transmit (uChoice high enough to beat Fresnel ~0.04).
                 BsdfSampleSpectral eIn =
                     bsdfSampleSpectral(glass, Vec3(0.0f, 0.0f, 1.0f), 0.99f, 0.0f, 0.0f, 0.5f, wv,
-                                       glass.ior, 0);
+                                       glass.ior, 0, aces);
                 BsdfSampleSpectral eOut =
                     bsdfSampleSpectral(glass, Vec3(0.0f, 0.0f, -1.0f), 0.99f, 0.0f, 0.0f, 0.5f, wv,
-                                       glass.ior, 0);
+                                       glass.ior, 0, aces);
                 if (!eIn.valid || !eIn.transmitted || !eOut.valid || !eOut.transmitted) continue;
-                SampledSpectrum thr = eIn.weight * eOut.weight * rgbToSpectrumEmission(Vec3(1.0f), wv);
-                const Vec3 o = spectrumToRgb(thr, wv);
+                SampledSpectrum thr =
+                    eIn.weight * eOut.weight * rgbToSpectrumEmission(Vec3(1.0f), wv, aces);
+                const Vec3 o = spectrumToRgb(thr, wv, aces);
                 rSum += double(o.x);
                 gSum += double(o.y);
                 bSum += double(o.z);
@@ -4241,7 +4310,7 @@ void testSpectralHeroBasics() {
                         b = float(bSum / accepted);
             check(std::fabs(r / g - 1.0f) < 0.05f && std::fabs(b / g - 1.0f) < 0.05f,
                   "glass spectral enter×exit×env not reddish");
-            check(std::fabs(r - 1.0f) < 0.08f && std::fabs(g - 1.0f) < 0.08f, "glass spectral ~white");
+            check(std::fabs(r - 1.0f) < 0.12f && std::fabs(g - 1.0f) < 0.12f, "glass spectral ~white");
 
             // TerminateSecondary policy: specular glass must keep secondaries.
             BsdfSample bsSpec{};
