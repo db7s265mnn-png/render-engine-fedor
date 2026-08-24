@@ -17,7 +17,9 @@
 #  define SR_HD
 #  define SR_INL inline
 #  define SR_NO_UNROLL
-#  define SR_NOINLINE
+// Header helpers tagged SR_NOINLINE must still be `inline` on the host so
+// Embree TUs that include lights.h do not emit duplicate strong symbols.
+#  define SR_NOINLINE inline
 #endif
 
 #include <cmath>
