@@ -14,7 +14,10 @@
 // share SR_INL/SR_HD from core/math.h if later used from device code.
 
 #include "core/math.h"
+
+#define SOL_RNG_NO_SOBOL
 #include "core/rng.h"
+#undef SOL_RNG_NO_SOBOL
 
 #include <cstdint>
 
@@ -1539,36 +1542,53 @@ SR_INL SR_HD float uintToUnitFloat(uint32_t x) {
     return float(x >> 8) * (1.0f / 16777216.0f);
 }
 
+// Joe–Kuo direction numbers for one dimension. Host caches these in
+// SobolDirectionTable; OptiX builds them on the fly so it does not depend on
+// a host magic-static.
+SR_INL SR_HD void sobolFillDirections(uint32_t dimension, uint32_t vOut[kSobolBits]) {
+    if (dimension == 0u) {
+        for (uint32_t j = 0; j < kSobolBits; ++j)
+            vOut[j] = 1u << (31u - j);
+        return;
+    }
+    const uint32_t pi = dimension - 1u;
+    const uint32_t s = kSobolDegree[pi];
+    const uint32_t a = kSobolA[pi];
+    const uint32_t mBase = kSobolMOffset[pi];
+
+    uint32_t m[33];
+    for (uint32_t i = 1; i <= s; ++i)
+        m[i] = kSobolM[mBase + (i - 1u)];
+
+    for (uint32_t i = s + 1u; i <= kSobolBits; ++i) {
+        uint32_t mi = m[i - s] ^ (m[i - s] << s);
+        for (uint32_t k = 1; k < s; ++k) {
+            if ((a >> (s - 1u - k)) & 1u)
+                mi ^= m[i - k] << k;
+        }
+        m[i] = mi;
+    }
+
+    for (uint32_t i = 1; i <= kSobolBits; ++i)
+        vOut[i - 1u] = m[i] << (kSobolBits - i);
+}
+
+SR_INL SR_HD uint32_t sobolRawDirect(uint32_t index, uint32_t dimension) {
+    uint32_t v[kSobolBits];
+    sobolFillDirections(dimension, v);
+    uint32_t x = 0u;
+    for (uint32_t b = 0; b < kSobolBits; ++b) {
+        if ((index >> b) & 1u) x ^= v[b];
+    }
+    return x;
+}
+
 struct SobolDirectionTable {
     uint32_t v[kSobolDimensions][kSobolBits];
 
     SobolDirectionTable() {
-        // Dimension 1: van der Corput / radical inverse base 2 direction numbers.
-        for (uint32_t j = 0; j < kSobolBits; ++j)
-            v[0][j] = 1u << (31u - j);
-
-        for (uint32_t d = 1; d < kSobolDimensions; ++d) {
-            const uint32_t pi = d - 1u;  // params index for dimension d+1 (1-based dim >= 2)
-            const uint32_t s = kSobolDegree[pi];
-            const uint32_t a = kSobolA[pi];
-            const uint32_t mBase = kSobolMOffset[pi];
-
-            uint32_t m[33];
-            for (uint32_t i = 1; i <= s; ++i)
-                m[i] = kSobolM[mBase + (i - 1u)];
-
-            for (uint32_t i = s + 1u; i <= kSobolBits; ++i) {
-                uint32_t mi = m[i - s] ^ (m[i - s] << s);
-                for (uint32_t k = 1; k < s; ++k) {
-                    if ((a >> (s - 1u - k)) & 1u)
-                        mi ^= m[i - k] << k;
-                }
-                m[i] = mi;
-            }
-
-            for (uint32_t i = 1; i <= kSobolBits; ++i)
-                v[d][i - 1u] = m[i] << (kSobolBits - i);
-        }
+        for (uint32_t d = 0; d < kSobolDimensions; ++d)
+            sobolFillDirections(d, v[d]);
     }
 };
 
@@ -1586,10 +1606,7 @@ SR_INL SR_HD uint32_t sobolRaw(uint32_t index, uint32_t dimension) {
         return x;
     }
 #if defined(__CUDA_ARCH__)
-    // Device path should not rely on host static init; use a simple fallback.
-    uint32_t x = reverseBits32(index);
-    x = hashUint(x ^ hashUint(dimension * 0x9e3779b9u));
-    return x;
+    return sobolRawDirect(index, dimension);
 #else
     const SobolDirectionTable& tab = directionTable();
     uint32_t x = 0u;
@@ -1667,11 +1684,16 @@ SR_INL float pathSobolQmcFn(void* ctx, uint32_t dimension) {
     return s->sampler.sample1D(s->sampleIndex, dimension);
 }
 
-SR_INL void attachPathSobol(Rng& rng, PathSobolStream& stream, int x, int y, int sampleIndex,
-                            uint32_t salt = 0u) {
+SR_INL SR_HD float rngOwenSobolSample(uint32_t scramble, uint32_t index, uint32_t dimension) {
+    SobolSampler sampler;
+    sampler.scrambleBase = scramble;
+    return sampler.sample1D(index, dimension);
+}
+
+SR_INL SR_HD void attachPathSobol(Rng& rng, int x, int y, int sampleIndex, uint32_t salt = 0u) {
     // Salt separates spectral hero channels etc. without correlating neighbors.
-    stream.sampler.scrambleBase =
-        uint32_t(hashPixelSample(x, y, 0u, salt, 0x50b01u));
+    rng.useSobol = 1;
+    rng.sobolScramble = uint32_t(hashPixelSample(x, y, 0u, salt, 0x50b01u));
     // CRITICAL: do NOT share one global sampleIndex across the whole frame.
     // Same Sobol index + only per-pixel Owen scramble still printed a square
     // lattice on MNEE/caustic paths (tile_test). Decorrelate the index with a
@@ -1679,10 +1701,17 @@ SR_INL void attachPathSobol(Rng& rng, PathSobolStream& stream, int x, int y, int
     const uint32_t si = uint32_t(sampleIndex < 0 ? 0 : sampleIndex);
     const uint32_t pixelOffset =
         uint32_t(hashPixelSample(x, y, 0u, salt, 0x51b01u) & 0xffffu);
-    stream.sampleIndex = si + pixelOffset * 65536u;  // spp in low bits of each pixel's lane
-    rng.qmcCtx = &stream;
-    rng.qmcFn = &pathSobolQmcFn;
+    rng.sobolIndex = si + pixelOffset * 65536u;  // spp in low bits of each pixel's lane
     rng.sampleDim = 0u;  // pbrt: one stream from dimension 0 (camera then path)
+    rng.qmcCtx = nullptr;
+    rng.qmcFn = nullptr;
+}
+
+SR_INL void attachPathSobol(Rng& rng, PathSobolStream& stream, int x, int y, int sampleIndex,
+                            uint32_t salt = 0u) {
+    attachPathSobol(rng, x, y, sampleIndex, salt);
+    stream.sampler.scrambleBase = rng.sobolScramble;
+    stream.sampleIndex = rng.sobolIndex;
 }
 
 }  // namespace sol

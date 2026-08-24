@@ -17,6 +17,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QResizeEvent>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QToolButton>
 #include <QVector3D>
@@ -278,7 +279,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         "  border-bottom: 1px solid #22242a;"
         "}");
 
-    detachButton_ = new DockDetachButton(chromeBar_);
+    detachButton_ = new DockDetachButton(this);
     detachButton_->hide();
     connect(detachButton_, &QToolButton::clicked, this, [this] {
         if (onDetach_) onDetach_();
@@ -678,17 +679,16 @@ void RenderView::layoutToolStrip() {
     chromeBar_->setGeometry(0, 0, width(), chromeH);
     int rightReserve = 0;
     if (detachButton_ && detachButton_->isVisible()) {
+        constexpr int kMargin = 6;
         const int y = std::max(0, (chromeH - detachButton_->height()) / 2);
-        detachButton_->move(chromeBar_->width() - detachButton_->width() - 8, y);
-        detachButton_->raise();
-        rightReserve = detachButton_->width() + 16;
+        detachButton_->move(width() - detachButton_->width() - kMargin, y);
+        rightReserve = detachButton_->width() + kMargin * 2;
     }
     int left = 0;
     if (renderControlStrip_) {
         renderControlStrip_->adjustSize();
         const int y = std::max(0, (chromeH - renderControlStrip_->height()) / 2);
         renderControlStrip_->move(0, y);
-        renderControlStrip_->raise();
         left = renderControlStrip_->width() + 4;
     }
     toolStrip_->adjustSize();
@@ -696,9 +696,10 @@ void RenderView::layoutToolStrip() {
     const int x = std::max(left, (available - toolStrip_->width()) / 2);
     const int y = std::max(0, (chromeH - toolStrip_->height()) / 2);
     toolStrip_->move(x, y);
+    chromeBar_->raise();
+    if (renderControlStrip_) renderControlStrip_->raise();
     toolStrip_->raise();
     if (detachButton_ && detachButton_->isVisible()) detachButton_->raise();
-    chromeBar_->raise();
 }
 
 void RenderView::attachRenderActions(QAction* start, QAction* stop) {
@@ -767,6 +768,11 @@ void RenderView::rebuildCameraMenu() {
 
 void RenderView::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
+    layoutToolStrip();
+}
+
+void RenderView::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
     layoutToolStrip();
 }
 

@@ -15,6 +15,7 @@
 class QToolButton;
 class QComboBox;
 class QAction;
+class QShowEvent;
 
 namespace sol {
 
@@ -151,6 +152,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     enum class GizmoAxis { None = 0, X, Y, Z, Center };

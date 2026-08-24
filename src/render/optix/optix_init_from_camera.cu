@@ -31,8 +31,12 @@ extern "C" __global__ void __raygen__init_from_camera() {
     }
 
     path.rng = makePixelRng(x, y, params.sampleIndex, params.frameSeed);
-    float jitterX = 0.5f, jitterY = 0.5f, lensU = 0.5f, lensV = 0.5f;
-    sampleCameraPixelLens(x, y, params.sampleIndex, jitterX, jitterY, lensU, lensV);
+    attachPathSobol(path.rng, x, y, params.sampleIndex);
+    // Same stream as Embree: camera consumes dims 0–3, path continues at 4+.
+    const float jitterX = path.rng.nextFloat();
+    const float jitterY = path.rng.nextFloat();
+    const float lensU = path.rng.nextFloat();
+    const float lensV = path.rng.nextFloat();
 
     cameraRay(params.scene, float(x) + jitterX, float(y) + jitterY, lensU, lensV, path.origin, path.direction);
     samplePathWavelengths(path, params.spec);

@@ -754,6 +754,28 @@ void testXpuDevice() {
     checkNear(jy, jy2, 1e-6f, "shared camera jitter Y matches Sobol");
     checkNear(lu, lu2, 1e-6f, "shared lens U matches Sobol");
     checkNear(lv, lv2, 1e-6f, "shared lens V matches Sobol");
+
+    {
+        const uint32_t dims[] = {0u, 1u, 2u, 7u, 31u, 100u, 511u, 1023u};
+        const uint32_t indices[] = {0u, 1u, 2u, 16u, 1023u, 65536u + 3u};
+        for (uint32_t d : dims) {
+            for (uint32_t i : indices) {
+                check(sobol_detail::sobolRaw(i, d) == sobol_detail::sobolRawDirect(i, d),
+                      "host Sobol table matches on-the-fly directions");
+            }
+        }
+        Rng rng = makePixelRng(10, 20, 3, 0u);
+        attachPathSobol(rng, 10, 20, 3);
+        check(rng.useSobol == 1, "attachPathSobol sets useSobol");
+        SobolSampler sampler;
+        sampler.scrambleBase = rng.sobolScramble;
+        const uint32_t index = rng.sobolIndex;
+        for (uint32_t dim = 0; dim < 4; ++dim) {
+            const float fromRng = rng.nextFloat();
+            const float fromSampler = sampler.sample1D(index, dim);
+            check(fromRng == fromSampler, "path Sobol nextFloat matches sampler");
+        }
+    }
 }
 
 void testRenderSettingsFolders() {

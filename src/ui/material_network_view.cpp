@@ -42,6 +42,7 @@
 
 #include "io/image_io.h"
 #include "ui/texture_file_dialog.h"
+#include "ui/graph_view_nav.h"
 #include "io/materialx_graph.h"
 #include "render/metal_spectra.h"
 #include "nodes/node.h"
@@ -1366,21 +1367,22 @@ void MaterialNetworkGraphView::frameGraph() {
 }
 
 void MaterialNetworkGraphView::wheelEvent(QWheelEvent* event) {
-    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
     const QPoint delta = event->angleDelta().y() != 0 ? event->angleDelta() : event->pixelDelta();
     const qreal steps = qreal(delta.y()) / 120.0;
     if (std::abs(steps) < 1e-4) {
         event->accept();
         return;
     }
-
     const qreal factor = std::pow(1.08, steps);
     const double newScale = transform().m11() * factor;
     if (newScale < 0.16 || newScale > 4.0) {
         event->accept();
         return;
     }
-    QGraphicsView::scale(factor, factor);
+    const QPoint viewPos = graphicsViewWheelPos(this, event);
+    const auto saved = transformationAnchor();
+    zoomGraphicsViewAt(this, factor, viewPos, panning_ ? &lastPanPoint_ : nullptr);
+    if (!panning_) setTransformationAnchor(saved);
     event->accept();
 }
 
@@ -2543,7 +2545,6 @@ void MaterialContainerGraphView::frameGraph() {
 }
 
 void MaterialContainerGraphView::wheelEvent(QWheelEvent* event) {
-    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
     const QPoint delta = event->angleDelta().y() != 0 ? event->angleDelta() : event->pixelDelta();
     const qreal steps = qreal(delta.y()) / 120.0;
     if (std::abs(steps) < 1e-4) {
@@ -2556,7 +2557,10 @@ void MaterialContainerGraphView::wheelEvent(QWheelEvent* event) {
         event->accept();
         return;
     }
-    QGraphicsView::scale(factor, factor);
+    const QPoint viewPos = graphicsViewWheelPos(this, event);
+    const auto saved = transformationAnchor();
+    zoomGraphicsViewAt(this, factor, viewPos, panning_ ? &lastPanPoint_ : nullptr);
+    if (!panning_) setTransformationAnchor(saved);
     event->accept();
 }
 

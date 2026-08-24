@@ -25,6 +25,7 @@
 
 #include "nodes/node_registry.h"
 #include "ui/connection_item.h"
+#include "ui/graph_view_nav.h"
 #include "ui/node_item.h"
 #include "ui/theme.h"
 
@@ -456,14 +457,16 @@ NodeItem* NodeGraphView::nodeItemAt(QPoint viewPosition) const {
 }
 
 void NodeGraphView::wheelEvent(QWheelEvent* event) {
-    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
     const qreal factor = zoomFactorFromWheel(event);
     const double newScale = transform().m11() * factor;
     if (newScale < 0.12 || newScale > 4.0) {
         event->accept();
         return;
     }
-    QGraphicsView::scale(factor, factor);
+    const QPoint viewPos = graphicsViewWheelPos(this, event);
+    const auto saved = transformationAnchor();
+    zoomGraphicsViewAt(this, factor, viewPos, panning_ ? &lastPanPoint_ : nullptr);
+    if (!panning_) setTransformationAnchor(saved);
     event->accept();
 }
 

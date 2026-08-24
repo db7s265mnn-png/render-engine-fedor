@@ -702,6 +702,7 @@ set(SOLSTICE_APP_HEADERS
     src/ui/node_item.h
     src/ui/node_icons.h
     src/ui/connection_item.h
+    src/ui/graph_view_nav.h
     src/ui/parameter_panel.h
     src/ui/render_view.h
     src/ui/scene_graph_panel.h
