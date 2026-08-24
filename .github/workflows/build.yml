@@ -6,8 +6,8 @@ on:
   pull_request:
   workflow_dispatch:
 
-# One Windows OptiX job at a time per ref. Stacked PTX compiles each sat in
-# embed_binary.cmake until the 45-minute cap and starved HEAD.
+# One Windows job at a time per ref. OptiX PTX is not compiled in CI —
+# build GPU kernels locally with -DSOLSTICE_ENABLE_OPTIX=ON.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -31,9 +31,9 @@ jobs:
       - run: echo "Linux OptiX builds are disabled"
 
   windows:
-    name: Windows (Clang, OptiX exe)
+    name: Windows (Clang, Embree)
     runs-on: windows-2022
-    timeout-minutes: 240
+    timeout-minutes: 90
     env:
       EMBREE_VERSION: "4.4.0"
       IMATH_VERSION: "v3.1.12"
@@ -82,39 +82,6 @@ jobs:
           if (-not $clangCl) { throw "clang-cl not found on the runner" }
           Write-Host "clang-cl: $($clangCl.Source)"
           & clang-cl --version
-
-      # Windows OptiX: nvcc + OptiX headers. Linux OptiX stays off (jobs above are if: false).
-      # Do NOT install visual_studio_integration / Nsight — those hang the CUDA installer
-      # on windows-2022. nvcc must use MSVC cl.exe, not clang-cl (that hung CI 30–80+ min).
-      - name: Install CUDA toolkit
-        timeout-minutes: 40
-        uses: Jimver/cuda-toolkit@v0.2.35
-        with:
-          cuda: "12.6.3"
-          method: network
-          sub-packages: '["nvcc","cudart","thrust"]'
-          use-github-cache: true
-
-      - name: Put nvcc on PATH
-        shell: pwsh
-        run: |
-          if (-not $env:CUDA_PATH) { throw "CUDA_PATH was not set by cuda-toolkit" }
-          $bin = Join-Path $env:CUDA_PATH "bin"
-          $nvcc = Join-Path $bin "nvcc.exe"
-          if (-not (Test-Path $nvcc)) { throw "nvcc.exe missing at $nvcc" }
-          echo $bin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          Write-Host "CUDA_PATH=$env:CUDA_PATH"
-          & $nvcc --version
-
-      - name: Fetch the OptiX headers
-        shell: pwsh
-        run: |
-          $dst = Join-Path $env:RUNNER_TEMP "optix-dev"
-          if (-not (Test-Path "$dst/include/optix.h")) {
-            git clone --depth 1 --branch v7.7.0 https://github.com/NVIDIA/optix-dev.git $dst
-          }
-          if (-not (Test-Path "$dst/include/optix.h")) { throw "optix.h missing after clone" }
-          Write-Host "OptiX headers: $dst/include"
 
       - name: Cache the third party dependencies
         id: deps-cache
@@ -282,79 +249,28 @@ jobs:
           Get-ChildItem "$env:DEPS_PREFIX/bin" -Filter "openvdb*" -ErrorAction SilentlyContinue |
             ForEach-Object { Write-Host $_.Name }
 
-      - name: Configure (Clang + Ninja, OptiX ON)
+      - name: Configure (Clang + Ninja, Embree)
         shell: pwsh
         run: |
-          $cl = (Get-Command cl.exe -ErrorAction Stop).Source
-          $nvcc = Join-Path $env:CUDA_PATH "bin/nvcc.exe"
-          if (-not (Test-Path $nvcc)) { throw "nvcc.exe missing at $nvcc" }
-          $optixRoot = Join-Path $env:RUNNER_TEMP "optix-dev"
-          Write-Host "cl.exe (nvcc host): $cl"
-          Write-Host "nvcc: $nvcc"
-          Write-Host "OptiX_ROOT: $optixRoot"
           cmake -S . -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_COMPILER=clang-cl `
             -DCMAKE_CXX_COMPILER=clang-cl `
-            -DCMAKE_CUDA_COMPILER="$nvcc" `
-            -DCMAKE_CUDA_HOST_COMPILER="$cl" `
             -DCMAKE_PREFIX_PATH="$env:DEPS_PREFIX;$env:DEPS_PREFIX/embree" `
             -DSOLSTICE_MATERIALX_LIBRARIES="$env:DEPS_PREFIX/libraries" `
-            -DSOLSTICE_ENABLE_OPTIX=ON `
-            -DOptiX_ROOT="$optixRoot" `
-            -DSOLSTICE_CUDA_HOST_COMPILER="$cl" `
+            -DSOLSTICE_ENABLE_OPTIX=OFF `
             -DSOLSTICE_ENABLE_OCIO=ON `
             -DSOLSTICE_ENABLE_OPENVDB=ON `
             -DSOLSTICE_MODERN_CPU=ON `
             -DSOLSTICE_BUILD_TX_TOOLS_ALPHA=ON `
             -DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON
           if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
-          $cfg = Get-Content build/CMakeCache.txt | Select-String "SOLSTICE_HAVE_OPENVDB|SOLSTICE_HAVE_OPTIX"
+          $cfg = Get-Content build/CMakeCache.txt | Select-String "SOLSTICE_HAVE_OPENVDB|SOLSTICE_HAVE_OPTIX|SOLSTICE_ENABLE_OPTIX"
           Write-Host $cfg
           if (-not (Select-String -Path build/generated/solstice_config.h -Pattern "SOLSTICE_HAVE_OPENVDB 1" -Quiet)) {
             throw "OpenVDB was not detected — VDB from Polygons would be a no-op"
           }
-          if (-not (Select-String -Path build/generated/solstice_config.h -Pattern "SOLSTICE_HAVE_OPTIX 1" -Quiet)) {
-            throw "OptiX was requested but not enabled — this Windows build would ship Embree-only"
-          }
-
-      - name: Compile OptiX PTX
-        timeout-minutes: 45
-        env:
-          PYTHONUNBUFFERED: "1"
-        run: cmake --build build --target solstice_optix_programs --verbose
-
-      - name: Upload OptiX PTX log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: optix-ptx-steps
-          path: build/generated/ptx_steps.log
-          if-no-files-found: warn
-
-      - name: Prove OptiX IR is embedded
-        shell: pwsh
-        run: |
-          $modules = @(
-            @{ Ptx = 'optix_hit_miss.ptx'; Embed = 'solstice_optix_hit_miss_ir.cpp'; Sym = 'solsticeOptixHitIr' },
-            @{ Ptx = 'optix_init_from_camera.ptx'; Embed = 'solstice_optix_init_from_camera_ir.cpp'; Sym = 'solsticeOptixInitIr' },
-            @{ Ptx = 'optix_intersect_closest.ptx'; Embed = 'solstice_optix_intersect_closest_ir.cpp'; Sym = 'solsticeOptixIntersectClosestIr' },
-            @{ Ptx = 'optix_intersect_shadow.ptx'; Embed = 'solstice_optix_intersect_shadow_ir.cpp'; Sym = 'solsticeOptixIntersectShadowIr' },
-            @{ Ptx = 'optix_shade_background.ptx'; Embed = 'solstice_optix_shade_background_ir.cpp'; Sym = 'solsticeOptixShadeBackgroundIr' },
-            @{ Ptx = 'optix_shade_shadow.ptx'; Embed = 'solstice_optix_shade_shadow_ir.cpp'; Sym = 'solsticeOptixShadeShadowIr' },
-            @{ Ptx = 'optix_shade_volume.ptx'; Embed = 'solstice_optix_shade_volume_ir.cpp'; Sym = 'solsticeOptixShadeVolumeIr' },
-            @{ Ptx = 'optix_shade_surface.ptx'; Embed = 'solstice_optix_shade_surface_ir.cpp'; Sym = 'solsticeOptixShadeSurfaceIr' }
-          )
-          foreach ($m in $modules) {
-            $ptx = Join-Path 'build/generated' $m.Ptx
-            $embed = Join-Path 'build/generated' $m.Embed
-            if (-not (Test-Path $ptx)) { throw "$($m.Ptx) was not produced" }
-            if (-not (Test-Path $embed)) { throw "$($m.Embed) was not produced" }
-            if (-not (Select-String -Path $embed -Pattern $m.Sym -Quiet)) {
-              throw "embedded OptiX symbol $($m.Sym) missing"
-            }
-            Get-Item $ptx, $embed | ForEach-Object { Write-Host "$($_.Name) $($_.Length) bytes" }
-          }
+          Write-Host "OptiX PTX is not compiled in CI (SOLSTICE_ENABLE_OPTIX=OFF). Build GPU kernels locally."
 
       - name: Build
         timeout-minutes: 90
@@ -371,12 +287,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item build/bin/* dist/ -Recurse -Force
           Copy-Item "$env:DEPS_PREFIX/embree/bin/*.dll" dist/ -Force
-          # CUDA runtime for the OptiX backend (nvcuda.dll comes from the user's NVIDIA driver).
-          if (-not $env:CUDA_PATH) { throw "CUDA_PATH missing while packaging OptiX build" }
-          $cudaBin = Join-Path $env:CUDA_PATH "bin"
-          $cudart = Get-ChildItem -Path $cudaBin -Filter "cudart64_*.dll" -ErrorAction SilentlyContinue
-          if (-not $cudart) { throw "cudart64_*.dll missing under $cudaBin — GPU backend would fail to load" }
-          $cudart | ForEach-Object { Copy-Item $_.FullName dist/ -Force; Write-Host "Copied $($_.Name)" }
+          # OptiX/CUDA are not part of CI packages. Build GPU locally with SOLSTICE_ENABLE_OPTIX=ON.
           # Ensure Qt image format plugins are present (windeployqt may omit some).
           # Note: official Qt 6.7 often builds PNG into Qt6Gui (no qpng.dll) — still copy
           # whatever is in plugins/imageformats for jpeg/gif/webp/etc.
@@ -462,9 +373,6 @@ jobs:
             throw "OpenColorIO.dll missing from dist — Windows Display/View would be a no-op"
           }
           Write-Host "Packaged OCIO runtime: $($ocioDll.Name)"
-          if (-not (Get-ChildItem dist -Filter "cudart64_*.dll" -ErrorAction SilentlyContinue)) {
-            throw "cudart64_*.dll missing from dist — OptiX would fail to load on the user's PC"
-          }
           if (-not (Test-Path "dist/maketx.exe")) {
             throw "maketx.exe missing from dist — TX Converter would fail"
           }
