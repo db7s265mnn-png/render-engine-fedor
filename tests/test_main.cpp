@@ -6051,18 +6051,18 @@ void testNgonTriangulateAndVdb() {
                 sv.domeLightIndex = 0;
                 const Vec3 sunDir = normalize(lightAxisZ(lights[1]));
                 const Vec3 p(0.0f);
-                const float fDome = lightFluxWeight(sv, 0);
-                const float fSun = lightFluxWeight(sv, 1);
-                check(std::fabs(volumeLightSelectionWeight(sv, 0, p, sunDir, 0.0f) - fDome) < 1e-5f,
-                      "g=0 volume weight equals flux (dome)");
-                check(std::fabs(volumeLightSelectionWeight(sv, 1, p, sunDir, 0.0f) - fSun) < 1e-5f,
-                      "g=0 volume weight equals flux (sun)");
-                const float wSunFwd = volumeLightSelectionWeight(sv, 1, p, sunDir, 0.9f);
-                const float wDomeFwd = volumeLightSelectionWeight(sv, 0, p, sunDir, 0.9f);
-                check(std::fabs(wSunFwd - fSun) < 1e-5f, "volume pick ignores HG (sun = flux)");
-                check(std::fabs(wDomeFwd - fDome) < 1e-5f, "volume pick ignores HG (dome = flux)");
-                const float wSunBack = volumeLightSelectionWeight(sv, 1, p, sunDir * -1.0f, 0.9f);
-                check(std::fabs(wSunBack - fSun) < 1e-5f, "volume pick ignores HG tail");
+                const float pdfDome = volumeLightSelectionPdfIndex(sv, p, sunDir, 0.0f, 0);
+                const float pdfSun = volumeLightSelectionPdfIndex(sv, p, sunDir, 0.0f, 1);
+                checkNear(pdfDome, lightSelectionPdfIndex(sv, p, 0), 1e-5f,
+                          "volume pdf equals surface LightSampler (dome)");
+                checkNear(pdfSun, lightSelectionPdfIndex(sv, p, 1), 1e-5f,
+                          "volume pdf equals surface LightSampler (sun)");
+                checkNear(volumeLightSelectionPdfIndex(sv, p, sunDir, 0.9f, 1), pdfSun, 1e-5f,
+                          "volume pick ignores HG (sun)");
+                checkNear(volumeLightSelectionPdfIndex(sv, p, sunDir, 0.9f, 0), pdfDome, 1e-5f,
+                          "volume pick ignores HG (dome)");
+                checkNear(volumeLightSelectionPdfIndex(sv, p, sunDir * -1.0f, 0.9f, 1), pdfSun, 1e-5f,
+                          "volume pick ignores HG tail");
                 float pdfSel = 0.0f;
                 const int picked = sampleVolumeLightIndex(sv, p, sunDir, 0.9f, 0.5f, pdfSel);
                 check(picked >= 0 && pdfSel > 0.0f, "volume light pick at g=0.9 succeeds");
