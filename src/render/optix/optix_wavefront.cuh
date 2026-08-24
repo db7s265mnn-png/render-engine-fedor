@@ -51,12 +51,9 @@ __device__ inline Vec3 offsetRay(Vec3 p, Vec3 n, Vec3 dir) {
     return dot(dir, n) > 0.0f ? p + offset : p - offset;
 }
 
-// Snapshot throughput here: shade_surface / shade_volume continue the path
-// (BSDF weight, RR) before shade_shadow runs. Multiplying NEE by the later
-// throughput makes single-pixel chromatic fireflies.
 __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, float tMax, Vec3 contrib,
-                                     int mediumIndex, const GpuPath& path, float clampValue) {
-    if (!isFinite(contrib) || isBlack(contrib) || path.nLambda <= 0) {
+                                     int mediumIndex) {
+    if (!isFinite(contrib) || isBlack(contrib)) {
         shadow.queue = kShadowIdle;
         return;
     }
@@ -64,10 +61,6 @@ __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, f
     shadow.direction = dir;
     shadow.tMax = tMax;
     shadow.contrib = contrib;
-    shadow.nLambda = path.nLambda;
-    shadow.clampValue = clampValue;
-    for (int i = 0; i < path.nLambda; ++i) shadow.throughputS[i] = path.throughputS[i];
-    for (int i = path.nLambda; i < kMaxSpectrumSamples; ++i) shadow.throughputS[i] = 0.0f;
     shadow.occluded = 0;
     shadow.volumeTr = 1;
     shadow.mediumIndex = mediumIndex;

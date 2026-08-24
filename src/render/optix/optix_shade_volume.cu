@@ -67,13 +67,13 @@ extern "C" __global__ void __raygen__shade_volume() {
                 const float lightPdf = ls.pdf * selectPdf;
                 const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phase);
                 Vec3 contrib = ls.radiance * (phase / srMax(1e-8f, lightPdf)) * mis;
-                const float clampV = scene.settings.clampDirect;
+                contrib = clampFirefly(contrib, scene.settings.clampDirect);
                 if (scene.lights[lightIndex].shadowEnable) {
                     float tSh = 1.0e8f;
                     if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
-                    enqueueShadow(shadow, p, ls.wi, tSh, contrib, path.mediumIndex, path, clampV);
+                    enqueueShadow(shadow, p, ls.wi, tSh, contrib, path.mediumIndex);
                 } else {
-                    addPathLinearRgb(path, contrib, 1.0f, clampV);
+                    addPathLinearRgb(path, contrib, 1.0f, 0.0f);
                 }
             }
         }

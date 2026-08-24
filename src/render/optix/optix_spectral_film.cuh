@@ -24,21 +24,11 @@ __device__ inline void addPathEmissionRgb(GpuPath& path, Vec3 rgb, float scale, 
     addPathRadianceS(path, s, scale, clampValue);
 }
 
-__device__ inline void addPathLinearRgbThru(GpuPath& path, Vec3 rgb, const float* throughput, int n,
-                                           float clampValue) {
-    if (isBlack(rgb) || n <= 0) return;
-    float s[kMaxSpectrumSamples];
-    specUpsampleLinear(rgb, path.lambda, n, s);
-    float tmp[kMaxSpectrumSamples];
-    for (int i = 0; i < n; ++i) tmp[i] = throughput[i] * s[i];
-    specClampIndirect(tmp, n, clampValue);
-    if (!specIsFinite(tmp, n)) return;
-    for (int i = 0; i < n; ++i) path.radianceS[i] += tmp[i];
-}
-
 __device__ inline void addPathLinearRgb(GpuPath& path, Vec3 rgb, float scale, float clampValue) {
-    if (isBlack(rgb) || scale == 0.0f) return;
-    addPathLinearRgbThru(path, rgb * scale, path.throughputS, path.nLambda, clampValue);
+    if (isBlack(rgb)) return;
+    float s[kMaxSpectrumSamples];
+    specUpsampleLinear(rgb, path.lambda, path.nLambda, s);
+    addPathRadianceS(path, s, scale, clampValue);
 }
 
 __device__ inline void flushPathFilm(int pixel) {
