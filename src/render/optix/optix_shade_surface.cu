@@ -145,15 +145,16 @@ extern "C" __global__ void __raygen__shade_surface() {
                 const float lightPdf = ls.pdf * selectPdf;
                 const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
                 Vec3 contrib = ls.radiance * be.f * (fabsf(wiLocal.z) / lightPdf) * mis;
-                if (path.depth > 0 && !path.specularBounce)
-                    contrib = clampFirefly(contrib, scene.settings.clampDirect);
+                const float clampV =
+                    (path.depth > 0 && !path.specularBounce) ? scene.settings.clampDirect : 0.0f;
                 if (scene.lights[lightIndex].shadowEnable) {
                     const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
                     float tMax = 1.0e8f;
                     if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-                    enqueueShadow(shadow, shadowOrigin, ls.wi, tMax, contrib, path.mediumIndex);
+                    enqueueShadow(shadow, shadowOrigin, ls.wi, tMax, contrib, path.mediumIndex, path,
+                                  clampV);
                 } else {
-                    addPathLinearRgb(path, contrib, 1.0f, 0.0f);
+                    addPathLinearRgb(path, contrib, 1.0f, clampV);
                 }
             }
         }

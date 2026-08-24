@@ -1,5 +1,5 @@
 // Cycles analogue: integrator_shade_shadow.
-// RGB residual-ratio Tr (same as Embree NEE), then linear upsample × path throughput.
+// RGB residual-ratio Tr, then linear upsample × throughput snapshotted at NEE.
 #include "render/optix/optix_spectral_film.cuh"
 #include "render/optix/optix_volume.cuh"
 
@@ -19,7 +19,7 @@ extern "C" __global__ void __raygen__shade_shadow() {
         if (shadow.volumeTr)
             contrib = contrib * gpuVolumeShadowTr(params, shadow.origin, shadow.direction, shadow.tMax,
                                                   shadow.mediumIndex, path.rng);
-        addPathLinearRgb(path, contrib, 1.0f, 0.0f);
+        addPathLinearRgbThru(path, contrib, shadow.throughputS, shadow.nLambda, shadow.clampValue);
     }
     shadow.queue = kShadowIdle;
     flushPathFilm(pixel);

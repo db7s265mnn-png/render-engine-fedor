@@ -58,7 +58,10 @@ struct GpuPath {
 struct GpuShadow {
     Vec3 origin{0.0f};
     Vec3 direction{0.0f, 0.0f, 1.0f};
-    Vec3 contrib{0.0f};  // RGB NEE aggregate; shade_shadow upsamples like Embree
+    Vec3 contrib{0.0f};  // RGB NEE aggregate (no throughput); Tr applied in shade_shadow
+    float throughputS[kMaxSpectrumSamples]{};  // path throughput at the NEE vertex
+    int nLambda = 0;
+    float clampValue = 0.0f;
     float tMax = 0.0f;
     int queue = kShadowIdle;
     int occluded = 0;
