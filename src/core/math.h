@@ -11,9 +11,13 @@
 #  else
 #    define SR_INL inline
 #  endif
+#  define SR_NO_UNROLL _Pragma("unroll 1")
+#  define SR_NOINLINE __noinline__
 #else
 #  define SR_HD
 #  define SR_INL inline
+#  define SR_NO_UNROLL
+#  define SR_NOINLINE
 #endif
 
 #include <cmath>

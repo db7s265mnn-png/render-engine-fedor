@@ -507,6 +507,7 @@ SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
 SR_INL SR_HD void lightGroupCounts(const SceneView& scene, int& nInf, int& nFin) {
     nInf = 0;
     nFin = 0;
+    SR_NO_UNROLL
     for (int i = 0; i < scene.lightCount; ++i) {
         if (lightIsInfinite(scene.lights[i])) ++nInf;
         else ++nFin;
@@ -516,6 +517,7 @@ SR_INL SR_HD void lightGroupCounts(const SceneView& scene, int& nInf, int& nFin)
 SR_INL SR_HD void lightGroupFluxTotals(const SceneView& scene, float& wInf, float& wFin) {
     wInf = 0.0f;
     wFin = 0.0f;
+    SR_NO_UNROLL
     for (int i = 0; i < scene.lightCount; ++i) {
         const float w = lightFluxWeight(scene, i);
         if (lightIsInfinite(scene.lights[i])) wInf += w;
@@ -532,6 +534,7 @@ SR_INL SR_HD float infiniteLightGroupProbability(int nInf, int nFin) {
 
 SR_INL SR_HD int sampleInfiniteLightUniform(const SceneView& scene, float u, float pInf, float& pdf) {
     int nInf = 0;
+    SR_NO_UNROLL
     for (int i = 0; i < scene.lightCount; ++i)
         if (lightIsInfinite(scene.lights[i])) ++nInf;
     if (nInf <= 0 || pInf <= 0.0f) {
@@ -541,6 +544,7 @@ SR_INL SR_HD int sampleInfiniteLightUniform(const SceneView& scene, float u, flo
     int k = int(clampf(u, 0.0f, 0.999999f) * float(nInf));
     if (k >= nInf) k = nInf - 1;
     int seen = 0;
+    SR_NO_UNROLL
     for (int i = 0; i < scene.lightCount; ++i) {
         if (!lightIsInfinite(scene.lights[i])) continue;
         if (seen == k) {
@@ -603,6 +607,7 @@ SR_INL SR_HD int sampleLightIndexInGroup(const SceneView& scene, float u, bool i
     float r = clampf(u, 0.0f, 0.999999f) * groupFlux;
     int last = -1;
     float lastW = 0.0f;
+    SR_NO_UNROLL
     for (int i = 0; i < scene.lightCount; ++i) {
         if (lightIsInfinite(scene.lights[i]) != infinite) continue;
         const float w = lightFluxWeight(scene, i);
@@ -852,11 +857,13 @@ SR_INL SR_HD float lightSelectionPdfIndexMaybeVolume(const SceneView& scene, Vec
 
 // Solar disc for Physical Sky distant lights. The baked sky map has no disc
 // (avoids double lighting / HDRI fireflies); camera and glossy rays see this.
-SR_INL SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec3 dirWorld, float bsdfPdf,
-                                        bool specularBounce, bool primary, bool skipNonCausticLights,
-                                        bool volumePhaseMis, Vec3 volumeWo, float volumeG) {
+SR_NOINLINE SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec3 dirWorld,
+                                                    float bsdfPdf, bool specularBounce, bool primary,
+                                                    bool skipNonCausticLights, bool volumePhaseMis,
+                                                    Vec3 volumeWo, float volumeG) {
     Vec3 sum(0.0f);
     const Vec3 wi = normalize(dirWorld);
+    SR_NO_UNROLL
     for (int i = 0; i < scene.lightCount; ++i) {
         const LightData& l = scene.lights[i];
         if (l.type != kLightDistant || l.cameraSunDisc == 0) continue;
