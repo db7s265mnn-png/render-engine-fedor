@@ -16,6 +16,12 @@ enum SpectralColorSpace : int {
     kSpectralColorSpaceDisplayP3 = 3,
 };
 
+// pbrt RGBColorSpace illuminant: D65 for sRGB/Rec.2020/P3, D60 for ACEScg.
+enum WhiteIlluminant : int {
+    kWhiteIlluminantD65 = 0,
+    kWhiteIlluminantD60 = 1,
+};
+
 struct Xyz {
     float x = 0, y = 0, z = 0;
     Xyz() = default;
@@ -24,6 +30,7 @@ struct Xyz {
 
 struct RGBColorSpace {
     const char* name = "sRGB";
+    int whiteIlluminant = kWhiteIlluminantD65;
     // Row-major 3×3: rgb = M * xyz
     float rgbFromXyz[9]{};
     float xyzFromRgb[9]{};
@@ -69,9 +76,11 @@ inline bool invertMat3(const float* m, float* out) {
     return true;
 }
 
-inline RGBColorSpace makeColorSpace(const char* name, const float* rgbFromXyz9) {
+inline RGBColorSpace makeColorSpace(const char* name, const float* rgbFromXyz9,
+                                    int whiteIlluminant = kWhiteIlluminantD65) {
     RGBColorSpace cs;
     cs.name = name;
+    cs.whiteIlluminant = whiteIlluminant;
     for (int i = 0; i < 9; ++i) cs.rgbFromXyz[i] = rgbFromXyz9[i];
     invertMat3(cs.rgbFromXyz, cs.xyzFromRgb);
     return cs;
@@ -90,7 +99,7 @@ inline const RGBColorSpace& colorSpaceAcesCg() {
     static const float m[9] = {1.6410233797f, -0.3248032942f, -0.2364246952f, -0.6636628587f,
                                1.6153315917f,  0.0167563477f,  0.0117218943f,  -0.0082844420f,
                                0.9883948585f};
-    static const RGBColorSpace cs = makeColorSpace("ACEScg", m);
+    static const RGBColorSpace cs = makeColorSpace("ACEScg", m, kWhiteIlluminantD60);
     return cs;
 }
 

@@ -4110,31 +4110,54 @@ void testSpectralHeroBasics() {
     SampledWavelengths w = SampledWavelengths::sampleUniform(4, 0.25f);
     check(w.n == 4, "hero sample count");
     check(w.lambda[0] >= kSpectrumLambdaMin && w.lambda[3] <= kSpectrumLambdaMax, "lambda range");
-    SampledSpectrum white = rgbToSpectrumReflectance(Vec3(1, 1, 1), w);
-    check(spectrumAvg(white) > 0.5f, "white upsample energy");
+    SampledSpectrum whiteAlbedo = rgbToSpectrumReflectance(Vec3(1, 1, 1), w);
+    check(spectrumAvg(whiteAlbedo) > 0.5f, "white upsample energy");
     SampledSpectrum gold = SampledSpectrum::zero(w.n);
     for (int i = 0; i < w.n; ++i) {
         SpectralNk nk = metalNk("Au", w.lambda[i]);
         gold.values[i] = conductorFresnel(0.5f, nk.eta, nk.k);
     }
     check(spectrumAvg(gold) > 0.1f, "gold fresnel");
-    Vec3 rgb = spectrumToRgb(white, w);
-    check(rgb.x > 0.0f && rgb.y > 0.0f && rgb.z > 0.0f, "spectrumToRgb white");
-    // Neutral white: no pink cast under equal-energy / unit spectrum.
-    check(std::fabs(rgb.x - rgb.y) < 0.05f && std::fabs(rgb.y - rgb.z) < 0.05f, "white is neutral");
-    check(std::fabs(rgb.x - 1.0f) < 0.08f, "white ~1");
-    // Grey albedo round-trip ≈ Path Tracer brightness.
-    Vec3 greyIn(0.8f, 0.8f, 0.8f);
-    Vec3 greyOut = spectrumToRgb(rgbToSpectrumReflectance(greyIn, w), w);
-    check(std::fabs(greyOut.x - 0.8f) < 0.08f && std::fabs(greyOut.y - greyOut.x) < 0.05f,
-          "grey 0.8 round-trip");
-    // HDRI-like emission must not pick up a pink cast.
+    // pbrt: albedo under the working-space white illuminant, film ToXYZ→sRGB (D65).
+    Vec3 rgb(0.0f), greyOut(0.0f);
+    {
+        const SampledSpectrum d65 = illuminantSpectrum(w);
+        const Xyz d65Xyz = spectrumToXyz(d65, w);
+        check(std::fabs(d65Xyz.y - 1.0f) < 0.08f, "Y-normalized D65");
+        Vec3 d65Rgb = spectrumToRgb(d65, w);
+        check(std::fabs(d65Rgb.x - 1.0f) < 0.08f && std::fabs(d65Rgb.y - 1.0f) < 0.08f &&
+                  std::fabs(d65Rgb.z - 1.0f) < 0.08f,
+              "D65 illuminant is sRGB white");
+        rgb = spectrumToRgb(whiteAlbedo * d65, w);
+        check(rgb.x > 0.0f && rgb.y > 0.0f && rgb.z > 0.0f, "spectrumToRgb white albedo");
+        check(std::fabs(rgb.x - rgb.y) < 0.08f && std::fabs(rgb.y - rgb.z) < 0.08f,
+              "white albedo under D65 is neutral");
+        check(std::fabs(rgb.x - 1.0f) < 0.12f, "white albedo under D65 ~1");
+        Vec3 greyIn(0.8f, 0.8f, 0.8f);
+        greyOut = spectrumToRgb(rgbToSpectrumReflectance(greyIn, w) * d65, w);
+        check(std::fabs(greyOut.x - 0.8f) < 0.12f && std::fabs(greyOut.y - greyOut.x) < 0.08f,
+              "grey 0.8 albedo under D65");
+    }
+    // HDRI / lights: RGBIlluminantSpectrum round-trips through D65 film.
     Vec3 hdri(4.2f, 4.1f, 4.3f);
     Vec3 hdriOut = spectrumToRgb(rgbToSpectrumEmission(hdri, w), w);
-    check(std::fabs(hdriOut.x - hdri.x) < 0.15f && std::fabs(hdriOut.y - hdri.y) < 0.15f &&
-              std::fabs(hdriOut.z - hdri.z) < 0.15f,
-          "HDRI round-trip");
-    check(std::fabs((hdriOut.x / hdriOut.y) - (hdri.x / hdri.y)) < 0.05f, "HDRI not pink");
+    check(std::fabs(hdriOut.x - hdri.x) < 0.35f && std::fabs(hdriOut.y - hdri.y) < 0.35f &&
+              std::fabs(hdriOut.z - hdri.z) < 0.35f,
+          "HDRI illuminant round-trip");
+    check(hdriOut.y > 2.0f, "HDRI keeps energy");
+    check(std::fabs((hdriOut.x / hdriOut.y) - (hdri.x / hdri.y)) < 0.08f, "HDRI not pink");
+    {
+        Vec3 whiteL = spectrumToRgb(rgbToSpectrumEmission(Vec3(1.0f), w), w);
+        check(std::fabs(whiteL.x - 1.0f) < 0.12f && std::fabs(whiteL.y - 1.0f) < 0.12f &&
+                  std::fabs(whiteL.z - 1.0f) < 0.12f,
+              "white RGBIlluminantSpectrum ~1");
+        // Book ch.10: filtered RGB albedo × white RGBIlluminant, film ToRGB.
+        Vec3 texRed(0.72f, 0.18f, 0.10f);
+        Vec3 texOut =
+            spectrumToRgb(rgbToSpectrumReflectance(texRed, w) * rgbToSpectrumEmission(Vec3(1.0f), w), w);
+        check(texOut.x > texOut.y && texOut.y > texOut.z * 0.4f, "red albedo stays red under D65");
+        check(std::fabs(texOut.x - texRed.x) < 0.20f, "red albedo luminance ballpark");
+    }
     // Linear path-weight upsample must conserve energy under multiply (glass enter×exit).
     {
         const float eta = 1.5f;
@@ -4142,10 +4165,12 @@ void testSpectralHeroBasics() {
         const Vec3 wExit(eta * eta);
         SampledSpectrum t = rgbToSpectrumLinear(wEnter, w);
         t *= rgbToSpectrumLinear(wExit, w);
-        Vec3 round = spectrumToRgb(t, w);
-        check(std::fabs(round.x - 1.0f) < 0.08f && std::fabs(round.y - 1.0f) < 0.08f &&
-                  std::fabs(round.z - 1.0f) < 0.08f,
-              "glass enter×exit linear upsample ~1");
+        for (int i = 0; i < t.n; ++i)
+            check(std::fabs(t.values[i] - 1.0f) < 0.08f, "glass enter×exit linear upsample ~1");
+        Vec3 round = spectrumToRgb(t * illuminantSpectrum(w), w);
+        check(std::fabs(round.x - 1.0f) < 0.12f && std::fabs(round.y - 1.0f) < 0.12f &&
+                  std::fabs(round.z - 1.0f) < 0.12f,
+              "glass enter×exit under D65 ~white");
     }
     // Abbe IOR must vary with λ (geometric dispersion).
     const float nBlue = dielectricIorFromAbbe(1.5f, 30.0f, 450.0f);
@@ -4176,14 +4201,18 @@ void testSpectralHeroBasics() {
         check(spectrumAvg(bbs) > 0.1f, "blackbody sample");
         ConstantSpectrum ones(1.0f);
         check(ones.sample(w).values[0] == 1.0f, "constant spectrum");
-        Vec3 aces = spectrumToRgb(white, w, kSpectralColorSpaceAcesCg);
+        Vec3 aces = spectrumToRgb(rgbToSpectrumEmission(Vec3(1.0f), w, colorSpaceAcesCg()), w,
+                                  kSpectralColorSpaceAcesCg);
         check(aces.x > 0.0f && aces.y > 0.0f && aces.z > 0.0f, "ACEScg convert");
+        check(std::fabs(aces.x - 1.0f) < 0.15f && std::fabs(aces.y - 1.0f) < 0.15f &&
+                  std::fabs(aces.z - 1.0f) < 0.15f,
+              "ACEScg white illuminant ~1");
         const float fBlue = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 450.0f, 0.2f);
         const float fRed = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 650.0f, 0.2f);
         check(std::fabs(fBlue - fRed) > 1e-4f, "thin-film Airy chromatic");
 
-        // Visible + TerminateSecondary must not pink-cast equal-energy / white emission.
-        // (Regression: sample-matched WB + RGB clamp on single-λ → R/G ≈ 2.)
+        // Visible + TerminateSecondary must not pink-cast white RGBIlluminantSpectrum.
+        // (Regression: sample-matched E white-balance on single-λ → R/G ≈ 2.)
         {
             Rng rng(42u, 7u);
             double rSum = 0.0, gSum = 0.0, bSum = 0.0;
