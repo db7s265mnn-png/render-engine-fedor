@@ -339,6 +339,7 @@ file(REMOVE "${_solstice_manifest_tmp}")
 set(_solstice_ptx_stamp "${CMAKE_BINARY_DIR}/generated/optix_ptx.stamp")
 add_custom_command(
     OUTPUT ${SOLSTICE_OPTIX_EMBED_SOURCES} ${_solstice_ptx_stamp}
+    COMMAND ${CMAKE_COMMAND} -E echo "OptiX PTX sequential driver starting"
     COMMAND ${CMAKE_COMMAND} -E env PYTHONUNBUFFERED=1
             ${SOLSTICE_EMBED_PYTHON}
             ${CMAKE_SOURCE_DIR}/cmake/build_optix_ptx.py
@@ -351,7 +352,6 @@ add_custom_command(
         ${CMAKE_SOURCE_DIR}/cmake/embed_binary.py
     COMMENT "OptiX PTX: sequential nvcc + embed"
     VERBATIM
-    USES_TERMINAL
 )
 add_custom_target(solstice_optix_programs DEPENDS ${SOLSTICE_OPTIX_EMBED_SOURCES} ${_solstice_ptx_stamp})
 set_source_files_properties(${SOLSTICE_OPTIX_EMBED_SOURCES} PROPERTIES GENERATED TRUE)
