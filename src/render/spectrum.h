@@ -8,12 +8,9 @@
 #include "core/math.h"
 #include "render/cie_tables.h"
 #include "render/color_space.h"
+#include "render/spectrum_constants.h"
 
 namespace sol {
-
-constexpr int kMaxSpectrumSamples = 16;
-constexpr float kSpectrumLambdaMin = 360.0f;
-constexpr float kSpectrumLambdaMax = 830.0f;
 
 struct SampledWavelengths {
     float lambda[kMaxSpectrumSamples]{};

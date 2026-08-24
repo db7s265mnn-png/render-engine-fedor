@@ -1,8 +1,9 @@
 // Cycles analogue: integrator_shade_surface.
 // No optixTrace — NEE writes a shadow ray for intersect_shadow.
+// BSDF bounce is hero-λ (Jakob / dielectric); NEE stays RGB then linear upsample (Embree).
 #include "render/lights.h"
-#include "render/optix/optix_bsdf.cuh"
 #include "render/optix/optix_geom.cuh"
+#include "render/optix/optix_spectral.cuh"
 #include "render/optix/optix_volume.cuh"
 
 namespace sol {
@@ -23,7 +24,7 @@ extern "C" __global__ void __raygen__shade_surface() {
 
     Surf si;
     if (!buildSurf(scene, hit, path.origin, path.direction, si)) {
-        path.queue = kQueueDead;
+        killPath(pixel, path);
         return;
     }
 
@@ -87,17 +88,19 @@ extern "C" __global__ void __raygen__shade_surface() {
                     lightSelectionPdfIndex(scene, path.origin, si.lightIndex);
                 weight = powerHeuristic(1.0f, path.bsdfPdf, 1.0f, lp);
             }
-            Vec3 contrib = path.throughput * emitted * weight;
-            if (path.depth > 0 && !path.specularBounce)
-                contrib = clampFirefly(contrib, scene.settings.clampDirect);
-            addRadiance(pixel, contrib);
+            float Le[kMaxSpectrumSamples];
+            specLightEmission(light, path, Le);
+            const float rgbScale = length(emitted) / srMax(1e-6f, length(light.emittedRadiance()));
+            const float clampV =
+                (path.depth > 0 && !path.specularBounce) ? scene.settings.clampDirect : 0.0f;
+            addPathRadianceS(path, Le, weight * rgbScale, clampV);
         }
-        path.queue = kQueueDead;
+        killPath(pixel, path);
         return;
     }
 
     if (si.materialIndex < 0 || si.materialIndex >= scene.materialCount || !scene.materials) {
-        path.queue = kQueueDead;
+        killPath(pixel, path);
         return;
     }
 
@@ -109,7 +112,7 @@ extern "C" __global__ void __raygen__shade_surface() {
     if (mat.emissionStrength > 0.0f && !isBlack(mat.emissionColor)) {
         const bool frontFacing = dot(si.ns, -path.direction) > 0.0f;
         if (frontFacing || mat.doubleSided)
-            addRadiance(pixel, path.throughput * mat.emissionColor * mat.emissionStrength);
+            addPathEmissionRgb(path, mat.emissionColor * mat.emissionStrength, 1.0f, 0.0f);
     }
     if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && path.rng.nextFloat() > mat.opacity)) {
         path.origin = offsetRay(si.p, si.ng, path.direction);
@@ -120,7 +123,7 @@ extern "C" __global__ void __raygen__shade_surface() {
 
     const int maxDepth = srMax(1, scene.settings.maxDepth);
     if (path.depth >= maxDepth) {
-        path.queue = kQueueDead;
+        killPath(pixel, path);
         return;
     }
 
@@ -141,7 +144,7 @@ extern "C" __global__ void __raygen__shade_surface() {
             if (be.pdf > 0.0f && !isBlack(be.f)) {
                 const float lightPdf = ls.pdf * selectPdf;
                 const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
-                Vec3 contrib = path.throughput * ls.radiance * be.f * (fabsf(wiLocal.z) / lightPdf) * mis;
+                Vec3 contrib = ls.radiance * be.f * (fabsf(wiLocal.z) / lightPdf) * mis;
                 if (path.depth > 0 && !path.specularBounce)
                     contrib = clampFirefly(contrib, scene.settings.clampDirect);
                 if (scene.lights[lightIndex].shadowEnable) {
@@ -150,34 +153,42 @@ extern "C" __global__ void __raygen__shade_surface() {
                     if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
                     enqueueShadow(shadow, shadowOrigin, ls.wi, tMax, contrib, path.mediumIndex);
                 } else {
-                    addRadiance(pixel, contrib);
+                    addPathLinearRgb(path, contrib, 1.0f, 0.0f);
                 }
             }
         }
     }
 
-    const optixpt::BsdfSample bs =
-        optixpt::bsdfSampleLocal(mat, frame.toLocal(wo), path.rng.nextFloat(), path.rng.nextFloat(),
-                                 path.rng.nextFloat(), path.rng.nextFloat());
-    if (bs.pdf <= 0.0f || isBlack(bs.weight)) {
-        path.queue = kQueueDead;
+    const GpuBsdfSampleS bs =
+        bsdfSampleSpectralGpu(mat, frame.toLocal(wo), path.rng.nextFloat(), path.rng.nextFloat(),
+                              path.rng.nextFloat(), path.rng.nextFloat(), path, mat.ior);
+    if (!bs.valid || bs.pdf <= 0.0f) {
+        killPath(pixel, path);
         return;
     }
     const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
     if (!optixpt::shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) {
-        path.queue = kQueueDead;
+        killPath(pixel, path);
         return;
     }
 
-    path.throughput *= bs.weight;
-    if (!isFinite(path.throughput) || isBlack(path.throughput)) {
-        path.queue = kQueueDead;
+    specMul(path.throughputS, bs.weight, path.nLambda);
+    if (!specIsFinite(path.throughputS, path.nLambda) || specIsBlack(path.throughputS, path.nLambda)) {
+        killPath(pixel, path);
         return;
     }
     path.origin = offsetRay(si.p, si.ng, wiWorld);
     path.direction = wiWorld;
     path.bsdfPdf = bs.pdf;
     path.specularBounce = bs.specular ? 1 : 0;
+    optixpt::BsdfSample rgbBs;
+    rgbBs.wi = bs.wi;
+    rgbBs.pdf = bs.pdf;
+    rgbBs.specular = bs.specular;
+    rgbBs.transmitted = bs.transmitted;
+    const optixpt::LobeWeights lw = optixpt::computeLobes(mat, frame.toLocal(wo));
+    if (shouldTerminateSecondaryGpu(rgbBs, lw) && !specSecondaryTerminated(path.pdf, path.nLambda))
+        specTerminateSecondary(path.pdf, path.nLambda);
     if (bs.transmitted && volInst.mediumIndex >= 0) {
         const MediumData* med = getMedium(scene, volInst.mediumIndex);
         if (med && med->type == 1) {
@@ -188,12 +199,12 @@ extern "C" __global__ void __raygen__shade_surface() {
     ++path.depth;
 
     if (path.depth >= srMax(1, scene.settings.rrStartDepth)) {
-        const float q = clampf(maxComponent(path.throughput), 0.05f, 1.0f);
+        const float q = clampf(specMax(path.throughputS, path.nLambda), 0.05f, 1.0f);
         if (path.rng.nextFloat() > q) {
-            path.queue = kQueueDead;
+            killPath(pixel, path);
             return;
         }
-        path.throughput /= q;
+        specMulS(path.throughputS, 1.0f / q, path.nLambda);
     }
 
     path.queue = kQueueIntersectClosest;

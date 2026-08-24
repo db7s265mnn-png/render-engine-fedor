@@ -127,6 +127,14 @@ __device__ inline MediumSample sampleGpuFog(const GpuVolumeGrid& g, const Medium
     return sampleHeterogeneousFog(view, medium, origin, direction, tMax, rng, throughput);
 }
 
+__device__ inline MediumSample sampleGpuFogWl(const GpuVolumeGrid& g, const MediumData& medium, Vec3 origin,
+                                              Vec3 direction, float tMax, Rng& rng, float* throughput,
+                                              const float* lambda, int n) {
+    GpuFogGrid view;
+    view.g = &g;
+    return sampleHeterogeneousFogWl(view, medium, origin, direction, tMax, rng, throughput, lambda, n);
+}
+
 __device__ inline Vec3 gpuVolumeShadowTr(const LaunchParams& params, Vec3 origin, Vec3 direction, float dist,
                                          int mediumIndex, Rng& rng) {
     if (dist <= 1e-6f) return Vec3(1.0f);

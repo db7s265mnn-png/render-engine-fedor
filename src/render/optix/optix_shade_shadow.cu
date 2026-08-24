@@ -1,4 +1,6 @@
 // Cycles analogue: integrator_shade_shadow.
+// RGB residual-ratio Tr (same as Embree NEE), then linear upsample × path throughput.
+#include "render/optix/optix_spectral_film.cuh"
 #include "render/optix/optix_volume.cuh"
 
 namespace sol {
@@ -11,14 +13,16 @@ extern "C" __global__ void __raygen__shade_shadow() {
     const LaunchParams& params = launchParams();
     GpuShadow& shadow = params.shadows[pixel];
     if (shadow.queue != kShadowShade) return;
+    GpuPath& path = params.paths[pixel];
     if (!shadow.occluded) {
         Vec3 contrib = shadow.contrib;
         if (shadow.volumeTr)
             contrib = contrib * gpuVolumeShadowTr(params, shadow.origin, shadow.direction, shadow.tMax,
-                                                  shadow.mediumIndex, params.paths[pixel].rng);
-        addRadiance(pixel, contrib);
+                                                  shadow.mediumIndex, path.rng);
+        addPathLinearRgb(path, contrib, 1.0f, 0.0f);
     }
     shadow.queue = kShadowIdle;
+    flushPathFilm(pixel);
 }
 
 }  // namespace sol

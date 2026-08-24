@@ -1,8 +1,10 @@
 // Cycles analogue: integrator_init_from_camera.
 // Pinhole + thin-lens DoF. Polynomial optics stay on Embree.
+// Samples hero wavelengths the same way as SpectralPathIntegrator.
 #include "render/blue_noise.h"
 #include "render/camera_sample.h"
 #include "render/optix/optix_geom.cuh"
+#include "render/optix/optix_spectral_film.cuh"
 #include "render/optix/optix_volume.cuh"
 
 namespace sol {
@@ -18,6 +20,10 @@ extern "C" __global__ void __raygen__init_from_camera() {
     GpuShadow& shadow = params.shadows[pixel];
 
     path.sampleRgb = Vec3(0.0f);
+    path.nLambda = 0;
+    path.filmOpen = 0;
+    specZero(path.radianceS, kMaxSpectrumSamples);
+    specZero(path.throughputS, kMaxSpectrumSamples);
     if (params.skipMask && params.skipMask[pixel]) {
         path.queue = kQueueDead;
         hit = GpuHit{};
@@ -31,7 +37,7 @@ extern "C" __global__ void __raygen__init_from_camera() {
                           params.manualTestMult, jitterX, jitterY, lensU, lensV);
 
     cameraRay(params.scene, float(x) + jitterX, float(y) + jitterY, lensU, lensV, path.origin, path.direction);
-    path.throughput = Vec3(1.0f);
+    samplePathWavelengths(path, params.spec);
     path.bsdfPdf = 0.0f;
     path.depth = 0;
     path.hops = 0;

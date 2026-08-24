@@ -25,8 +25,12 @@
 #include <vector>
 
 #include "core/log.h"
+#include "render/cie_tables.h"
+#include "render/color_space.h"
+#include "render/illuminant_spd.h"
 #include "render/optix/launch_params.h"
 #include "render/render_device.h"
+#include "render/rgb_spectrum_tables.h"
 #include "scene/volume_grid.h"
 
 // Emitted by the build from the wavefront OptiX modules.
@@ -257,12 +261,13 @@ public:
             CUDA_CHECK(cudaEventCreate(&gpuStartEvent_));
             CUDA_CHECK(cudaEventCreate(&gpuStopEvent_));
 
+            uploadSpectralTables();
             buildPipeline();
             warmupPrograms();
             initialized_ = true;
             logInfo("OptiX backend initialised on " + deviceName_ +
                     " (" + std::to_string(properties.multiProcessorCount) +
-                    " SMs, wavefront PT: surfaces + thin-lens + GPU volumes, LaunchParams " +
+                    " SMs, spectral wavefront PT: hero-λ + Jakob/D60 film + GPU volumes, LaunchParams " +
                     std::to_string(sizeof(LaunchParams)) + " bytes)");
             logInfo("OptiX submits CUDA/Compute work. Windows Task Manager defaults to the 3D graph "
                     "(~0% for path tracing) — switch a GPU graph to CUDA or Compute_0, or watch the HUD ms.");
@@ -617,6 +622,7 @@ public:
             launchParams.frameSeed = unsigned(scene_->settings.seed) * 9781u + unsigned(sampleIndex) * 6271u;
             launchParams.pixelSampler = scene_->settings.pixelSampler;
             launchParams.manualTestMult = scene_->settings.manualTestMult;
+            fillSpectralLaunch(launchParams);
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
             launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();
             launchParams.volumeCount = gpuVolumeCount_;
@@ -774,6 +780,48 @@ private:
         graphW_ = 0;
         graphH_ = 0;
         graphIters_ = 0;
+    }
+
+    void uploadSpectralTables() {
+        using namespace rgb_spec;
+        jakobAlbedoScale_.upload(albedoScaleTable(), size_t(kJakobTableRes));
+        jakobAlbedoCoeffs_.upload(albedoCoeffsTable(), size_t(kJakobCoeffCount));
+        jakobIllumScale_.upload(illuminantScaleTable(), size_t(kJakobTableRes));
+        jakobIllumCoeffs_.upload(illuminantCoeffsTable(), size_t(kJakobCoeffCount));
+        jakobAcesAlbedoScale_.upload(acesAlbedoScaleTable(), size_t(kJakobTableRes));
+        jakobAcesAlbedoCoeffs_.upload(acesAlbedoCoeffsTable(), size_t(kJakobCoeffCount));
+        jakobAcesIllumScale_.upload(acesIlluminantScaleTable(), size_t(kJakobTableRes));
+        jakobAcesIllumCoeffs_.upload(acesIlluminantCoeffsTable(), size_t(kJakobCoeffCount));
+        cieX_.upload(cie_tab::kCieX, size_t(cie_tab::kCieTabSamples));
+        cieY_.upload(cie_tab::kCieY, size_t(cie_tab::kCieTabSamples));
+        cieZ_.upload(cie_tab::kCieZ, size_t(cie_tab::kCieTabSamples));
+        illumD65_.upload(illum_tab::kIllumD65, size_t(illum_tab::kIllumTabSamples));
+        illumD60_.upload(illum_tab::kIllumD60, size_t(illum_tab::kIllumTabSamples));
+    }
+
+    void fillSpectralLaunch(LaunchParams& lp) const {
+        const RenderSettingsData& st = scene_->settings;
+        const RGBColorSpace& cs = (st.workingSpace == kWorkingSpaceAcesCg)
+                                      ? colorSpaceAcesCg()
+                                      : colorSpaceById(st.spectralColorSpace);
+        const bool aces = cs.whiteIlluminant == kWhiteIlluminantD60;
+        GpuSpectralTables spec;
+        spec.albedoScale = aces ? jakobAcesAlbedoScale_.as<float>() : jakobAlbedoScale_.as<float>();
+        spec.albedoCoeffs = aces ? jakobAcesAlbedoCoeffs_.as<float>() : jakobAlbedoCoeffs_.as<float>();
+        spec.illuminantScale = aces ? jakobAcesIllumScale_.as<float>() : jakobIllumScale_.as<float>();
+        spec.illuminantCoeffs = aces ? jakobAcesIllumCoeffs_.as<float>() : jakobIllumCoeffs_.as<float>();
+        spec.cieX = cieX_.as<float>();
+        spec.cieY = cieY_.as<float>();
+        spec.cieZ = cieZ_.as<float>();
+        spec.illuminantSpd =
+            (cs.whiteIlluminant == kWhiteIlluminantD60) ? illumD60_.as<float>() : illumD65_.as<float>();
+        for (int i = 0; i < 9; ++i) spec.rgbFromXyz[i] = cs.rgbFromXyz[i];
+        int n = st.spectralSamples;
+        if (n < 2) n = 2;
+        if (n > kMaxSpectrumSamples) n = kMaxSpectrumSamples;
+        spec.samples = n;
+        spec.wavelengthSampling = st.spectralWavelengthSampling;
+        lp.spec = spec;
     }
 
     void warmupPrograms() {
@@ -1130,6 +1178,9 @@ private:
     DeviceBuffer raygenRecordBuffer_, missRecordBuffer_, hitRecordBuffer_;
     DeviceBuffer launchParamsBuffer_, accumBuffer_, lumSqBuffer_, skipMaskBuffer_;
     DeviceBuffer pathBuffer_, hitBuffer_, shadowBuffer_;
+    DeviceBuffer jakobAlbedoScale_, jakobAlbedoCoeffs_, jakobIllumScale_, jakobIllumCoeffs_;
+    DeviceBuffer jakobAcesAlbedoScale_, jakobAcesAlbedoCoeffs_, jakobAcesIllumScale_, jakobAcesIllumCoeffs_;
+    DeviceBuffer cieX_, cieY_, cieZ_, illumD65_, illumD60_;
     DeviceBuffer meshViewBuffer_, instanceBuffer_, materialBuffer_, lightBuffer_, envViewBuffer_;
     DeviceBuffer textureViewBuffer_;
     DeviceBuffer proceduralBuffer_;

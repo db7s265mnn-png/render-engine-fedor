@@ -50,9 +50,13 @@
 #include "render/pixel_oracle.h"
 #include "render/camera_sample.h"
 #include "render/spectrum.h"
+#include "render/spectrum_device.h"
 #include "render/spectrum_rgb.h"
 #include "render/spectrum_types.h"
 #include "render/spectral_common.h"
+#include "render/cie_tables.h"
+#include "render/illuminant_spd.h"
+#include "render/rgb_spectrum_tables.h"
 #include "scene/scene.h"
 #include "scene/displace.h"
 #include "scene/tessellate.h"
@@ -4325,6 +4329,43 @@ void testSpectralHeroBasics() {
             check(shouldTerminateSecondaryWavelengths(bsDiff, computeLobes(diffuse)),
                   "diffuse terminates secondary wavelengths");
         }
+    }
+
+    // OptiX uses the STL-free helpers in spectrum_device.h with the same tables.
+    {
+        GpuSpectralTables tab;
+        tab.albedoScale = rgb_spec::acesAlbedoScaleTable();
+        tab.albedoCoeffs = rgb_spec::acesAlbedoCoeffsTable();
+        tab.illuminantScale = rgb_spec::acesIlluminantScaleTable();
+        tab.illuminantCoeffs = rgb_spec::acesIlluminantCoeffsTable();
+        tab.cieX = cie_tab::kCieX;
+        tab.cieY = cie_tab::kCieY;
+        tab.cieZ = cie_tab::kCieZ;
+        tab.illuminantSpd = illum_tab::kIllumD60;
+        for (int i = 0; i < 9; ++i) tab.rgbFromXyz[i] = aces.rgbFromXyz[i];
+        float sDev[kMaxSpectrumSamples];
+        specUpsampleEmission(tab, hdri, w.lambda, w.n, sDev);
+        SampledSpectrum sHost = rgbToSpectrumEmission(hdri, w, aces);
+        for (int i = 0; i < w.n; ++i)
+            check(std::fabs(sDev[i] - sHost.values[i]) < 1e-4f, "device Jakob emission matches host");
+        specUpsampleReflectance(tab, Vec3(0.8f, 0.18f, 0.04f), w.lambda, w.n, sDev);
+        sHost = rgbToSpectrumReflectance(Vec3(0.8f, 0.18f, 0.04f), w, aces);
+        for (int i = 0; i < w.n; ++i)
+            check(std::fabs(sDev[i] - sHost.values[i]) < 1e-4f, "device Jakob albedo matches host");
+        SampledSpectrum L = rgbToSpectrumEmission(Vec3(1.0f), w, aces);
+        const Vec3 hostRgb = spectrumToRgb(L, w, aces);
+        const Vec3 devRgb = specToRgb(tab, L.values, w.lambda, w.pdf, w.n);
+        check(std::fabs(hostRgb.x - devRgb.x) < 1e-4f && std::fabs(hostRgb.y - devRgb.y) < 1e-4f &&
+                  std::fabs(hostRgb.z - devRgb.z) < 1e-4f,
+              "device film ToXYZ matches host");
+        SampledWavelengths term = w;
+        term.terminateSecondary();
+        SampledSpectrum one = SampledSpectrum::constant(term.n, 0.7f);
+        const Vec3 hostGrey = spectrumToRgb(one, term, aces);
+        const Vec3 devGrey = specToRgb(tab, one.values, term.lambda, term.pdf, term.n);
+        check(std::fabs(hostGrey.x - 0.7f) < 1e-5f && std::fabs(devGrey.x - hostGrey.x) < 1e-5f,
+              "device terminate film grey matches host");
+        check(std::fabs(specDielectricIor(1.5f, 30.0f, 450.0f) - nBlue) < 1e-6f, "device Abbe IOR");
     }
 
     std::printf("  spectral hero ok rgb=(%.3f,%.3f,%.3f) grey=(%.3f,%.3f,%.3f) hdri=(%.3f,%.3f,%.3f) "

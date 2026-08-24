@@ -1,6 +1,6 @@
 // Cycles analogue: integrator_shade_background (CUDA in Cycles; OptiX raygen here).
 #include "render/lights.h"
-#include "render/optix/optix_wavefront.cuh"
+#include "render/optix/optix_spectral_film.cuh"
 
 namespace sol {
 
@@ -30,16 +30,26 @@ extern "C" __global__ void __raygen__shade_background() {
                                      lightSelectionPdfIndex(scene, path.origin, scene.domeLightIndex);
                     weight = powerHeuristic(1.0f, path.bsdfPdf, 1.0f, lp);
                 }
-                Vec3 contrib = path.throughput * envL * weight;
-                if (path.depth > 0) contrib = clampFirefly(contrib, scene.settings.clampDirect);
-                addRadiance(pixel, contrib);
+                float envS[kMaxSpectrumSamples];
+                if (dome.colorTemperatureK > 50.0f) {
+                    specLightEmission(dome, path, envS);
+                    const float rgbScale =
+                        length(envL) / srMax(1e-6f, length(dome.emittedRadiance()));
+                    specMulS(envS, rgbScale, path.nLambda);
+                } else {
+                    specUpsampleEmission(gpuSpec(), envL, path.lambda, path.nLambda, envS);
+                }
+                addPathRadianceS(path, envS, weight,
+                                 (path.depth > 0 && !path.specularBounce) ? scene.settings.clampDirect
+                                                                          : 0.0f);
             }
         }
     }
 
     const Vec3 sunL = cameraSunDiscRadiance(scene, path.origin, path.direction, path.bsdfPdf,
                                            path.specularBounce != 0, primary, false);
-    if (!isBlack(sunL)) addRadiance(pixel, path.throughput * sunL);
+    if (!isBlack(sunL)) addPathEmissionRgb(path, sunL, 1.0f, 0.0f);
+    flushPathFilm(pixel);
 }
 
 }  // namespace sol

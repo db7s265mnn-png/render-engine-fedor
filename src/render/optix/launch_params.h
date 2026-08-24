@@ -3,6 +3,7 @@
 #pragma once
 
 #include "render/optix/path_state.h"
+#include "render/spectrum_device.h"
 #include "scene/types.h"
 
 namespace sol {
@@ -57,6 +58,8 @@ struct alignas(16) LaunchParams {
     unsigned int frameSeed = 0;
     int pixelSampler = 0;  // PixelSampler enum
     float manualTestMult = 0.0f;
+
+    GpuSpectralTables spec{};
 
     unsigned long long traversable = 0;  // OptixTraversableHandle
 };

@@ -6,6 +6,7 @@
 #include <cmath>
 
 #include "render/spectrum.h"
+#include "render/spectrum_constants.h"
 
 namespace sol {
 namespace rgb_spec {
@@ -33,6 +34,16 @@ RgbSigmoidPolynomial fetchIlluminant(Vec3 rgb);
 // ACEScg (AP1) tables fitted under CIE D60 (see rgb_spectrum_tables_aces.cpp).
 RgbSigmoidPolynomial fetchAlbedoAces(Vec3 rgb);
 RgbSigmoidPolynomial fetchIlluminantAces(Vec3 rgb);
+
+// Host pointers for OptiX upload (tables live in the .cpp TUs).
+const float* albedoScaleTable();
+const float* albedoCoeffsTable();
+const float* illuminantScaleTable();
+const float* illuminantCoeffsTable();
+const float* acesAlbedoScaleTable();
+const float* acesAlbedoCoeffsTable();
+const float* acesIlluminantScaleTable();
+const float* acesIlluminantCoeffsTable();
 
 // Evaluate a fetched polynomial at hero wavelengths.
 inline SampledSpectrum evalPolynomial(const RgbSigmoidPolynomial& p, const SampledWavelengths& w,

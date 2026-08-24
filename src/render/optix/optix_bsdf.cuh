@@ -21,6 +21,7 @@ namespace optixpt {
 
 constexpr float kMinAlpha = 1.0e-3f;
 constexpr float kDeltaAlpha = 2.0e-3f;
+constexpr float kCausticAlpha = 5.0e-2f;
 
 struct BsdfSample {
     Vec3 weight{0.0f, 0.0f, 0.0f};
@@ -154,6 +155,10 @@ SR_INL SR_HD LobeWeights computeLobes(const Material& mat, Vec3 woLocal) {
         lw.transmission = transWeight / total;
     }
     return lw;
+}
+
+SR_INL SR_HD bool isNearSpecularLobe(const LobeWeights& lw) {
+    return lw.alpha <= kCausticAlpha && lw.diffuse < 1e-3f;
 }
 
 SR_INL SR_HD LobeWeights computeLobes(const Material& mat) {

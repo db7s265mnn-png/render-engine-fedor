@@ -1,6 +1,7 @@
 // Cycles analogue: integrator_shade_volume.
-// Homogeneous media + VDB fog (same residual-ratio tracker as Embree). No optixTrace.
+// Homogeneous media + VDB fog (hero-λ null-collision, same as Embree). No optixTrace.
 #include "render/lights.h"
+#include "render/optix/optix_spectral_film.cuh"
 #include "render/optix/optix_volume.cuh"
 
 namespace sol {
@@ -33,24 +34,28 @@ extern "C" __global__ void __raygen__shade_volume() {
     if (walk.type == 2) {
         if (walk.volumeIndex >= 0 && walk.volumeIndex < params.volumeCount && params.volumes &&
             params.volumes[walk.volumeIndex].density && params.volumes[walk.volumeIndex].kind == 1) {
-            ms = sampleGpuFog(params.volumes[walk.volumeIndex], walk, path.origin, path.direction, tMax,
-                              path.rng, path.throughput);
+            ms = sampleGpuFogWl(params.volumes[walk.volumeIndex], walk, path.origin, path.direction, tMax,
+                                path.rng, path.throughputS, path.lambda, path.nLambda);
         } else {
             path.queue = hit.didHit ? kQueueShadeSurface : kQueueShadeBackground;
             return;
         }
     } else {
-        ms = sampleMediumHomogeneous(walk, tMax, path.rng, path.throughput);
+        ms = sampleMediumHomogeneousWl(walk, tMax, path.rng, path.throughputS, path.lambda, path.nLambda);
     }
 
-    if (ms.absorbed || isBlack(path.throughput) || !isFinite(path.throughput)) {
-        path.queue = kQueueDead;
+    if (ms.absorbed || specIsBlack(path.throughputS, path.nLambda) ||
+        !specIsFinite(path.throughputS, path.nLambda) ||
+        specMax(path.throughputS, path.nLambda) < 1e-20f) {
+        killPath(pixel, path);
         return;
     }
 
     if (ms.scattered) {
         const Vec3 p = path.origin + path.direction * ms.t;
         const Vec3 wo = -path.direction;
+        if (!isBlack(med->emission))
+            addPathEmissionRgb(path, med->emission, 1.0f, 0.0f);
         if (scene.lightCount > 0) {
             float selectPdf = 0.0f;
             const int lightIndex = sampleLightIndex(scene, p, path.rng.nextFloat(), selectPdf);
@@ -61,15 +66,14 @@ extern "C" __global__ void __raygen__shade_volume() {
                 const float phase = henyeyGreenstein(dot(wo, ls.wi), walk.g);
                 const float lightPdf = ls.pdf * selectPdf;
                 const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phase);
-                Vec3 contrib =
-                    path.throughput * ls.radiance * (phase / srMax(1e-8f, lightPdf)) * mis;
+                Vec3 contrib = ls.radiance * (phase / srMax(1e-8f, lightPdf)) * mis;
                 contrib = clampFirefly(contrib, scene.settings.clampDirect);
                 if (scene.lights[lightIndex].shadowEnable) {
                     float tSh = 1.0e8f;
                     if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
                     enqueueShadow(shadow, p, ls.wi, tSh, contrib, path.mediumIndex);
                 } else {
-                    addRadiance(pixel, contrib);
+                    addPathLinearRgb(path, contrib, 1.0f, 0.0f);
                 }
             }
         }
@@ -83,16 +87,16 @@ extern "C" __global__ void __raygen__shade_volume() {
         ++path.depth;
         ++path.volumeScatters;
         if (path.depth >= srMax(1, scene.settings.maxDepth)) {
-            path.queue = kQueueDead;
+            killPath(pixel, path);
             return;
         }
         if (path.depth >= srMax(1, scene.settings.rrStartDepth)) {
-            const float q = volumeRussianRouletteQ(path.throughput);
+            const float q = clampf(specMax(path.throughputS, path.nLambda), 0.05f, 1.0f);
             if (path.rng.nextFloat() > q) {
-                path.queue = kQueueDead;
+                killPath(pixel, path);
                 return;
             }
-            path.throughput /= q;
+            specMulS(path.throughputS, 1.0f / q, path.nLambda);
         }
         path.queue = kQueueIntersectClosest;
         hit = GpuHit{};

@@ -9319,5 +9319,10 @@ RgbSigmoidPolynomial fetchIlluminantAces(Vec3 rgb) {
     return fetchTableAces(kAcesIlluminantScale, kAcesIlluminantCoeffs, rgb);
 }
 
+const float* acesAlbedoScaleTable() { return kAcesAlbedoScale; }
+const float* acesAlbedoCoeffsTable() { return kAcesAlbedoCoeffs; }
+const float* acesIlluminantScaleTable() { return kAcesIlluminantScale; }
+const float* acesIlluminantCoeffsTable() { return kAcesIlluminantCoeffs; }
+
 }  // namespace rgb_spec
 }  // namespace sol
