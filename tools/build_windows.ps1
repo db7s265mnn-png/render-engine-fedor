@@ -798,6 +798,10 @@ $env:PATH = "$ninjaDir;$env:PATH"
 Ensure-NativeDeps
 $embreeRoot = Resolve-EmbreePrefix
 $BuildDir = Resolve-BuildDir
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+if (-not (Test-Path -LiteralPath (Join-Path $BuildDir 'CMakeCache.txt'))) {
+    Info "No CMake cache in $BuildDir — clean configure (expected after deleting the build folder)."
+}
 
 $Prefix = "$Qt;$script:DepsPrefix;$embreeRoot"
 
@@ -943,30 +947,11 @@ function Invoke-LoggedCMakeBuild([string[]]$BuildArgs) {
             $idleTicks = 0
         }
     }
+    # HasExited can be true before ExitCode is filled; [int]$null is 0, which
+    # hid ninja failures and then the script searched for the exe / ran deploy.
+    $p.WaitForExit()
+    if ($null -eq $p.ExitCode) { return 1 }
     return [int]$p.ExitCode
-}
-
-Write-Host ''
-Info 'Building in parallel: nvcc PTX uses 1 core; MSVC compiles the rest on the other cores.'
-Info 'GPU OptiX is wavefront modules (init/intersect/shade), not integrator.h. ninja compiles them in parallel.'
-Info 'Ninja [0/N] on PTX is a timer, not a percent. cicc cpu= must grow. 3% on a 14900K = one thread at 100%.'
-$j = $env:NUMBER_OF_PROCESSORS
-if (-not $j) { $j = '8' }
-$code = Invoke-LoggedCMakeBuild @('--build', $BuildDir, '--parallel', "$j")
-if ($code -ne 0) {
-    Fail @"
-Build failed.
-If type_traits / aligned_storage: CUDA 12.0 was used, need 13.2 + compute_75.
-If cicc cpu= stopped growing: hung. Otherwise wait it out.
-Keep %LOCALAPPDATA%\grendizer-deps. Delete C:\gz-build only if CUDA version changed.
-"@
-}
-
-Write-Host ''
-Info 'Deploying Qt DLLs next to the exe ...'
-& $CMake --build $BuildDir --target deploy
-if ($LASTEXITCODE -ne 0) {
-    Write-Host 'Warning: deploy target failed. The exe may need Qt on PATH.' -ForegroundColor Yellow
 }
 
 function Find-RenderExe([string]$Dir) {
@@ -995,22 +980,36 @@ function Find-RenderExe([string]$Dir) {
     return $null
 }
 
+Write-Host ''
+Info 'Building in parallel: nvcc PTX uses 1 core; MSVC compiles the rest on the other cores.'
+Info 'GPU OptiX is wavefront modules (init/intersect/shade), not integrator.h. ninja compiles them in parallel.'
+Info 'Ninja [0/N] on PTX is a timer, not a percent. cicc cpu= must grow. 3% on a 14900K = one thread at 100%.'
+$j = $env:NUMBER_OF_PROCESSORS
+if (-not $j) { $j = '8' }
+$code = Invoke-LoggedCMakeBuild @('--build', $BuildDir, '--parallel', "$j")
+if ($code -ne 0) {
+    Fail @"
+Compile failed (ninja/nvcc). Scroll up to the first error (often sobol.h / undefined in device code).
+No exe until that is fixed. Deleting the build folder is OK — the next run recreates $BuildDir.
+If type_traits / aligned_storage: CUDA 12.0 was used, need 13.2 + compute_75.
+If cicc cpu= stopped growing: hung.
+Keep %LOCALAPPDATA%\grendizer-deps.
+"@
+}
+
 $Exe = Find-RenderExe $BuildDir
 if (-not $Exe) {
-    $binRoot = Join-Path $BuildDir 'bin'
-    $listing = '(bin folder missing)'
-    if (Test-Path -LiteralPath $binRoot) {
-        $listing = ((Get-ChildItem -LiteralPath $binRoot -Recurse -File -ErrorAction SilentlyContinue |
-            Select-Object -First 40 |
-            ForEach-Object { $_.FullName.Replace($BuildDir, '') }) -join "`n")
-        if (-not $listing) { $listing = '(empty)' }
-    }
     Fail @"
-exe not found under $BuildDir\bin
-Ninja puts Grendizer_Render*.exe in bin\ (not bin\Release).
-Files:
-$listing
+Compile reported success but Grendizer_Render*.exe is not under $BuildDir\bin.
+Ninja writes the exe to bin\ (not bin\Release). Do not treat MaterialX .mtlx files as the app.
 "@
+}
+
+Write-Host ''
+Info 'Deploying Qt DLLs next to the exe ...'
+& $CMake --build $BuildDir --target deploy
+if ($LASTEXITCODE -ne 0) {
+    Write-Host 'Warning: deploy target failed. The exe may need Qt on PATH.' -ForegroundColor Yellow
 }
 $Bin = $Exe.DirectoryName
 Info ("Found exe: " + $Exe.FullName)

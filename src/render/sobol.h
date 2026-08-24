@@ -27,8 +27,18 @@ namespace sobol_detail {
 static constexpr uint32_t kSobolDimensions = 1024u;
 static constexpr uint32_t kSobolBits = 32u;
 
+// nvcc: a host `static const` table is invisible in device code (error:
+// identifier "kSobolM" is undefined in device code). The device pass defines
+// __CUDA_ARCH__ and gets a __device__ copy; the host pass / MSVC keep a
+// normal static. Same initializer, two compilations of this header.
+#if defined(__CUDA_ARCH__)
+#  define SOL_SOBOL_VAR static __device__ const
+#else
+#  define SOL_SOBOL_VAR static const
+#endif
+
 // Joe-Kuo parameters for dimensions 2..kSobolDimensions (index 0 = dimension 2).
-static const uint8_t kSobolDegree[1023] = {
+SOL_SOBOL_VAR uint8_t kSobolDegree[1023] = {
     1, 2, 3, 3, 4, 4, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 7, 7,
     7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8,
     8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9,
@@ -83,7 +93,7 @@ static const uint8_t kSobolDegree[1023] = {
     13, 13, 13,
 };
 
-static const uint32_t kSobolA[1023] = {
+SOL_SOBOL_VAR uint32_t kSobolA[1023] = {
     0u, 1u, 1u, 2u, 1u, 4u, 2u, 4u,
     7u, 11u, 13u, 14u, 1u, 13u, 16u, 19u,
     22u, 25u, 1u, 4u, 7u, 8u, 14u, 19u,
@@ -214,7 +224,7 @@ static const uint32_t kSobolA[1023] = {
     3506u, 3511u, 3512u, 3515u, 3525u, 3532u, 3538u,
 };
 
-static const uint16_t kSobolMOffset[1023] = {
+SOL_SOBOL_VAR uint16_t kSobolMOffset[1023] = {
     0, 1, 3, 6, 9, 13, 17, 22, 27, 32, 37, 42,
     47, 53, 59, 65, 71, 77, 83, 90, 97, 104, 111, 118,
     125, 132, 139, 146, 153, 160, 167, 174, 181, 188, 195, 202,
@@ -303,7 +313,7 @@ static const uint16_t kSobolMOffset[1023] = {
     12053, 12066, 12079,
 };
 
-static const uint32_t kSobolM[12092] = {
+SOL_SOBOL_VAR uint32_t kSobolM[12092] = {
     1u, 1u, 3u, 1u, 3u, 1u, 1u, 1u, 1u, 1u,
     1u, 3u, 3u, 1u, 3u, 5u, 13u, 1u, 1u, 5u,
     5u, 17u, 1u, 1u, 5u, 5u, 5u, 1u, 1u, 7u,
@@ -1515,6 +1525,8 @@ static const uint32_t kSobolM[12092] = {
     1u, 5u, 11u, 11u, 33u, 37u, 29u, 263u, 1019u, 657u,
     1453u, 7807u,
 };
+
+#undef SOL_SOBOL_VAR
 
 SR_INL SR_HD uint32_t reverseBits32(uint32_t x) {
     x = ((x >> 1) & 0x55555555u) | ((x & 0x55555555u) << 1);

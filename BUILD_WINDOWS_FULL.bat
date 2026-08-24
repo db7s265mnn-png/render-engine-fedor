@@ -9,6 +9,7 @@ echo Output: C:\gz-full
 echo First full run builds OpenEXR/Alembic/OpenVDB/OCIO (cached after that).
 echo TinyUSDZ linking can sit with no new lines for a long time - wait.
 echo Keep %%LOCALAPPDATA%%\grendizer-deps
+echo Deleting C:\gz-full is OK - this script creates it again.
 echo.
 
 where powershell >nul 2>&1
@@ -19,6 +20,7 @@ if errorlevel 1 (
 
 set GRENDIZER_FULL_DEPS=1
 set GRENDIZER_BUILD_DIR=C:\gz-full
+if not exist "%GRENDIZER_BUILD_DIR%" mkdir "%GRENDIZER_BUILD_DIR%"
 
 powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\build_windows.ps1"
 if errorlevel 1 (

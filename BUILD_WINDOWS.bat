@@ -9,6 +9,7 @@ echo Output: C:\gz-build
 echo This is the fast GPU OptiX build (no VDB/MaterialX/Alembic/...).
 echo Full app: BUILD_WINDOWS_FULL.bat  -^>  C:\gz-full
 echo Keep %%LOCALAPPDATA%%\grendizer-deps (Embree cache).
+echo Deleting C:\gz-build is OK - this script creates it again.
 echo.
 
 where powershell >nul 2>&1
@@ -16,6 +17,8 @@ if errorlevel 1 (
     echo PowerShell not found.
     goto :end
 )
+
+if not exist "C:\gz-build" mkdir "C:\gz-build"
 
 powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\build_windows.ps1"
 if errorlevel 1 (
