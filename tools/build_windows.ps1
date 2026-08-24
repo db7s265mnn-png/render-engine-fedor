@@ -821,25 +821,57 @@ Write-Host ''
 $Generator = 'Ninja'
 Info "CMake generator: $Generator (cl.exe from VS $script:VsYear)"
 
+function Normalize-CmakeSrc([string]$p) {
+    if (-not $p) { return '' }
+    return ($p.Trim().TrimEnd('\', '/') -replace '\\', '/').ToLowerInvariant()
+}
+
 $cache = Join-Path $BuildDir 'CMakeCache.txt'
 if (Test-Path -LiteralPath $cache) {
     $stale = $false
-    if (Select-String -Path $cache -Pattern 'vcpkg' -Quiet) { $stale = $true }
+    $staleWhy = ''
+    if (Select-String -Path $cache -Pattern 'vcpkg' -Quiet) {
+        $stale = $true
+        $staleWhy = 'vcpkg cache'
+    }
     $oldGen = Select-String -Path $cache -Pattern '^CMAKE_GENERATOR:INTERNAL=(.+)$' | Select-Object -First 1
-    if ($oldGen -and $oldGen.Matches[0].Groups[1].Value -ne $Generator) { $stale = $true }
+    if ($oldGen -and $oldGen.Matches[0].Groups[1].Value -ne $Generator) {
+        $stale = $true
+        $staleWhy = 'CMake generator changed'
+    }
     $errLog = Join-Path $BuildDir 'CMakeFiles\CMakeError.log'
-    if (Test-Path -LiteralPath $errLog) { $stale = $true }
+    if (Test-Path -LiteralPath $errLog) {
+        $stale = $true
+        $staleWhy = 'previous CMakeError.log'
+    }
     $oldNvcc = Select-String -Path $cache -Pattern '^CMAKE_CUDA_COMPILER:FILEPATH=(.+)$' | Select-Object -First 1
     if ($oldNvcc) {
         $oldNvccPath = $oldNvcc.Matches[0].Groups[1].Value.Replace('/', '\')
-        if ($oldNvccPath -ne $Nvcc) { $stale = $true }
+        if ($oldNvccPath -ne $Nvcc) {
+            $stale = $true
+            $staleWhy = 'nvcc path changed'
+        }
     }
     if ($script:CudaRelease -ge [version]'13.0') {
-        if (Select-String -Path $cache -Pattern 'compute_60|CUDA\\\\v12|CUDA/v12' -Quiet) { $stale = $true }
+        if (Select-String -Path $cache -Pattern 'compute_60|CUDA\\\\v12|CUDA/v12' -Quiet) {
+            $stale = $true
+            $staleWhy = 'old CUDA 12 cache'
+        }
+    }
+    # GitHub zip extracts as "...-6909 (8)" vs "(44)". C:\gz-full still points at the old tree.
+    $oldHome = Select-String -Path $cache -Pattern '^CMAKE_HOME_DIRECTORY:INTERNAL=(.+)$' | Select-Object -First 1
+    if ($oldHome) {
+        $cachedSrc = Normalize-CmakeSrc $oldHome.Matches[0].Groups[1].Value
+        $currentSrc = Normalize-CmakeSrc $Root
+        if ($cachedSrc -and $currentSrc -and ($cachedSrc -ne $currentSrc)) {
+            $stale = $true
+            $staleWhy = "source moved (`n  cache: $cachedSrc`n  now:   $currentSrc)"
+        }
     }
     if ($stale) {
-        Info "Clearing $BuildDir (old CUDA 12 / vcpkg / generator cache)"
+        Info "Clearing $BuildDir ($staleWhy)"
         Remove-Item -LiteralPath $BuildDir -Recurse -Force
+        New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
     }
 }
 
