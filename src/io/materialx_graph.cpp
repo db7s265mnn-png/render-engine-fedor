@@ -407,6 +407,23 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     material.coatRoughness = saturatef(coatRoughness);
     material.coatIor = clampf(coatIor, 1.0f, 3.0f);
     material.coatThickness = srMax(0.0f, coatThickness);
+
+    float sheen = 0.0f, sheenRoughness = 0.3f;
+    setFloat("sheen", sheen);
+    setFloat("sheen_roughness", sheenRoughness);
+    setColor("sheen_color", material.sheenColor);
+    material.sheen = saturatef(sheen);
+    material.sheenRoughness = saturatef(sheenRoughness);
+
+    float diffuseRoughness = 0.0f;
+    setFloat("diffuse_roughness", diffuseRoughness);
+    material.diffuseRoughness = saturatef(diffuseRoughness);
+
+    float specularAnisotropy = 0.0f, specularRotation = 0.0f;
+    setFloat("specular_anisotropy", specularAnisotropy);
+    setFloat("specular_rotation", specularRotation);
+    material.specularAnisotropy = saturatef(specularAnisotropy);
+    material.specularRotation = specularRotation - floorf(specularRotation);
 }
 
 #endif  // SOLSTICE_HAVE_MATERIALX
@@ -684,6 +701,12 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"coat_IOR", "float", "1.5"},
          {"coat_thickness", "float", "0"},
          {"coat_color", "color3", "1, 1, 1"},
+         {"sheen", "float", "0"},
+         {"sheen_color", "color3", "1, 1, 1"},
+         {"sheen_roughness", "float", "0.3"},
+         {"diffuse_roughness", "float", "0"},
+         {"specular_anisotropy", "float", "0"},
+         {"specular_rotation", "float", "0"},
          {"opacity", "color3", "1, 1, 1"}});
     add("triplanarprojection", "color3", "Texture",
         {{"file", "filename", {}},
@@ -816,6 +839,22 @@ QVector<MaterialXNodeCatalogEntry> listMaterialXNodeCatalog() {
                 } else {
                     entries[*it] = e; // prefer Solstice port/param layout
                 }
+            } else if (e.category == QStringLiteral("standard_surface")) {
+                const auto it = indexByCategory.constFind(e.category);
+                if (it == indexByCategory.constEnd()) {
+                    indexByCategory.insert(e.category, entries.size());
+                    entries.push_back(e);
+                } else {
+                    MaterialXNodeCatalogEntry& dst = entries[*it];
+                    for (auto tit = e.inputsByType.constBegin(); tit != e.inputsByType.constEnd(); ++tit) {
+                        QVector<MaterialXNodeInputDef>& dstInputs = dst.inputsByType[tit.key()];
+                        QSet<QString> have;
+                        for (const MaterialXNodeInputDef& in : dstInputs) have.insert(in.name);
+                        for (const MaterialXNodeInputDef& in : tit.value()) {
+                            if (!have.contains(in.name)) dstInputs.push_back(in);
+                        }
+                    }
+                }
             }
         }
     }
@@ -866,6 +905,12 @@ QString createDefaultMaterialXDocument() {
     ss->setInputValue("coat_IOR", 1.5f);
     ss->setInputValue("coat_thickness", 0.0f);
     ss->setInputValue("coat_color", mx::Color3(1.0f, 1.0f, 1.0f));
+    ss->setInputValue("sheen", 0.0f);
+    ss->setInputValue("sheen_color", mx::Color3(1.0f, 1.0f, 1.0f));
+    ss->setInputValue("sheen_roughness", 0.3f);
+    ss->setInputValue("diffuse_roughness", 0.0f);
+    ss->setInputValue("specular_anisotropy", 0.0f);
+    ss->setInputValue("specular_rotation", 0.0f);
 
     // Place nodes left-to-right like Houdini Solaris MaterialX.
     ss->setAttribute("xpos", "0.0");

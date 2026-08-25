@@ -8,6 +8,7 @@
 
 #include "render/integrator_base.h"
 #include "render/spectral_common.h"
+#include "render/sss_spectral.h"
 #include "render/volume_vdb.h"
 
 namespace sol {
@@ -279,8 +280,9 @@ public:
                 }
                 if (pSpec > 0.0f && pSpec < 0.999f) throughput *= (1.0f / (1.0f - pSpec));
 
-                const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
-                if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
+                const SssWalkResultSpectral walk =
+                    sampleSssRandomWalkSpectral(scene, tracer, si, wo, mat, rng, waves);
+                if (!walk.escaped || !sssSpectrumWeightValid(walk.pathWeight)) break;
                 Material lambert = sssExitLambertMaterial();
                 SurfaceInteraction ssSi = si;
                 ssSi.p = walk.exitP;
@@ -292,7 +294,7 @@ public:
                                                          walk.exitWo, rng, currentMedium);
                     if (!isBlack(nee)) {
                         SampledSpectrum contrib =
-                            throughput * upsampleRgb(walk.pathWeight * nee, waves);
+                            throughput * walk.pathWeight * upsampleRgb(nee, waves);
                         if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                         radiance += contrib;
                     }
@@ -302,13 +304,12 @@ public:
                                     rng.nextFloat(), rng.nextFloat(), rng.nextFloat());
                 if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
                     const Vec3 wiWorld = normalize(ssFrame.toWorld(ssBs.wi));
-                    throughput *= upsampleRgb(walk.pathWeight * ssBs.weight, waves);
+                    throughput *= walk.pathWeight * upsampleRgb(ssBs.weight, waves);
                     origin = offsetRayOrigin(walk.exitP, walk.exitN, wiWorld);
                     direction = wiWorld;
                     bsdfPdf = ssBs.pdf;
                     specularBounce = false;
                     rayKind = nextRayShadeKind(ssBs, computeLobes(lambert, ssFrame.toLocal(walk.exitWo)));
-                    if (!waves.secondaryTerminated()) waves.terminateSecondary();
                     sawNonSpecular = true;
                     causticSuffix = false;
                     ++depth;

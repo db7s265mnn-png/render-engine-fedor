@@ -7,6 +7,7 @@
 #include "render/integrator_base.h"
 #include "render/integrator_bdpt.h"
 #include "render/spectral_common.h"
+#include "render/sss_spectral.h"
 
 namespace sol {
 
@@ -229,8 +230,9 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 break;
             } else {
                 if (pSpec > 0.0f && pSpec < 0.999f) beta *= 1.0f / (1.0f - pSpec);
-                const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, -dir, mat, rng);
-                if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
+                const SssWalkResultSpectral walk =
+                    sampleSssRandomWalkSpectral(scene, tracer, si, -dir, mat, rng, waves);
+                if (!walk.escaped || !sssSpectrumWeightValid(walk.pathWeight)) break;
                 cur.p = walk.exitP;
                 cur.ng = walk.exitN;
                 cur.ns = walk.exitN;
@@ -239,7 +241,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 cur.delta = false;
                 cur.connectable = true;
                 cur.nearSpec = false;
-                beta *= upsampleRgb(walk.pathWeight, waves);
+                beta *= walk.pathWeight;
                 cur.beta = spectrumToRgb(beta, waves, cs);
                 betaPath[count - 1] = beta;
 

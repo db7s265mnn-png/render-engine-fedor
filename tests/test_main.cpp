@@ -56,6 +56,7 @@
 #include "render/spectrum_rgb.h"
 #include "render/spectrum_types.h"
 #include "render/spectral_common.h"
+#include "render/sss_spectral.h"
 #include "render/cie_tables.h"
 #include "render/illuminant_spd.h"
 #include "render/rgb_spectrum_tables.h"
@@ -527,6 +528,90 @@ void testBsdf() {
         coat.coatIor = 1.5f;
         coat.coatRoughness = 0.1f;
         check(coatPickProb(coat, Vec3(0.0f, 0.0f, 1.0f)) > 0.02f, "dielectric coat overlay is selectable");
+    }
+
+    // Anisotropic GGX: ax≠ay when specular_anisotropy>0; eval along X vs Y differs.
+    {
+        Material iso;
+        iso.baseColor = Vec3(1.0f);
+        iso.roughness = 0.4f;
+        iso.metallic = 1.0f;
+        iso.specular = 1.0f;
+        Material an = iso;
+        an.specularAnisotropy = 1.0f;
+        const Vec3 wo(0.0f, 0.0f, 1.0f);
+        const Vec3 wiX = normalize(Vec3(0.75f, 0.0f, 0.66f));
+        const Vec3 wiY = normalize(Vec3(0.0f, 0.75f, 0.66f));
+        const float isoX = average(bsdfEvalLocal(iso, wo, wiX).f);
+        const float isoY = average(bsdfEvalLocal(iso, wo, wiY).f);
+        const float anX = average(bsdfEvalLocal(an, wo, wiX).f);
+        const float anY = average(bsdfEvalLocal(an, wo, wiY).f);
+        checkNear(isoX, isoY, 0.02f, "isotropic GGX is azimuthally symmetric");
+        check(std::fabs(anX - anY) > 0.02f, "anisotropic GGX eval X != Y");
+        LobeWeights lw = computeLobes(an, wo);
+        check(std::fabs(lw.ax - lw.ay) > 0.05f, "anisotropy splits αx/αy");
+        const Vec3 h = normalize(Vec3(0.25f, 0.1f, 0.96f));
+        const float a = 0.3f;
+        const float a2 = a * a;
+        const float cos2 = h.z * h.z;
+        const float t = cos2 * (a2 - 1.0f) + 1.0f;
+        const float isoD = a2 / (kPi * t * t);
+        checkNear(ggxD(h, a), isoD, 1e-5f, "ax=ay GGX D matches isotropic formula");
+        for (int i = 0; i < 1500; ++i) {
+            const BsdfSample sample = bsdfSampleLocal(an, wo, rng.nextFloat(), rng.nextFloat(),
+                                                      rng.nextFloat(), rng.nextFloat());
+            if (sample.pdf <= 0.0f || sample.specular) continue;
+            const BsdfEval evaluated = bsdfEvalLocal(an, wo, sample.wi);
+            checkNear(evaluated.pdf, sample.pdf, std::max(1e-3f, sample.pdf * 0.02f),
+                      "aniso sample and eval pdf agree");
+        }
+    }
+
+    // Charlie sheen is a selectable lobe; grazing eval exceeds sheen-off.
+    {
+        Material cloth;
+        cloth.baseColor = Vec3(0.08f, 0.08f, 0.1f);
+        cloth.roughness = 0.8f;
+        cloth.metallic = 0.0f;
+        cloth.specular = 0.0f;
+        cloth.sheen = 1.0f;
+        cloth.sheenColor = Vec3(1.0f, 0.2f, 0.1f);
+        cloth.sheenRoughness = 0.35f;
+        const LobeWeights lw = computeLobes(cloth, Vec3(0.0f, 0.0f, 1.0f));
+        check(lw.sheen > 0.05f, "sheen is selectable in the lobe lottery");
+        Material bare = cloth;
+        bare.sheen = 0.0f;
+        const Vec3 woG = normalize(Vec3(0.92f, 0.0f, 0.39f));
+        const Vec3 wiG = normalize(Vec3(-0.92f, 0.0f, 0.39f));
+        check(average(bsdfEvalLocal(cloth, woG, wiG).f) >
+                  average(bsdfEvalLocal(bare, woG, wiG).f) * 1.15f,
+              "Charlie sheen adds grazing energy");
+        int sheenHits = 0;
+        for (int i = 0; i < 2000; ++i) {
+            const BsdfSample sample = bsdfSampleLocal(cloth, woG, rng.nextFloat(), rng.nextFloat(),
+                                                      rng.nextFloat(), rng.nextFloat());
+            if (sample.pdf <= 0.0f) continue;
+            ++sheenHits;
+        }
+        check(sheenHits > 200, "sheen material samples valid directions");
+    }
+
+    // Oren–Nayar (diffuse_roughness>0) differs from Lambert at oblique pairs.
+    {
+        Material lamb;
+        lamb.baseColor = Vec3(0.8f);
+        lamb.roughness = 1.0f;
+        lamb.metallic = 0.0f;
+        lamb.specular = 0.0f;
+        Material on = lamb;
+        on.diffuseRoughness = 1.0f;
+        const Vec3 wo = normalize(Vec3(0.75f, 0.0f, 0.66f));
+        const Vec3 wi = normalize(Vec3(0.45f, 0.0f, 0.89f));
+        const float fL = average(bsdfEvalLocal(lamb, wo, wi).f);
+        const float fO = average(bsdfEvalLocal(on, wo, wi).f);
+        check(std::fabs(fL - fO) > 1e-4f, "Oren–Nayar differs from Lambert");
+        checkNear(average(bsdfEvalLocal(lamb, wo, wi).f), 0.8f * kInvPi, 1e-5f,
+                  "Lambert is albedo/π when diffuse_roughness=0");
     }
 }
 
@@ -4263,6 +4348,40 @@ void testSpectralHeroBasics() {
     check(eta.x > 0.0f && k.x > 0.0f, "Au η/κ rgb seed");
     SpectralNk nk550 = nkFromRgb(eta, k, 550.0f);
     check(nk550.eta > 0.0f && nk550.k > 0.0f, "nkFromRgb");
+    {
+        Vec3 etaFit, kFit;
+        conductorNkFromReflectance(Vec3(1.0f, 0.766f, 0.336f), Vec3(1.5f), etaFit, kFit);
+        check(kFit.x > 0.5f && kFit.y > 0.0f && kFit.z > 0.0f, "gold F0 inverts to conductor k");
+        Material metal;
+        metal.metallic = 1.0f;
+        metal.baseColor = Vec3(1.0f, 0.766f, 0.336f);
+        metal.conductorEta = Vec3(1.5f);
+        metal.conductorK = Vec3(0.0f);
+        SampledWavelengths wm = SampledWavelengths::sampleUniform(4, 0.25f);
+        const Frame fr(Vec3(0.0f, 0.0f, 1.0f));
+        const Vec3 wo(0.0f, 0.0f, 1.0f);
+        const Vec3 wi = normalize(Vec3(0.25f, 0.0f, 0.97f));
+        SampledSpectrum lifted = liftBsdfWeight(metal, fr, wo, wi, Vec3(1.0f), wm, 1.5f, 0);
+        float mn = 1.0e9f, mx = 0.0f;
+        for (int i = 0; i < lifted.n; ++i) {
+            if (wm.pdf[i] <= 0.0f) continue;
+            mn = srMin(mn, lifted.values[i]);
+            mx = srMax(mx, lifted.values[i]);
+        }
+        check(mx - mn > 1e-4f, "metallic without authored k uses spectral conductor Fresnel");
+    }
+    {
+        Material skin;
+        skin.subsurfaceColor = Vec3(1.0f, 0.75f, 0.55f);
+        skin.subsurfaceRadius = Vec3(1.0f, 0.35f, 0.2f);
+        skin.subsurfaceScale = 1.0f;
+        check(sssMfpAtLambda(skin, 650.0f) > sssMfpAtLambda(skin, 550.0f) + 0.1f,
+              "skin SSS MFP red > green");
+        check(sssMfpAtLambda(skin, 550.0f) > sssMfpAtLambda(skin, 450.0f) + 0.05f,
+              "skin SSS MFP green > blue");
+        check(sssAlbedoAtLambda(skin, 650.0f) > sssAlbedoAtLambda(skin, 450.0f),
+              "skin SSS albedo red > blue");
+    }
 
     // Tabulated CIE + TerminateSecondary + blackbody + visible sampling.
     {
@@ -5171,6 +5290,33 @@ void testMaterialXArnoldMapsAndConstants() {
                                               Vec3(0, 1, 0), 0.01f);
         check(std::fabs(m.roughness - 0.75f) < 1e-3f, "roughness map replaces constant (no ×0.4)");
         std::printf("  map-replace roughness=%.3f\n", m.roughness);
+    }
+
+    // Standard Surface sheen / Oren–Nayar / anisotropy ports bake onto Material.
+    {
+        const QString xml = QStringLiteral(
+            "<?xml version=\"1.0\"?>\n"
+            "<materialx version=\"1.38\">\n"
+            "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+            "    <input name=\"sheen\" type=\"float\" value=\"0.8\"/>\n"
+            "    <input name=\"sheen_color\" type=\"color3\" value=\"1, 0.2, 0.1\"/>\n"
+            "    <input name=\"sheen_roughness\" type=\"float\" value=\"0.4\"/>\n"
+            "    <input name=\"diffuse_roughness\" type=\"float\" value=\"0.55\"/>\n"
+            "    <input name=\"specular_anisotropy\" type=\"float\" value=\"0.7\"/>\n"
+            "    <input name=\"specular_rotation\" type=\"float\" value=\"0.25\"/>\n"
+            "  </standard_surface>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n");
+        MaterialXEvalResult eval = evaluateMaterialXDocument(xml, QString());
+        check(eval.ok, "sheen/aniso standard_surface evaluates");
+        checkNear(eval.material.sheen, 0.8f, 1e-4f, "MX sheen bakes");
+        checkNear(eval.material.sheenColor.y, 0.2f, 1e-4f, "MX sheen_color bakes");
+        checkNear(eval.material.sheenRoughness, 0.4f, 1e-4f, "MX sheen_roughness bakes");
+        checkNear(eval.material.diffuseRoughness, 0.55f, 1e-4f, "MX diffuse_roughness bakes");
+        checkNear(eval.material.specularAnisotropy, 0.7f, 1e-4f, "MX specular_anisotropy bakes");
+        checkNear(eval.material.specularRotation, 0.25f, 1e-4f, "MX specular_rotation bakes");
     }
 
     // transmission_color tints refraction, not base_color.

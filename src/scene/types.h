@@ -132,6 +132,15 @@ struct Material {
     float coatThickness = 0.0f;
     Vec3 coatColor{1.0f, 1.0f, 1.0f};
 
+    // Autodesk Standard Surface sheen (Charlie / Estevez–Kulla) and Oren–Nayar.
+    float sheen = 0.0f;
+    float sheenRoughness = 0.3f;
+    Vec3 sheenColor{1.0f, 1.0f, 1.0f};
+    float diffuseRoughness = 0.0f;
+    // Specular GGX anisotropy (0 = isotropic) and tangent-plane rotation (0–1 = 0–360°).
+    float specularAnisotropy = 0.0f;
+    float specularRotation = 0.0f;
+
     // MaterialX volumeshader (connected to surfacematerial.volumeshader).
     // When hasVolumeShader != 0, fog/VDB path uses these coefficients.
     int hasVolumeShader = 0;

@@ -29,6 +29,21 @@ inline SpectralNk nkFromRgb(Vec3 etaRgb, Vec3 kRgb, float lambdaNm) {
     return {rgbTripletAtLambda(etaRgb, lambdaNm), rgbTripletAtLambda(kRgb, lambdaNm)};
 }
 
+// Invert conductor F0 = ((n-1)²+k²)/((n+1)²+k²) per RGB channel, holding η fixed.
+// Used when metalness is on but conductor_k was never authored (base_color is F0).
+inline void conductorNkFromReflectance(Vec3 f0, Vec3 etaHint, Vec3& etaRgb, Vec3& kRgb) {
+    auto solveK = [](float r, float n) -> float {
+        r = clampf(r, 1e-4f, 0.999f);
+        n = srMax(1e-3f, n);
+        const float np = n + 1.0f;
+        const float nm = n - 1.0f;
+        const float k2 = (r * np * np - nm * nm) / srMax(1e-6f, 1.0f - r);
+        return sqrtf(srMax(0.0f, k2));
+    };
+    etaRgb = Vec3(srMax(1e-3f, etaHint.x), srMax(1e-3f, etaHint.y), srMax(1e-3f, etaHint.z));
+    kRgb = Vec3(solveK(f0.x, etaRgb.x), solveK(f0.y, etaRgb.y), solveK(f0.z, etaRgb.z));
+}
+
 // Very compact tabulated metals (visible range). Linear interpolate in λ.
 inline SpectralNk metalNk(const char* preset, float lambdaNm) {
     struct Sample {

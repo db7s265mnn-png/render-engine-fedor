@@ -311,8 +311,12 @@ inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, V
                                       Vec3 rgbWeight, const SampledWavelengths& w, float /*baseIor*/,
                                       int /*heroIdx*/, const RGBColorSpace& cs = colorSpaceSrgb()) {
     SampledSpectrum base = rgbToSpectrumUnbounded(rgbWeight, w, cs);
-    const bool useConductor =
-        mat.metallic >= 0.5f && (mat.conductorK.x + mat.conductorK.y + mat.conductorK.z) > 1e-4f;
+    Vec3 etaRgb = mat.conductorEta;
+    Vec3 kRgb = mat.conductorK;
+    const bool metallic = mat.metallic >= 0.5f;
+    if (metallic && (kRgb.x + kRgb.y + kRgb.z) <= 1e-4f)
+        conductorNkFromReflectance(vmax(Vec3(0.0f), mat.baseColor), etaRgb, etaRgb, kRgb);
+    const bool useConductor = metallic && (kRgb.x + kRgb.y + kRgb.z) > 1e-4f;
     if (useConductor) {
         const Vec3 wh = normalize(wo + wi);
         if (length(wh) < 1e-6f) return base;
@@ -323,7 +327,7 @@ inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, V
                 s.values[i] = 0.0f;
                 continue;
             }
-            const SpectralNk nk = nkFromRgb(mat.conductorEta, mat.conductorK, w.lambda[i]);
+            const SpectralNk nk = nkFromRgb(etaRgb, kRgb, w.lambda[i]);
             const float F = conductorFresnel(dot(wh, wo), nk.eta, nk.k);
             s.values[i] = mag * (0.25f + 0.75f * F);
         }
@@ -371,26 +375,28 @@ inline SampledSpectrum bsdfEvalSpectralDielectric(const Material& mat, Vec3 wo, 
 
     const float tw = saturatef(mat.transmission) * (1.0f - saturatef(mat.metallic));
     const bool reflecting = wo.z * wi.z > 0.0f;
+    const Vec3 woS = rotateForAnisotropy(wo, mat.specularRotation);
+    const Vec3 wiS = rotateForAnisotropy(wi, mat.specularRotation);
     const SampledSpectrum tint = rgbToSpectrumReflectance(lw.transmissionTint, w, cs);
 
     if (reflecting) {
-        Vec3 h = wo + wi;
+        Vec3 h = woS + wiS;
         if (lengthSquared(h) <= 0.0f) return out;
         h = normalize(h);
         if (h.z < 0.0f) h = -h;
         const bool allowDielectricReflect = wo.z > 0.0f || mat.internalReflections > 0.5f;
-        const float d = ggxD(h, lw.alpha);
-        const float g = smithG2(wo, wi, lw.alpha);
+        const float d = ggxD(h, lw.ax, lw.ay);
+        const float g = smithG2(woS, wiS, lw.ax, lw.ay);
         for (int i = 0; i < w.n; ++i) {
             if (w.pdf[i] <= 0.0f) continue;
             const float etaAbs = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, w.lambda[i]);
             const float eta = wo.z > 0.0f ? etaAbs : 1.0f / etaAbs;
             if (!allowDielectricReflect) {
-                const float cosHI = absDot(wo, h);
+                const float cosHI = absDot(woS, h);
                 const float sin2 = srMax(0.0f, 1.0f - cosHI * cosHI);
                 if ((sin2 / (eta * eta)) < 1.0f) continue;
             }
-            const float fr = fresnelDielectric(dot(wo, h), eta);
+            const float fr = fresnelDielectric(dot(woS, h), eta);
             out.values[i] = (d * g * fr / (4.0f * fabsf(wo.z) * fabsf(wi.z))) * tw;
         }
         return out;
@@ -400,18 +406,18 @@ inline SampledSpectrum bsdfEvalSpectralDielectric(const Material& mat, Vec3 wo, 
         if (w.pdf[i] <= 0.0f) continue;
         const float etaAbs = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, w.lambda[i]);
         const float eta = wo.z > 0.0f ? etaAbs : 1.0f / etaAbs;
-        Vec3 h = -(wo + wi * eta);
+        Vec3 h = -(woS + wiS * eta);
         if (lengthSquared(h) <= 0.0f) continue;
         h = normalize(h);
         if (h.z < 0.0f) h = -h;
-        const float dotOH = dot(wo, h);
-        const float dotIH = dot(wi, h);
+        const float dotOH = dot(woS, h);
+        const float dotIH = dot(wiS, h);
         if (dotOH * wo.z <= 0.0f) continue;
         const float sqrtDenom = dotOH + eta * dotIH;
         if (fabsf(sqrtDenom) <= 1e-6f) continue;
         const float fr = fresnelDielectric(dotOH, eta);
-        const float d = ggxD(h, lw.alpha);
-        const float g = smithG2(wo, wi, lw.alpha);
+        const float d = ggxD(h, lw.ax, lw.ay);
+        const float g = smithG2(woS, wiS, lw.ax, lw.ay);
         const float factor = fabsf(dotIH * dotOH / (wo.z * wi.z));
         const float ft = (1.0f - fr) * d * g * factor * (eta * eta) / (sqrtDenom * sqrtDenom);
         out.values[i] = tint.values[i] * ft * tw;
