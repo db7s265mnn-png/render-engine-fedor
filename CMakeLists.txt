@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.14 LANGUAGES CXX)
+project(Solstice VERSION 0.9.15 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -84,10 +84,10 @@ endif()
 # roughly Haswell / Excavator / Zen 1 (~2013–2015). Embree still does its own
 # runtime ISA dispatch; this mainly accelerates our integrator / shading code.
 option(SOLSTICE_MODERN_CPU "Target x86-64-v3 (AVX2+); faster, not for ancient CPUs" ON)
-# Firefly hunt: IEEE nvcc still has no --use_fast_math (isfinite stays).
-# Approx div/sqrt is on (0.9.14). Last step: --use_fast_math.
+# Firefly hunt: keep IEEE nvcc (precise div/sqrt). Approx --prec-div/--prec-sqrt
+# brought the colored dots back (reverted 0.9.14). Do not re-enable. No --use_fast_math.
 option(SOLSTICE_IEEE_FP32
-    "nvcc without --use_fast_math (isfinite stays). Approx div/sqrt and FMA on."
+    "nvcc without --use_fast_math; precise div/sqrt. Approx div/sqrt caused fireflies."
     ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -129,9 +129,9 @@ endif()
 
 if(SOLSTICE_IEEE_FP32)
     set(SOLSTICE_IEEE_FP32_01 1)
-    set(SOLSTICE_BUILD_ID "${SOLSTICE_BUILD_ID}-ieee-approxds")
+    set(SOLSTICE_BUILD_ID "${SOLSTICE_BUILD_ID}-ieee-precdiv")
     set(SOLSTICE_VERSION_FULL
-        "${PROJECT_VERSION} (${SOLSTICE_GIT_SHA}${SOLSTICE_GIT_DIRTY}, ${SOLSTICE_BUILD_DATE}, ieee-approxds)")
+        "${PROJECT_VERSION} (${SOLSTICE_GIT_SHA}${SOLSTICE_GIT_DIRTY}, ${SOLSTICE_BUILD_DATE}, ieee-precdiv)")
     set(SOLSTICE_OUTPUT_NAME "${SOLSTICE_APP_DISPLAY_NAME}-${SOLSTICE_BUILD_ID}")
     if(MSVC)
         add_compile_options(/fp:precise)
@@ -146,7 +146,7 @@ if(SOLSTICE_IEEE_FP32)
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         add_compile_options(-fno-fast-math -fno-finite-math-only -fno-reciprocal-math)
     endif()
-    message(STATUS "IEEE FP32 ON (no --use_fast_math; approx div/sqrt; title -ieee-approxds)")
+    message(STATUS "IEEE FP32 ON (precise div/sqrt; no --use_fast_math; title -ieee-precdiv)")
 else()
     set(SOLSTICE_IEEE_FP32_01 0)
 endif()
