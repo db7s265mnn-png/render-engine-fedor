@@ -1,8 +1,7 @@
 // Path Tracer — hero-wavelength unidirectional path tracer (CPU / Embree).
 // pbrt-v4 PathIntegrator: textures filter in RGB; albedo → RGBAlbedoSpectrum,
 // lights/env → RGBIlluminantSpectrum (Jakob × D65/D60). MC weights stay linear.
-// Film is pbrt ToXYZ → working-space RGB while secondaries are alive;
-// TerminateSecondary keeps illuminant-E WB (grey fireflies).
+// Film is pbrt ToXYZ → working-space RGB (including after TerminateSecondary).
 #pragma once
 
 #include <algorithm>

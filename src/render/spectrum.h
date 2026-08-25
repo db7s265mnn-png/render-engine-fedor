@@ -170,31 +170,14 @@ inline Xyz spectrumToXyz(const SampledSpectrum& s, const SampledWavelengths& w) 
     return Xyz(X * scale, Y * scale, Z * scale);
 }
 
-// SampledSpectrum → RGB.
-//
-//   • Multi-λ (secondaries alive): pbrt ToXYZ / CIE_Y, then the working-space
-//     matrix. ACEScg(D60) → (1,1,1). No illuminant-E white balance — that
-//     would pink-cast a D60 sky when the viewport expects ACEScg.
-//   • After TerminateSecondary / single λ: sample-matched E (X/Xw = s(λ)) so
-//     the lone wavelength is grey, not a CMF spike (volume fireflies).
+// SampledSpectrum → RGB. Always pbrt ToXYZ / CIE_Y then the working-space
+// matrix — including after TerminateSecondary. A lone λ is a spectral-locus
+// colour (rainbows). The mean of many terminated equal-energy samples is white.
+// Do not emit grey s(λ): that hides chromatic dispersion.
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
                           const RGBColorSpace& cs = colorSpaceSrgb()) {
     if (s.n <= 0 || w.n <= 0) return Vec3(0.0f);
-    const int n = std::min(s.n, w.n);
-    int active = 0;
-    for (int i = 0; i < n; ++i)
-        if (w.pdf[i] > 0.0f) ++active;
-
-    if (active >= 2 && !w.secondaryTerminated())
-        return cs.toRgb(spectrumToXyz(s, w));
-
-    // One live λ (TerminateSecondary): CMF chromaticity is a spectral-locus
-    // spike (and ȳ/z̄ can be ~0 in the tails, so X/Xw is unsafe). Emit grey at
-    // s(λ) — same as sample-matched E when all CMF channels are non-zero.
-    float hero = 0.0f;
-    for (int i = 0; i < n; ++i)
-        if (w.pdf[i] > 0.0f) hero = s.values[i];
-    return Vec3(hero, hero, hero);
+    return cs.toRgb(spectrumToXyz(s, w));
 }
 
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w, int colorSpaceId) {
