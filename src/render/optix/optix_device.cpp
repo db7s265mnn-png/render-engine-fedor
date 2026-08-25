@@ -276,7 +276,7 @@ public:
                     " SMs, Iray wavefront + tail pipeline, LaunchParams " +
                     std::to_string(sizeof(LaunchParams)) + " bytes"
 #if SOLSTICE_IEEE_FP32
-                    ", fast-math + precise div/sqrt, OptiX opt DEFAULT"
+                    ", fast-math ftz, precise div/sqrt, OptiX DEFAULT"
 #endif
                     ")");
             logInfo("OptiX submits CUDA/Compute work. Windows Task Manager defaults to the 3D graph "

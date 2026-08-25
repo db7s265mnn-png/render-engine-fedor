@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
     // OCIO status at application start (library + OCIO env / config).
     sol::ocioLogStatus(true, {});
 #if SOLSTICE_IEEE_FP32
-    sol::logInfo("FP32: --use_fast_math, precise div/sqrt override, FMA, OptiX DEFAULT.");
+    sol::logInfo("FP32: --use_fast_math --ftz=true, precise div/sqrt, FMA, OptiX DEFAULT.");
 #endif
 
     sol::MainWindow window;
