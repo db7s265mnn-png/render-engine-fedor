@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
     // OCIO status at application start (library + OCIO env / config).
     sol::ocioLogStatus(true, {});
 #if SOLSTICE_IEEE_FP32
-    sol::logInfo("FP32: IEEE nvcc (no --use_fast_math). OptiX module DEFAULT. Host precise.");
+    sol::logInfo("FP32: IEEE nvcc, --fmad=true, OptiX module DEFAULT. No --use_fast_math. Host precise.");
 #endif
 
     sol::MainWindow window;

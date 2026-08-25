@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.11 LANGUAGES CXX)
+project(Solstice VERSION 0.9.12 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -84,10 +84,10 @@ endif()
 # roughly Haswell / Excavator / Zen 1 (~2013–2015). Embree still does its own
 # runtime ISA dispatch; this mainly accelerates our integrator / shading code.
 option(SOLSTICE_MODERN_CPU "Target x86-64-v3 (AVX2+); faster, not for ancient CPUs" ON)
-# Firefly hunt: IEEE nvcc (no --use_fast_math). OptiX module opt is DEFAULT
-# again (0.9.11). Flip OFF after the ladder: oxopt → fmad → host FMA → fast-math.
+# Firefly hunt: IEEE nvcc (no --use_fast_math). OptiX DEFAULT + --fmad=true
+# (0.9.12). Next: host FMA contract, then approx div/sqrt, then use_fast_math.
 option(SOLSTICE_IEEE_FP32
-    "IEEE-754 FP32 nvcc (no --use_fast_math). Diagnostic. OptiX module uses DEFAULT opt."
+    "IEEE-754 nvcc without --use_fast_math. Diagnostic. FMA and OptiX DEFAULT are on."
     ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -129,9 +129,9 @@ endif()
 
 if(SOLSTICE_IEEE_FP32)
     set(SOLSTICE_IEEE_FP32_01 1)
-    set(SOLSTICE_BUILD_ID "${SOLSTICE_BUILD_ID}-ieee-oxopt")
+    set(SOLSTICE_BUILD_ID "${SOLSTICE_BUILD_ID}-ieee-fmad")
     set(SOLSTICE_VERSION_FULL
-        "${PROJECT_VERSION} (${SOLSTICE_GIT_SHA}${SOLSTICE_GIT_DIRTY}, ${SOLSTICE_BUILD_DATE}, ieee-oxopt)")
+        "${PROJECT_VERSION} (${SOLSTICE_GIT_SHA}${SOLSTICE_GIT_DIRTY}, ${SOLSTICE_BUILD_DATE}, ieee-fmad)")
     set(SOLSTICE_OUTPUT_NAME "${SOLSTICE_APP_DISPLAY_NAME}-${SOLSTICE_BUILD_ID}")
     if(MSVC)
         add_compile_options(/fp:precise)
@@ -149,7 +149,7 @@ if(SOLSTICE_IEEE_FP32)
             -fno-fast-math -ffp-contract=off -fno-finite-math-only
             -fno-associative-math -fno-reciprocal-math)
     endif()
-    message(STATUS "IEEE FP32 ON (nvcc precise; OptiX module DEFAULT; title stamps -ieee-oxopt)")
+    message(STATUS "IEEE FP32 ON (no --use_fast_math; --fmad=true; OptiX DEFAULT; title -ieee-fmad)")
 else()
     set(SOLSTICE_IEEE_FP32_01 0)
 endif()
