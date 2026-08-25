@@ -128,6 +128,9 @@ public:
 
 signals:
     void cameraMoved();
+    // Alt+LMB / MMB / Alt+RMB drag (not wheel, not the TRS gizmo).
+    void cameraNavStarted();
+    void cameraNavEnded();
     // Fired while dragging (values already written quietly — do not cook/IPR).
     void transformEdited(sol::Node* node);
     // Fired on mouse release after a gizmo drag — safe to cook/IPR.

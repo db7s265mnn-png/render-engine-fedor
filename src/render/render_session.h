@@ -37,6 +37,10 @@ public:
     // sample and restart accumulation on the *render* thread (no UI-thread join).
     // Call after mutating scene->camera (etc.). If idle, falls back to update+start.
     void pushInteractiveRestart();
+    // Mouse-drag orbit/pan/dolly: 1/4-res, maxDepth 1, no volumes. Display-only —
+    // release wipes the film and restarts full-quality PT. Wheel dolly stays full-res.
+    void setInteractivePreview(bool on);
+    bool interactivePreview() const { return interactivePreview_.load(std::memory_order_relaxed); }
     // Stop the render thread and free *all* previous-render state: device BVH,
     // cooked scene, accumulation, and display hold. Call before a heavy
     // tessellation so peak RAM is not previous_render + new_tess.
@@ -83,6 +87,7 @@ private:
     std::atomic<bool> softRestart_{false};
     std::atomic<bool> rendering_{false};
     std::atomic<bool> sceneDirty_{true};
+    std::atomic<bool> interactivePreview_{false};
 
     mutable std::mutex progressMutex_;
     RenderProgress progress_;

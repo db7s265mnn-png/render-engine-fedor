@@ -14,6 +14,7 @@
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QObject>
 #include <QTemporaryDir>
 #include <QFile>
 #include <QFileInfo>
@@ -573,6 +574,51 @@ void testGraphCook() {
     CookContext context2;
     StagePtr stage2 = reloaded.cookDisplay(context2);
     check(stage2 != nullptr && stage2->prims.size() == stage->prims.size(), "reloaded graph cooks the same");
+}
+
+void testGraphDeleteAfterLoad() {
+    std::printf("graph delete after load\n");
+    registerBuiltinNodes();
+    NodeGraph graph;
+    buildDefaultGraph(graph);
+    const int n0 = int(graph.nodes().size());
+    check(n0 >= 8, "default graph has nodes");
+    const QJsonObject json = graph.toJson();
+
+    int aboutToRemove = 0;
+    QObject::connect(&graph, &NodeGraph::nodeAboutToBeRemoved, [&](Node* node) {
+        check(node != nullptr, "aboutToBeRemoved pointer");
+        // UAF if clear()/fromJson destroyed Nodes before this signal.
+        check(!node->typeName().isEmpty(), "node alive during aboutToBeRemoved");
+        check(!node->name().isEmpty(), "node name alive during aboutToBeRemoved");
+        ++aboutToRemove;
+    });
+
+    QString error;
+    check(graph.fromJson(json, error), "reload into live graph");
+    check(aboutToRemove == n0, "clear() notifies before destroying loaded nodes");
+
+    Node* display = graph.displayNode();
+    check(display != nullptr, "display after reload");
+    const QString displayName = display->name();
+    graph.removeNode(display);
+    check(graph.findNode(displayName) == nullptr, "display removed after load");
+    for (const NodePtr& n : graph.nodes()) {
+        check(n && !n->typeName().isEmpty(), "surviving node after display delete");
+    }
+
+    Node* leftover = graph.nodes().empty() ? nullptr : graph.nodes().front().get();
+    check(leftover != nullptr, "a node remains after display delete");
+    const QString leftoverName = leftover->name();
+    graph.removeNode(leftover);
+    check(graph.findNode(leftoverName) == nullptr, "non-display node removed after load");
+
+    const int left = int(graph.nodes().size());
+    aboutToRemove = 0;
+    graph.clear();
+    check(aboutToRemove == left, "clear() notifies remaining nodes");
+    check(graph.nodes().empty(), "graph empty after clear");
+    check(graph.displayNode() == nullptr, "no display node after clear");
 }
 
 void testXpuDevice() {
@@ -6738,6 +6784,7 @@ int main() {
     testBsdf();
     testGlob();
     testGraphCook();
+    testGraphDeleteAfterLoad();
     testXpuDevice();
     testRenderSettingsFolders();
     testSceneGraphFolders();

@@ -6,6 +6,7 @@
 #include <QGraphicsView>
 #include <QHash>
 #include <QList>
+#include <QMetaObject>
 
 #include "nodes/node_graph.h"
 
@@ -30,6 +31,7 @@ public:
     void rebuild();
     void updateConnections();
     void refreshAllNodeItems();
+    void dropNodeItem(Node* node);
     NodeItem* itemForNode(Node* node) const;
 
 protected:
@@ -117,9 +119,15 @@ private:
     void endPan();
     qreal zoomFactorFromWheel(const QWheelEvent* event) const;
 
+    void disconnectGraph();
+
     NodeGraph* graph_ = nullptr;
     NodeGraphScene* graphScene_ = nullptr;
     NodeCreateMenu* createMenu_ = nullptr;
+    QMetaObject::Connection graphChangedConnection_;
+    QMetaObject::Connection nodeAddedConnection_;
+    QMetaObject::Connection nodeAboutToBeRemovedConnection_;
+    QMetaObject::Connection displayNodeChangedConnection_;
 
     bool panning_ = false;
     bool spaceHeld_ = false;

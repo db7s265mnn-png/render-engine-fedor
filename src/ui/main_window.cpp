@@ -177,6 +177,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&graph_, &NodeGraph::displayNodeChanged, this, [this](Node*) { scheduleCook(0); });
 
     connect(renderView_, &RenderView::cameraMoved, this, &MainWindow::onCameraMoved);
+    connect(renderView_, &RenderView::cameraNavStarted, this, [this] {
+        if (!renderArmed()) return;
+        session_.setInteractivePreview(true);
+    });
+    connect(renderView_, &RenderView::cameraNavEnded, this, [this] { session_.setInteractivePreview(false); });
     connect(renderView_, &RenderView::viewTransformChanged, this, [this](int) {
         framePending_.store(true, std::memory_order_relaxed);
         onRenderTick();
@@ -195,7 +200,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         }
     });
     connect(&graph_, &NodeGraph::nodeAboutToBeRemoved, this, [this](Node* node) {
-        if (!node || node->typeName() != QLatin1String("camera")) return;
+        if (!node) return;
+        if (parameterPanel_ && parameterPanel_->node() == node) parameterPanel_->clearSelection();
+        if (renderView_ && renderView_->transformTarget() == node) renderView_->setTransformTarget(nullptr);
+        if (selectedSourceNode_ == node->name()) selectedSourceNode_.clear();
+        if (node->typeName() != QLatin1String("camera")) return;
         if (lookThroughCameraName_ == node->name()) {
             lookThroughCameraName_.clear();
             cameraOverride_ = true;

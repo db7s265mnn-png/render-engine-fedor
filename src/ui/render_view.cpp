@@ -902,6 +902,7 @@ void RenderView::beginNavigation(int mode, const QPoint& pos) {
         setCursor(Qt::ClosedHandCursor);
     }
     grabMouse();
+    emit cameraNavStarted();
 }
 
 bool RenderView::hasTransformTarget() const {
@@ -1502,10 +1503,11 @@ void RenderView::mouseReleaseEvent(QMouseEvent* event) {
         return;
     }
     if (mode_ != 0) {
+        const bool wasNav = mode_ == 1 || mode_ == 2 || mode_ == 3;
         mode_ = 0;
         releaseMouse();
         unsetCursor();
-        // Final soft-restart flush is unnecessary — camera already pushed live.
+        if (wasNav) emit cameraNavEnded();
         emit cameraMoved();
         event->accept();
         return;

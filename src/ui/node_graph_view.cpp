@@ -84,9 +84,28 @@ void NodeGraphScene::updateConnections() {
     }
 }
 
+void NodeGraphScene::dropNodeItem(Node* node) {
+    if (!node) return;
+    NodeItem* item = nodeItems_.take(node);
+    if (!item) return;
+    for (int i = connections_.size() - 1; i >= 0; --i) {
+        ConnectionItem* connection = connections_[i];
+        if (!connection) continue;
+        if (connection->source() == item || connection->destination() == item) {
+            removeItem(connection);
+            delete connection;
+            connections_.removeAt(i);
+        }
+    }
+    removeItem(item);
+    delete item;
+}
+
 void NodeGraphScene::refreshAllNodeItems() {
     for (auto it = nodeItems_.cbegin(); it != nodeItems_.cend(); ++it) {
-        if (it.value()) it.value()->refresh();
+        if (!it.value()) continue;
+        if (graph_ && !graph_->contains(it.key())) continue;
+        it.value()->refresh();
     }
 }
 
@@ -243,17 +262,37 @@ NodeGraphView::NodeGraphView(QWidget* parent) : QGraphicsView(parent) {
     });
 }
 
+void NodeGraphView::disconnectGraph() {
+    if (graphChangedConnection_) disconnect(graphChangedConnection_);
+    if (nodeAddedConnection_) disconnect(nodeAddedConnection_);
+    if (nodeAboutToBeRemovedConnection_) disconnect(nodeAboutToBeRemovedConnection_);
+    if (displayNodeChangedConnection_) disconnect(displayNodeChangedConnection_);
+}
+
 void NodeGraphView::setGraph(NodeGraph* graph) {
+    disconnectGraph();
     graph_ = graph;
     graphScene_->setGraph(graph);
     if (!graph) return;
-    connect(graph, &NodeGraph::graphChanged, this, [this] { graphScene_->updateConnections(); });
-    connect(graph, &NodeGraph::nodeAdded, this, [this](Node*) { graphScene_->rebuild(); });
-    connect(graph, &NodeGraph::nodeAboutToBeRemoved, this, [this](Node*) {
-        // Rebuilt after removal completes so dangling items never get painted.
-        QMetaObject::invokeMethod(this, [this] { graphScene_->rebuild(); }, Qt::QueuedConnection);
+    graphChangedConnection_ =
+        connect(graph, &NodeGraph::graphChanged, this, [this] { graphScene_->updateConnections(); });
+    nodeAddedConnection_ =
+        connect(graph, &NodeGraph::nodeAdded, this, [this](Node*) { graphScene_->rebuild(); });
+    nodeAboutToBeRemovedConnection_ = connect(graph, &NodeGraph::nodeAboutToBeRemoved, this, [this](Node* node) {
+        if (dragSource_ && dragSource_->node() == node) {
+            if (dragWire_) {
+                graphScene_->removeItem(dragWire_);
+                delete dragWire_;
+                dragWire_ = nullptr;
+            }
+            dragSource_ = nullptr;
+            dragDestination_ = nullptr;
+            snapTarget_ = nullptr;
+        }
+        graphScene_->dropNodeItem(node);
     });
-    connect(graph, &NodeGraph::displayNodeChanged, this, [this](Node*) { graphScene_->refreshAllNodeItems(); });
+    displayNodeChangedConnection_ =
+        connect(graph, &NodeGraph::displayNodeChanged, this, [this](Node*) { graphScene_->refreshAllNodeItems(); });
     // Framing needs the final widget size, which is only known once the layout
     // has run, so it is deferred to the first show/resize.
     scheduleFrameAll();

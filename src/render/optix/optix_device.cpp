@@ -639,6 +639,8 @@ public:
             int batch = 4;
             if (pixelCount > size_t(1920 * 1080)) batch = 2;
             if (pixelCount > size_t(3840 * 2160)) batch = 1;
+            // First present and tumble preview: 1 spp, D2H immediately (not a 4-spp hitch).
+            if (sampleIndex == 0 || opt.navPreview) batch = 1;
             if (batch > remaining) batch = remaining;
             if (batch < 1) batch = 1;
             launchParams.batchSamples = batch;
@@ -653,10 +655,17 @@ public:
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
             launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();
             launchParams.volumeCount = gpuVolumeCount_;
+            applyNavPreview(launchParams.scene, opt);
+            if (opt.skipVolumes) {
+                launchParams.volumeCount = 0;
+                launchParams.volumes = nullptr;
+            }
 
             if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
 
-            const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
+            const int maxDepth = launchParams.scene.settings.maxDepth > 0
+                                     ? launchParams.scene.settings.maxDepth
+                                     : 1;
 
             const auto wall0 = std::chrono::steady_clock::now();
             CUDA_CHECK(cudaEventRecord(gpuStartEvent_, stream_));
@@ -704,7 +713,7 @@ public:
             const double wallMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
 
-            if (wantCopy && (sampleIndex < 2 || sampleIndex % 32 == 0)) {
+            if (wantCopy && !opt.navPreview && (sampleIndex < 2 || sampleIndex % 32 == 0)) {
                 std::ostringstream msg;
                 msg.setf(std::ios::fixed);
                 msg.precision(2);

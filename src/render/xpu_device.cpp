@@ -70,6 +70,15 @@ public:
         if (fb.width() <= 0 || fb.height() <= 0) return;
 
         const RenderSampleOptions opt = options ? *options : RenderSampleOptions{};
+        if (opt.navPreview) {
+            stopGpuWorker();
+            RenderSampleOptions previewOpt = opt;
+            previewOpt.xpuRemainingSamples = 1;
+            if (gpu_) gpu_->renderSample(fb, sampleIndex, cancel, midProgress, &previewOpt);
+            else cpu_->renderSample(fb, sampleIndex, cancel, midProgress, &previewOpt);
+            lastCompletedSamples_ = std::max(1, gpu_ ? gpu_->lastCompletedSamples() : 1);
+            return;
+        }
         if (opt.xpuSchedule == kXpuScheduleMixture) {
             renderMixture(fb, sampleIndex, cancel, midProgress, opt);
             return;
@@ -287,7 +296,7 @@ private:
         const auto cpuT0 = std::chrono::steady_clock::now();
         try {
             if (runCpu && !cancel.load(std::memory_order_relaxed)) {
-                cpu_->renderSample(fb, xpuCpuSampleIndex(nextCpuSample_), cancel, midProgress, nullptr);
+                cpu_->renderSample(fb, xpuCpuSampleIndex(nextCpuSample_), cancel, midProgress, &opt);
                 ++nextCpuSample_;
             }
         } catch (...) {
@@ -389,7 +398,7 @@ private:
                 cpuSpp_.load(std::memory_order_relaxed) + gpuSpp_.load(std::memory_order_relaxed) < target) {
                 cpuFb_.copySkipMask(fb.skipMask());
                 const int cpuIndex = xpuCpuSampleIndex(cpuSpp_.load(std::memory_order_relaxed));
-                cpu_->renderSample(cpuFb_, cpuIndex, cancel, wrappedMid, nullptr);
+                cpu_->renderSample(cpuFb_, cpuIndex, cancel, wrappedMid, &opt);
                 cpuSpp_.fetch_add(1, std::memory_order_relaxed);
             }
         } catch (...) {
