@@ -9,7 +9,10 @@ __device__ inline int wavefrontPixel(int& x, int& y) {
     const LaunchParams& p = launchParams();
     const uint3 li = optixGetLaunchIndex();
     if (p.compactLaunch && p.workItems) {
-        if (li.x >= (unsigned)srMax(0, p.workCount)) return -1;
+        unsigned n = p.workCount > 0 ? (unsigned)p.workCount : 0u;
+        if (p.workSlot >= 0 && p.workSlot < kSlotCount && p.workCounts)
+            n = p.workCounts[p.workSlot];
+        if (li.x >= n) return -1;
         const int pixel = p.workItems[li.x];
         if (pixel < 0 || !p.paths || !p.hits || !p.shadows || !p.accumBuffer) return -1;
         if (p.width <= 0 || pixel >= p.width * p.height) return -1;

@@ -59,7 +59,8 @@ struct alignas(16) LaunchParams {
     int* qShadow = nullptr;
     unsigned int* workCounts = nullptr;  // kSlotCount atomics
     int* workItems = nullptr;            // queue this optixLaunch reads
-    int workCount = 0;                   // 1D launch width
+    int workCount = 0;                   // 1D launch width (upper bound)
+    int workSlot = -1;                   // >=0: live count is workCounts[slot] on device
     int compactLaunch = 0;               // 1 = 1D workItems, 0 = 2D pixel grid
     int batchSamples = 1;                // spp folded in this wavefront (regen)
 

@@ -23,7 +23,7 @@ extern "C" __global__ void __raygen__init_from_camera() {
     }
 
     spawnCameraPath(pixel, x, y, 0);
-    enqueueSlot(kSlotIntersect, pixel);
+    if (params.compactLaunch) enqueueSlot(kSlotIntersect, pixel);
 }
 
 }  // namespace sol

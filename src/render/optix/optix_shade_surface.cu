@@ -214,7 +214,7 @@ extern "C" __global__ void __raygen__shade_surface() {
     GpuPath& path = launchParams().paths[pixel];
     if (!launchParams().compactLaunch && path.queue != kQueueShadeSurface) return;
     shadeSurfacePixel(pixel);
-    enqueuePathContinuation(pixel);
+    if (launchParams().compactLaunch) enqueuePathContinuation(pixel);
 }
 #endif
 

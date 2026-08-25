@@ -53,7 +53,7 @@ extern "C" __global__ void __raygen__shade_background() {
     GpuPath& path = launchParams().paths[pixel];
     if (!launchParams().compactLaunch && path.queue != kQueueShadeBackground) return;
     shadeBackgroundPixel(pixel);
-    enqueuePathContinuation(pixel);
+    if (launchParams().compactLaunch) enqueuePathContinuation(pixel);
 }
 #endif
 

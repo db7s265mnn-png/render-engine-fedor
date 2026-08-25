@@ -116,7 +116,7 @@ extern "C" __global__ void __raygen__shade_volume() {
     GpuPath& path = launchParams().paths[pixel];
     if (!launchParams().compactLaunch && path.queue != kQueueShadeVolume) return;
     shadeVolumePixel(pixel);
-    enqueuePathContinuation(pixel);
+    if (launchParams().compactLaunch) enqueuePathContinuation(pixel);
 }
 #endif
 

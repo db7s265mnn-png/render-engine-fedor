@@ -2,8 +2,9 @@
 //
 // Geometry acceleration structures are built per mesh and instanced through a
 // top level IAS, mirroring the Embree backend so both produce the same image.
-// Compacted 1D work queues (live pixel lists) + Iray-style tail megakernel
-// when live paths fit on the SMs. Shade kernels never call optixTrace.
+// Compacted 1D work queues (live pixel lists). Shade kernels never call optixTrace.
+// The host bounce loop stays pipelined (no per-kernel cudaStreamSynchronize):
+// WDDM flushes were the UI hitches.
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_OPTIX
@@ -274,8 +275,7 @@ public:
             initialized_ = true;
             logInfo("OptiX backend initialised on " + deviceName_ +
                     " (" + std::to_string(properties.multiProcessorCount) +
-                    " SMs, compacted spectral PT, tail megakernel @" +
-                    std::to_string(tailThreshold_) + " live, LaunchParams " +
+                    " SMs, pipelined compact PT, LaunchParams " +
                     std::to_string(sizeof(LaunchParams)) + " bytes)");
             logInfo("OptiX submits CUDA/Compute work. Windows Task Manager defaults to the 3D graph "
                     "(~0% for path tracing) — switch a GPU graph to CUDA or Compute_0, or watch the HUD ms.");
@@ -639,12 +639,12 @@ public:
             launchParams.workCounts = workCounts_.as<unsigned int>();
             launchParams.workItems = nullptr;
             launchParams.workCount = 0;
+            launchParams.workSlot = -1;
             launchParams.compactLaunch = 0;
-            int batch = 1;
-            if (!opt.deferHostCopy && opt.xpuRemainingSamples > 1 && sampleIndex >= 4)
-                batch = std::min(8, opt.xpuRemainingSamples);
-            launchParams.batchSamples = batch;
-            lastCompletedSamples_ = batch;
+            // 1 spp per call. Folding 8 spp (or the tail megakernel) held the
+            // GPU for a full batch with no UI tick — that was the hitch.
+            launchParams.batchSamples = 1;
+            lastCompletedSamples_ = 1;
             launchParams.width = width;
             launchParams.height = height;
             launchParams.pixelOffsetX = offX;
@@ -659,15 +659,15 @@ public:
             if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
 
             const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
-            const int maxIters = batch * (maxDepth + 18);
+            const int maxIters = maxDepth + 18;
 
             const auto wall0 = std::chrono::steady_clock::now();
             CUDA_CHECK(cudaEventRecord(gpuStartEvent_, stream_));
             int launches = 0;
             // CUDA graphs cannot capture variable 1D sizes; previous Windows
             // CaptureModeGlobal also returned OPTIX_ERROR_CUDA_ERROR (7900).
-            launchCompactWavefront(launchParams, unsigned(launchW), unsigned(launchH), maxIters, cancel,
-                                   launches);
+            launchPipelinedWavefront(launchParams, unsigned(launchW), unsigned(launchH), maxIters, cancel,
+                                     launches);
             CUDA_CHECK(cudaEventRecord(gpuStopEvent_, stream_));
             if (!opt.deferHostCopy) {
                 if (opt.skipFramebufferStore) {
@@ -704,8 +704,7 @@ public:
                 msg.setf(std::ios::fixed);
                 msg.precision(2);
                 msg << "OptiX GPU " << lastGpuSampleMs_ << " ms  wall " << wallMs << " ms  " << deviceName_
-                    << "  " << width << "x" << height << "  compacted=" << launches
-                    << " launches  batch=" << batch;
+                    << "  " << width << "x" << height << "  wavefront=" << launches << " launches";
                 logInfo(msg.str());
             }
 
@@ -793,81 +792,27 @@ private:
                                    cudaMemcpyHostToDevice, stream_));
     }
 
-    void pullWorkCounts(unsigned host[kSlotCount]) {
-        CUDA_CHECK(cudaMemcpyAsync(host, workCounts_.as<void>(), sizeof(unsigned) * unsigned(kSlotCount),
-                                   cudaMemcpyDeviceToHost, stream_));
-        CUDA_CHECK(cudaStreamSynchronize(stream_));
-    }
-
-    void launchCompact(LaunchParams& lp, int raygen, int* queue, unsigned count) {
-        if (count == 0) return;
-        lp.compactLaunch = 1;
-        lp.workItems = queue;
-        lp.workCount = int(count);
-        uploadLaunch(lp);
-        launchKernel(raygen, count, 1);
-    }
-
-    void launchCompactWavefront(LaunchParams& lp, unsigned launchW, unsigned launchH, int maxIters,
-                                const std::atomic<bool>& cancel, int& launches) {
+    void launchPipelinedWavefront(LaunchParams& lp, unsigned launchW, unsigned launchH, int maxIters,
+                                  const std::atomic<bool>& cancel, int& launches) {
         launches = 0;
-        CUDA_CHECK(cudaMemsetAsync(workCounts_.as<void>(), 0, workCounts_.size(), stream_));
         lp.compactLaunch = 0;
         lp.workItems = nullptr;
         lp.workCount = 0;
+        lp.workSlot = -1;
         uploadLaunch(lp);
         launchKernel(kRgInit, launchW, launchH);
         ++launches;
-        unsigned counts[kSlotCount] = {};
-        pullWorkCounts(counts);
-        unsigned nI = counts[kSlotIntersect];
-
         for (int iter = 0; iter < maxIters; ++iter) {
             if (cancel.load(std::memory_order_relaxed)) break;
-            if (nI == 0) break;
-
-            CUDA_CHECK(cudaMemsetAsync(workCounts_.as<void>(), 0, workCounts_.size(), stream_));
-            launchCompact(lp, kRgIntersectClosest, lp.qIntersect, nI);
-            ++launches;
-            pullWorkCounts(counts);
-            const unsigned nV = counts[kSlotVolume];
-            unsigned nS = counts[kSlotSurface];
-            unsigned nB = counts[kSlotBackground];
-
-            if (nV) {
-                launchCompact(lp, kRgShadeVolume, lp.qVolume, nV);
-                ++launches;
-                pullWorkCounts(counts);
-                nS = counts[kSlotSurface];
-                nB = counts[kSlotBackground];
-            }
-            if (nB) {
-                launchCompact(lp, kRgShadeBackground, lp.qBackground, nB);
-                ++launches;
-            }
-            if (nS) {
-                launchCompact(lp, kRgShadeSurface, lp.qSurface, nS);
-                ++launches;
-            }
-            if (nV || nB || nS) pullWorkCounts(counts);
-            const unsigned nSh = counts[kSlotShadow];
-            nI = counts[kSlotIntersectNext];
-            if (nSh) {
-                launchCompact(lp, kRgIntersectShadow, lp.qShadow, nSh);
-                launchCompact(lp, kRgShadeShadow, lp.qShadow, nSh);
-                launches += 2;
-                // Dead paths with a pending NEE regenerate only after shade_shadow.
-                pullWorkCounts(counts);
-                nI = counts[kSlotIntersectNext];
-            }
-            std::swap(lp.qIntersect, lp.qIntersectNext);
-
-            if (nI == 0) break;
-            if (int(nI) <= tailThreshold_) {
-                launchCompact(lp, kRgPathTail, lp.qIntersect, nI);
-                ++launches;
-                break;
-            }
+            // Same stream, no host read: GPU stays busy. Do not compact-sync here —
+            // cudaStreamSynchronize per bounce was the WDDM hitch.
+            launchKernel(kRgIntersectClosest, launchW, launchH);
+            launchKernel(kRgShadeVolume, launchW, launchH);
+            launchKernel(kRgShadeBackground, launchW, launchH);
+            launchKernel(kRgShadeSurface, launchW, launchH);
+            launchKernel(kRgIntersectShadow, launchW, launchH);
+            launchKernel(kRgShadeShadow, launchW, launchH);
+            launches += 6;
         }
     }
 
