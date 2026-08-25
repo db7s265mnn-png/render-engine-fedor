@@ -252,6 +252,7 @@ public:
 
         SceneView scene = view_;  // local copy: carries the progressive pass index
         scene.settings.progressiveSample = sampleIndex;
+        bindFilmToFramebuffer(scene, width, height);
         const uint32_t frameSeed = uint32_t(settings.seed) * 9781u + uint32_t(sampleIndex) * 6271u;
 
         const bool pathTracer = settings.integrator == kIntegratorPathTracer;

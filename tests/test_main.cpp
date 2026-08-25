@@ -5325,6 +5325,30 @@ void testMaterialXUdimCubeAsset() {
     check(length(c1001.xyz() - c1011.xyz()) > 0.15f, "1001 vs 1011 centers differ");
 }
 
+void testQuarterFilmIsDownscaleNotCrop() {
+    std::printf("quarter-film downscale\n");
+    SceneView scene{};
+    scene.settings.resolutionX = 400;
+    scene.settings.resolutionY = 200;
+    scene.camera.sensorWidth = 36.0f;
+    scene.camera.focalLength = 50.0f;
+    scene.camera.fStop = 0.0f;
+    scene.camera.cameraToWorld = Mat4::identity();
+
+    Vec3 oFull, dFull, oCrop, dCrop, oDown, dDown;
+    generateCameraRay(scene, 399.5f, 100.0f, 0.5f, 0.5f, oFull, dFull);
+
+    // Same pixel index on a 1/4 buffer, still divided by authored 400×200 → crop.
+    generateCameraRay(scene, 99.5f, 25.0f, 0.5f, 0.5f, oCrop, dCrop);
+    check(std::fabs(dCrop.x - dFull.x) > 0.05f, "unbound 1/4 pixel is a crop, not the right edge");
+
+    bindFilmToFramebuffer(scene, 100, 50);
+    generateCameraRay(scene, 99.5f, 25.0f, 0.5f, 0.5f, oDown, dDown);
+    checkNear(dDown.x, dFull.x, 0.02f, "bound 1/4 film right edge matches full FOV");
+    checkNear(dDown.y, dFull.y, 0.02f, "bound 1/4 film y matches full FOV");
+    checkNear(dDown.z, dFull.z, 0.02f, "bound 1/4 film z matches full FOV");
+}
+
 void testCameraDofFocus() {
     std::printf("camera-dof-focus\n");
     registerBuiltinNodes();
@@ -6788,6 +6812,7 @@ int main() {
     testXpuDevice();
     testRenderSettingsFolders();
     testSceneGraphFolders();
+    testQuarterFilmIsDownscaleNotCrop();
     testCameraDofFocus();
     testPolyOpticsApertureSpread();
     testPolynomialOpticsCamera();

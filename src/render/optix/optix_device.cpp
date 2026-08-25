@@ -614,6 +614,7 @@ public:
 
             LaunchParams launchParams{};
             launchParams.scene = deviceScene_;
+            bindFilmToFramebuffer(launchParams.scene, width, height);
             launchParams.accumBuffer = accumBuffer_.as<Vec4>();
             launchParams.lumSq = lumSqBuffer_.as<float>();
             launchParams.skipMask = nullptr;

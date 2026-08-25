@@ -43,6 +43,13 @@ struct RenderSampleOptions {
     bool navPreview = false;
 };
 
+// Pixel grid is the framebuffer. Camera NDC must use this, not the authored
+// Film res — otherwise a smaller FB is a top-left crop, not a 1/4 downscale.
+inline void bindFilmToFramebuffer(SceneView& scene, int width, int height) {
+    scene.settings.resolutionX = width > 0 ? width : 1;
+    scene.settings.resolutionY = height > 0 ? height : 1;
+}
+
 class RenderDevice {
 public:
     virtual ~RenderDevice() = default;
