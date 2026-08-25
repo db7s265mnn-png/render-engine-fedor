@@ -1,19 +1,12 @@
 // Cycles analogue: integrator_shade_background (CUDA in Cycles; OptiX raygen here).
 #include "render/lights.h"
-#include "render/optix/optix_spectral_film.cuh"
+#include "render/optix/optix_spawn.cuh"
 
 namespace sol {
 
-extern "C" __global__ void __raygen__shade_background() {
-    int x = 0, y = 0;
-    const int pixel = wavefrontPixel(x, y);
-    if (pixel < 0) return;
-
+__device__ inline void shadeBackgroundPixel(int pixel) {
     const LaunchParams& params = launchParams();
     GpuPath& path = params.paths[pixel];
-    if (path.queue != kQueueShadeBackground) return;
-    path.queue = kQueueDead;
-
     const SceneView& scene = params.scene;
     const bool primary = path.depth == 0;
 
@@ -49,7 +42,19 @@ extern "C" __global__ void __raygen__shade_background() {
     const Vec3 sunL = cameraSunDiscRadiance(scene, path.origin, path.direction, path.bsdfPdf,
                                            path.specularBounce != 0, primary, false);
     if (!isBlack(sunL)) addPathEmissionRgb(path, sunL, 1.0f, 0.0f);
-    flushPathFilm(pixel);
+    terminatePath(pixel, path);
 }
+
+#ifndef SOLSTICE_OPTIX_OPS_ONLY
+extern "C" __global__ void __raygen__shade_background() {
+    int x = 0, y = 0;
+    const int pixel = wavefrontPixel(x, y);
+    if (pixel < 0) return;
+    GpuPath& path = launchParams().paths[pixel];
+    if (!launchParams().compactLaunch && path.queue != kQueueShadeBackground) return;
+    shadeBackgroundPixel(pixel);
+    enqueuePathContinuation(pixel);
+}
+#endif
 
 }  // namespace sol

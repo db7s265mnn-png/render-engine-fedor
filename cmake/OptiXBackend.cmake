@@ -133,6 +133,8 @@ endif()
 # Cycles: each integrator stage is its own kernel (intersect_closest, shade_surface,
 # …) so cicc never sees optixTrace + BSDF + lights in one megakernel. -O1: OptiX
 # re-optimizes at optixModuleCreate.
+# Exception: path_tail is the Iray-style megakernel (trace + shade). It is
+# slower to nvcc; give it a longer timeout.
 #
 # Do NOT give ninja 16 separate custom commands. On Windows CI, after the
 # shade_surface embed finished, ninja never started [15/16] (shade_background)
@@ -159,6 +161,7 @@ set(_solstice_nvcc_ptx_common
 set(_solstice_optix_base
     ${_solstice_optix_dir}/optix_common.cuh
     ${_solstice_optix_dir}/optix_wavefront.cuh
+    ${_solstice_optix_dir}/optix_work.cuh
     ${_solstice_optix_dir}/launch_params.h
     ${_solstice_optix_dir}/path_state.h
     ${CMAKE_SOURCE_DIR}/src/scene/types.h
@@ -182,7 +185,7 @@ function(_solstice_json_escape out str)
 endfunction()
 
 function(solstice_optix_kernel name source symbol)
-    cmake_parse_arguments(K "LIGHTS" "" "DEPENDS" ${ARGN})
+    cmake_parse_arguments(K "LIGHTS" "TIMEOUT" "DEPENDS" ${ARGN})
     set(ptx "${CMAKE_BINARY_DIR}/generated/optix_${name}.ptx")
     set(embed "${CMAKE_BINARY_DIR}/generated/solstice_optix_${name}_ir.cpp")
     set(extra)
@@ -195,6 +198,9 @@ function(solstice_optix_kernel name source symbol)
     set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_PTX_${name} "${ptx}")
     set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_EMBED_${name} "${embed}")
     set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_DEFS_${name} "${extra}")
+    if(K_TIMEOUT)
+        set_property(DIRECTORY PROPERTY SOLSTICE_OPTIX_TIMEOUT_${name} "${K_TIMEOUT}")
+    endif()
     set_property(DIRECTORY APPEND PROPERTY SOLSTICE_OPTIX_ALL_DEPS "${source}")
     foreach(_d IN LISTS K_DEPENDS)
         set_property(DIRECTORY APPEND PROPERTY SOLSTICE_OPTIX_ALL_DEPS "${_d}")
@@ -214,6 +220,7 @@ solstice_optix_kernel(init_from_camera
     DEPENDS ${_solstice_optix_base}
             ${_solstice_optix_dir}/optix_geom.cuh
             ${_solstice_optix_dir}/optix_volume.cuh
+            ${_solstice_optix_dir}/optix_spawn.cuh
             ${CMAKE_SOURCE_DIR}/src/render/camera_sample.h
             ${CMAKE_SOURCE_DIR}/src/render/sobol.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
@@ -222,12 +229,14 @@ solstice_optix_kernel(init_from_camera
 solstice_optix_kernel(intersect_closest
     ${_solstice_optix_dir}/optix_intersect_closest.cu
     solsticeOptixIntersectClosestIr
-    DEPENDS ${_solstice_optix_base} ${_solstice_optix_dir}/optix_trace.cuh)
+    DEPENDS ${_solstice_optix_base} ${_solstice_optix_dir}/optix_trace.cuh
+            ${_solstice_optix_dir}/optix_work.cuh)
 
 solstice_optix_kernel(intersect_shadow
     ${_solstice_optix_dir}/optix_intersect_shadow.cu
     solsticeOptixIntersectShadowIr
-    DEPENDS ${_solstice_optix_base} ${_solstice_optix_dir}/optix_trace.cuh)
+    DEPENDS ${_solstice_optix_base} ${_solstice_optix_dir}/optix_trace.cuh
+            ${_solstice_optix_dir}/optix_work.cuh)
 
 solstice_optix_kernel(shade_surface
     ${_solstice_optix_dir}/optix_shade_surface.cu
@@ -237,6 +246,7 @@ solstice_optix_kernel(shade_surface
             ${_solstice_optix_dir}/optix_geom.cuh
             ${_solstice_optix_dir}/optix_bsdf.cuh
             ${_solstice_optix_dir}/optix_volume.cuh
+            ${_solstice_optix_dir}/optix_spawn.cuh
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
@@ -245,13 +255,15 @@ solstice_optix_kernel(shade_background
     ${_solstice_optix_dir}/optix_shade_background.cu
     solsticeOptixShadeBackgroundIr
     LIGHTS
-    DEPENDS ${_solstice_optix_base} ${CMAKE_SOURCE_DIR}/src/render/lights.h)
+    DEPENDS ${_solstice_optix_base} ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${_solstice_optix_dir}/optix_spawn.cuh)
 
 solstice_optix_kernel(shade_shadow
     ${_solstice_optix_dir}/optix_shade_shadow.cu
     solsticeOptixShadeShadowIr
     DEPENDS ${_solstice_optix_base}
             ${_solstice_optix_dir}/optix_volume.cuh
+            ${_solstice_optix_dir}/optix_spawn.cuh
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
@@ -261,9 +273,32 @@ solstice_optix_kernel(shade_volume
     LIGHTS
     DEPENDS ${_solstice_optix_base}
             ${_solstice_optix_dir}/optix_volume.cuh
+            ${_solstice_optix_dir}/optix_spawn.cuh
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h
             ${CMAKE_SOURCE_DIR}/src/render/lights.h)
+
+solstice_optix_kernel(path_tail
+    ${_solstice_optix_dir}/optix_path_tail.cu
+    solsticeOptixPathTailIr
+    LIGHTS
+    TIMEOUT 1800
+    DEPENDS ${_solstice_optix_base}
+            ${_solstice_optix_dir}/optix_trace.cuh
+            ${_solstice_optix_dir}/optix_geom.cuh
+            ${_solstice_optix_dir}/optix_bsdf.cuh
+            ${_solstice_optix_dir}/optix_volume.cuh
+            ${_solstice_optix_dir}/optix_work.cuh
+            ${_solstice_optix_dir}/optix_spawn.cuh
+            ${_solstice_optix_dir}/optix_intersect_closest.cu
+            ${_solstice_optix_dir}/optix_intersect_shadow.cu
+            ${_solstice_optix_dir}/optix_shade_surface.cu
+            ${_solstice_optix_dir}/optix_shade_volume.cu
+            ${_solstice_optix_dir}/optix_shade_background.cu
+            ${_solstice_optix_dir}/optix_shade_shadow.cu
+            ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
 get_property(_solstice_optix_kernels DIRECTORY PROPERTY SOLSTICE_OPTIX_KERNELS)
 get_property(SOLSTICE_OPTIX_EMBED_SOURCES DIRECTORY PROPERTY SOLSTICE_OPTIX_EMBED_SOURCES)
@@ -290,6 +325,10 @@ foreach(_name IN LISTS _solstice_optix_kernels)
     get_property(_ptx DIRECTORY PROPERTY SOLSTICE_OPTIX_PTX_${_name})
     get_property(_embed DIRECTORY PROPERTY SOLSTICE_OPTIX_EMBED_${_name})
     get_property(_defs DIRECTORY PROPERTY SOLSTICE_OPTIX_DEFS_${_name})
+    get_property(_timeout DIRECTORY PROPERTY SOLSTICE_OPTIX_TIMEOUT_${_name})
+    if(NOT _timeout)
+        set(_timeout 0)
+    endif()
     _solstice_json_escape(_ename "${_name}")
     _solstice_json_escape(_esrc "${_src}")
     _solstice_json_escape(_esym "${_sym}")
@@ -311,7 +350,7 @@ foreach(_name IN LISTS _solstice_optix_kernels)
     endif()
     set(_solstice_first_kernel FALSE)
     string(APPEND _solstice_json_kernels
-        "    {\"name\": \"${_ename}\", \"source\": \"${_esrc}\", \"ptx\": \"${_eptx}\", \"embed\": \"${_eembed}\", \"symbol\": \"${_esym}\", \"extra_flags\": ${_eflags}}")
+        "    {\"name\": \"${_ename}\", \"source\": \"${_esrc}\", \"ptx\": \"${_eptx}\", \"embed\": \"${_eembed}\", \"symbol\": \"${_esym}\", \"timeout_sec\": ${_timeout}, \"extra_flags\": ${_eflags}}")
 endforeach()
 
 _solstice_json_escape(_envcc "${CMAKE_CUDA_COMPILER}")

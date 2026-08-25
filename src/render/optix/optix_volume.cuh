@@ -1,6 +1,6 @@
 // GPU volume helpers. No optixTrace — used by shade_volume / shade_shadow / init.
-// Fog uses the same residual-ratio tracker as Embree (volume_track.h) on the
-// uploaded occupancy brick + CPU majorant / empty-skip grids.
+// Free-flight is Woodcock / delta tracking (warp-coherent). Shadow Tr stays
+// residual-ratio, matching Embree NEE. CPU PT is unchanged.
 #pragma once
 
 #include "render/optix/optix_wavefront.cuh"
@@ -132,7 +132,7 @@ __device__ inline MediumSample sampleGpuFogWl(const GpuVolumeGrid& g, const Medi
                                               const float* lambda, int n) {
     GpuFogGrid view;
     view.g = &g;
-    return sampleHeterogeneousFogWl(view, medium, origin, direction, tMax, rng, throughput, lambda, n);
+    return sampleHeterogeneousFogWlWoodcock(view, medium, origin, direction, tMax, rng, throughput, lambda, n);
 }
 
 __device__ inline Vec3 gpuVolumeShadowTr(const LaunchParams& params, Vec3 origin, Vec3 direction, float dist,

@@ -1,20 +1,14 @@
 // Cycles analogue: integrator_shade_volume.
-// Homogeneous media + VDB fog (hero-λ null-collision, same as Embree). No optixTrace.
+// Homogeneous media + VDB fog (hero-λ Woodcock on GPU). No optixTrace.
 #include "render/lights.h"
-#include "render/optix/optix_spectral_film.cuh"
+#include "render/optix/optix_spawn.cuh"
 #include "render/optix/optix_volume.cuh"
 
 namespace sol {
 
-extern "C" __global__ void __raygen__shade_volume() {
-    int x = 0, y = 0;
-    const int pixel = wavefrontPixel(x, y);
-    if (pixel < 0) return;
-
+__device__ inline void shadeVolumePixel(int pixel) {
     const LaunchParams& params = launchParams();
     GpuPath& path = params.paths[pixel];
-    if (path.queue != kQueueShadeVolume) return;
-
     const SceneView& scene = params.scene;
     GpuHit& hit = params.hits[pixel];
     GpuShadow& shadow = params.shadows[pixel];
@@ -47,7 +41,7 @@ extern "C" __global__ void __raygen__shade_volume() {
     if (ms.absorbed || specIsBlack(path.throughputS, path.nLambda) ||
         !specIsFinite(path.throughputS, path.nLambda) ||
         specMax(path.throughputS, path.nLambda) < 1e-20f) {
-        killPath(pixel, path);
+        terminatePath(pixel, path);
         return;
     }
 
@@ -87,13 +81,13 @@ extern "C" __global__ void __raygen__shade_volume() {
         ++path.depth;
         ++path.volumeScatters;
         if (path.depth >= srMax(1, scene.settings.maxDepth)) {
-            killPath(pixel, path);
+            terminatePath(pixel, path);
             return;
         }
         if (path.depth >= srMax(1, scene.settings.rrStartDepth)) {
             const float q = clampf(specMax(path.throughputS, path.nLambda), 0.05f, 1.0f);
             if (path.rng.nextFloat() > q) {
-                killPath(pixel, path);
+                terminatePath(pixel, path);
                 return;
             }
             specMulS(path.throughputS, 1.0f / q, path.nLambda);
@@ -104,7 +98,6 @@ extern "C" __global__ void __raygen__shade_volume() {
     }
 
     path.origin = path.origin + path.direction * ms.t;
-    // Exited the fog AABB before the surface — leave the medium (same as Embree).
     if (walk.type == 2 && (!hit.didHit || ms.t + 1e-4f < hit.t)) {
         path.mediumIndex = -1;
         ++path.hops;
@@ -114,5 +107,17 @@ extern "C" __global__ void __raygen__shade_volume() {
     }
     path.queue = hit.didHit ? kQueueShadeSurface : kQueueShadeBackground;
 }
+
+#ifndef SOLSTICE_OPTIX_OPS_ONLY
+extern "C" __global__ void __raygen__shade_volume() {
+    int x = 0, y = 0;
+    const int pixel = wavefrontPixel(x, y);
+    if (pixel < 0) return;
+    GpuPath& path = launchParams().paths[pixel];
+    if (!launchParams().compactLaunch && path.queue != kQueueShadeVolume) return;
+    shadeVolumePixel(pixel);
+    enqueuePathContinuation(pixel);
+}
+#endif
 
 }  // namespace sol

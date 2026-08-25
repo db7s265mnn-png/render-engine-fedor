@@ -49,6 +49,20 @@ struct alignas(16) LaunchParams {
     GpuPath* paths = nullptr;
     GpuHit* hits = nullptr;
     GpuShadow* shadows = nullptr;
+
+    // Compacted work queues (pixel indices). Host launches 1D on live count.
+    int* qIntersect = nullptr;
+    int* qIntersectNext = nullptr;
+    int* qVolume = nullptr;
+    int* qSurface = nullptr;
+    int* qBackground = nullptr;
+    int* qShadow = nullptr;
+    unsigned int* workCounts = nullptr;  // kSlotCount atomics
+    int* workItems = nullptr;            // queue this optixLaunch reads
+    int workCount = 0;                   // 1D launch width
+    int compactLaunch = 0;               // 1 = 1D workItems, 0 = 2D pixel grid
+    int batchSamples = 1;                // spp folded in this wavefront (regen)
+
     int width = 0;
     int height = 0;
     int pixelOffsetX = 0;

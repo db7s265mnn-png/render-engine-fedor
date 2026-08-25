@@ -170,8 +170,9 @@ def main(argv):
             extra = [f for f in (k.get("extra_flags") or []) if f]
             Path(ptx).parent.mkdir(parents=True, exist_ok=True)
             log.write("[%s/%s] nvcc %s" % (i, len(kernels), name))
+            k_timeout = int(k.get("timeout_sec") or 0) or timeout
             cmd = [nvcc] + common + extra + ["-o", ptx, source]
-            run_cmd(log, cmd, timeout, "nvcc %s" % name)
+            run_cmd(log, cmd, k_timeout, "nvcc %s" % name)
             if not Path(ptx).is_file():
                 log.write("FAILED missing PTX %s" % ptx)
                 raise SystemExit(1)

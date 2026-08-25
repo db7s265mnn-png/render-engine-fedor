@@ -3,19 +3,15 @@
 // BSDF bounce is hero-λ (Jakob / dielectric); NEE stays RGB then linear upsample (Embree).
 #include "render/lights.h"
 #include "render/optix/optix_geom.cuh"
+#include "render/optix/optix_spawn.cuh"
 #include "render/optix/optix_spectral.cuh"
 #include "render/optix/optix_volume.cuh"
 
 namespace sol {
 
-extern "C" __global__ void __raygen__shade_surface() {
-    int x = 0, y = 0;
-    const int pixel = wavefrontPixel(x, y);
-    if (pixel < 0) return;
-
+__device__ inline void shadeSurfacePixel(int pixel) {
     const LaunchParams& params = launchParams();
     GpuPath& path = params.paths[pixel];
-    if (path.queue != kQueueShadeSurface) return;
 
     const SceneView& scene = params.scene;
     const GpuHit& hit = params.hits[pixel];
@@ -24,7 +20,7 @@ extern "C" __global__ void __raygen__shade_surface() {
 
     Surf si;
     if (!buildSurf(scene, hit, path.origin, path.direction, si)) {
-        killPath(pixel, path);
+        terminatePath(pixel, path);
         return;
     }
 
@@ -95,12 +91,12 @@ extern "C" __global__ void __raygen__shade_surface() {
                 (path.depth > 0 && !path.specularBounce) ? scene.settings.clampDirect : 0.0f;
             addPathRadianceS(path, Le, weight * rgbScale, clampV);
         }
-        killPath(pixel, path);
+        terminatePath(pixel, path);
         return;
     }
 
     if (si.materialIndex < 0 || si.materialIndex >= scene.materialCount || !scene.materials) {
-        killPath(pixel, path);
+        terminatePath(pixel, path);
         return;
     }
 
@@ -123,7 +119,7 @@ extern "C" __global__ void __raygen__shade_surface() {
 
     const int maxDepth = srMax(1, scene.settings.maxDepth);
     if (path.depth >= maxDepth) {
-        killPath(pixel, path);
+        terminatePath(pixel, path);
         return;
     }
 
@@ -163,18 +159,18 @@ extern "C" __global__ void __raygen__shade_surface() {
         bsdfSampleSpectralGpu(mat, frame.toLocal(wo), path.rng.nextFloat(), path.rng.nextFloat(),
                               path.rng.nextFloat(), path.rng.nextFloat(), path, mat.ior);
     if (!bs.valid || bs.pdf <= 0.0f) {
-        killPath(pixel, path);
+        terminatePath(pixel, path);
         return;
     }
     const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
     if (!optixpt::shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) {
-        killPath(pixel, path);
+        terminatePath(pixel, path);
         return;
     }
 
     specMul(path.throughputS, bs.weight, path.nLambda);
     if (!specIsFinite(path.throughputS, path.nLambda) || specIsBlack(path.throughputS, path.nLambda)) {
-        killPath(pixel, path);
+        terminatePath(pixel, path);
         return;
     }
     path.origin = offsetRay(si.p, si.ng, wiWorld);
@@ -201,7 +197,7 @@ extern "C" __global__ void __raygen__shade_surface() {
     if (path.depth >= srMax(1, scene.settings.rrStartDepth)) {
         const float q = clampf(specMax(path.throughputS, path.nLambda), 0.05f, 1.0f);
         if (path.rng.nextFloat() > q) {
-            killPath(pixel, path);
+            terminatePath(pixel, path);
             return;
         }
         specMulS(path.throughputS, 1.0f / q, path.nLambda);
@@ -209,5 +205,17 @@ extern "C" __global__ void __raygen__shade_surface() {
 
     path.queue = kQueueIntersectClosest;
 }
+
+#ifndef SOLSTICE_OPTIX_OPS_ONLY
+extern "C" __global__ void __raygen__shade_surface() {
+    int x = 0, y = 0;
+    const int pixel = wavefrontPixel(x, y);
+    if (pixel < 0) return;
+    GpuPath& path = launchParams().paths[pixel];
+    if (!launchParams().compactLaunch && path.queue != kQueueShadeSurface) return;
+    shadeSurfacePixel(pixel);
+    enqueuePathContinuation(pixel);
+}
+#endif
 
 }  // namespace sol

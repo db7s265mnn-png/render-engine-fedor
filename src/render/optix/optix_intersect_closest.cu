@@ -1,17 +1,12 @@
 // Cycles analogue: __raygen__kernel_optix_integrator_intersect_closest
 #include "render/optix/optix_trace.cuh"
+#include "render/optix/optix_work.cuh"
 
 namespace sol {
 
-extern "C" __global__ void __raygen__intersect_closest() {
-    int x = 0, y = 0;
-    const int pixel = wavefrontPixel(x, y);
-    if (pixel < 0) return;
-
+__device__ inline void intersectClosestPixel(int pixel) {
     const LaunchParams& params = launchParams();
     GpuPath& path = params.paths[pixel];
-    if (path.queue != kQueueIntersectClosest) return;
-
     GpuHit& hit = params.hits[pixel];
     traceClosest(path.origin, path.direction, kFloatMax, hit);
     if (path.mediumIndex >= 0) {
@@ -20,5 +15,18 @@ extern "C" __global__ void __raygen__intersect_closest() {
         path.queue = hit.didHit ? kQueueShadeSurface : kQueueShadeBackground;
     }
 }
+
+#ifndef SOLSTICE_OPTIX_OPS_ONLY
+extern "C" __global__ void __raygen__intersect_closest() {
+    int x = 0, y = 0;
+    const int pixel = wavefrontPixel(x, y);
+    if (pixel < 0) return;
+
+    GpuPath& path = launchParams().paths[pixel];
+    if (!launchParams().compactLaunch && path.queue != kQueueIntersectClosest) return;
+    intersectClosestPixel(pixel);
+    enqueuePathContinuation(pixel);
+}
+#endif
 
 }  // namespace sol

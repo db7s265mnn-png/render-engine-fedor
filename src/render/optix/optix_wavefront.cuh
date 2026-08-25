@@ -8,6 +8,15 @@ namespace sol {
 __device__ inline int wavefrontPixel(int& x, int& y) {
     const LaunchParams& p = launchParams();
     const uint3 li = optixGetLaunchIndex();
+    if (p.compactLaunch && p.workItems) {
+        if (li.x >= (unsigned)srMax(0, p.workCount)) return -1;
+        const int pixel = p.workItems[li.x];
+        if (pixel < 0 || !p.paths || !p.hits || !p.shadows || !p.accumBuffer) return -1;
+        if (p.width <= 0 || pixel >= p.width * p.height) return -1;
+        x = pixel % p.width;
+        y = pixel / p.width;
+        return pixel;
+    }
     x = int(li.x) + p.pixelOffsetX;
     y = int(li.y) + p.pixelOffsetY;
     if (x >= p.width || y >= p.height || !p.paths || !p.hits || !p.shadows || !p.accumBuffer)

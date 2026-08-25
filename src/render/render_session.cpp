@@ -378,16 +378,20 @@ void RenderSession::threadMain() {
             };
         }
 
-        RenderSampleOptions xpuOpt;
+        RenderSampleOptions opt;
         const bool xpu = scene->settings.backend == kBackendXpu;
+        const bool gpu = scene->settings.backend == kBackendGpuOptix;
         if (xpu) {
-            xpuOpt.xpuRemainingSamples = targetSamples - sample;
-            xpuOpt.xpuTargetSamples = targetSamples;
-            xpuOpt.xpuSchedule = scene->settings.xpuSchedule;
+            opt.xpuRemainingSamples = targetSamples - sample;
+            opt.xpuTargetSamples = targetSamples;
+            opt.xpuSchedule = scene->settings.xpuSchedule;
+        } else if (gpu) {
+            opt.xpuRemainingSamples = targetSamples - sample;
         }
 
         try {
-            device_->renderSample(framebuffer_, sample, cancel_, midProgress, xpu ? &xpuOpt : nullptr);
+            device_->renderSample(framebuffer_, sample, cancel_, midProgress,
+                                  (xpu || gpu) ? &opt : nullptr);
         } catch (const std::exception& ex) {
             const int backend = scene->settings.backend;
             const std::string prefix = backend == kBackendXpu

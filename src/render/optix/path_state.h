@@ -20,6 +20,16 @@ enum PathQueue : int {
     kQueueShadeVolume = 4,
 };
 
+enum WorkSlot : int {
+    kSlotIntersect = 0,
+    kSlotVolume = 1,
+    kSlotSurface = 2,
+    kSlotBackground = 3,
+    kSlotShadow = 4,
+    kSlotIntersectNext = 5,
+    kSlotCount = 6
+};
+
 enum ShadowQueue : int {
     kShadowIdle = 0,
     kShadowTrace = 1,
@@ -52,6 +62,9 @@ struct GpuPath {
     int specularBounce = 1;
     int mediumIndex = -1;
     int volumeScatters = 0;
+    int localSample = 0;  // 0 .. batchSamples-1 when regenerating into the next spp
+    // AoS on purpose: compacted queues gather random pixels, so SoA would not
+    // coalesce those loads. Do not split this struct into pointer arrays.
     Rng rng;
 };
 

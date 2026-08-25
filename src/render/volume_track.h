@@ -1,4 +1,6 @@
 // Heterogeneous fog free-flight + residual-ratio shadow Tr (PBRT 4ed §11.2).
+// Embree / SpectralPathIntegrator uses residual-ratio (sampleHeterogeneousFogWl
+// / sampleHeterogeneousFogSpectral). OptiX free-flight uses Woodcock.
 // Shared by Embree (OpenVDB) and OptiX (uploaded occupancy + the same majorant
 // bricks). Grid adapters must expose:
 //   Vec3 bmin()/bmax(), float majorant()
@@ -446,6 +448,76 @@ SR_INL SR_HD MediumSample sampleHeterogeneousFogWl(const Grid& grid, const Mediu
         }
         if (leftCell) continue;
         break;
+    }
+    out.t = tMax;
+    return out;
+}
+
+// GPU fog: Woodcock / delta tracking on the cell majorant. Same unbiased null-collision
+// as the residual-ratio walk, without the nested residual loop (warp-divergent on OptiX).
+template <typename Grid>
+SR_INL SR_HD MediumSample sampleHeterogeneousFogWlWoodcock(const Grid& grid, const MediumData& medium,
+                                                          Vec3 origin, Vec3 direction, float tMax, Rng& rng,
+                                                          float* throughput, const float* lambda, int n) {
+    MediumSample out;
+    if (tMax <= 0.0f || n <= 0) {
+        out.t = tMax;
+        return out;
+    }
+    float aabbEnter = 0.0f;
+    float aabbExit = tMax;
+    if (rayAabbInterval(origin, direction, grid.bmin(), grid.bmax(), aabbEnter, aabbExit))
+        tMax = srMin(tMax, srMax(0.0f, aabbExit));
+    if (tMax <= 0.0f) {
+        out.t = 0.0f;
+        return out;
+    }
+    float t = srMax(0.0f, aabbEnter);
+    if (t >= tMax) {
+        out.t = tMax;
+        return out;
+    }
+
+    const float densityScale = srMax(0.0f, medium.density);
+    float sigT0[kMaxSpectrumSamples];
+    specUpsampleLinear(medium.sigmaA + medium.sigmaS, lambda, n, sigT0);
+    float baseMaj = 0.0f;
+    for (int i = 0; i < n; ++i) baseMaj = srMax(baseMaj, sigT0[i]);
+    if (baseMaj <= 1e-12f || densityScale <= 0.0f) {
+        out.t = tMax;
+        return out;
+    }
+
+    for (int iter = 0; iter < kNullCollisionMaxIters && t < tMax; ++iter) {
+        const Vec3 pLook = origin + direction * (t + 1e-5f);
+        if (grid.hasMajorantBricks() && grid.brickEmpty(pLook)) {
+            const float tBr = grid.brickExitT(origin, direction, t, tMax);
+            t = (tBr > t) ? tBr : t + 1e-4f;
+            continue;
+        }
+        float minD = 0.0f;
+        float maxD = grid.majorant();
+        grid.occupancy(pLook, minD, maxD);
+        const float tCell = grid.hasMajorantGrid() ? grid.cellExitT(origin, direction, t, tMax) : tMax;
+        if (!(tCell > t)) {
+            t += 1e-4f;
+            continue;
+        }
+        if (maxD <= 1e-8f) {
+            t = tCell;
+            continue;
+        }
+        const float majorant = srMax(1e-8f, baseMaj * maxD * densityScale);
+        const float u = srMax(1e-6f, 1.0f - rng.nextFloat());
+        const float tHit = t + (-logf(u) / majorant);
+        if (tHit >= tCell) {
+            t = tCell;
+            continue;
+        }
+        const float occ = clampf(grid.sampleOcc(origin + direction * tHit), minD, maxD);
+        if (fogCollideWl(medium, densityScale, occ, majorant, tHit, rng, throughput, lambda, n, out))
+            return out;
+        t = tHit;
     }
     out.t = tMax;
     return out;

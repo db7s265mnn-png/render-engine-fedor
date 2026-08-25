@@ -2,7 +2,8 @@
 //
 // Geometry acceleration structures are built per mesh and instanced through a
 // top level IAS, mirroring the Embree backend so both produce the same image.
-// Each sample launches init → (intersect_closest → shade → intersect_shadow)*
+// Compacted 1D work queues (live pixel lists) + Iray-style tail megakernel
+// when live paths fit on the SMs. Shade kernels never call optixTrace.
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_OPTIX
@@ -48,6 +49,8 @@ extern "C" const unsigned char solsticeOptixShadeShadowIr[];
 extern "C" const unsigned long long solsticeOptixShadeShadowIrSize;
 extern "C" const unsigned char solsticeOptixShadeVolumeIr[];
 extern "C" const unsigned long long solsticeOptixShadeVolumeIrSize;
+extern "C" const unsigned char solsticeOptixPathTailIr[];
+extern "C" const unsigned long long solsticeOptixPathTailIrSize;
 extern "C" const unsigned char solsticeOptixHitIr[];
 extern "C" const unsigned long long solsticeOptixHitIrSize;
 
@@ -205,6 +208,7 @@ enum RaygenId : int {
     kRgShadeBackground,
     kRgShadeShadow,
     kRgShadeVolume,
+    kRgPathTail,
     kRgCount
 };
 
@@ -216,6 +220,7 @@ enum ModuleId : int {
     kModShadeBackground,
     kModShadeShadow,
     kModShadeVolume,
+    kModPathTail,
     kModHit,
     kModCount
 };
@@ -231,6 +236,7 @@ public:
     bool isAvailable() const override { return initialized_; }
 
     double lastGpuSampleMs() const override { return lastGpuSampleMs_; }
+    int lastCompletedSamples() const override { return lastCompletedSamples_; }
 
     bool initialize(std::string& error) {
         try {
@@ -246,6 +252,7 @@ public:
             cudaDeviceProp properties{};
             CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
             deviceName_ = properties.name;
+            tailThreshold_ = std::max(4096, properties.multiProcessorCount * 1024);
 
             OPTIX_CHECK(optixInit());
 
@@ -267,7 +274,8 @@ public:
             initialized_ = true;
             logInfo("OptiX backend initialised on " + deviceName_ +
                     " (" + std::to_string(properties.multiProcessorCount) +
-                    " SMs, spectral wavefront PT: hero-λ + Jakob/D60 film + GPU volumes, LaunchParams " +
+                    " SMs, compacted spectral PT, tail megakernel @" +
+                    std::to_string(tailThreshold_) + " live, LaunchParams " +
                     std::to_string(sizeof(LaunchParams)) + " bytes)");
             logInfo("OptiX submits CUDA/Compute work. Windows Task Manager defaults to the 3D graph "
                     "(~0% for path tracing) — switch a GPU graph to CUDA or Compute_0, or watch the HUD ms.");
@@ -566,11 +574,19 @@ public:
             }
             if (pathBuffer_.size() != pixelCount * sizeof(GpuPath) ||
                 hitBuffer_.size() != pixelCount * sizeof(GpuHit) ||
-                shadowBuffer_.size() != pixelCount * sizeof(GpuShadow)) {
+                shadowBuffer_.size() != pixelCount * sizeof(GpuShadow) ||
+                qIntersect_.size() != pixelCount * sizeof(int)) {
                 destroyGraph();
                 pathBuffer_.alloc(pixelCount * sizeof(GpuPath));
                 hitBuffer_.alloc(pixelCount * sizeof(GpuHit));
                 shadowBuffer_.alloc(pixelCount * sizeof(GpuShadow));
+                qIntersect_.alloc(pixelCount * sizeof(int));
+                qIntersectNext_.alloc(pixelCount * sizeof(int));
+                qVolume_.alloc(pixelCount * sizeof(int));
+                qSurface_.alloc(pixelCount * sizeof(int));
+                qBackground_.alloc(pixelCount * sizeof(int));
+                qShadow_.alloc(pixelCount * sizeof(int));
+                workCounts_.alloc(sizeof(unsigned) * unsigned(kSlotCount));
                 CUDA_CHECK(cudaMemsetAsync(pathBuffer_.as<void>(), 0, pathBuffer_.size(), stream_));
                 CUDA_CHECK(cudaMemsetAsync(hitBuffer_.as<void>(), 0, hitBuffer_.size(), stream_));
                 CUDA_CHECK(cudaMemsetAsync(shadowBuffer_.as<void>(), 0, shadowBuffer_.size(), stream_));
@@ -614,6 +630,21 @@ public:
             launchParams.paths = pathBuffer_.as<GpuPath>();
             launchParams.hits = hitBuffer_.as<GpuHit>();
             launchParams.shadows = shadowBuffer_.as<GpuShadow>();
+            launchParams.qIntersect = qIntersect_.as<int>();
+            launchParams.qIntersectNext = qIntersectNext_.as<int>();
+            launchParams.qVolume = qVolume_.as<int>();
+            launchParams.qSurface = qSurface_.as<int>();
+            launchParams.qBackground = qBackground_.as<int>();
+            launchParams.qShadow = qShadow_.as<int>();
+            launchParams.workCounts = workCounts_.as<unsigned int>();
+            launchParams.workItems = nullptr;
+            launchParams.workCount = 0;
+            launchParams.compactLaunch = 0;
+            int batch = 1;
+            if (!opt.deferHostCopy && opt.xpuRemainingSamples > 1 && sampleIndex >= 4)
+                batch = std::min(8, opt.xpuRemainingSamples);
+            launchParams.batchSamples = batch;
+            lastCompletedSamples_ = batch;
             launchParams.width = width;
             launchParams.height = height;
             launchParams.pixelOffsetX = offX;
@@ -626,18 +657,17 @@ public:
             launchParams.volumeCount = gpuVolumeCount_;
 
             if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
-            CUDA_CHECK(cudaMemcpyAsync(launchParamsBuffer_.as<void>(), &launchParams, sizeof(LaunchParams),
-                                       cudaMemcpyHostToDevice, stream_));
 
             const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
-            const int maxIters = maxDepth + 18;
+            const int maxIters = batch * (maxDepth + 18);
 
             const auto wall0 = std::chrono::steady_clock::now();
             CUDA_CHECK(cudaEventRecord(gpuStartEvent_, stream_));
-            // Queue every wavefront stage on `stream_` and sync once at the end.
-            // Capturing optixLaunch into a CUDA graph (CaptureModeGlobal) returns
-            // OPTIX_ERROR_CUDA_ERROR (7900) on current Windows OptiX/driver stacks.
-            launchBounceLoop(unsigned(launchW), unsigned(launchH), maxIters);
+            int launches = 0;
+            // CUDA graphs cannot capture variable 1D sizes; previous Windows
+            // CaptureModeGlobal also returned OPTIX_ERROR_CUDA_ERROR (7900).
+            launchCompactWavefront(launchParams, unsigned(launchW), unsigned(launchH), maxIters, cancel,
+                                   launches);
             CUDA_CHECK(cudaEventRecord(gpuStopEvent_, stream_));
             if (!opt.deferHostCopy) {
                 if (opt.skipFramebufferStore) {
@@ -674,8 +704,8 @@ public:
                 msg.setf(std::ios::fixed);
                 msg.precision(2);
                 msg << "OptiX GPU " << lastGpuSampleMs_ << " ms  wall " << wallMs << " ms  " << deviceName_
-                    << "  " << width << "x" << height << "  wavefront=" << (1 + 6 * maxIters)
-                    << " launches/spp";
+                    << "  " << width << "x" << height << "  compacted=" << launches
+                    << " launches  batch=" << batch;
                 logInfo(msg.str());
             }
 
@@ -746,7 +776,7 @@ private:
     void launchKernel(int raygenIndex, unsigned width, unsigned height) {
         static const char* kNames[kRgCount] = {
             "init_from_camera", "intersect_closest", "intersect_shadow", "shade_surface",
-            "shade_background",  "shade_shadow",     "shade_volume",
+            "shade_background",  "shade_shadow",     "shade_volume",     "path_tail",
         };
         const OptixResult result =
             optixLaunch(pipeline_, stream_, launchParamsBuffer_.device(), sizeof(LaunchParams),
@@ -758,15 +788,86 @@ private:
         }
     }
 
-    void launchBounceLoop(unsigned width, unsigned height, int maxIters) {
-        launchKernel(kRgInit, width, height);
-        for (int i = 0; i < maxIters; ++i) {
-            launchKernel(kRgIntersectClosest, width, height);
-            launchKernel(kRgShadeVolume, width, height);
-            launchKernel(kRgShadeBackground, width, height);
-            launchKernel(kRgShadeSurface, width, height);
-            launchKernel(kRgIntersectShadow, width, height);
-            launchKernel(kRgShadeShadow, width, height);
+    void uploadLaunch(const LaunchParams& lp) {
+        CUDA_CHECK(cudaMemcpyAsync(launchParamsBuffer_.as<void>(), &lp, sizeof(LaunchParams),
+                                   cudaMemcpyHostToDevice, stream_));
+    }
+
+    void pullWorkCounts(unsigned host[kSlotCount]) {
+        CUDA_CHECK(cudaMemcpyAsync(host, workCounts_.as<void>(), sizeof(unsigned) * unsigned(kSlotCount),
+                                   cudaMemcpyDeviceToHost, stream_));
+        CUDA_CHECK(cudaStreamSynchronize(stream_));
+    }
+
+    void launchCompact(LaunchParams& lp, int raygen, int* queue, unsigned count) {
+        if (count == 0) return;
+        lp.compactLaunch = 1;
+        lp.workItems = queue;
+        lp.workCount = int(count);
+        uploadLaunch(lp);
+        launchKernel(raygen, count, 1);
+    }
+
+    void launchCompactWavefront(LaunchParams& lp, unsigned launchW, unsigned launchH, int maxIters,
+                                const std::atomic<bool>& cancel, int& launches) {
+        launches = 0;
+        CUDA_CHECK(cudaMemsetAsync(workCounts_.as<void>(), 0, workCounts_.size(), stream_));
+        lp.compactLaunch = 0;
+        lp.workItems = nullptr;
+        lp.workCount = 0;
+        uploadLaunch(lp);
+        launchKernel(kRgInit, launchW, launchH);
+        ++launches;
+        unsigned counts[kSlotCount] = {};
+        pullWorkCounts(counts);
+        unsigned nI = counts[kSlotIntersect];
+
+        for (int iter = 0; iter < maxIters; ++iter) {
+            if (cancel.load(std::memory_order_relaxed)) break;
+            if (nI == 0) break;
+
+            CUDA_CHECK(cudaMemsetAsync(workCounts_.as<void>(), 0, workCounts_.size(), stream_));
+            launchCompact(lp, kRgIntersectClosest, lp.qIntersect, nI);
+            ++launches;
+            pullWorkCounts(counts);
+            const unsigned nV = counts[kSlotVolume];
+            unsigned nS = counts[kSlotSurface];
+            unsigned nB = counts[kSlotBackground];
+
+            if (nV) {
+                launchCompact(lp, kRgShadeVolume, lp.qVolume, nV);
+                ++launches;
+                pullWorkCounts(counts);
+                nS = counts[kSlotSurface];
+                nB = counts[kSlotBackground];
+            }
+            if (nB) {
+                launchCompact(lp, kRgShadeBackground, lp.qBackground, nB);
+                ++launches;
+            }
+            if (nS) {
+                launchCompact(lp, kRgShadeSurface, lp.qSurface, nS);
+                ++launches;
+            }
+            if (nV || nB || nS) pullWorkCounts(counts);
+            const unsigned nSh = counts[kSlotShadow];
+            nI = counts[kSlotIntersectNext];
+            if (nSh) {
+                launchCompact(lp, kRgIntersectShadow, lp.qShadow, nSh);
+                launchCompact(lp, kRgShadeShadow, lp.qShadow, nSh);
+                launches += 2;
+                // Dead paths with a pending NEE regenerate only after shade_shadow.
+                pullWorkCounts(counts);
+                nI = counts[kSlotIntersectNext];
+            }
+            std::swap(lp.qIntersect, lp.qIntersectNext);
+
+            if (nI == 0) break;
+            if (int(nI) <= tailThreshold_) {
+                launchCompact(lp, kRgPathTail, lp.qIntersect, nI);
+                ++launches;
+                break;
+            }
         }
     }
 
@@ -958,6 +1059,7 @@ private:
             solsticeOptixShadeBackgroundIr,
             solsticeOptixShadeShadowIr,
             solsticeOptixShadeVolumeIr,
+            solsticeOptixPathTailIr,
             solsticeOptixHitIr,
         };
         const unsigned long long irSize[kModCount] = {
@@ -968,6 +1070,7 @@ private:
             solsticeOptixShadeBackgroundIrSize,
             solsticeOptixShadeShadowIrSize,
             solsticeOptixShadeVolumeIrSize,
+            solsticeOptixPathTailIrSize,
             solsticeOptixHitIrSize,
         };
         for (int i = 0; i < kModCount; ++i) loadModule(ir[i], irSize[i], modules_[i]);
@@ -976,7 +1079,7 @@ private:
         const char* raygenNames[kRgCount] = {
             "__raygen__init_from_camera",     "__raygen__intersect_closest", "__raygen__intersect_shadow",
             "__raygen__shade_surface",        "__raygen__shade_background",  "__raygen__shade_shadow",
-            "__raygen__shade_volume",
+            "__raygen__shade_volume",         "__raygen__path_tail",
         };
         for (int i = 0; i < kRgCount; ++i) {
             OptixProgramGroupDesc raygenDesc{};
@@ -1033,7 +1136,7 @@ private:
         // IAS→GAS is two traversables. Depth 1 is OPTIX_ERROR_INVALID_VALUE (7001)
         // with ALLOW_SINGLE_LEVEL_INSTANCING.
         constexpr unsigned int kTraversableGraphDepth = 2;
-        if (continuationStack < 4096u) continuationStack = 4096u;
+        if (continuationStack < 8192u) continuationStack = 8192u;
         OPTIX_CHECK(optixPipelineSetStackSize(pipeline_, directCallableFromTraversal, directCallableFromState,
                                               continuationStack, kTraversableGraphDepth));
 
@@ -1116,6 +1219,13 @@ private:
         pathBuffer_.free();
         hitBuffer_.free();
         shadowBuffer_.free();
+        qIntersect_.free();
+        qIntersectNext_.free();
+        qVolume_.free();
+        qSurface_.free();
+        qBackground_.free();
+        qShadow_.free();
+        workCounts_.free();
         launchParamsBuffer_.free();
         raygenRecordBuffer_.free();
         missRecordBuffer_.free();
@@ -1149,6 +1259,8 @@ private:
     bool warnedOptics_ = false;
     bool warnedVolumes_ = false;
     double lastGpuSampleMs_ = 0.0;
+    int lastCompletedSamples_ = 1;
+    int tailThreshold_ = 65536;
     int accumWidth_ = 0;
     int accumHeight_ = 0;
     std::string deviceName_;
@@ -1173,6 +1285,7 @@ private:
     DeviceBuffer raygenRecordBuffer_, missRecordBuffer_, hitRecordBuffer_;
     DeviceBuffer launchParamsBuffer_, accumBuffer_, lumSqBuffer_, skipMaskBuffer_;
     DeviceBuffer pathBuffer_, hitBuffer_, shadowBuffer_;
+    DeviceBuffer qIntersect_, qIntersectNext_, qVolume_, qSurface_, qBackground_, qShadow_, workCounts_;
     DeviceBuffer jakobAlbedoScale_, jakobAlbedoCoeffs_, jakobIllumScale_, jakobIllumCoeffs_;
     DeviceBuffer jakobAcesAlbedoScale_, jakobAcesAlbedoCoeffs_, jakobAcesIllumScale_, jakobAcesIllumCoeffs_;
     DeviceBuffer cieX_, cieY_, cieZ_, illumD65_, illumD60_;

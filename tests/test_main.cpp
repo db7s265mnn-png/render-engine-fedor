@@ -44,6 +44,8 @@
 #include "render/physical_sky.h"
 #include "render/render_session.h"
 #include "render/shading.h"
+#include "render/volume.h"
+#include "render/volume_track.h"
 #include "render/volume_vdb.h"
 #include "render/xpu_split.h"
 #include "render/pixel_oracle.h"
@@ -5736,6 +5738,51 @@ void testFogAabbProxyEnterExit() {
     check(medium == -1, "missing grid does not enter a medium");
 }
 
+// GPU Woodcock walk lives in the shared header; instantiate it on CPU so a
+// template error fails Embree tests instead of the user's nvcc.
+struct DummyFogGrid {
+    Vec3 bmin() const { return Vec3(-1.0f); }
+    Vec3 bmax() const { return Vec3(1.0f); }
+    float majorant() const { return 1.0f; }
+    bool hasMajorantGrid() const { return false; }
+    bool hasMajorantBricks() const { return false; }
+    bool brickEmpty(Vec3) const { return false; }
+    float brickExitT(Vec3, Vec3, float, float tMax) const { return tMax; }
+    void occupancy(Vec3, float& minD, float& maxD) const {
+        minD = 0.0f;
+        maxD = 1.0f;
+    }
+    float cellExitT(Vec3, Vec3, float, float tMax) const { return tMax; }
+    float sampleOcc(Vec3) const { return 0.5f; }
+};
+
+void testFogWoodcockHeader() {
+    std::printf("fog Woodcock header\n");
+    DummyFogGrid grid;
+    MediumData med{};
+    med.type = 2;
+    med.sigmaA = Vec3(0.1f);
+    med.sigmaS = Vec3(0.4f);
+    med.density = 1.0f;
+    Rng rng(1u, 1u);
+    float lambda[4] = {450.0f, 500.0f, 550.0f, 600.0f};
+    float trWood[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float trRes[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    const MediumSample wood =
+        sampleHeterogeneousFogWlWoodcock(grid, med, Vec3(-2.0f, 0.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f),
+                                         4.0f, rng, trWood, lambda, 4);
+    Rng rng2(1u, 1u);
+    const MediumSample residual =
+        sampleHeterogeneousFogWl(grid, med, Vec3(-2.0f, 0.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f), 4.0f,
+                                 rng2, trRes, lambda, 4);
+    check(std::isfinite(wood.t) && wood.t >= 0.0f, "Woodcock free-flight t is finite");
+    check(std::isfinite(residual.t) && residual.t >= 0.0f, "residual-ratio free-flight t is finite");
+    for (int i = 0; i < 4; ++i) {
+        check(std::isfinite(trWood[i]) && trWood[i] >= 0.0f, "Woodcock throughput finite");
+        check(std::isfinite(trRes[i]) && trRes[i] >= 0.0f, "residual-ratio throughput finite");
+    }
+}
+
 void testNgonTriangulateAndVdb() {
     std::printf("n-gon triangulate + OpenVDB\n");
     // Concave quad (arrowhead) — fan would flip; earcut should keep area positive.
@@ -6635,6 +6682,7 @@ int main() {
     if (getenv("SOL_ONLY_VDB")) {
         registerBuiltinNodes();
         testFogAabbProxyEnterExit();
+        testFogWoodcockHeader();
         testNgonTriangulateAndVdb();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
@@ -6734,6 +6782,7 @@ int main() {
     testBdptShadersAndSss();
     testBinaryUsdLoad();
     testFogAabbProxyEnterExit();
+    testFogWoodcockHeader();
     testNgonTriangulateAndVdb();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
