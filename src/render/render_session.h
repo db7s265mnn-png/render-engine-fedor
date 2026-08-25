@@ -37,8 +37,8 @@ public:
     // sample and restart accumulation on the *render* thread (no UI-thread join).
     // Call after mutating scene->camera (etc.). If idle, falls back to update+start.
     void pushInteractiveRestart();
-    // Mouse-drag orbit/pan/dolly: 1/4-res, maxDepth 1, no volumes. Display-only —
-    // release wipes the film and restarts full-quality PT. Wheel dolly stays full-res.
+    // Mouse-drag orbit/pan/dolly: same scene at 1/4 film, 1 spp. Display-only —
+    // release wipes and restarts full-res. Wheel dolly stays full-res, 1 spp.
     void setInteractivePreview(bool on);
     bool interactivePreview() const { return interactivePreview_.load(std::memory_order_relaxed); }
     // Stop the render thread and free *all* previous-render state: device BVH,

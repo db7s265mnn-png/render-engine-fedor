@@ -39,21 +39,9 @@ struct RenderSampleOptions {
     bool deferHostCopy = false;         // OptiX: skip D2H; caller downloads the batch
     bool skipPhotonRebuild = false;     // Embree: keep the photon map from an earlier tile
     bool skipGuidingCommit = false;     // Embree: delay OpenPGL commit until finishSample()
-    // Display-only tumble proxy (never mixed into the settled beauty accum).
+    // Same integrator / scene; session shrank the film. Forces 1 spp present.
     bool navPreview = false;
-    int maxDepthOverride = 0;           // 0 = scene maxDepth
-    bool skipVolumes = false;
 };
-
-inline void applyNavPreview(SceneView& scene, const RenderSampleOptions& opt) {
-    if (opt.maxDepthOverride > 0) scene.settings.maxDepth = opt.maxDepthOverride;
-    if (opt.skipVolumes) {
-        scene.volumeCount = 0;
-        scene.volumes = nullptr;
-        scene.mediumCount = 0;
-        scene.media = nullptr;
-    }
-}
 
 class RenderDevice {
 public:

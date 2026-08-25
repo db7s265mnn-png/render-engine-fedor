@@ -426,9 +426,6 @@ void RenderSession::threadMain() {
         }
         if (preview) {
             opt.navPreview = true;
-            opt.maxDepthOverride = 1;
-            opt.skipVolumes = true;
-            opt.skipPhotonRebuild = true;
             opt.xpuRemainingSamples = 1;
         }
 

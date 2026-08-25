@@ -70,15 +70,6 @@ public:
         if (fb.width() <= 0 || fb.height() <= 0) return;
 
         const RenderSampleOptions opt = options ? *options : RenderSampleOptions{};
-        if (opt.navPreview) {
-            stopGpuWorker();
-            RenderSampleOptions previewOpt = opt;
-            previewOpt.xpuRemainingSamples = 1;
-            if (gpu_) gpu_->renderSample(fb, sampleIndex, cancel, midProgress, &previewOpt);
-            else cpu_->renderSample(fb, sampleIndex, cancel, midProgress, &previewOpt);
-            lastCompletedSamples_ = std::max(1, gpu_ ? gpu_->lastCompletedSamples() : 1);
-            return;
-        }
         if (opt.xpuSchedule == kXpuScheduleMixture) {
             renderMixture(fb, sampleIndex, cancel, midProgress, opt);
             return;

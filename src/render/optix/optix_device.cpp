@@ -655,17 +655,10 @@ public:
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
             launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();
             launchParams.volumeCount = gpuVolumeCount_;
-            applyNavPreview(launchParams.scene, opt);
-            if (opt.skipVolumes) {
-                launchParams.volumeCount = 0;
-                launchParams.volumes = nullptr;
-            }
 
             if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
 
-            const int maxDepth = launchParams.scene.settings.maxDepth > 0
-                                     ? launchParams.scene.settings.maxDepth
-                                     : 1;
+            const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
 
             const auto wall0 = std::chrono::steady_clock::now();
             CUDA_CHECK(cudaEventRecord(gpuStartEvent_, stream_));
