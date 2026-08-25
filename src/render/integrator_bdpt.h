@@ -1065,7 +1065,8 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             // (floor→camera occluded) — MNEE owns that family. On open floor
             // the same glass block is already handled by t=1 splats; skip MNEE
             // there to avoid double-counting.
-            if (!(glassPath && eyeThroughSpec) || photonEngine) continue;
+            if (!causticsUseMnee(settings, &scene) || photonEngine) continue;
+            if (!(glassPath && eyeThroughSpec)) continue;
             // Radiance / intensity as expected by manifoldConnect (not /r²).
             const Vec3 LeMnee =
                 l.type == kLightPoint ? l.emittedRadiance() : lightRadiance(l);

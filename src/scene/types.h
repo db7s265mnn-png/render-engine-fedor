@@ -108,13 +108,14 @@ struct Material {
     int subdivIterations = 0;   // authored on geometry; densify may ignore under Screen Adaptive
     int autobump = 1;           // Pref-space displace normal (Arnold-like), all ray types
     int displacementVector = 0; // 0 = along normal (float), 1 = vector displace
-    // PT Spectral metal complex IOR (RGB ≈ η/κ at ~650/550/450 nm). Used only by
-    // the spectral integrator; RGB Path Tracer ignores these.
+    // Spectral metal complex IOR (RGB ≈ η/κ at ~650/550/450 nm). Used by the
+    // hero-λ Path Tracer / BDPT; RGB MNEE / Photon paths ignore these.
     Vec3 conductorEta{1.5f, 1.5f, 1.5f};
     Vec3 conductorK{0.0f, 0.0f, 0.0f};
 
-    // Chromatic dispersion of the transmission lobe (Abbe number, Arnold-style
-    // `dispersion_abbe`): 0 = off; typical glass 20–60, lower = stronger rainbow.
+    // Chromatic dispersion of the transmission lobe (Abbe Vd). 0 = off (constant
+    // η). Default matches crown / clear-glass presets; lower = stronger rainbow.
+    // pbrt-v4 uses a tabulated Spectrum eta — Cauchy(nd, Vd) is the UI mapping.
     float dispersionAbbe = 0.0f;
     // Thin-film iridescence on the specular reflection lobe (soap bubble / oil):
     // film thickness in nanometres (0 = off) and film IOR.
@@ -432,31 +433,35 @@ enum XpuSchedule : int {
     kXpuScheduleOverlap = 0,
     kXpuScheduleMixture = 1,
 };
-// BDPT / spectral / wireframe are CPU / Embree only; GPU and XPU require Path Tracer
+// Crown-glass Abbe Vd (MaterialX `dispersion_abbe` default). 0 on the port still
+// means “off”. Typical range 20–90; BK7 is ~64.
+constexpr float kDispersionAbbeDefault = 55.0f;
+
+// BDPT / wireframe are CPU / Embree only; GPU and XPU require Path Tracer
 // and stop with an error (no Embree fallback).
-// Menu order matches these values: Path Tracer, BDPT, Direct Lighting, AO,
-// PT Spectral, BDPT Spectral, Wireframe.
+// Menu order: Path Tracer, BDPT, Direct Lighting, AO, Wireframe.
 enum IntegratorMode : int {
     kIntegratorPathTracer = 0,
     kIntegratorBdpt = 1,
     kIntegratorDirectLighting = 2,
     kIntegratorAmbientOcclusion = 3,
-    kIntegratorSpectralPath = 4,  // PT Spectral (CPU / Embree)
-    kIntegratorSpectralBdpt = 5,  // BDPT Spectral (CPU / Embree)
-    kIntegratorWireframe = 6,     // Geometry edge overlay (barycentric)
+    kIntegratorWireframe = 4,  // Geometry edge overlay (barycentric)
 };
 
 // How refractive / reflective caustics are estimated when settings.caustics != 0.
-// Menu order matches these values: MNEE, MNEE+Photon, Photon / VCM.
+// Menu order: Path/BDPT (pbrt), MNEE, MNEE+Photon, Photon / VCM.
 enum CausticsEngine : int {
+    // pbrt-v4: unidirectional PT + NEE (BSDF caustics) and BDPT Veach MIS with
+    // t=1 light-tracing splats. No MNEE, no photon map.
+    kCausticsEnginePbrt = 0,
     // Manifold next-event (PT) / BDPT LT+MNEE — best for near-delta glass.
-    kCausticsEngineMnee = 0,
+    kCausticsEngineMnee = 1,
     // Smart pick: delta glass → MNEE; rough refractive casters → Photon.
     // BDPT keeps light-tracing; MNEE upgrades under-glass SDS when not Photon.
-    kCausticsEngineAuto = 1,  // UI label: MNEE+Photon
+    kCausticsEngineAuto = 2,  // UI label: MNEE+Photon
     // Caustic-only photon map gather (VCM-style density estimation) — better for
     // rough glass and caustics seen through thick refractive bases.
-    kCausticsEnginePhoton = 2,
+    kCausticsEnginePhoton = 3,
 };
 
 // How the image is scheduled / written (Render Settings → Sampling Type).
@@ -584,7 +589,7 @@ struct RenderSettingsData {
     // (soften per-material with shadow_opacity / contribute_caustics).
     int caustics = 1;
     // Which estimator carries caustics when enabled (see CausticsEngine).
-    int causticsEngine = kCausticsEngineAuto;  // MNEE+Photon smart pick
+    int causticsEngine = kCausticsEnginePbrt;  // pbrt PT/BDPT (default)
     // Firefly cap for paths that look through glass/mirrors at a light (SDS) and for
     // BDPT near-specular NEE/connections. Those never converge with more samples when
     // the light is small; a safety floor of 10 is always applied when this is left at 0
@@ -616,7 +621,7 @@ struct RenderSettingsData {
     // Master switch: off = render cages, skip subdiv + geometric displacement.
     int enableDisplacement = 1;
 
-    // PT Spectral / BDPT Spectral. Wavelength count is pbrt-v4 NSpectrumSamples.
+    // Path Tracer / BDPT hero-λ samples. Wavelength count is pbrt-v4 NSpectrumSamples.
     int spectralSamples = kMaxSpectrumSamples;
     // Beauty conversion color space. Default ACEScg — same as workingSpace.
     int spectralColorSpace = 1;   // kSpectralColorSpaceAcesCg

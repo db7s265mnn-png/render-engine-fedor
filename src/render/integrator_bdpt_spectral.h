@@ -213,6 +213,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 cur.beta = spectrumToRgb(beta, waves, cs);
                 betaPath[count - 1] = beta;
                 const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
+                terminateSecondaryIfSpectralEta(specMat, waves);
                 BsdfSampleSpectral ss =
                     bsdfSampleSpectral(specMat, woLocal, uSpec, rng.nextFloat(), rng.nextFloat(),
                                        rng.nextFloat(), waves, specMat.ior, heroIdx, cs);
@@ -292,6 +293,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
             const float u1 = rng.nextFloat();
             const float u2 = rng.nextFloat();
             const float uChoice = rng.nextFloat();
+            terminateSecondaryIfSpectralEta(cur.mat, waves);
             BsdfSampleSpectral ss = bsdfSampleSpectral(cur.mat, woLocal, uLobe, u1, u2, uChoice,
                                                        waves, baseIor, heroIdx, cs);
             if (!ss.valid) break;
@@ -335,7 +337,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
         if (!spectrumIsFinite(beta) || spectrumNearBlack(beta)) break;
         {
             const LobeWeights lwTerm = computeLobes(cur.mat, woLocal);
-            if (cfg.eyePath && shouldTerminateSecondaryWavelengths(bs, lwTerm) &&
+            if (shouldTerminateSecondaryWavelengths(bs, lwTerm, cur.mat) &&
                 !waves.secondaryTerminated())
                 waves.terminateSecondary();
         }
@@ -730,7 +732,8 @@ inline Vec3 traceRadianceBdptSpectral(
         }
 
         if (!clearPath) {
-            if (!(glassPath && eyeThroughSpec) || photonEngine) continue;
+            if (!causticsUseMnee(settings, &scene) || photonEngine) continue;
+            if (!(glassPath && eyeThroughSpec)) continue;
             const Vec3 LeMnee =
                 l.type == kLightPoint ? l.emittedRadiance() : lightRadiance(l);
             if (isBlack(LeMnee)) continue;
@@ -880,7 +883,7 @@ inline Vec3 traceRadianceBdptSpectral(
 template <typename Tracer>
 class SpectralBdptIntegrator final : public Integrator<Tracer> {
 public:
-    const char* name() const override { return "BDPT Spectral"; }
+    const char* name() const override { return "BDPT"; }
 
     Vec3 Li(IntegratorSampleContext<Tracer>& ctx) const override {
         const int sampleCount = kMaxSpectrumSamples;

@@ -2,7 +2,7 @@
 //
 // Cycles keeps one IntegratorState slot per path and a queue id for the next
 // kernel (intersect_closest, shade_surface, …). Same idea here: unidirectional
-// spectral PT (hero-λ, matching Embree SpectralPathIntegrator). Shade kernels
+// spectral PT (hero-λ, matching Embree Path Tracer). Shade kernels
 // never call optixTrace; intersect kernels never include the BSDF.
 #pragma once
 

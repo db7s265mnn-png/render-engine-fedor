@@ -1,7 +1,8 @@
-// PT Spectral — hero-wavelength unidirectional path tracer (CPU / Embree).
-// Textures filter in RGB; albedo → RGBAlbedoSpectrum, lights/env → RGBIlluminantSpectrum
-// (Jakob × D65/D60). MC weights stay linear. Film is pbrt ToXYZ → working-space RGB
-// while secondaries are alive; TerminateSecondary keeps illuminant-E WB (grey fireflies).
+// Path Tracer — hero-wavelength unidirectional path tracer (CPU / Embree).
+// pbrt-v4 PathIntegrator: textures filter in RGB; albedo → RGBAlbedoSpectrum,
+// lights/env → RGBIlluminantSpectrum (Jakob × D65/D60). MC weights stay linear.
+// Film is pbrt ToXYZ → working-space RGB while secondaries are alive;
+// TerminateSecondary keeps illuminant-E WB (grey fireflies).
 #pragma once
 
 #include <algorithm>
@@ -13,10 +14,21 @@
 
 namespace sol {
 
+// Eye-path contribution clamp. Specular / SDS (look-through-glass-at-light) uses
+// the existing caustic firefly floor (10, or causticClamp); other indirect uses
+// Direct Clamp. Primary hits (depth 0) stay unclamped, matching pbrt.
+inline SampledSpectrum clampPathContribution(SampledSpectrum contrib, const RenderSettingsData& settings,
+                                             int depth, bool specularBounce, bool causticSuffix) {
+    if (depth <= 0) return contrib;
+    if (specularBounce || causticSuffix)
+        return clampSpectrumIndirect(contrib, causticFireflyCap(settings));
+    return clampSpectrumIndirect(contrib, settings.clampDirect);
+}
+
 template <typename Tracer>
 class SpectralPathIntegrator final : public Integrator<Tracer> {
 public:
-    const char* name() const override { return "PT Spectral"; }
+    const char* name() const override { return "Path Tracer"; }
 
     Vec3 Li(IntegratorSampleContext<Tracer>& ctx) const override {
         const SceneView& scene = *ctx.scene;
@@ -71,7 +83,7 @@ public:
                     ms = sampleMediumHomogeneousSpectral(medWalk, tMax, rng, throughput, waves);
                 }
                 if (ms.absorbed || spectrumMaxComponent(throughput) < 1e-20f) break;
-                if (ms.scattered) {
+                        if (ms.scattered) {
                     origin = origin + direction * ms.t;
                     if (!isBlack(med->emission))
                         radiance += throughput * upsampleEmission(med->emission, waves, filmCs);
@@ -80,7 +92,7 @@ public:
                         const Vec3 volDirect =
                             nextEventEstimationVolumeOnce(scene, tracer, origin, woVol, medWalk, rng);
                         SampledSpectrum contrib = throughput * upsampleRgb(volDirect, waves);
-                        if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                        contrib = clampPathContribution(contrib, settings, depth, false, false);
                         radiance += contrib;
                     }
                     float phasePdf = 0.0f;
@@ -131,8 +143,8 @@ public:
                                            srMax(1e-6f, length(dome.emittedRadiance())))
                                     : upsampleEmission(envL, waves, filmCs);
                             SampledSpectrum contrib = throughput * envS * weight;
-                            if (depth > 0 && !specularBounce)
-                                contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                            contrib = clampPathContribution(contrib, settings, depth, specularBounce,
+                                                            causticSuffix);
                             radiance += contrib;
                         }
                     }
@@ -146,6 +158,8 @@ public:
                                                   primarySun, causticSuffix);
                         if (!isBlack(sunL)) {
                             SampledSpectrum contrib = throughput * upsampleEmission(sunL, waves, filmCs);
+                            contrib = clampPathContribution(contrib, settings, depth, specularBounce,
+                                                            causticSuffix);
                             radiance += contrib;
                         }
                     }
@@ -188,8 +202,7 @@ public:
                     const float rgbScale =
                         length(emitted) / srMax(1e-6f, length(light.emittedRadiance()));
                     SampledSpectrum contrib = throughput * Le * (weight * rgbScale);
-                    if (depth > 0 && !specularBounce)
-                        contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                    contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
                     radiance += contrib;
                 }
                 break;
@@ -237,7 +250,8 @@ public:
                         nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, currentMedium);
                     if (!isBlack(nee)) {
                         SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
-                        if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                        contrib = clampPathContribution(contrib, settings, depth, specularBounce,
+                                                        causticSuffix);
                         radiance += contrib;
                     }
                 }
@@ -245,6 +259,7 @@ public:
                 if (pSpec > 0.0f && rng.nextFloat() < pSpec) {
                     throughput *= (1.0f / pSpec);
                     const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();
+                    terminateSecondaryIfSpectralEta(specMat, waves);
                     BsdfSampleSpectral specBs =
                         bsdfSampleSpectral(specMat, woLocalEntry, uSpec, rng.nextFloat(), rng.nextFloat(),
                                            rng.nextFloat(), waves, specMat.ior, heroIdx, filmCs);
@@ -262,7 +277,7 @@ public:
                         bs.transmitted = specBs.transmitted;
                         bs.weight = Vec3(1.0f);
                         rayKind = nextRayShadeKind(bs, specLw);
-                        if (shouldTerminateSecondaryWavelengths(bs, specLw) &&
+                        if (shouldTerminateSecondaryWavelengths(bs, specLw, specMat) &&
                             !waves.secondaryTerminated())
                             waves.terminateSecondary();
                         const bool causticBounce = specBs.specular || isNearSpecularLobe(specLw);
@@ -295,7 +310,7 @@ public:
                     if (!isBlack(nee)) {
                         SampledSpectrum contrib =
                             throughput * walk.pathWeight * upsampleRgb(nee, waves);
-                        if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                        contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
                         radiance += contrib;
                     }
                 }
@@ -324,7 +339,7 @@ public:
                     nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, currentMedium);
                 if (!isBlack(nee)) {
                     SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
-                    if (depth > 0) contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                    contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
                     radiance += contrib;
                 }
             }
@@ -334,6 +349,7 @@ public:
             const float u1 = rng.nextFloat();
             const float u2 = rng.nextFloat();
             const float uChoice = rng.nextFloat();
+            terminateSecondaryIfSpectralEta(mat, waves);
             BsdfSampleSpectral ss =
                 bsdfSampleSpectral(mat, woLocal, uLobe, u1, u2, uChoice, waves, baseIor, heroIdx,
                                    filmCs);
@@ -351,7 +367,7 @@ public:
             bs.weight = Vec3(1.0f);  // unused after spectral weight
             const LobeWeights lw = computeLobes(mat, woLocal);
             rayKind = nextRayShadeKind(bs, lw);
-            if (shouldTerminateSecondaryWavelengths(bs, lw) && !waves.secondaryTerminated())
+            if (shouldTerminateSecondaryWavelengths(bs, lw, mat) && !waves.secondaryTerminated())
                 waves.terminateSecondary();
 
             origin = offsetRayOrigin(si.p, si.ng, wiWorld);

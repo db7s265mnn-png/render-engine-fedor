@@ -1,4 +1,4 @@
-// Shared spectral BSDF / medium helpers (PT / BDPT Spectral).
+// Shared spectral BSDF / medium helpers (Path Tracer / BDPT, hero-λ).
 #pragma once
 
 #include <algorithm>
@@ -285,13 +285,29 @@ inline bool usesSpectralDielectric(const Material& mat) {
     return saturatef(mat.transmission) > 1e-4f && saturatef(mat.metallic) < 0.5f;
 }
 
+inline bool dielectricEtaVaries(const Material& mat) {
+    return usesSpectralDielectric(mat) && mat.dispersionAbbe > 1e-3f;
+}
+
 inline float spectralAbsoluteIor(float baseIor, float abbeVd, float lambdaNm) {
     return dielectricIorFromAbbe(baseIor, abbeVd, lambdaNm);
 }
 
-// pbrt-style: keep multi-λ on specular / near-specular; terminate on rough/diffuse.
+// pbrt-v4 PathIntegrator: keep multi-λ on constant-η specular; terminate after
+// rough/diffuse. DielectricMaterial::GetBxDF also kills secondaries when η(λ)
+// varies — one wavelength, one Snell direction (rainbows from many paths).
 inline bool shouldTerminateSecondaryWavelengths(const BsdfSample& bs, const LobeWeights& lw) {
     return !(bs.specular || isNearSpecularLobe(lw));
+}
+
+inline bool shouldTerminateSecondaryWavelengths(const BsdfSample& bs, const LobeWeights& lw,
+                                                const Material& mat) {
+    if (dielectricEtaVaries(mat)) return true;
+    return shouldTerminateSecondaryWavelengths(bs, lw);
+}
+
+inline void terminateSecondaryIfSpectralEta(const Material& mat, SampledWavelengths& waves) {
+    if (dielectricEtaVaries(mat) && !waves.secondaryTerminated()) waves.terminateSecondary();
 }
 
 struct BsdfSampleSpectral {

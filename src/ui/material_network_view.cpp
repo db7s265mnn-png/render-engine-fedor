@@ -853,7 +853,7 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
             {"transmission_color", "color3", "1, 1, 1", {}},
             {"shadow_opacity", "float", "1", {}},
             {"contribute_caustics", "boolean", "true", {}},
-            {"dispersion_abbe", "float", "0", {}},
+            {"dispersion_abbe", "float", "55", {}},
             {"thin_film_thickness", "float", "0", {}},
             {"thin_film_IOR", "float", "1.4", {}},
             {"internal_reflections", "boolean", "true", {}},

@@ -1146,7 +1146,7 @@ void testRender() {
     check(nonBlack > image.width() * image.height() / 2, "most pixels receive light");
     check(sum > 0.0 && maxValue < 1e4, "render output is in a sane range");
 
-    // Integrator smoke tests: PT+MNEE caustics and the BDPT integrator.
+    // Integrator smoke tests.
     auto smokeIntegrator = [&](int integrator, int caustics, const char* label) {
         scene->settings.integrator = integrator;
         scene->settings.caustics = caustics;
@@ -1169,11 +1169,13 @@ void testRender() {
         check(ok, std::string(label) + " output is finite");
         check(s > 0.0, std::string(label) + " produces light");
     };
-    smokeIntegrator(kIntegratorPathTracer, 1, "PT + MNEE caustics");
+    scene->settings.causticsEngine = kCausticsEnginePbrt;
+    smokeIntegrator(kIntegratorPathTracer, 1, "PT + pbrt caustics");
     smokeIntegrator(kIntegratorPathTracer, 0, "PT caustics off");
     smokeIntegrator(kIntegratorBdpt, 1, "BDPT integrator");
-    smokeIntegrator(kIntegratorSpectralPath, 1, "PT Spectral");
-    smokeIntegrator(kIntegratorSpectralBdpt, 1, "BDPT Spectral");
+    scene->settings.causticsEngine = kCausticsEngineMnee;
+    smokeIntegrator(kIntegratorPathTracer, 1, "PT + MNEE caustics");
+    scene->settings.causticsEngine = kCausticsEnginePbrt;
     smokeIntegrator(kIntegratorWireframe, 0, "Wireframe");
     // UI default leaves Caustics on — must not route Wireframe into Photon/MNEE.
     smokeIntegrator(kIntegratorWireframe, 1, "Wireframe + caustics on");
@@ -1182,10 +1184,10 @@ void testRender() {
     scene->settings.pathGuiding = 1;
     smokeIntegrator(kIntegratorPathTracer, 1, "PT + guiding");
     smokeIntegrator(kIntegratorBdpt, 1, "BDPT + guiding");
-    smokeIntegrator(kIntegratorSpectralBdpt, 1, "BDPT Spectral + guiding");
     scene->settings.pathGuiding = 0;
     scene->settings.integrator = kIntegratorPathTracer;
     scene->settings.caustics = 1;
+    scene->settings.causticsEngine = kCausticsEnginePbrt;
 }
 
 // The equirectangular convention must stay stable: +Y is the top row of the
@@ -1836,6 +1838,7 @@ void testCausticsGlassSphere() {
         scene->settings.maxDepth = 8;
         scene->settings.integrator = integrator;
         scene->settings.caustics = caustics;
+        scene->settings.causticsEngine = kCausticsEngineMnee;
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
         scene->settings.clampDirect = 0.0f;
@@ -1977,6 +1980,7 @@ void testBdptCausticThroughRefraction() {
         scene->settings.maxDepth = 8;
         scene->settings.integrator = integrator;
         scene->settings.caustics = caustics;
+        scene->settings.causticsEngine = kCausticsEngineMnee;
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
         scene->settings.clampDirect = 0.0f;
@@ -2517,6 +2521,7 @@ void testDispersionAndThinFilm() {
         scene->settings.samplesPerPixel = 32;
         scene->settings.integrator = kIntegratorPathTracer;
         scene->settings.caustics = 1;
+        scene->settings.causticsEngine = kCausticsEnginePbrt;
         scene->settings.pathGuiding = 0;
         scene->settings.envVisibleCamera = 0;
         scene->settings.clampDirect = 0.0f;
@@ -4347,6 +4352,38 @@ void testSpectralHeroBasics() {
     const float nBlue = dielectricIorFromAbbe(1.5f, 30.0f, 450.0f);
     const float nRed = dielectricIorFromAbbe(1.5f, 30.0f, 650.0f);
     check(nBlue > nRed + 0.01f, "dispersion IOR blue > red");
+    {
+        Material g;
+        g.transmission = 1.0f;
+        g.ior = 1.5f;
+        g.roughness = 0.0f;
+        g.specular = 1.0f;
+        g.dispersionAbbe = 30.0f;
+        SampledWavelengths wb{};
+        wb.n = 4;
+        wb.lambda[0] = 450.0f;
+        wb.pdf[0] = 1.0f;
+        SampledWavelengths wr = wb;
+        wr.lambda[0] = 650.0f;
+        const Vec3 wo = normalize(Vec3(0.55f, 0.0f, 0.835f));
+        const BsdfSampleSpectral sb =
+            bsdfSampleSpectral(g, wo, 0.99f, 0.0f, 0.0f, 0.9f, wb, g.ior, 0);
+        const BsdfSampleSpectral sr =
+            bsdfSampleSpectral(g, wo, 0.99f, 0.0f, 0.0f, 0.9f, wr, g.ior, 0);
+        check(sb.valid && sr.valid && sb.transmitted && sr.transmitted,
+              "dispersive Snell samples transmit");
+        check(std::fabs(sb.wi.x) > std::fabs(sr.wi.x) + 0.004f,
+              "blue bends more than red (pbrt η(λ) geometry)");
+        SampledWavelengths wLive = SampledWavelengths::sampleUniform(4, 0.2f);
+        check(!wLive.secondaryTerminated(), "uniform λ start with secondaries");
+        terminateSecondaryIfSpectralEta(g, wLive);
+        check(wLive.secondaryTerminated(), "pbrt GetBxDF terminates secondaries on η(λ)");
+        Material achromatic = g;
+        achromatic.dispersionAbbe = 0.0f;
+        SampledWavelengths wKeep = SampledWavelengths::sampleUniform(4, 0.2f);
+        terminateSecondaryIfSpectralEta(achromatic, wKeep);
+        check(!wKeep.secondaryTerminated(), "constant η keeps secondaries");
+    }
     // RGB η/κ seed from metal table.
     Vec3 eta, k;
     metalNkRgbPreset("Au", eta, k);
@@ -4480,12 +4517,16 @@ void testSpectralHeroBasics() {
                   "glass spectral enter×exit×env not reddish");
             check(std::fabs(r - 1.0f) < 0.12f && std::fabs(g - 1.0f) < 0.12f, "glass spectral ~white");
 
-            // TerminateSecondary policy: specular glass must keep secondaries.
+            // pbrt DielectricMaterial::GetBxDF: spectrally-varying η terminates secondaries.
             BsdfSample bsSpec{};
             bsSpec.specular = true;
             LobeWeights lwGlass = computeLobes(glass);
-            check(!shouldTerminateSecondaryWavelengths(bsSpec, lwGlass),
-                  "specular glass keeps secondary wavelengths");
+            check(shouldTerminateSecondaryWavelengths(bsSpec, lwGlass, glass),
+                  "dispersive glass terminates secondary wavelengths (pbrt)");
+            Material glassNd = glass;
+            glassNd.dispersionAbbe = 0.0f;
+            check(!shouldTerminateSecondaryWavelengths(bsSpec, computeLobes(glassNd), glassNd),
+                  "achromatic glass keeps secondary wavelengths");
             BsdfSample bsDiff{};
             bsDiff.specular = false;
             Material diffuse;

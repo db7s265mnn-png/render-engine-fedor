@@ -56,7 +56,7 @@ inline rgb_spec::RgbSigmoidPolynomial fetchIlluminantPoly(Vec3 rgb, const RGBCol
 
 }  // namespace
 
-// Linear RGB→spectrum (energy-conserving under multiply). Use for PT/BDPT Spectral
+// Linear RGB→spectrum (energy-conserving under multiply). Use for Path Tracer / BDPT
 // path throughput weights and NEE/env aggregates that are already MC weights.
 inline SampledSpectrum rgbToSpectrumLinear(Vec3 rgb, const SampledWavelengths& w) {
     SampledSpectrum s(w.n);
