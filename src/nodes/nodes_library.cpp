@@ -1129,14 +1129,14 @@ public:
                          .withGroup("Engine")
                          .withTooltip(optixBackendCompiledIn()
                                           ? QStringLiteral("CPU (Embree): full feature set on the host.\n"
-                                                           "GPU (OptiX): NVIDIA wavefront path tracer.\n"
+                                                           "GPU (OptiX): NVIDIA Iray-style wavefront path tracer.\n"
                                                            "XPU (Embree+OptiX): CPU (full PT: MNEE / SSS / "
-                                                           "OpenPGL / N lights / filters) and GPU (OptiX "
-                                                           "wavefront PT) run together. Default schedule is "
-                                                           "Overlap: GPU fills even spp until Embree finishes "
-                                                           "one odd spp, then one add (no 1:1 wait). Mixture "
-                                                           "is usually slower than GPU-only (it still waits "
-                                                           "on a full Embree spp plus a snapshot copy). Set "
+                                                           "OpenPGL / N lights / filters, Owen-Sobol) and GPU "
+                                                           "(OptiX Iray wavefront, PCG) run together. Default "
+                                                           "schedule is Overlap: GPU Iray-batches consecutive "
+                                                           "spp until Embree finishes one spp, then one add "
+                                                           "(no 1:1 wait). Mixture is independent films plus "
+                                                           "a ~12 Hz GPU snapshot. Set "
                                                            "XPU Schedule when this device is selected.\n"
                                                            "XPU is Path Tracer only. BDPT, spectral, "
                                                            "wireframe, AO stay CPU (Embree).\n"
@@ -1150,14 +1150,15 @@ public:
                          .withGroup("Engine")
                          .withVisibleWhen("backend==2")
                          .withTooltip("Only when Render Device is XPU.\n"
-                                      "Overlap (default): GPU keeps launching even spp into device "
-                                      "accum until Embree finishes one odd spp, then one D2H add. "
+                                      "Overlap (default): GPU keeps Iray-batching consecutive PCG "
+                                      "spp into device accum until Embree finishes one Sobol spp, "
+                                      "then one D2H add. "
                                       "Faster GPU ⇒ more GPU spp per CPU spp. Same film, no 1:1 wait. "
                                       "This is the fast XPU mode.\n"
                                       "Mixture (Karma): CPU and GPU each own a full-frame film; host "
-                                      "adds them. GPU never waits to render, but each UI step still "
-                                      "waits for one Embree spp and a snapshot copy, so wall time "
-                                      "is often worse than GPU-only."));
+                                      "adds them. GPU never waits to render; snapshots copy at ~12 Hz "
+                                      "so the UI step is not a D2H barrier. Wall time is still paced "
+                                      "by one Embree spp per tick."));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
                                           "Ambient Occlusion", "PT Spectral", "BDPT Spectral",

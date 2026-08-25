@@ -416,7 +416,8 @@ SR_INL SR_HD bool renderDeviceUsesCpu(int backend) {
 SR_INL SR_HD bool renderDeviceIsXpu(int backend) { return backend == kBackendXpu; }
 
 // XPU work schedule (Render Settings → Engine, visible only when backend is XPU).
-// Overlap (default): GPU fills even spp until Embree finishes one odd spp, then one D2H add.
+// Overlap (default): GPU Iray-batches consecutive PCG spp until Embree finishes
+// one Sobol spp (disjoint index band), then one D2H add.
 // Mixture: Karma-style independent full-frame estimators, host blend, automatic spp share.
 enum XpuSchedule : int {
     kXpuScheduleOverlap = 0,

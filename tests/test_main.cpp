@@ -582,8 +582,12 @@ void testXpuDevice() {
     check(xpuEmbreeThreadCount(1) == 1, "XPU keeps at least one Embree thread");
     check(xpuEmbreeThreadCount(0) >= 1, "XPU auto thread count is at least 1");
     check(kXpuScheduleOverlap == 0 && kXpuScheduleMixture == 1, "Overlap is default schedule 0");
-    check(xpuGpuOwnsSample(0) && !xpuGpuOwnsSample(1), "Overlap: even spp GPU, odd spp CPU");
+    check(xpuGpuRemaining(10, 0, 0) == 10, "XPU GPU remaining starts at the target");
+    check(xpuGpuRemaining(10, 8, 1) == 1, "XPU GPU remaining subtracts both films");
+    check(xpuGpuRemaining(10, 9, 1) == 0, "XPU GPU remaining clamps at zero");
+    check(xpuGpuRemaining(0, 0, 0) == 0, "XPU GPU remaining is 0 without a target");
     check(xpuCpuSampleIndex(0) != 0, "CPU estimator uses a disjoint sample index");
+    check(xpuCpuSampleIndex(1) == xpuCpuSampleIndex(0) + 1, "CPU sample indices are consecutive in that band");
     check(noiseOracleMinSamples(64) >= 4, "oracle waits for a few camera samples");
     check(!noiseOraclePixelQuiet(0.5f, 0.5f, 0.5f, 0.0f, 8, 0.01f), "oracle stays open without L²");
     check(noiseOraclePixelQuiet(0.0f, 0.0f, 0.0f, 0.0f, 8, 0.01f), "black pixels with no L² are quiet");

@@ -20,10 +20,10 @@ Intel Embree CPU device, the NVIDIA OptiX GPU device, or XPU (both together).
 * **Path guiding** — Intel OpenPGL on the CPU backend (enabled by default in Render Settings)
   learns incident radiance while rendering and guides BSDF samples with MIS.
 * **Render Device** — `CPU (Embree)` uses Embree 4 with a tiled thread pool; `GPU (OptiX)` uses
-  OptiX wavefront path tracing; `XPU (Embree+OptiX)` runs CPU and GPU together. **Overlap**
-  (default) keeps the GPU filling even spp until Embree finishes one odd spp, then one film
+  OptiX Iray-style wavefront path tracing; `XPU (Embree+OptiX)` runs CPU and GPU together. **Overlap**
+  (default) Iray-batches consecutive GPU (PCG) spp until Embree finishes one Sobol spp, then one film
   add — faster GPU means more GPU spp per CPU spp. **Mixture** is optional (Karma
-    independent films) and is usually slower than GPU-only. **Pixel Oracle** + **Noise Threshold**
+    independent films, ~12 Hz GPU snapshot). **Pixel Oracle** + **Noise Threshold**
   (Sampling, Karma XPU Variance): Variance (default) stops quiet pixels once relative
   luminance error is below the threshold (0 = off, default 0.01). Uniform always takes
   every Samples Per Pixel. Overlay shows `noise off` vs `noise 0.01  N% skip`. At 0.01 a

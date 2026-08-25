@@ -129,9 +129,10 @@ parameters, and *Look Through Camera Node* goes back to the authored camera.
 
 Folders are Houdini-style tabs in the parameter panel: click a tab to show only that group.
 
-XPU (`Render Device` = Embree+OptiX) is Path Tracer only. Even samples run on the GPU, odd
-samples on the CPU, both full-frame. If OptiX cannot start, rendering stops with an error
-(no Embree fallback). Non-PT integrators also stop on GPU/XPU.
+XPU (`Render Device` = Embree+OptiX) is Path Tracer only. **Overlap** (default) Iray-batches
+consecutive GPU (PCG) spp until Embree finishes one Sobol spp, then one film add. **Mixture**
+keeps independent CPU/GPU films and blends them (~12 Hz GPU snapshot). If OptiX cannot start,
+rendering stops with an error (no Embree fallback). Non-PT integrators also stop on GPU/XPU.
 
 Film settings are applied when the framebuffer is displayed or written to an LDR file; `.exr`
 and `.hdr` outputs stay linear.
