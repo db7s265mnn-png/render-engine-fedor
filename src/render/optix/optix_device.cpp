@@ -550,6 +550,7 @@ public:
 
     void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
                       const RenderMidProgressFn& midProgress, const RenderSampleOptions* options) override {
+        lastCompletedSamples_ = 0;
         if (!initialized_ || !scene_ || !stream_) return;
         if (cancel.load(std::memory_order_relaxed)) return;
         try {
@@ -667,6 +668,17 @@ public:
             launchIrayWavefront(launchParams, unsigned(launchW), unsigned(launchH), maxDepth, cancel,
                                 launches);
             CUDA_CHECK(cudaEventRecord(gpuStopEvent_, stream_));
+            CUDA_CHECK(cudaEventSynchronize(gpuStopEvent_));
+            float gpuMs = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&gpuMs, gpuStartEvent_, gpuStopEvent_));
+            lastGpuSampleMs_ = double(gpuMs);
+
+            // Aborted wavefront is missing bounces / tail. Do not D2H or markHasData
+            // — a partial copy is charcoal holes in the viewport.
+            if (cancel.load(std::memory_order_relaxed)) {
+                lastCompletedSamples_ = 0;
+                return;
+            }
 
             const bool lastBatch = remaining <= batch;
             const bool needOracle = scene_->settings.noiseThreshold > 0.0f;
@@ -698,12 +710,8 @@ public:
                 }
                 lastHostCopy_ = copyNow;
                 hostCopyEver_ = true;
+                CUDA_CHECK(cudaStreamSynchronize(stream_));
             }
-            CUDA_CHECK(cudaEventSynchronize(gpuStopEvent_));
-            float gpuMs = 0.0f;
-            CUDA_CHECK(cudaEventElapsedTime(&gpuMs, gpuStartEvent_, gpuStopEvent_));
-            lastGpuSampleMs_ = double(gpuMs);
-            if (wantCopy) CUDA_CHECK(cudaStreamSynchronize(stream_));
             const double wallMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
 

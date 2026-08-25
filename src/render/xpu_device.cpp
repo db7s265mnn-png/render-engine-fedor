@@ -167,7 +167,8 @@ private:
                 gpuOpt.xpuRemainingSamples = remaining;
                 gpuOpt.xpuTargetSamples = targetSpp_;
                 gpu_->renderSample(*fbPtr_, gpu, *cancelPtr_, RenderMidProgressFn{}, &gpuOpt);
-                const int step = std::max(1, gpu_->lastCompletedSamples());
+                const int step = gpu_->lastCompletedSamples();
+                if (step <= 0) break;
                 gpuSpp_.fetch_add(step, std::memory_order_relaxed);
                 maybeTakeSnapshot(remaining <= step);
             }
@@ -274,7 +275,8 @@ private:
                     gpuOpt.resetAccum = (done == 0);
                     gpuOpt.xpuRemainingSamples = maxGpu - done;
                     gpu_->renderSample(fb, nextGpuSample_, cancel, RenderMidProgressFn{}, &gpuOpt);
-                    const int step = std::max(1, gpu_->lastCompletedSamples());
+                    const int step = gpu_->lastCompletedSamples();
+                    if (step <= 0) break;
                     nextGpuSample_ += step;
                     gpuCount.fetch_add(step, std::memory_order_relaxed);
                 }
@@ -303,6 +305,10 @@ private:
 
         const int g = gpuCount.load(std::memory_order_relaxed);
         const int c = runCpu ? 1 : 0;
+        if (cancel.load(std::memory_order_relaxed)) {
+            lastCompletedSamples_ = 0;
+            return;
+        }
         lastCompletedSamples_ = std::max(1, g + c);
 
         if (g > 0) {
@@ -412,7 +418,7 @@ private:
             }
             std::rethrow_exception(ex);
         }
-        presentMixture(fb);
+        if (!cancel.load(std::memory_order_relaxed)) presentMixture(fb);
 
         const int total = cpuSpp_.load(std::memory_order_relaxed) + gpuSpp_.load(std::memory_order_relaxed);
         lastCompletedSamples_ = std::max(1, total - reportedSpp_);

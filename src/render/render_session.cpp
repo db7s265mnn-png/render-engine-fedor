@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <new>
 #include <string>
 #include <thread>
@@ -54,9 +55,9 @@ Image RenderSession::displayImage() const {
     // Keep OCIO config in sync with Film settings for Nuke-style views.
     ocioEnsureConfig(settings.ocioUseEnv != 0, settings.ocioConfigPath);
 
-    // After a clear / restart / re-dice, keep the last finished preview until the
-    // first bootstrap pixels land — avoids a harsh black flash.
-    if (!framebuffer_.hasAccumulatedData()) {
+    // After a clear / restart / re-dice, keep the last finished preview until a
+    // complete sample lands — never resolve scanline / bootstrap holes.
+    if (!framebuffer_.hasAccumulatedData() || !framebuffer_.isPresentable()) {
         std::lock_guard<std::mutex> lock(displayHoldMutex_);
         if (!displayHold_.empty()) {
             // FB may be released (size 0) during tess, or already resized to match.
@@ -146,11 +147,17 @@ void RenderSession::pushInteractiveRestart() {
 }
 
 void RenderSession::setInteractivePreview(bool on) {
-    interactivePreview_.store(on, std::memory_order_relaxed);
+    const bool was = interactivePreview_.exchange(on, std::memory_order_relaxed);
+    if (was == on) return;
+    completeFramesOnly_.store(true, std::memory_order_relaxed);
     if (rendering_.load(std::memory_order_relaxed) && thread_.joinable()) {
         softRestart_.store(true, std::memory_order_relaxed);
         cancel_.store(true, std::memory_order_relaxed);
     }
+}
+
+void RenderSession::noteCameraMoved() {
+    cameraEpoch_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void RenderSession::discardPreviousRender() {
@@ -394,25 +401,19 @@ void RenderSession::threadMain() {
                 progress_.samplesPerSecond = 0.0;
                 progress_.backendGpuMs = 0.0;
             }
-            notifyUi(true);
+            // Keep the last complete blit. Do not resolve an empty / half-filled FB.
             continue;
         }
 
         if (cancel_.load(std::memory_order_relaxed)) break;
 
         const bool preview = applyFilmSize(sample);
-        if (preview && sample >= 1) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(8));
-            continue;
-        }
+        if (preview && device_) device_->refreshSceneData();
+        const uint64_t epochLaunched = cameraEpoch_.load(std::memory_order_relaxed);
 
-        RenderMidProgressFn midProgress;
-        if (sample == 0) {
-            midProgress = [&] {
-                if (cancel_.load(std::memory_order_relaxed)) return;
-                notifyUi(false);
-            };
-        }
+        // Never blit a partial sample. Embree bootstrap 2x2 / Progressive scanlines
+        // would otherwise paint holes; OptiX abort-before-D2H would too.
+        const RenderMidProgressFn midProgress;
 
         RenderSampleOptions opt;
         const bool xpu = scene->settings.backend == kBackendXpu;
@@ -445,7 +446,8 @@ void RenderSession::threadMain() {
         if (softRestart_.load(std::memory_order_relaxed)) continue;  // handled at loop top
         if (cancel_.load(std::memory_order_relaxed)) break;
 
-        const int sampleStep = std::max(1, device_ ? device_->lastCompletedSamples() : 1);
+        const int sampleStep = device_ ? device_->lastCompletedSamples() : 1;
+        if (sampleStep <= 0) continue;
         framebuffer_.setSampleCount(sample + sampleStep);
         const float noiseT = (preview || scene->settings.samplingDebug != 0)
                                  ? 0.0f
@@ -465,13 +467,31 @@ void RenderSession::threadMain() {
             progress_.noisePixelCount = framebuffer_.width() * framebuffer_.height();
         }
 
-        // Throttle UI notifications: early samples update immediately, later
-        // ones at roughly 10 Hz.
-        const double sinceNotify = std::chrono::duration<double>(now - lastNotify).count();
-        if (sample < 4 || sinceNotify > 0.1 || sample + sampleStep >= targetSamples ||
-            framebuffer_.noiseOracleDone()) {
-            notifyUi(true);
+        // Only present a finished sample — never scanline / bootstrap holes.
+        framebuffer_.setPresentable(true);
+        notifyUi(true);
+        if (!preview) completeFramesOnly_.store(false, std::memory_order_relaxed);
+
+        if (preview) {
+            sample = 0;
+            while (!hardStop_.load(std::memory_order_relaxed) &&
+                   !softRestart_.load(std::memory_order_relaxed) &&
+                   !cancel_.load(std::memory_order_relaxed)) {
+                if (!interactivePreview_.load(std::memory_order_relaxed)) break;
+                if (cameraEpoch_.load(std::memory_order_relaxed) != epochLaunched) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            }
+            if (hardStop_.load(std::memory_order_relaxed)) break;
+            if (softRestart_.load(std::memory_order_relaxed) || cancel_.load(std::memory_order_relaxed) ||
+                !interactivePreview_.load(std::memory_order_relaxed)) {
+                continue;
+            }
+            if (device_) device_->refreshSceneData();
+            framebuffer_.clear();
+            sample = 0;
+            continue;
         }
+
         sample += sampleStep;
         if (framebuffer_.noiseOracleDone()) {
             std::lock_guard<std::mutex> lock(progressMutex_);

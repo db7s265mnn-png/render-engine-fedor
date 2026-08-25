@@ -5349,6 +5349,20 @@ void testQuarterFilmIsDownscaleNotCrop() {
     checkNear(dDown.z, dFull.z, 0.02f, "bound 1/4 film z matches full FOV");
 }
 
+void testFramebufferPresentableOnlyWhenComplete() {
+    std::printf("framebuffer presentable\n");
+    Framebuffer fb;
+    fb.resize(4, 4);
+    check(!fb.hasAccumulatedData() && !fb.isPresentable(), "empty film is not presentable");
+    fb.addSample(0, 0, Vec3(1.0f, 1.0f, 1.0f));
+    check(fb.hasAccumulatedData(), "one pixel sets hasData");
+    check(!fb.isPresentable(), "partial fill must not be shown");
+    fb.setPresentable(true);
+    check(fb.isPresentable(), "session marks a finished sample presentable");
+    fb.clear();
+    check(!fb.hasAccumulatedData() && !fb.isPresentable(), "clear drops presentable");
+}
+
 void testCameraDofFocus() {
     std::printf("camera-dof-focus\n");
     registerBuiltinNodes();
@@ -6813,6 +6827,7 @@ int main() {
     testRenderSettingsFolders();
     testSceneGraphFolders();
     testQuarterFilmIsDownscaleNotCrop();
+    testFramebufferPresentableOnlyWhenComplete();
     testCameraDofFocus();
     testPolyOpticsApertureSpread();
     testPolynomialOpticsCamera();

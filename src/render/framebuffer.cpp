@@ -25,6 +25,7 @@ void Framebuffer::resize(int width, int height) {
     splatPaths_.store(0, std::memory_order_relaxed);
     samples_.store(0, std::memory_order_relaxed);
     hasData_.store(false, std::memory_order_relaxed);
+    presentable_.store(false, std::memory_order_relaxed);
 }
 
 void Framebuffer::clear() {
@@ -39,6 +40,7 @@ void Framebuffer::clear() {
     splatPaths_.store(0, std::memory_order_relaxed);
     samples_.store(0, std::memory_order_relaxed);
     hasData_.store(false, std::memory_order_relaxed);
+    presentable_.store(false, std::memory_order_relaxed);
 }
 
 void Framebuffer::release() {
@@ -57,6 +59,7 @@ void Framebuffer::release() {
     splatPaths_.store(0, std::memory_order_relaxed);
     samples_.store(0, std::memory_order_relaxed);
     hasData_.store(false, std::memory_order_relaxed);
+    presentable_.store(false, std::memory_order_relaxed);
 }
 
 void Framebuffer::mergeFilmTile(const FilmTile& tile) {

@@ -39,6 +39,10 @@ public:
     void setSampleCount(int n) { samples_.store(n, std::memory_order_relaxed); }
     bool hasAccumulatedData() const { return hasData_.load(std::memory_order_relaxed); }
     void markHasData() { hasData_.store(true, std::memory_order_relaxed); }
+    // Viewport may resolve the accum only after a finished sample (all pixels).
+    // Bootstrap / cancelled wavefronts set hasData without being presentable.
+    bool isPresentable() const { return presentable_.load(std::memory_order_relaxed); }
+    void setPresentable(bool v) { presentable_.store(v, std::memory_order_relaxed); }
 
     // Accumulates one sample. Safe as long as different threads own different
     // pixels, which is how the tile scheduler works. Prefer FilmTile + merge
@@ -132,6 +136,7 @@ private:
     std::atomic<int64_t> splatPaths_{0};
     std::atomic<int> samples_{0};
     std::atomic<bool> hasData_{false};
+    std::atomic<bool> presentable_{false};
     mutable std::mutex mutex_;
 };
 

@@ -67,7 +67,8 @@ public:
 
     // Renders `sampleIndex` (one sample per pixel) into the framebuffer.
     // `cancel` is polled frequently so the UI stays responsive.
-    // `midProgress` may be invoked during long passes (bootstrap) for smoother IPR.
+    // `midProgress` may be invoked after a *complete* bootstrap phase. The session
+    // leaves it empty so the viewport only ever sees a hole-free sample.
     virtual void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
                               const RenderMidProgressFn& midProgress,
                               const RenderSampleOptions* options = nullptr) = 0;

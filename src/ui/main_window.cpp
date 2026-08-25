@@ -1525,8 +1525,12 @@ void MainWindow::onCameraMoved() {
         applyLensFromCameraNode(cam, scene_->camera);
     }
 
-    // Live IPR during tumble: soft-restart on the render thread (no UI join).
-    // Hard updateSceneData()+start() joined every mousemove and made orbit hitch.
+    session_.noteCameraMoved();
+    // During tumble keep the in-flight 1/4 x 1 spp running. Cancelling it
+    // every mouse-move aborts OptiX before D2H and leaves charcoal holes.
+    // The next launch picks up cameraEpoch_ after this frame presents.
+    if (session_.interactivePreview())
+        return;
     session_.pushInteractiveRestart();
 }
 

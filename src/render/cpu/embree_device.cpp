@@ -104,6 +104,7 @@ public:
 
     std::string name() const override { return "CPU / Embree 4"; }
     bool isAvailable() const override { return device_ != nullptr; }
+    int lastCompletedSamples() const override { return lastCompletedSamples_; }
 
     bool buildScene(const ScenePtr& scene, std::string& error) override {
         if (!device_) {
@@ -230,6 +231,7 @@ public:
 
     void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
                       const RenderMidProgressFn& midProgress, const RenderSampleOptions* options) override {
+        lastCompletedSamples_ = 0;
         if (!topScene_ || !scene_) return;
         const RenderSettingsData& settings = view_.settings;
         const int width = fb.width();
@@ -611,7 +613,10 @@ public:
         constexpr int kBootstrapStep = 2;
 
         auto runBootstrapOrFull = [&](auto&& renderPass) {
-            if (sampleIndex == 0 && !clipped) {
+            // 2x2 bootstrap is only useful if the session will blit each phase.
+            // Nav preview / hold-until-complete pass an empty hook — fill every
+            // pixel in one pass so the first present has no holes.
+            if (sampleIndex == 0 && !clipped && midProgress && !opt.navPreview) {
                 const int phaseCount = kBootstrapStep * kBootstrapStep;
                 for (int phase = 0; phase < phaseCount; ++phase) {
                     if (cancel.load(std::memory_order_relaxed)) break;
@@ -718,6 +723,7 @@ public:
             }
         }
 #endif
+        if (!cancel.load(std::memory_order_relaxed)) lastCompletedSamples_ = 1;
     }
 
     void finishSample() override {
@@ -766,6 +772,7 @@ private:
     PolynomialOpticsCamera polyOptics_;
     std::unique_ptr<ThreadPool> pool_;
     int threadCount_ = 0;
+    int lastCompletedSamples_ = 1;
     CausticPhotonMap photonMap_;
 #if SOLSTICE_HAVE_OPENPGL
     std::unique_ptr<PathGuiding> pathGuiding_;

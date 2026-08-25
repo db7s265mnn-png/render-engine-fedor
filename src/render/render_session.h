@@ -38,9 +38,12 @@ public:
     // Call after mutating scene->camera (etc.). If idle, falls back to update+start.
     void pushInteractiveRestart();
     // Mouse-drag orbit/pan/dolly: same scene at 1/4 film, 1 spp. Display-only —
-    // release wipes and restarts full-res. Wheel dolly stays full-res, 1 spp.
+    // release keeps the last complete preview until full-res 1 spp lands.
     void setInteractivePreview(bool on);
     bool interactivePreview() const { return interactivePreview_.load(std::memory_order_relaxed); }
+    // Bump so the worker can pick up the latest camera after the current sample.
+    // Does not cancel an in-flight preview frame.
+    void noteCameraMoved();
     // Stop the render thread and free *all* previous-render state: device BVH,
     // cooked scene, accumulation, and display hold. Call before a heavy
     // tessellation so peak RAM is not previous_render + new_tess.
@@ -88,6 +91,8 @@ private:
     std::atomic<bool> rendering_{false};
     std::atomic<bool> sceneDirty_{true};
     std::atomic<bool> interactivePreview_{false};
+    std::atomic<bool> completeFramesOnly_{false};
+    std::atomic<uint64_t> cameraEpoch_{0};
 
     mutable std::mutex progressMutex_;
     RenderProgress progress_;
