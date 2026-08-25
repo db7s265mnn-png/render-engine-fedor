@@ -276,7 +276,7 @@ public:
                     " SMs, Iray wavefront + tail pipeline, LaunchParams " +
                     std::to_string(sizeof(LaunchParams)) + " bytes"
 #if SOLSTICE_IEEE_FP32
-                    ", IEEE FP32"
+                    ", IEEE nvcc, OptiX opt DEFAULT"
 #endif
                     ")");
             logInfo("OptiX submits CUDA/Compute work. Windows Task Manager defaults to the 3D graph "
@@ -976,12 +976,9 @@ private:
     void buildPipeline() {
         OptixModuleCompileOptions moduleOptions{};
         moduleOptions.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
-#if SOLSTICE_IEEE_FP32
-        // Don't let OptiX re-associate the IEEE PTX we just asked nvcc for.
-        moduleOptions.optLevel = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
-#else
+        // Step 1 of the IEEE ladder: module DEFAULT again. nvcc still has no
+        // --use_fast_math (isfinite stays). LEVEL_0 was the big speed hit.
         moduleOptions.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-#endif
         moduleOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_MINIMAL;
 
         OptixPipelineCompileOptions pipelineOptions{};
