@@ -293,7 +293,7 @@ public:
 #endif
 
         if (useSpectral) {
-            const int bins = std::clamp(settings.spectralBins, 8, 32);
+            const int bins = kMaxSpectrumSamples;
             if (spectralBins_.width != width || spectralBins_.height != height || spectralBins_.bins != bins)
                 spectralBins_.resize(width, height, bins);
             if (sampleIndex == 0) spectralBins_.clear();
@@ -320,14 +320,14 @@ public:
         if (sampleIndex == 0 && !clipped) {
             if (useSpectralBdpt)
                 logInfo(std::string("Integrator: BDPT Spectral (hero λ=") +
-                        std::to_string(std::clamp(settings.spectralSamples, 2, 16)) + ", bins=" +
-                        std::to_string(std::clamp(settings.spectralBins, 8, 32)) + ")" +
+                        std::to_string(kMaxSpectrumSamples) + ", bins=" +
+                        std::to_string(kMaxSpectrumSamples) + ")" +
                         (useGuiding ? " + OpenPGL guiding" : "") +
                         (usePhoton ? " + Photon caustics" : " + LT/MNEE caustics"));
             else if (useSpectralPt)
                 logInfo(std::string("Integrator: PT Spectral (hero λ=") +
-                        std::to_string(std::clamp(settings.spectralSamples, 2, 16)) + ", bins=" +
-                        std::to_string(std::clamp(settings.spectralBins, 8, 32)) + ")");
+                        std::to_string(kMaxSpectrumSamples) + ", bins=" +
+                        std::to_string(kMaxSpectrumSamples) + ")");
             if (usePhoton)
                 logInfo(std::string("Caustics: Photon map (VCM-style gather, ") +
                         std::to_string(photonMap_.size()) + " photons, r=" +

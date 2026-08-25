@@ -3,7 +3,8 @@
 
 namespace sol {
 
-constexpr int kMaxSpectrumSamples = 16;
+// pbrt-v4 NSpectrumSamples: compile-time 4. Not a UI slider.
+constexpr int kMaxSpectrumSamples = 4;
 constexpr float kSpectrumLambdaMin = 360.0f;
 constexpr float kSpectrumLambdaMax = 830.0f;
 

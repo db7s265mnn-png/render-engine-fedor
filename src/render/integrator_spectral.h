@@ -28,7 +28,7 @@ public:
         const RenderSettingsData& settings = scene.settings;
         const RGBColorSpace& filmCs = pathColorSpace(settings);
 
-        const int nLambda = std::clamp(settings.spectralSamples, 2, kMaxSpectrumSamples);
+        const int nLambda = kMaxSpectrumSamples;
         SampledWavelengths waves =
             (settings.spectralWavelengthSampling == 1)
                 ? SampledWavelengths::sampleUniform(nLambda, rng.nextFloat())

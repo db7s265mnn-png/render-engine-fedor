@@ -4,6 +4,8 @@
 
 #include "core/math.h"
 
+#include "render/spectrum_constants.h"
+
 namespace sol {
 
 // Arnold-like ray switch: absolute indices into SceneView::materials (-1 = use
@@ -604,9 +606,10 @@ struct RenderSettingsData {
     // Master switch: off = render cages, skip subdiv + geometric displacement.
     int enableDisplacement = 1;
 
-    // PT Spectral / BDPT Spectral.
-    int spectralSamples = 4;      // hero λ count (UI: 2..16)
-    int spectralBins = 16;        // fixed bins for multilayer spectral EXR (8..32)
+    // PT Spectral / BDPT Spectral. Wavelength count is pbrt-v4 NSpectrumSamples,
+    // not a UI slider. spectralBins matches that for the optional EXR dump.
+    int spectralSamples = kMaxSpectrumSamples;
+    int spectralBins = kMaxSpectrumSamples;
     int spectralExr = 0;          // write spectral multilayer EXR on save when set
     // Beauty conversion color space. Default ACEScg — same as workingSpace.
     int spectralColorSpace = 1;   // kSpectralColorSpaceAcesCg
@@ -614,7 +617,7 @@ struct RenderSettingsData {
     int spectralWavelengthSampling = 0;
     // Film: false-color debug from spectral bins (PT Spectral). Diagnostic group.
     int filmFalseColor = 0;
-    int filmFalseColorBin = 0;    // which bin to visualise (0 .. spectralBins-1)
+    int filmFalseColorBin = 0;    // which bin to visualise (0 .. 3)
     // Sampling / seed diagnostics (skip light transport; write debug RGB).
     int samplingDebug = 0;        // SamplingDebug enum
 

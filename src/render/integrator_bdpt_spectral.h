@@ -886,8 +886,7 @@ public:
 
     Vec3 LiPixel(IntegratorSampleContext<Tracer>& ctx, int x, int y,
                  SpectralBinBuffer* bins) const {
-        const int sampleCount =
-            std::clamp(ctx.scene->settings.spectralSamples, 2, kMaxSpectrumSamples);
+        const int sampleCount = kMaxSpectrumSamples;
         SampledWavelengths waves =
             (ctx.scene->settings.spectralWavelengthSampling == 1)
                 ? SampledWavelengths::sampleUniform(sampleCount, ctx.rng->nextFloat())

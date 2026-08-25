@@ -814,10 +814,7 @@ private:
         spec.illuminantSpd =
             (cs.whiteIlluminant == kWhiteIlluminantD60) ? illumD60_.as<float>() : illumD65_.as<float>();
         for (int i = 0; i < 9; ++i) spec.rgbFromXyz[i] = cs.rgbFromXyz[i];
-        int n = st.spectralSamples;
-        if (n < 2) n = 2;
-        if (n > kMaxSpectrumSamples) n = kMaxSpectrumSamples;
-        spec.samples = n;
+        spec.samples = kMaxSpectrumSamples;
         spec.wavelengthSampling = st.spectralWavelengthSampling;
         lp.spec = spec;
     }

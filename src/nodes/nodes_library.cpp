@@ -22,6 +22,7 @@
 #include "render/cpu/polynomial_optics.h"
 #include "render/physical_sky.h"
 #include "render/render_device.h"
+#include "render/spectrum_constants.h"
 
 namespace sol {
 
@@ -1176,21 +1177,12 @@ public:
         // Hidden migration marker: legacy menu was PT / DL / AO / BDPT.
         // New nodes default to v2; legacy files without this key are remapped on load.
         addParameter(Parameter::makeBool("_integrator_menu_v2", "", true));
-        addParameter(Parameter::makeInt("spectralsamples", "Spectral Samples", 4, 2, 16)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==4||integrator==5")
-                         .withTooltip("Spectral integrators: number of hero wavelengths per path "
-                                      "(2–16, default 4). Higher = cleaner colour, slower."));
-        addParameter(Parameter::makeInt("spectralbins", "Spectral Bins", 16, 8, 32)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==4||integrator==5")
-                         .withTooltip("Spectral: fixed wavelength bins for multilayer spectral "
-                                      "EXR / false-color (8–32)."));
         addParameter(Parameter::makeBool("spectralexr", "Write Spectral EXR Layers", false)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==4||integrator==5")
                          .withTooltip("When saving EXR with a spectral integrator, also write "
-                                      "fixed spectral bin layers (S0..Sn)."));
+                                      "four fixed wavelength bin layers (S0..S3), matching "
+                                      "pbrt-v4 NSpectrumSamples. Not a 8–32 slider."));
         addParameter(Parameter::makeMenu("spectralcolorspace", "Spectral Color Space",
                                          {"sRGB Linear", "ACEScg", "Rec.2020", "Display P3"}, 1)
                          .withGroup("Engine")
@@ -1402,10 +1394,11 @@ public:
                          .withVisibleWhen("integrator==4||integrator==5")
                          .withTooltip("Spectral integrators: visualise one spectral bin as "
                                       "false-color instead of beauty RGB (debug)."));
-        addParameter(Parameter::makeInt("filmfalsecolorbin", "False Color Bin", 0, 0, 31)
+        addParameter(Parameter::makeInt("filmfalsecolorbin", "False Color Bin", 0, 0, 3)
                          .withGroup("Diagnostic")
                          .withVisibleWhen("integrator==4&&filmfalsecolor==1||integrator==5&&filmfalsecolor==1")
-                         .withTooltip("Which spectral bin to show when Spectral False Color is on."));
+                         .withTooltip("Which of the four wavelength bins to show "
+                                      "(pbrt-v4 NSpectrumSamples)."));
     }
 
     void cook(CookContext&, const std::vector<StagePtr>&, Stage& stage) override {
@@ -1467,8 +1460,8 @@ public:
         settings.dicingPolyLimitM = std::clamp(intValue("dicingpolylimitm", 10), 1, 200);
         settings.dicingCameraMode =
             intValue("dicingcamera", 0) == 1 ? kDicingCameraCustom : kDicingCameraRender;
-        settings.spectralSamples = std::clamp(intValue("spectralsamples", 4), 2, 16);
-        settings.spectralBins = std::clamp(intValue("spectralbins", 16), 8, 32);
+        settings.spectralSamples = kMaxSpectrumSamples;
+        settings.spectralBins = kMaxSpectrumSamples;
         settings.spectralExr = boolValue("spectralexr", false) ? 1 : 0;
         settings.spectralColorSpace = std::clamp(intValue("spectralcolorspace", 1), 0, 3);
         settings.spectralWavelengthSampling = std::clamp(intValue("spectralwavesamp", 0), 0, 1);
@@ -1482,7 +1475,7 @@ public:
         settings.filterRadius = float(floatValue("filterradius", 0.5));
         settings.envVisibleCamera = boolValue("envvisible", true) ? 1 : 0;
         settings.filmFalseColor = boolValue("filmfalsecolor", false) ? 1 : 0;
-        settings.filmFalseColorBin = std::clamp(intValue("filmfalsecolorbin", 0), 0, 31);
+        settings.filmFalseColorBin = std::clamp(intValue("filmfalsecolorbin", 0), 0, 3);
         settings.samplingDebug = std::clamp(intValue("samplingdebug", 0), 0, 4);
         settings.enableTxCache = boolValue("enabletxcache", true) ? 1 : 0;
         settings.ocioUseEnv = boolValue("ociousenv", true) ? 1 : 0;
