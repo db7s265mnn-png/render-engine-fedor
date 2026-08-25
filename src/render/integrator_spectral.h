@@ -18,10 +18,6 @@ public:
     const char* name() const override { return "PT Spectral"; }
 
     Vec3 Li(IntegratorSampleContext<Tracer>& ctx) const override {
-        return LiPixel(ctx, -1, -1, nullptr);
-    }
-
-    Vec3 LiPixel(IntegratorSampleContext<Tracer>& ctx, int x, int y, SpectralBinBuffer* bins) const {
         const SceneView& scene = *ctx.scene;
         Tracer& tracer = *ctx.tracer;
         Rng& rng = *ctx.rng;
@@ -380,7 +376,6 @@ public:
             if (spectrumMaxComponent(throughput) < 1e-6f) break;
         }
 
-        if (bins) bins->addSample(x, y, radiance, waves);
         Vec3 rgb = spectrumToRgb(radiance, waves, filmCs);
         return isFinite(rgb) ? rgb : Vec3(0.0f);
     }

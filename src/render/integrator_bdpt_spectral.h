@@ -881,11 +881,6 @@ public:
     const char* name() const override { return "BDPT Spectral"; }
 
     Vec3 Li(IntegratorSampleContext<Tracer>& ctx) const override {
-        return LiPixel(ctx, -1, -1, nullptr);
-    }
-
-    Vec3 LiPixel(IntegratorSampleContext<Tracer>& ctx, int x, int y,
-                 SpectralBinBuffer* bins) const {
         const int sampleCount = kMaxSpectrumSamples;
         SampledWavelengths waves =
             (ctx.scene->settings.spectralWavelengthSampling == 1)
@@ -905,7 +900,6 @@ public:
             *ctx.scene, *ctx.tracer, ctx.origin, ctx.direction, *ctx.rng, waves, heroIdx,
             ctx.splatFb, ctx.dispersion, ctx.photons, &radiance);
 #endif
-        if (bins) bins->addSample(x, y, radiance, waves);
         return rgb;
     }
 };

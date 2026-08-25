@@ -9,8 +9,6 @@
 #include "render/framebuffer.h"
 #include "scene/scene.h"
 
-#include <vector>
-
 namespace sol {
 
 struct RenderProgress {
@@ -87,12 +85,6 @@ public:
     virtual void refreshSceneData() {}
 
     virtual void release() {}
-
-    // PT Spectral: optional fixed-bin spectral accumulation (Embree only).
-    virtual bool copySpectralBins(int& /*width*/, int& /*height*/, int& /*bins*/,
-                                  std::vector<float>& /*accum*/) const {
-        return false;
-    }
 };
 
 using RenderDevicePtr = std::shared_ptr<RenderDevice>;

@@ -201,25 +201,4 @@ inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
     return spectrumToRgb(s, w, colorSpaceById(colorSpaceId));
 }
 
-// False-color: map a spectral bin / wavelength to a visible debug color.
-inline Vec3 wavelengthToFalseColor(float lambdaNm) {
-    const float t = saturatef((lambdaNm - kSpectrumLambdaMin) / (kSpectrumLambdaMax - kSpectrumLambdaMin));
-    const float h = (1.0f - t) * 0.75f;
-    const float s = 1.0f, v = 1.0f;
-    const float c = v * s;
-    const float x = c * (1.0f - fabsf(fmodf(h * 6.0f, 2.0f) - 1.0f));
-    const float m = v - c;
-    float r = 0, g = 0, b = 0;
-    const int sector = int(h * 6.0f) % 6;
-    switch (sector) {
-        case 0: r = c; g = x; break;
-        case 1: r = x; g = c; break;
-        case 2: g = c; b = x; break;
-        case 3: g = x; b = c; break;
-        case 4: r = x; b = c; break;
-        default: r = c; b = x; break;
-    }
-    return Vec3(r + m, g + m, b + m);
-}
-
 }  // namespace sol

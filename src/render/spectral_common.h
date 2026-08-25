@@ -1,8 +1,7 @@
-// Shared spectral film buffer + spectral BSDF helpers (PT / BDPT Spectral).
+// Shared spectral BSDF / medium helpers (PT / BDPT Spectral).
 #pragma once
 
 #include <algorithm>
-#include <vector>
 
 #include "render/metal_spectra.h"
 #include "render/shading.h"
@@ -13,43 +12,6 @@
 #include "render/volume_track.h"
 
 namespace sol {
-
-struct SpectralBinBuffer {
-    int width = 0;
-    int height = 0;
-    int bins = 0;
-    std::vector<float> accum;
-
-    void resize(int w, int h, int b) {
-        width = std::max(0, w);
-        height = std::max(0, h);
-        bins = std::clamp(b, 0, 64);
-        accum.assign(size_t(std::max(width, 0)) * size_t(std::max(height, 0)) * size_t(std::max(bins, 1)),
-                     0.0f);
-    }
-    void clear() { std::fill(accum.begin(), accum.end(), 0.0f); }
-
-    void addSample(int x, int y, const SampledSpectrum& s, const SampledWavelengths& w) {
-        if (bins <= 0 || width <= 0 || height <= 0 || s.n <= 0) return;
-        if (x < 0 || y < 0 || x >= width || y >= height) return;
-        const size_t base = (size_t(y) * size_t(width) + size_t(x)) * size_t(bins);
-        const float span = kSpectrumLambdaMax - kSpectrumLambdaMin;
-        const int n = std::min(s.n, w.n);
-        for (int i = 0; i < n; ++i) {
-            if (w.pdf[i] <= 0.0f) continue;
-            float t = (w.lambda[i] - kSpectrumLambdaMin) / span;
-            int bin = int(t * float(bins));
-            bin = std::clamp(bin, 0, bins - 1);
-            accum[base + size_t(bin)] += s.values[i] / w.pdf[i];
-        }
-    }
-
-    float binValue(int x, int y, int bin) const {
-        if (bins <= 0 || !width || bin < 0 || bin >= bins) return 0.0f;
-        if (x < 0 || y < 0 || x >= width || y >= height) return 0.0f;
-        return accum[(size_t(y) * size_t(width) + size_t(x)) * size_t(bins) + size_t(bin)];
-    }
-};
 
 // MC path weights / NEE aggregates — energy-safe under multiply.
 inline SampledSpectrum upsampleRgb(Vec3 rgb, const SampledWavelengths& w) {

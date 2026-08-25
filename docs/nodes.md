@@ -125,7 +125,7 @@ parameters, and *Look Through Camera Node* goes back to the authored camera.
 | Motion Blur | Enable Motion Blur, Motion Keys, Shutter Length |
 | Displacement | Frustum Cull, Screen Adaptive, Enable Displacement, Dicing Camera |
 | Film | Working Space, OCIO, Environment Visible To Camera |
-| Diagnostic | Sampling Debug, Spectral False Color |
+| Diagnostic | Sampling Debug |
 
 Folders are Houdini-style tabs in the parameter panel: click a tab to show only that group.
 

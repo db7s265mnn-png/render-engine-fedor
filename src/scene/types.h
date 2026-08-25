@@ -606,18 +606,12 @@ struct RenderSettingsData {
     // Master switch: off = render cages, skip subdiv + geometric displacement.
     int enableDisplacement = 1;
 
-    // PT Spectral / BDPT Spectral. Wavelength count is pbrt-v4 NSpectrumSamples,
-    // not a UI slider. spectralBins matches that for the optional EXR dump.
+    // PT Spectral / BDPT Spectral. Wavelength count is pbrt-v4 NSpectrumSamples.
     int spectralSamples = kMaxSpectrumSamples;
-    int spectralBins = kMaxSpectrumSamples;
-    int spectralExr = 0;          // write spectral multilayer EXR on save when set
     // Beauty conversion color space. Default ACEScg — same as workingSpace.
     int spectralColorSpace = 1;   // kSpectralColorSpaceAcesCg
     // Wavelength sampling: 0 = visible importance (pbrt), 1 = uniform stratified.
     int spectralWavelengthSampling = 0;
-    // Film: false-color debug from spectral bins (PT Spectral). Diagnostic group.
-    int filmFalseColor = 0;
-    int filmFalseColorBin = 0;    // which bin to visualise (0 .. 3)
     // Sampling / seed diagnostics (skip light transport; write debug RGB).
     int samplingDebug = 0;        // SamplingDebug enum
 
