@@ -7,12 +7,12 @@ namespace sol {
 __device__ inline void intersectClosestPixel(int pixel) {
     const LaunchParams& params = launchParams();
     GpuPath& path = params.paths[pixel];
-    GpuHit& hit = params.hits[pixel];
-    traceClosest(path.origin, path.direction, kFloatMax, hit);
+    traceClosest(pixel, path.origin, path.direction, kFloatMax);
+    const int didHit = params.hits[pixel].didHit;
     if (path.mediumIndex >= 0) {
         path.queue = kQueueShadeVolume;
     } else {
-        path.queue = hit.didHit ? kQueueShadeSurface : kQueueShadeBackground;
+        path.queue = didHit ? kQueueShadeSurface : kQueueShadeBackground;
     }
 }
 

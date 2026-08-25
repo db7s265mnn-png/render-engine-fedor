@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.7 LANGUAGES CXX)
+project(Solstice VERSION 0.9.8 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -55,8 +55,8 @@ message(STATUS "Build id: ${SOLSTICE_BUILD_ID}")
 # Options
 # ---------------------------------------------------------------------------
 option(SOLSTICE_ENABLE_OPTIX "Build the OptiX GPU path tracing backend" OFF)
-set(SOLSTICE_OPTIX_NVCC_OPT "1" CACHE STRING
-    "nvcc -O level for OptiX PTX (1 = faster compile; OptiX still optimizes at module create)")
+set(SOLSTICE_OPTIX_NVCC_OPT "3" CACHE STRING
+    "nvcc -O level for OptiX PTX (3 = device speed; OptiX still optimizes at module create)")
 option(SOLSTICE_ENABLE_ALEMBIC "Build with Alembic geometry import" ON)
 option(SOLSTICE_ENABLE_OPENEXR "Build with OpenEXR image support" ON)
 option(SOLSTICE_ENABLE_TIFF "Build with libtiff (.tx / .tif mipmap) support" ON)

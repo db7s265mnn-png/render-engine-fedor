@@ -27,6 +27,12 @@ __device__ inline int wavefrontPixel(int& x, int& y) {
     return y * p.width + x;
 }
 
+// Closest-hit / miss: same launch index as the tracing raygen (Iray: no payload).
+__device__ inline int wavefrontPixelIndex() {
+    int x = 0, y = 0;
+    return wavefrontPixel(x, y);
+}
+
 __device__ inline Vec3 clampFirefly(Vec3 contrib, float clampValue) {
     if (clampValue <= 0.0f || !isFinite(contrib)) return isFinite(contrib) ? contrib : Vec3(0.0f);
     const float m = maxComponent(contrib);

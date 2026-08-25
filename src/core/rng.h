@@ -11,9 +11,11 @@ namespace sol {
 // fallback for older call sites.
 using RngQmcFn = float (*)(void* ctx, uint32_t dimension);
 
+#if !defined(SOL_RNG_NO_SOBOL)
 // Defined in render/sobol.h (included below). Host table and device on-the-fly
 // direction numbers produce the same Owen-scrambled values.
 SR_HD float rngOwenSobolSample(uint32_t scramble, uint32_t index, uint32_t dimension);
+#endif
 
 enum RngBackend : uint8_t {
     kRngBackendPcg = 0,         // PCG32 (default)
@@ -93,7 +95,9 @@ struct Rng {
     }
 
     SR_HD float nextFloat() {
+#if !defined(SOL_RNG_NO_SOBOL)
         if (useSobol) return rngOwenSobolSample(sobolScramble, sobolIndex, sampleDim++);
+#endif
 #if !defined(__CUDACC__)
         if (qmcFn) return qmcFn(qmcCtx, sampleDim++);
 #endif

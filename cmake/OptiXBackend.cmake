@@ -93,9 +93,9 @@ set(_solstice_optix_dir ${CMAKE_SOURCE_DIR}/src/render/optix)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 
 if(NOT DEFINED SOLSTICE_OPTIX_NVCC_OPT)
-    set(SOLSTICE_OPTIX_NVCC_OPT "1")
+    set(SOLSTICE_OPTIX_NVCC_OPT "3")
 endif()
-message(STATUS "OptiX PTX: wavefront modules (init/intersect/shade), nvcc -O${SOLSTICE_OPTIX_NVCC_OPT}")
+message(STATUS "OptiX PTX: Iray wavefront modules (init/intersect/shade/tail), nvcc -O${SOLSTICE_OPTIX_NVCC_OPT}")
 
 set(_solstice_nvcc_inc_flags)
 foreach(_inc IN LISTS CUDAToolkit_INCLUDE_DIRS)
@@ -130,10 +130,8 @@ if(WIN32)
         -Xcompiler=/bigobj,/nologo)
 endif()
 
-# Cycles: each integrator stage is its own kernel (intersect_closest, shade_surface,
-# …) so cicc never sees optixTrace + BSDF + lights in one megakernel. -O1: OptiX
-# re-optimizes at optixModuleCreate.
-# Exception: path_tail is the Iray-style megakernel (trace + shade). It is
+# Iray: thin wavefront stages (intersect vs shade) plus a separate tail megakernel
+# so cicc never sees optixTrace + BSDF in the interactive pipeline. path_tail is
 # slower to nvcc; give it a longer timeout.
 #
 # Do NOT give ninja 16 separate custom commands. On Windows CI, after the
@@ -153,6 +151,7 @@ set(_solstice_nvcc_ptx_common
     -D_USE_MATH_DEFINES
     -DNOMINMAX
     -DWIN32_LEAN_AND_MEAN
+    -DSOL_RNG_NO_SOBOL
     -I${CMAKE_SOURCE_DIR}/src
     -I${CMAKE_BINARY_DIR}/generated
     -I${OptiX_INCLUDE_DIR}
@@ -222,7 +221,6 @@ solstice_optix_kernel(init_from_camera
             ${_solstice_optix_dir}/optix_volume.cuh
             ${_solstice_optix_dir}/optix_spawn.cuh
             ${CMAKE_SOURCE_DIR}/src/render/camera_sample.h
-            ${CMAKE_SOURCE_DIR}/src/render/sobol.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 

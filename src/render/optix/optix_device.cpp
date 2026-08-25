@@ -1,10 +1,9 @@
-// GPU wavefront path tracing on NVIDIA OptiX (Cycles-style small modules).
+// GPU Iray-style wavefront path tracing on NVIDIA OptiX (4λ spectral PT).
 //
-// Geometry acceleration structures are built per mesh and instanced through a
-// top level IAS, mirroring the Embree backend so both produce the same image.
-// Compacted 1D work queues (live pixel lists). Shade kernels never call optixTrace.
-// The host bounce loop stays pipelined (no per-kernel cudaStreamSynchronize):
-// WDDM flushes were the UI hitches.
+// Thin wavefront kernels (init / intersect / shade) plus a separate tail
+// pipeline so the interactive stack is not poisoned by the megakernel.
+// Closest-hit writes GpuHit / occlusion; no payload. Host never reads live
+// counts — full W×H pool, GPU regen into the next spp, one D2H at UI rate.
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_OPTIX
@@ -253,15 +252,14 @@ public:
             cudaDeviceProp properties{};
             CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
             deviceName_ = properties.name;
-            tailThreshold_ = std::max(4096, properties.multiProcessorCount * 1024);
 
             OPTIX_CHECK(optixInit());
 
             OptixDeviceContextOptions options{};
             options.logCallbackFunction = &contextLog;
-            options.logCallbackLevel = 4;
+            options.logCallbackLevel = 2;
 #if OPTIX_VERSION >= 70200
-            options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+            options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
 #endif
             OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
 
@@ -275,7 +273,7 @@ public:
             initialized_ = true;
             logInfo("OptiX backend initialised on " + deviceName_ +
                     " (" + std::to_string(properties.multiProcessorCount) +
-                    " SMs, pipelined compact PT, LaunchParams " +
+                    " SMs, Iray wavefront + tail pipeline, LaunchParams " +
                     std::to_string(sizeof(LaunchParams)) + " bytes)");
             logInfo("OptiX submits CUDA/Compute work. Windows Task Manager defaults to the 3D graph "
                     "(~0% for path tracing) — switch a GPU graph to CUDA or Compute_0, or watch the HUD ms.");
@@ -574,19 +572,11 @@ public:
             }
             if (pathBuffer_.size() != pixelCount * sizeof(GpuPath) ||
                 hitBuffer_.size() != pixelCount * sizeof(GpuHit) ||
-                shadowBuffer_.size() != pixelCount * sizeof(GpuShadow) ||
-                qIntersect_.size() != pixelCount * sizeof(int)) {
+                shadowBuffer_.size() != pixelCount * sizeof(GpuShadow)) {
                 destroyGraph();
                 pathBuffer_.alloc(pixelCount * sizeof(GpuPath));
                 hitBuffer_.alloc(pixelCount * sizeof(GpuHit));
                 shadowBuffer_.alloc(pixelCount * sizeof(GpuShadow));
-                qIntersect_.alloc(pixelCount * sizeof(int));
-                qIntersectNext_.alloc(pixelCount * sizeof(int));
-                qVolume_.alloc(pixelCount * sizeof(int));
-                qSurface_.alloc(pixelCount * sizeof(int));
-                qBackground_.alloc(pixelCount * sizeof(int));
-                qShadow_.alloc(pixelCount * sizeof(int));
-                workCounts_.alloc(sizeof(unsigned) * unsigned(kSlotCount));
                 CUDA_CHECK(cudaMemsetAsync(pathBuffer_.as<void>(), 0, pathBuffer_.size(), stream_));
                 CUDA_CHECK(cudaMemsetAsync(hitBuffer_.as<void>(), 0, hitBuffer_.size(), stream_));
                 CUDA_CHECK(cudaMemsetAsync(shadowBuffer_.as<void>(), 0, shadowBuffer_.size(), stream_));
@@ -630,21 +620,25 @@ public:
             launchParams.paths = pathBuffer_.as<GpuPath>();
             launchParams.hits = hitBuffer_.as<GpuHit>();
             launchParams.shadows = shadowBuffer_.as<GpuShadow>();
-            launchParams.qIntersect = qIntersect_.as<int>();
-            launchParams.qIntersectNext = qIntersectNext_.as<int>();
-            launchParams.qVolume = qVolume_.as<int>();
-            launchParams.qSurface = qSurface_.as<int>();
-            launchParams.qBackground = qBackground_.as<int>();
-            launchParams.qShadow = qShadow_.as<int>();
-            launchParams.workCounts = workCounts_.as<unsigned int>();
+            launchParams.qIntersect = nullptr;
+            launchParams.qIntersectNext = nullptr;
+            launchParams.qVolume = nullptr;
+            launchParams.qSurface = nullptr;
+            launchParams.qBackground = nullptr;
+            launchParams.qShadow = nullptr;
+            launchParams.workCounts = nullptr;
             launchParams.workItems = nullptr;
             launchParams.workCount = 0;
             launchParams.workSlot = -1;
             launchParams.compactLaunch = 0;
-            // 1 spp per call. Folding 8 spp (or the tail megakernel) held the
-            // GPU for a full batch with no UI tick — that was the hitch.
-            launchParams.batchSamples = 1;
-            lastCompletedSamples_ = 1;
+            int remaining = opt.xpuRemainingSamples > 0 ? opt.xpuRemainingSamples : 1;
+            int batch = 4;
+            if (pixelCount > size_t(1920 * 1080)) batch = 2;
+            if (pixelCount > size_t(3840 * 2160)) batch = 1;
+            if (batch > remaining) batch = remaining;
+            if (batch < 1) batch = 1;
+            launchParams.batchSamples = batch;
+            lastCompletedSamples_ = batch;
             launchParams.width = width;
             launchParams.height = height;
             launchParams.pixelOffsetX = offX;
@@ -659,17 +653,22 @@ public:
             if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
 
             const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
-            const int maxIters = maxDepth + 18;
 
             const auto wall0 = std::chrono::steady_clock::now();
             CUDA_CHECK(cudaEventRecord(gpuStartEvent_, stream_));
             int launches = 0;
-            // CUDA graphs cannot capture variable 1D sizes; previous Windows
-            // CaptureModeGlobal also returned OPTIX_ERROR_CUDA_ERROR (7900).
-            launchPipelinedWavefront(launchParams, unsigned(launchW), unsigned(launchH), maxIters, cancel,
-                                     launches);
+            launchIrayWavefront(launchParams, unsigned(launchW), unsigned(launchH), maxDepth, cancel,
+                                launches);
             CUDA_CHECK(cudaEventRecord(gpuStopEvent_, stream_));
-            if (!opt.deferHostCopy) {
+
+            const bool lastBatch = remaining <= batch;
+            const bool needOracle = scene_->settings.noiseThreshold > 0.0f;
+            const auto copyNow = std::chrono::steady_clock::now();
+            const double copyAge = std::chrono::duration<double>(copyNow - lastHostCopy_).count();
+            const bool wantCopy =
+                !opt.deferHostCopy &&
+                (needOracle || sampleIndex < 4 || lastBatch || !hostCopyEver_ || copyAge >= 0.08);
+            if (wantCopy) {
                 if (opt.skipFramebufferStore) {
                     hostAccum_.resize(pixelCount);
                     hostLumSq_.resize(pixelCount);
@@ -690,25 +689,28 @@ public:
                                                    stream_));
                     }
                 }
+                lastHostCopy_ = copyNow;
+                hostCopyEver_ = true;
             }
             CUDA_CHECK(cudaEventSynchronize(gpuStopEvent_));
             float gpuMs = 0.0f;
             CUDA_CHECK(cudaEventElapsedTime(&gpuMs, gpuStartEvent_, gpuStopEvent_));
             lastGpuSampleMs_ = double(gpuMs);
-            if (!opt.deferHostCopy) CUDA_CHECK(cudaStreamSynchronize(stream_));
+            if (wantCopy) CUDA_CHECK(cudaStreamSynchronize(stream_));
             const double wallMs =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wall0).count();
 
-            if (!opt.deferHostCopy && (sampleIndex < 2 || sampleIndex % 32 == 0)) {
+            if (wantCopy && (sampleIndex < 2 || sampleIndex % 32 == 0)) {
                 std::ostringstream msg;
                 msg.setf(std::ios::fixed);
                 msg.precision(2);
                 msg << "OptiX GPU " << lastGpuSampleMs_ << " ms  wall " << wallMs << " ms  " << deviceName_
-                    << "  " << width << "x" << height << "  wavefront=" << launches << " launches";
+                    << "  " << width << "x" << height << "  batch=" << batch
+                    << "  wavefront=" << launches << " launches";
                 logInfo(msg.str());
             }
 
-            if (!opt.skipFramebufferStore && !opt.deferHostCopy) {
+            if (wantCopy && !opt.skipFramebufferStore) {
                 fb.markHasData();
                 if (!hostLumSq_.empty()) fb.copyLumSq(hostLumSq_.data(), hostLumSq_.size());
             }
@@ -777,8 +779,9 @@ private:
             "init_from_camera", "intersect_closest", "intersect_shadow", "shade_surface",
             "shade_background",  "shade_shadow",     "shade_volume",     "path_tail",
         };
+        const OptixPipeline pipe = (raygenIndex == kRgPathTail) ? pipelineTail_ : pipeline_;
         const OptixResult result =
-            optixLaunch(pipeline_, stream_, launchParamsBuffer_.device(), sizeof(LaunchParams),
+            optixLaunch(pipe, stream_, launchParamsBuffer_.device(), sizeof(LaunchParams),
                         &sbts_[raygenIndex], width, height, 1);
         if (result != OPTIX_SUCCESS) {
             throw std::runtime_error(optixFailMessage(result, "optixLaunch") + " [" +
@@ -792,8 +795,8 @@ private:
                                    cudaMemcpyHostToDevice, stream_));
     }
 
-    void launchPipelinedWavefront(LaunchParams& lp, unsigned launchW, unsigned launchH, int maxIters,
-                                  const std::atomic<bool>& cancel, int& launches) {
+    void launchIrayWavefront(LaunchParams& lp, unsigned launchW, unsigned launchH, int maxDepth,
+                             const std::atomic<bool>& cancel, int& launches) {
         launches = 0;
         lp.compactLaunch = 0;
         lp.workItems = nullptr;
@@ -802,10 +805,11 @@ private:
         uploadLaunch(lp);
         launchKernel(kRgInit, launchW, launchH);
         ++launches;
-        for (int iter = 0; iter < maxIters; ++iter) {
-            if (cancel.load(std::memory_order_relaxed)) break;
-            // Same stream, no host read: GPU stays busy. Do not compact-sync here —
-            // cudaStreamSynchronize per bounce was the WDDM hitch.
+        // Iray: coherent first bounces as wavefront, remainder in the tail megakernel.
+        constexpr int kWavefrontBounces = 3;
+        const int wave = std::max(1, std::min(maxDepth, kWavefrontBounces));
+        for (int iter = 0; iter < wave; ++iter) {
+            if (cancel.load(std::memory_order_relaxed)) return;
             launchKernel(kRgIntersectClosest, launchW, launchH);
             launchKernel(kRgShadeVolume, launchW, launchH);
             launchKernel(kRgShadeBackground, launchW, launchH);
@@ -814,6 +818,9 @@ private:
             launchKernel(kRgShadeShadow, launchW, launchH);
             launches += 6;
         }
+        if (cancel.load(std::memory_order_relaxed)) return;
+        launchKernel(kRgPathTail, launchW, launchH);
+        ++launches;
     }
 
     void destroyGraph() {
@@ -972,7 +979,7 @@ private:
         pipelineOptions.usesMotionBlur = 0;
         // IAS of triangle GAS — one instance level. Depth 2 (IAS + GAS).
         pipelineOptions.traversableGraphFlags = OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
-        pipelineOptions.numPayloadValues = 6;
+        pipelineOptions.numPayloadValues = 0;
         pipelineOptions.numAttributeValues = 2;
         pipelineOptions.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
         pipelineOptions.pipelineLaunchParamsVariableName = "solsticeLaunchParams";
@@ -1056,34 +1063,46 @@ private:
         logSize = sizeof(log);
         OPTIX_CHECK(optixProgramGroupCreate(context_, hitDesc, 2, &groupOptions, log, &logSize, hitGroups_));
 
-        OptixProgramGroup groups[kRgCount + 4];
-        for (int i = 0; i < kRgCount; ++i) groups[i] = raygenGroups_[i];
-        groups[kRgCount + 0] = missGroups_[0];
-        groups[kRgCount + 1] = missGroups_[1];
-        groups[kRgCount + 2] = hitGroups_[0];
-        groups[kRgCount + 3] = hitGroups_[1];
+        OptixProgramGroup groupsWf[kRgPathTail + 4];
+        for (int i = 0; i < kRgPathTail; ++i) groupsWf[i] = raygenGroups_[i];
+        groupsWf[kRgPathTail + 0] = missGroups_[0];
+        groupsWf[kRgPathTail + 1] = missGroups_[1];
+        groupsWf[kRgPathTail + 2] = hitGroups_[0];
+        groupsWf[kRgPathTail + 3] = hitGroups_[1];
+        OptixProgramGroup groupsTail[5] = {raygenGroups_[kRgPathTail], missGroups_[0], missGroups_[1],
+                                           hitGroups_[0], hitGroups_[1]};
+
         OptixPipelineLinkOptions linkOptions{};
         linkOptions.maxTraceDepth = 1;
         logSize = sizeof(log);
-        OPTIX_CHECK(optixPipelineCreate(context_, &pipelineOptions, &linkOptions, groups,
-                                        unsigned(sizeof(groups) / sizeof(groups[0])), log, &logSize, &pipeline_));
+        OPTIX_CHECK(optixPipelineCreate(context_, &pipelineOptions, &linkOptions, groupsWf,
+                                        unsigned(sizeof(groupsWf) / sizeof(groupsWf[0])), log, &logSize,
+                                        &pipeline_));
+        logSize = sizeof(log);
+        OPTIX_CHECK(optixPipelineCreate(context_, &pipelineOptions, &linkOptions, groupsTail,
+                                        unsigned(sizeof(groupsTail) / sizeof(groupsTail[0])), log, &logSize,
+                                        &pipelineTail_));
 
-        OptixStackSizes stackSizes{};
-        for (OptixProgramGroup group : groups) {
-            OPTIX_CHECK(optixUtilAccumulateStackSizes(group, &stackSizes, pipeline_));
-        }
-        unsigned int directCallableFromTraversal = 0;
-        unsigned int directCallableFromState = 0;
-        unsigned int continuationStack = 0;
-        OPTIX_CHECK(optixUtilComputeStackSizes(&stackSizes, linkOptions.maxTraceDepth, 0, 0,
-                                               &directCallableFromTraversal, &directCallableFromState,
-                                               &continuationStack));
+        auto setStack = [&](OptixPipeline pipe, OptixProgramGroup* groups, int n, unsigned floor) {
+            OptixStackSizes stackSizes{};
+            for (int i = 0; i < n; ++i) {
+                OPTIX_CHECK(optixUtilAccumulateStackSizes(groups[i], &stackSizes, pipe));
+            }
+            unsigned int directCallableFromTraversal = 0;
+            unsigned int directCallableFromState = 0;
+            unsigned int continuationStack = 0;
+            OPTIX_CHECK(optixUtilComputeStackSizes(&stackSizes, linkOptions.maxTraceDepth, 0, 0,
+                                                   &directCallableFromTraversal, &directCallableFromState,
+                                                   &continuationStack));
+            if (continuationStack < floor) continuationStack = floor;
+            constexpr unsigned int kTraversableGraphDepth = 2;
+            OPTIX_CHECK(optixPipelineSetStackSize(pipe, directCallableFromTraversal, directCallableFromState,
+                                                  continuationStack, kTraversableGraphDepth));
+        };
         // IAS→GAS is two traversables. Depth 1 is OPTIX_ERROR_INVALID_VALUE (7001)
         // with ALLOW_SINGLE_LEVEL_INSTANCING.
-        constexpr unsigned int kTraversableGraphDepth = 2;
-        if (continuationStack < 8192u) continuationStack = 8192u;
-        OPTIX_CHECK(optixPipelineSetStackSize(pipeline_, directCallableFromTraversal, directCallableFromState,
-                                              continuationStack, kTraversableGraphDepth));
+        setStack(pipeline_, groupsWf, int(sizeof(groupsWf) / sizeof(groupsWf[0])), 1024u);
+        setStack(pipelineTail_, groupsTail, int(sizeof(groupsTail) / sizeof(groupsTail[0])), 8192u);
 
         RayGenRecord raygenRecords[kRgCount]{};
         for (int i = 0; i < kRgCount; ++i) {
@@ -1176,6 +1195,7 @@ private:
         missRecordBuffer_.free();
         hitRecordBuffer_.free();
         if (pipeline_) optixPipelineDestroy(pipeline_);
+        if (pipelineTail_) optixPipelineDestroy(pipelineTail_);
         for (OptixProgramGroup& group : raygenGroups_) {
             if (group) optixProgramGroupDestroy(group);
             group = nullptr;
@@ -1194,6 +1214,7 @@ private:
         }
         if (context_) optixDeviceContextDestroy(context_);
         pipeline_ = nullptr;
+        pipelineTail_ = nullptr;
         context_ = nullptr;
         initialized_ = false;
     }
@@ -1205,9 +1226,10 @@ private:
     bool warnedVolumes_ = false;
     double lastGpuSampleMs_ = 0.0;
     int lastCompletedSamples_ = 1;
-    int tailThreshold_ = 65536;
     int accumWidth_ = 0;
     int accumHeight_ = 0;
+    bool hostCopyEver_ = false;
+    std::chrono::steady_clock::time_point lastHostCopy_{};
     std::string deviceName_;
 
     OptixDeviceContext context_ = nullptr;
@@ -1216,6 +1238,7 @@ private:
     OptixProgramGroup missGroups_[2] = {nullptr, nullptr};
     OptixProgramGroup hitGroups_[2] = {nullptr, nullptr};
     OptixPipeline pipeline_ = nullptr;
+    OptixPipeline pipelineTail_ = nullptr;
     OptixShaderBindingTable sbt_{};
     OptixShaderBindingTable sbts_[kRgCount]{};
 

@@ -25,7 +25,7 @@ __device__ inline void spawnCameraPath(int pixel, int x, int y, int sampleOffset
     const unsigned frameSeed =
         unsigned(params.scene.settings.seed) * 9781u + unsigned(sampleIndex) * 6271u;
     path.rng = makePixelRng(x, y, sampleIndex, frameSeed);
-    attachPathSobol(path.rng, x, y, sampleIndex);
+    // OptiX: PCG. Embree keeps Owen-Sobol. Device Joe–Kuo rebuild was a tax.
     const float jitterX = path.rng.nextFloat();
     const float jitterY = path.rng.nextFloat();
     const float lensU = path.rng.nextFloat();

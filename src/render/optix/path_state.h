@@ -63,8 +63,9 @@ struct GpuPath {
     int mediumIndex = -1;
     int volumeScatters = 0;
     int localSample = 0;  // 0 .. batchSamples-1 when regenerating into the next spp
-    // AoS on purpose: compacted queues gather random pixels, so SoA would not
-    // coalesce those loads. Do not split this struct into pointer arrays.
+    // AoS: shade kernels touch many fields of one path. Iray's SoA win was in a
+    // separate logic kernel that streamed one member across 1M slots — not here.
+    // Packed flags would misalign the 4λ arrays; leave ints.
     Rng rng;
 };
 

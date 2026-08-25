@@ -1,5 +1,5 @@
-// Compacted pixel queues for the OptiX wavefront (Iray / Cycles work queues).
-// Shade kernels never call optixTrace. Host launches 1D on live count.
+// Compacted pixel queues (kept for a future device-side compact). The Iray
+// hot path launches the full path pool and skips by queue tag — no host count.
 #pragma once
 
 #include "render/optix/optix_wavefront.cuh"

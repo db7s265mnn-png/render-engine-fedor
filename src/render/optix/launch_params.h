@@ -61,8 +61,8 @@ struct alignas(16) LaunchParams {
     int* workItems = nullptr;            // queue this optixLaunch reads
     int workCount = 0;                   // 1D launch width (upper bound)
     int workSlot = -1;                   // >=0: live count is workCounts[slot] on device
-    int compactLaunch = 0;               // 1 = 1D workItems, 0 = 2D pixel grid
-    int batchSamples = 1;                // spp folded in this wavefront (regen)
+    int compactLaunch = 0;               // unused (Iray pool = full W×H, no host count)
+    int batchSamples = 1;                // spp folded in this wavefront (GPU regen)
 
     int width = 0;
     int height = 0;

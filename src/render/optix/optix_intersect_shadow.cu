@@ -6,7 +6,7 @@ namespace sol {
 
 __device__ inline void intersectShadowPixel(int pixel) {
     GpuShadow& shadow = launchParams().shadows[pixel];
-    shadow.occluded = traceShadow(shadow.origin, shadow.direction, shadow.tMax);
+    traceShadow(pixel, shadow.origin, shadow.direction, shadow.tMax);
     shadow.queue = kShadowShade;
 }
 

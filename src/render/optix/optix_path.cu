@@ -1,7 +1,4 @@
-// Wavefront OptiX modules (Cycles-style split kernels + Iray tail):
-//   optix_init_from_camera.cu
-//   optix_intersect_closest.cu / optix_intersect_shadow.cu
-//   optix_shade_surface.cu / optix_shade_background.cu / optix_shade_shadow.cu
-//   optix_shade_volume.cu  — spectral hero-λ PT (GPU fog: Woodcock)
-//   optix_path_tail.cu     — remaining live paths in one megakernel
-//   optix_hit_miss.cu
+// Iray wavefront OptiX modules (4λ spectral PT):
+//   init / intersect / shade — thin kernels, no payload (CH writes GpuHit)
+//   path_tail — remainder of the state machine in a separate pipeline
+//   hit_miss  — closest-hit / miss write wavefront state
