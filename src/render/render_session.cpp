@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <new>
 #include <string>
+#include <thread>
 
 #include "core/log.h"
 #include "io/ocio_util.h"
@@ -52,16 +55,25 @@ Image RenderSession::displayImage() const {
     // Keep OCIO config in sync with Film settings for Nuke-style views.
     ocioEnsureConfig(settings.ocioUseEnv != 0, settings.ocioConfigPath);
 
-    // After a clear / restart / re-dice, keep the last finished preview until the
-    // first bootstrap pixels land — avoids a harsh black flash.
-    if (!framebuffer_.hasAccumulatedData()) {
+    // After a clear / restart / re-dice, keep the last finished preview until a
+    // complete sample lands — never resolve scanline / bootstrap holes.
+    if (!framebuffer_.hasAccumulatedData() || !framebuffer_.isPresentable()) {
         std::lock_guard<std::mutex> lock(displayHoldMutex_);
         if (!displayHold_.empty()) {
             // FB may be released (size 0) during tess, or already resized to match.
-            if (framebuffer_.width() <= 0 || framebuffer_.height() <= 0 ||
-                (displayHold_.width() == framebuffer_.width() &&
-                 displayHold_.height() == framebuffer_.height())) {
+            const int fw = framebuffer_.width();
+            const int fh = framebuffer_.height();
+            if (fw <= 0 || fh <= 0 ||
+                (displayHold_.width() == fw && displayHold_.height() == fh)) {
                 return displayHold_;
+            }
+            // Nav preview 1/4 ↔ full: keep the last beauty instead of a charcoal flash.
+            const int hw = displayHold_.width();
+            const int hh = displayHold_.height();
+            if (hw > 0 && hh > 0) {
+                const double fa = double(fw) / double(fh);
+                const double ha = double(hw) / double(hh);
+                if (std::abs(fa - ha) < 0.05) return displayHold_;
             }
         }
         // Soft charcoal placeholder (less jarring than pure black).
@@ -134,6 +146,22 @@ void RenderSession::pushInteractiveRestart() {
     start();
 }
 
+void RenderSession::setInteractivePreview(bool on) {
+    const bool was = interactivePreview_.exchange(on, std::memory_order_relaxed);
+    if (was == on) return;
+    // Coarsest first picture on press (RenderMan PP). Refine after each frame.
+    if (on) navDivider_.store(kNavPreviewDividerStart, std::memory_order_relaxed);
+    completeFramesOnly_.store(true, std::memory_order_relaxed);
+    if (rendering_.load(std::memory_order_relaxed) && thread_.joinable()) {
+        softRestart_.store(true, std::memory_order_relaxed);
+        cancel_.store(true, std::memory_order_relaxed);
+    }
+}
+
+void RenderSession::noteCameraMoved() {
+    cameraEpoch_.fetch_add(1, std::memory_order_relaxed);
+}
+
 void RenderSession::discardPreviousRender() {
     stop();
     {
@@ -194,18 +222,45 @@ bool RenderSession::prepareDevice(std::string& error) {
     const int threads = scene->settings.threads;
     if (!device_ || backend != deviceBackend_ || threads != deviceThreads_) {
         device_.reset();
-        if (backend == kBackendGpuOptix) {
+        if (backend == kBackendGpuOptix || backend == kBackendXpu) {
+            const char* label = backend == kBackendXpu ? "XPU (Embree+OptiX)" : "GPU (OptiX)";
             if (!optixBackendCompiledIn()) {
-                logWarning("GPU (OptiX) selected, but this build has no OptiX backend "
-                           "(configure with -DSOLSTICE_ENABLE_OPTIX=ON). Falling back to Embree.");
+                error = std::string(label) + " is selected, but this build has no OptiX/CUDA backend. "
+                        "Rebuild with BUILD_WINDOWS.bat.";
+                return false;
             }
-            device_ = createOptixDevice();
-            if (!device_) {
-                logWarning("OptiX backend is unavailable, falling back to Embree");
-                device_ = createEmbreeDevice(threads);
+            if (scene->settings.integrator != kIntegratorPathTracer) {
+                error = std::string(label) + " only supports Path Tracer. Switch Integrator to Path Tracer, "
+                        "or set Render Device to CPU (Embree).";
+                return false;
+            }
+            if (backend == kBackendXpu) {
+                device_ = createXpuDevice(threads);
+                if (!device_) {
+                    std::string err;
+                    optixRuntimeAvailable(&err);
+                    error = "XPU (Embree+OptiX) cannot start";
+                    if (!err.empty()) error += ": " + err;
+                    else error += ": NVIDIA GPU / driver / CUDA runtime unavailable";
+                    return false;
+                }
+            } else {
+                device_ = createOptixDevice();
+                if (!device_) {
+                    std::string err;
+                    optixRuntimeAvailable(&err);
+                    error = "GPU (OptiX) cannot start";
+                    if (!err.empty()) error += ": " + err;
+                    else error += ": NVIDIA GPU / driver / CUDA runtime unavailable";
+                    return false;
+                }
             }
         } else {
             device_ = createEmbreeDevice(threads);
+        }
+        if (!device_) {
+            error = "no render device available";
+            return false;
         }
         deviceBackend_ = backend;
         deviceThreads_ = threads;
@@ -216,7 +271,16 @@ bool RenderSession::prepareDevice(std::string& error) {
         return false;
     }
     if (sceneDirty_.exchange(false, std::memory_order_relaxed)) {
-        if (!device_->buildScene(scene, error)) return false;
+        if (!device_->buildScene(scene, error)) {
+            if (backend == kBackendGpuOptix) {
+                error = std::string("GPU (OptiX) failed to build the scene") +
+                        (error.empty() ? std::string() : ": " + error);
+            } else if (backend == kBackendXpu) {
+                error = std::string("XPU (Embree+OptiX) failed to build the scene") +
+                        (error.empty() ? std::string() : ": " + error);
+            }
+            return false;
+        }
     }
     return true;
 }
@@ -229,11 +293,23 @@ void RenderSession::threadMain() {
     }
 
     auto fail = [&](const std::string& error) {
-        logError("Render failed: " + error);
+        if (device_) {
+            try {
+                device_->finishRender();
+            } catch (...) {
+            }
+        }
+        logError(error);
         {
             std::lock_guard<std::mutex> lock(progressMutex_);
             progress_.running = false;
             progress_.message = error;
+            if (scene && scene->settings.backend == kBackendXpu)
+                progress_.backendName = "XPU / Embree+OptiX";
+            else if (scene && scene->settings.backend == kBackendGpuOptix)
+                progress_.backendName = "GPU / OptiX";
+            else if (device_)
+                progress_.backendName = device_->name();
         }
         rendering_.store(false, std::memory_order_relaxed);
         std::function<void()> finished;
@@ -247,7 +323,7 @@ void RenderSession::threadMain() {
     std::string error;
     try {
         if (!prepareDevice(error)) {
-            fail(error.empty() ? std::string("device prepare failed") : error);
+            fail(error.empty() ? std::string("Render failed: no device") : error);
             return;
         }
     } catch (const std::bad_alloc&) {
@@ -259,12 +335,25 @@ void RenderSession::threadMain() {
     }
 
     const RenderSettingsData& settings = scene->settings;
-    const int width = std::max(1, settings.resolutionX);
-    const int height = std::max(1, settings.resolutionY);
-    if (framebuffer_.width() != width || framebuffer_.height() != height) framebuffer_.resize(width, height);
-
-    const int startSample = framebuffer_.sampleCount();
+    const int fullWidth = std::max(1, settings.resolutionX);
+    const int fullHeight = std::max(1, settings.resolutionY);
     const int targetSamples = std::max(1, settings.samplesPerPixel);
+
+    int navDivUsed = 1;
+    auto applyFilmSize = [&](int& sampleIndex) -> bool {
+        const bool preview = interactivePreview_.load(std::memory_order_relaxed);
+        navDivUsed = preview ? clampNavPreviewDivider(navDivider_.load(std::memory_order_relaxed)) : 1;
+        const int width = std::max(1, fullWidth / navDivUsed);
+        const int height = std::max(1, fullHeight / navDivUsed);
+        if (framebuffer_.width() != width || framebuffer_.height() != height) {
+            framebuffer_.resize(width, height);
+            sampleIndex = 0;
+        }
+        return preview;
+    };
+
+    int startSample = framebuffer_.sampleCount();
+    applyFilmSize(startSample);
 
     {
         std::lock_guard<std::mutex> lock(progressMutex_);
@@ -275,6 +364,9 @@ void RenderSession::threadMain() {
         progress_.message.clear();
         progress_.elapsedSeconds = 0.0;
         progress_.samplesPerSecond = 0.0;
+        progress_.backendGpuMs = 0.0;
+        progress_.noiseSkipCount = 0;
+        progress_.noisePixelCount = framebuffer_.width() * framebuffer_.height();
     }
 
     const auto startTime = std::chrono::steady_clock::now();
@@ -311,44 +403,120 @@ void RenderSession::threadMain() {
                 progress_.samplesTarget = targetSamples;
                 progress_.elapsedSeconds = 0.0;
                 progress_.samplesPerSecond = 0.0;
+                progress_.backendGpuMs = 0.0;
             }
-            notifyUi(true);
+            // Keep the last complete blit. Do not resolve an empty / half-filled FB.
             continue;
         }
 
         if (cancel_.load(std::memory_order_relaxed)) break;
 
-        RenderMidProgressFn midProgress;
-        if (sample == 0) {
-            midProgress = [&] {
-                if (cancel_.load(std::memory_order_relaxed)) return;
-                notifyUi(false);
-            };
+        const bool preview = applyFilmSize(sample);
+        if (preview && device_) device_->refreshSceneData();
+        const uint64_t epochLaunched = cameraEpoch_.load(std::memory_order_relaxed);
+
+        // Never blit a partial sample. Embree bootstrap 2x2 / Progressive scanlines
+        // would otherwise paint holes; OptiX abort-before-D2H would too.
+        const RenderMidProgressFn midProgress;
+
+        RenderSampleOptions opt;
+        const bool xpu = scene->settings.backend == kBackendXpu;
+        const bool gpu = scene->settings.backend == kBackendGpuOptix;
+        if (xpu) {
+            opt.xpuRemainingSamples = targetSamples - sample;
+            opt.xpuTargetSamples = targetSamples;
+            opt.xpuSchedule = scene->settings.xpuSchedule;
+        } else if (gpu) {
+            opt.xpuRemainingSamples = targetSamples - sample;
+        }
+        if (preview) {
+            opt.navPreview = true;
+            opt.xpuRemainingSamples = 1;
         }
 
-        device_->renderSample(framebuffer_, sample, cancel_, midProgress);
+        const auto pass0 = std::chrono::steady_clock::now();
+        try {
+            device_->renderSample(framebuffer_, sample, cancel_, midProgress, &opt);
+        } catch (const std::exception& ex) {
+            const int backend = scene->settings.backend;
+            const std::string prefix = backend == kBackendXpu
+                                           ? "XPU (Embree+OptiX) render failed: "
+                                           : (backend == kBackendGpuOptix ? "GPU (OptiX) render failed: "
+                                                                          : "Render failed: ");
+            fail(prefix + ex.what());
+            return;
+        }
 
         if (hardStop_.load(std::memory_order_relaxed)) break;
         if (softRestart_.load(std::memory_order_relaxed)) continue;  // handled at loop top
         if (cancel_.load(std::memory_order_relaxed)) break;
 
-        framebuffer_.setSampleCount(sample + 1);
+        const int sampleStep = device_ ? device_->lastCompletedSamples() : 1;
+        if (sampleStep <= 0) continue;
+        const double passMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pass0)
+                .count();
+        framebuffer_.setSampleCount(sample + sampleStep);
+        const float noiseT = (preview || scene->settings.samplingDebug != 0)
+                                 ? 0.0f
+                                 : scene->settings.noiseThreshold;
+        if (noiseT > 0.0f) {
+            framebuffer_.refreshNoiseOracle(noiseT, sample + sampleStep, targetSamples);
+        }
         const auto now = std::chrono::steady_clock::now();
         const double elapsed = std::chrono::duration<double>(now - sampleStartTime).count();
         {
             std::lock_guard<std::mutex> lock(progressMutex_);
-            progress_.samplesDone = sample + 1;
+            progress_.samplesDone = sample + sampleStep;
             progress_.elapsedSeconds = elapsed;
-            progress_.samplesPerSecond = elapsed > 0.0 ? double(sample + 1) / elapsed : 0.0;
+            progress_.samplesPerSecond = elapsed > 0.0 ? double(sample + sampleStep) / elapsed : 0.0;
+            progress_.backendGpuMs = device_ ? device_->lastGpuSampleMs() : 0.0;
+            progress_.noiseSkipCount = framebuffer_.noiseOracleSkipCount();
+            progress_.noisePixelCount = framebuffer_.width() * framebuffer_.height();
         }
 
-        // Throttle UI notifications: early samples update immediately, later
-        // ones at roughly 10 Hz.
-        const double sinceNotify = std::chrono::duration<double>(now - lastNotify).count();
-        if (sample < 4 || sinceNotify > 0.1 || sample + 1 == targetSamples) {
-            notifyUi(true);
+        // Only present a finished sample — never scanline / bootstrap holes.
+        framebuffer_.setPresentable(true);
+        notifyUi(true);
+        if (!preview) completeFramesOnly_.store(false, std::memory_order_relaxed);
+
+        if (preview) {
+            sample = 0;
+            const int nextDiv = adaptNavPreviewDivider(navDivUsed, passMs);
+            navDivider_.store(nextDiv, std::memory_order_relaxed);
+            // Same camera, cheaper than target: refine 16→8→4 without waiting.
+            const bool refine = nextDiv < navDivUsed;
+            while (!refine && !hardStop_.load(std::memory_order_relaxed) &&
+                   !softRestart_.load(std::memory_order_relaxed) &&
+                   !cancel_.load(std::memory_order_relaxed)) {
+                if (!interactivePreview_.load(std::memory_order_relaxed)) break;
+                if (cameraEpoch_.load(std::memory_order_relaxed) != epochLaunched) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            }
+            if (hardStop_.load(std::memory_order_relaxed)) break;
+            if (softRestart_.load(std::memory_order_relaxed) || cancel_.load(std::memory_order_relaxed) ||
+                !interactivePreview_.load(std::memory_order_relaxed)) {
+                continue;
+            }
+            if (device_) device_->refreshSceneData();
+            framebuffer_.clear();
+            sample = 0;
+            continue;
         }
-        ++sample;
+
+        sample += sampleStep;
+        if (framebuffer_.noiseOracleDone()) {
+            std::lock_guard<std::mutex> lock(progressMutex_);
+            progress_.samplesDone = targetSamples;
+            break;
+        }
+    }
+
+    if (device_) {
+        try {
+            device_->finishRender();
+        } catch (...) {
+        }
     }
 
     {

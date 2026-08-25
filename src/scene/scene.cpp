@@ -15,7 +15,7 @@ namespace sol {
 void Mesh::ensureRenderTriangles() {
     if (!indices.empty()) return;
     if (!hasPolygonCage()) return;
-    triangulateMeshFaces(positions, faceVertexCounts, faceVertexIndices, indices);
+    triangulateMeshFaces(positions, faceVertexCounts, faceVertexIndices, indices, &triEdgeMask);
 }
 
 void Mesh::ensurePolygonCageFromTriangles() {
@@ -30,6 +30,74 @@ void Mesh::ensurePolygonCageFromTriangles() {
         faceVertexIndices.push_back(indices[t + 0]);
         faceVertexIndices.push_back(indices[t + 1]);
         faceVertexIndices.push_back(indices[t + 2]);
+    }
+    // Every edge of a triangle face is a boundary edge.
+    triEdgeMask.assign(indices.size() / 3, uint8_t(7));
+}
+
+void Mesh::captureWireCage() {
+    wireIndices.clear();
+    wirePositions.clear();
+    wireNormals.clear();
+    if (positions.empty()) return;
+
+    // Compact unique undirected edges from the authored polygon cage (preferred)
+    // or from render triangles when no cage exists.
+    std::vector<std::pair<uint32_t, uint32_t>> edges;
+    if (hasPolygonCage()) {
+        size_t cursor = 0;
+        for (uint32_t count : faceVertexCounts) {
+            if (count < 2 || cursor + size_t(count) > faceVertexIndices.size()) {
+                cursor += size_t(count);
+                continue;
+            }
+            for (uint32_t i = 0; i < count; ++i) {
+                uint32_t a = faceVertexIndices[cursor + i];
+                uint32_t b = faceVertexIndices[cursor + ((i + 1) % count)];
+                if (a > b) std::swap(a, b);
+                if (a != b) edges.emplace_back(a, b);
+            }
+            cursor += size_t(count);
+        }
+    } else if (indices.size() >= 3) {
+        for (size_t t = 0; t + 2 < indices.size(); t += 3) {
+            const uint32_t v[3] = {indices[t], indices[t + 1], indices[t + 2]};
+            for (int e = 0; e < 3; ++e) {
+                uint32_t a = v[e];
+                uint32_t b = v[(e + 1) % 3];
+                if (a > b) std::swap(a, b);
+                if (a != b) edges.emplace_back(a, b);
+            }
+        }
+    }
+    if (edges.empty()) return;
+    std::sort(edges.begin(), edges.end());
+    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+
+    if (normals.size() != positions.size()) computeNormalsIfMissing();
+
+    // Remap referenced verts into a compact wirePositions buffer (cage-sized).
+    std::unordered_map<uint32_t, uint32_t> remap;
+    remap.reserve(edges.size() * 2);
+    auto mapVert = [&](uint32_t old) -> uint32_t {
+        auto it = remap.find(old);
+        if (it != remap.end()) return it->second;
+        const uint32_t neu = uint32_t(wirePositions.size());
+        if (old < positions.size()) {
+            wirePositions.push_back(positions[old]);
+            if (old < normals.size()) wireNormals.push_back(normals[old]);
+            else wireNormals.push_back(Vec3(0.0f, 1.0f, 0.0f));
+        } else {
+            wirePositions.push_back(Vec3(0.0f));
+            wireNormals.push_back(Vec3(0.0f, 1.0f, 0.0f));
+        }
+        remap.emplace(old, neu);
+        return neu;
+    };
+    wireIndices.reserve(edges.size() * 2);
+    for (const auto& e : edges) {
+        wireIndices.push_back(mapVert(e.first));
+        wireIndices.push_back(mapVert(e.second));
     }
 }
 
@@ -89,14 +157,18 @@ void Mesh::computeNormalsIfMissing() {
 }
 
 void Mesh::validate() {
-    // Prefer densifying from the polygon cage when present.
-    if (hasPolygonCage()) {
-        triangulateMeshFaces(positions, faceVertexCounts, faceVertexIndices, indices);
+    // Densify from the polygon cage only when render triangles are missing.
+    // Never rebuild over an existing triangulation (subdiv / dicing would be wiped).
+    if (indices.empty() && hasPolygonCage()) {
+        triangulateMeshFaces(positions, faceVertexCounts, faceVertexIndices, indices, &triEdgeMask);
     }
     // Drop degenerate or out of range triangles so the BVH builders stay happy.
     std::vector<uint32_t> cleaned;
     cleaned.reserve(indices.size());
     const uint32_t vertexCount = static_cast<uint32_t>(positions.size());
+    std::vector<uint8_t> cleanedMask;
+    const bool keepMask = triEdgeMask.size() == indices.size() / 3 && !triEdgeMask.empty();
+    if (keepMask) cleanedMask.reserve(triEdgeMask.size());
     for (size_t t = 0; t + 2 < indices.size(); t += 3) {
         const uint32_t i0 = indices[t + 0], i1 = indices[t + 1], i2 = indices[t + 2];
         if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) continue;
@@ -106,10 +178,16 @@ void Mesh::validate() {
         cleaned.push_back(i0);
         cleaned.push_back(i1);
         cleaned.push_back(i2);
+        if (keepMask) cleanedMask.push_back(triEdgeMask[t / 3]);
     }
-    if (cleaned.size() != indices.size()) indices.swap(cleaned);
+    if (cleaned.size() != indices.size()) {
+        indices.swap(cleaned);
+        if (keepMask && cleanedMask.size() == indices.size() / 3) triEdgeMask.swap(cleanedMask);
+        else triEdgeMask.clear();
+    }
     if (!uvs.empty() && uvs.size() != positions.size()) uvs.clear();
     computeNormalsIfMissing();
+    if (wireIndices.empty()) captureWireCage();
     computeBounds();
 }
 
@@ -129,6 +207,16 @@ MeshView Mesh::view() const {
         (restPositions.size() == positions.size() && !restPositions.empty()) ? restPositions.data() : nullptr;
     v.restNormals =
         (restNormals.size() == positions.size() && !restNormals.empty()) ? restNormals.data() : nullptr;
+    v.triEdgeMask =
+        (triEdgeMask.size() == indices.size() / 3 && !triEdgeMask.empty()) ? triEdgeMask.data() : nullptr;
+    if (!wireIndices.empty() && !wirePositions.empty() && (wireIndices.size() % 2) == 0) {
+        v.wireIndices = wireIndices.data();
+        v.wirePositions = wirePositions.data();
+        v.wireNormals =
+            (wireNormals.size() == wirePositions.size()) ? wireNormals.data() : nullptr;
+        v.wireEdgeCount = uint32_t(wireIndices.size() / 2);
+        v.wireVertexCount = uint32_t(wirePositions.size());
+    }
     v.motionKeyCount = 1;
     v.motionPositions = nullptr;
     if (!motionPositions.empty() && !positions.empty()) {
@@ -265,7 +353,9 @@ int Scene::addMedium(const MediumData& medium, const std::string& vdbPath) {
             vi = int(volumePaths.size());
             volumePaths.push_back(vdbPath);
         }
-        m.volumeIndex = vi;
+        // volumePaths is file identity. Sampling uses Scene::volumes — keep an
+        // already-authored volumes index (Stage::toScene / addVolume).
+        if (m.volumeIndex < 0) m.volumeIndex = vi;
 #if !SOLSTICE_HAVE_OPENVDB
         // Without OpenVDB, type-2 media still use the authored homogeneous σa/σs.
         logWarning("OpenVDB not in this build — volume '" + vdbPath +
@@ -324,43 +414,169 @@ void Scene::buildLightProxies() {
 // Light BVH construction helpers (host-only, scene.cpp internal)
 // ---------------------------------------------------------------------------
 
-// Approximate emitted power for one light (same formula as lightFluxWeight in lights.h).
+// pbrt-v4 Φ — keep in sync with lightFluxWeight in lights.h.
 static float lightPowerForBvh(const LightData& l,
-                               const std::vector<std::shared_ptr<EnvironmentMap>>& envMaps) {
-    const Vec3 emitted = l.emittedRadiance();
-    const float intens = std::max(1e-8f, (emitted.x + emitted.y + emitted.z) * (1.0f / 3.0f));
+                               const std::vector<std::shared_ptr<EnvironmentMap>>& envMaps,
+                               float sceneRadius) {
+    Vec3 e = l.emittedRadiance();
+    auto avg3 = [](Vec3 v) { return std::max(1e-8f, (v.x + v.y + v.z) * (1.0f / 3.0f)); };
+    const float intens = avg3(vmax(e, Vec3(0.0f)));
+    (void)intens;
+    // Same empty-bounds rule as lights.h sceneRadius(): r=1, not a 1cm floor.
+    const float r = sceneRadius > 1e-3f ? sceneRadius : 1.0f;
+    const float piR2 = kPi * r * r;
+    auto radianceLum = [&]() -> float {
+        Vec3 Le = e;
+        if (l.normalize) {
+            switch (l.type) {
+                case kLightRect: {
+                    const Vec3 ax = transformVector(l.xform, Vec3(l.width, 0.0f, 0.0f));
+                    const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.height, 0.0f));
+                    const float area = length(cross(ax, ay));
+                    if (area > 0.0f) Le = e / area;
+                    break;
+                }
+                case kLightDisk: {
+                    const Vec3 ax = transformVector(l.xform, Vec3(l.radius, 0.0f, 0.0f));
+                    const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.radius, 0.0f));
+                    const float area = kPi * length(cross(ax, ay));
+                    if (area > 0.0f) Le = e / area;
+                    break;
+                }
+                case kLightSphere: {
+                    const float sx = length(transformVector(l.xform, Vec3(1.0f, 0.0f, 0.0f)));
+                    const float sy = length(transformVector(l.xform, Vec3(0.0f, 1.0f, 0.0f)));
+                    const float sz = length(transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f)));
+                    const float rad = l.radius * (sx + sy + sz) * (1.0f / 3.0f);
+                    const float area = 4.0f * kPi * rad * rad;
+                    if (area > 0.0f) Le = e / area;
+                    break;
+                }
+                case kLightDistant: {
+                    const float halfAngle = (l.angle * kPi / 180.0f) * 0.5f;
+                    const float omega = kTwoPi * (1.0f - std::cos(halfAngle));
+                    if (omega > 1e-9f) Le = e / omega;
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+        return avg3(vmax(Le, Vec3(0.0f)));
+    };
+    const float lum = radianceLum();
     switch (l.type) {
-        case kLightDome:
+        case kLightDome: {
+            float integ = 4.0f * kPi;
             if (l.envIndex >= 0 && l.envIndex < int(envMaps.size()) && envMaps[l.envIndex] &&
                 envMaps[l.envIndex]->distribution.valid())
-                return intens * std::max(1e-4f, envMaps[l.envIndex]->distribution.integral());
-            return intens * 4.0f;
+                integ = std::max(1e-4f, envMaps[l.envIndex]->distribution.integral());
+            return avg3(vmax(e, Vec3(0.0f))) * integ * piR2;
+        }
         case kLightRect: {
-            const Vec3 ax = transformVector(l.xform, Vec3(l.width,  0.0f, 0.0f));
+            const Vec3 ax = transformVector(l.xform, Vec3(l.width, 0.0f, 0.0f));
             const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.height, 0.0f));
-            return intens * std::max(1e-6f, length(cross(ax, ay)));
+            const float area = std::max(1e-6f, length(cross(ax, ay)));
+            return lum * area * kPi * (l.twoSided ? 2.0f : 1.0f);
         }
         case kLightDisk: {
             const Vec3 ax = transformVector(l.xform, Vec3(l.radius, 0.0f, 0.0f));
             const Vec3 ay = transformVector(l.xform, Vec3(0.0f, l.radius, 0.0f));
-            return intens * std::max(1e-6f, kPi * length(cross(ax, ay)));
+            const float area = std::max(1e-6f, kPi * length(cross(ax, ay)));
+            return lum * area * kPi * (l.twoSided ? 2.0f : 1.0f);
         }
         case kLightSphere: {
             const float sx = length(transformVector(l.xform, Vec3(1.0f, 0.0f, 0.0f)));
             const float sy = length(transformVector(l.xform, Vec3(0.0f, 1.0f, 0.0f)));
             const float sz = length(transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f)));
-            const float r = l.radius * (sx + sy + sz) * (1.0f / 3.0f);
-            return intens * std::max(1e-6f, 4.0f * kPi * r * r);
+            const float rad = l.radius * (sx + sy + sz) * (1.0f / 3.0f);
+            const float area = std::max(1e-6f, 4.0f * kPi * rad * rad);
+            return lum * area * kPi;
         }
         case kLightDistant: {
             const float halfAngle = (l.angle * kPi / 180.0f) * 0.5f;
-            if (halfAngle < 1e-4f) return intens;
-            return intens * std::max(1e-6f, kTwoPi * (1.0f - std::cos(halfAngle)));
+            float E = avg3(vmax(e, Vec3(0.0f)));
+            if (halfAngle >= 1e-8f && !l.normalize) {
+                const float omega = kTwoPi * (1.0f - std::cos(halfAngle));
+                E = lum * std::max(1e-12f, omega);
+            }
+            return E * piR2;
         }
         case kLightPoint:
         default:
-            return intens;
+            return avg3(vmax(e, Vec3(0.0f))) * 4.0f * kPi;
     }
+}
+
+static void setLeafEmissionCone(LightBvhNode& n, const LightData& l) {
+    n.twoSided = l.twoSided;
+    if (l.type == kLightSphere || l.type == kLightPoint) {
+        n.coneAxis = Vec3(0.0f, 0.0f, 1.0f);
+        n.cosThetaO = -1.0f;
+        n.cosThetaE = 0.0f;
+        n.twoSided = 1;
+        return;
+    }
+    Vec3 z = transformVector(l.xform, Vec3(0.0f, 0.0f, 1.0f));
+    const float len = length(z);
+    n.coneAxis = len > 1e-8f ? z * (-1.0f / len) : Vec3(0.0f, 0.0f, 1.0f);
+    n.cosThetaO = 1.0f;
+    n.cosThetaE = 0.0f;
+}
+
+static void unionEmissionCones(LightBvhNode& dst, const LightBvhNode& a, const LightBvhNode& b) {
+    dst.twoSided = (a.twoSided || b.twoSided) ? 1 : 0;
+    dst.cosThetaE = std::min(a.cosThetaE, b.cosThetaE);
+    if (a.cosThetaO <= -0.999f) {
+        dst.coneAxis = a.coneAxis;
+        dst.cosThetaO = -1.0f;
+        return;
+    }
+    if (b.cosThetaO <= -0.999f) {
+        dst.coneAxis = b.coneAxis;
+        dst.cosThetaO = -1.0f;
+        return;
+    }
+    Vec3 wa = a.coneAxis;
+    Vec3 wb = b.coneAxis;
+    const float la = length(wa);
+    const float lb = length(wb);
+    if (la > 1e-8f) wa = wa * (1.0f / la);
+    if (lb > 1e-8f) wb = wb * (1.0f / lb);
+    const float c = clampf(dot(wa, wb), -1.0f, 1.0f);
+    const float ta = std::acos(clampf(a.cosThetaO, -1.0f, 1.0f));
+    const float tb = std::acos(clampf(b.cosThetaO, -1.0f, 1.0f));
+    const float td = std::acos(c);
+    if (std::min(ta, tb) + td <= std::max(ta, tb) + 1e-4f) {
+        if (ta > tb) {
+            dst.coneAxis = wa;
+            dst.cosThetaO = a.cosThetaO;
+        } else {
+            dst.coneAxis = wb;
+            dst.cosThetaO = b.cosThetaO;
+        }
+        return;
+    }
+    const float to = 0.5f * (ta + tb + td);
+    if (to >= kPi - 1e-4f) {
+        dst.coneAxis = wa;
+        dst.cosThetaO = -1.0f;
+        return;
+    }
+    const float tr = to - ta;
+    Vec3 axis = cross(wa, wb);
+    if (lengthSquared(axis) < 1e-12f) {
+        dst.coneAxis = wa;
+        dst.cosThetaO = std::cos(std::min(to, kPi));
+        return;
+    }
+    axis = axis * (1.0f / length(axis));
+    const float ct = std::cos(tr);
+    const float st = std::sin(tr);
+    dst.coneAxis = wa * ct + cross(axis, wa) * st + axis * dot(axis, wa) * (1.0f - ct);
+    const float ln = length(dst.coneAxis);
+    if (ln > 1e-8f) dst.coneAxis = dst.coneAxis * (1.0f / ln);
+    dst.cosThetaO = std::cos(to);
 }
 
 // World-space AABB for a finite light (point, sphere, rect, disk).
@@ -420,9 +636,13 @@ void Scene::buildLightBvh() {
     std::vector<BuildEntry> finites;
     finites.reserve(lights.size());
 
+    // pbrt-v4 / lights.h: empty world AABB → r=1 so Φ_distant and Φ_env stay defined.
+    const float worldR = bounds_.radius();
+    const float sceneRadius = worldR > 1e-3f ? worldR : 1.0f;
+
     for (int i = 0; i < int(lights.size()); ++i) {
         const LightData& l = lights[i];
-        const float pw = lightPowerForBvh(l, envMaps);
+        const float pw = lightPowerForBvh(l, envMaps, sceneRadius);
         if (l.type == kLightDome || l.type == kLightDistant) {
             infiniteLightIndices_.push_back(i);
             infiniteLightPower_ += pw;
@@ -439,14 +659,8 @@ void Scene::buildLightBvh() {
 
     if (finites.empty()) return;
 
-    // Few finite lights: skip the BVH. Position-aware AABB importance
-    // (power / dist²_to_box) imprints axis-aligned "buckets" on diffuse floors
-    // under area lights — visible as square caustic sampling structure on every
-    // integrator. Flux-only selection is unbiased and cheaper for small N.
-    constexpr int kLightBvhMinFinites = 32;
-    if (int(finites.size()) < kLightBvhMinFinites) return;
-
-    // Pre-allocate: a full binary tree with N leaves has at most 2*N - 1 nodes.
+    // Always build (pbrt-v4 BVHLightSampler). Cone importance is 0 outside the
+    // emission cone, so small N does not imprint AABB buckets the way power/d² did.
     lightBvhNodes_.reserve(2 * finites.size());
 
     // Recursive median-split builder (iterative via std::function to avoid ABI issues).
@@ -469,6 +683,7 @@ void Scene::buildLightBvh() {
             lightBvhNodes_[nodeIdx].childOrLight = finites[first].lightIdx;
             lightBvhNodes_[nodeIdx].rightChild   = -1;
             lightBvhNodes_[nodeIdx].isLeaf       = 1;
+            setLeafEmissionCone(lightBvhNodes_[nodeIdx], lights[finites[first].lightIdx]);
             return nodeIdx;
         }
 
@@ -496,6 +711,7 @@ void Scene::buildLightBvh() {
         const int rightIdx = build(mid,   (first + count) - mid);
         lightBvhNodes_[nodeIdx].childOrLight = leftIdx;
         lightBvhNodes_[nodeIdx].rightChild   = rightIdx;
+        unionEmissionCones(lightBvhNodes_[nodeIdx], lightBvhNodes_[leftIdx], lightBvhNodes_[rightIdx]);
         return nodeIdx;
     };
 

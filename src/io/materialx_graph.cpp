@@ -16,7 +16,6 @@
 #include "io/image_io.h"
 #include "io/materialx_compile.h"
 #include "io/tx_cache.h"
-#include "io/tx_convert.h"
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_MATERIALX
@@ -95,8 +94,11 @@ mx::DocumentPtr makeLibraryDocument(std::string& error) {
 }
 
 mx::DocumentPtr loadUserDocument(const QString& xml, std::string& error) {
-    auto doc = makeLibraryDocument(error);
-    if (!doc) return nullptr;
+    // Parse authored XML only — do NOT import stdlib/pbrlib on every cook.
+    // importLibrary copies the whole MaterialX library and is the dominant cost when
+    // dragging volume density / standard_volume sliders. Evaluation only reads
+    // authored inputs (standard_surface / standard_volume values and wires).
+    auto doc = mx::createDocument();
     try {
         mx::readFromXmlString(doc, xml.toStdString());
     } catch (const std::exception& e) {
@@ -188,6 +190,13 @@ mx::NodePtr resolveConnectedNode(const mx::NodePtr& node, const std::string& inp
     return input->getConnectedNode();
 }
 
+// Solstice UI short names (surface / displacement / volume) plus MaterialX long names.
+mx::NodePtr resolveMaterialPort(const mx::NodePtr& surface, const std::string& shortName,
+                                const std::string& mtlxName) {
+    if (mx::NodePtr n = resolveConnectedNode(surface, shortName)) return n;
+    return resolveConnectedNode(surface, mtlxName);
+}
+
 std::string inputValueString(const mx::NodePtr& node, const std::string& inputName) {
     if (!node) return {};
     mx::InputPtr input = node->getInput(inputName);
@@ -210,12 +219,14 @@ std::shared_ptr<Image> loadTextureFromImageNode(const mx::NodePtr& imageNode, co
 
     // Arnold-style: colourspace drives TX maketx --colorconvert → ACEScg.
     std::string cs = inputValueString(imageNode, "colorspace");
-    if (cs.empty()) cs = "ACES - ACEScg";
+    if (cs.empty()) cs = srgbColor ? "auto" : "Utility - Raw";
+    const std::string previousCs = txDefaultInputColorSpace();
     setTxDefaultInputColorSpace(cs);
-    // TX already baked to ACEScg / linear — do not apply LDR sRGB decode on top.
-    // ACEScg / Raw authored spaces are also treated as linear.
-    const bool skipSrgbDecode = txSkipColorConvert(cs) || txCacheActive();
-    const bool linearize = srgbColor && !skipSrgbDecode;
+    struct CsRestore {
+        std::string prev;
+        ~CsRestore() { setTxDefaultInputColorSpace(prev); }
+    } restore{previousCs};
+    // TX / OCIO bake to ACEScg — do not apply a second LDR sRGB decode.
 
     QString pattern;
     std::vector<int> discovered;
@@ -230,10 +241,10 @@ std::shared_ptr<Image> loadTextureFromImageNode(const mx::NodePtr& imageNode, co
         }
         logInfo("MaterialX image file='" + file + "' colorspace='" + cs + "' → pattern='" +
                 pattern.toStdString() + "' tiles=[" + ids + "]");
-        return loadImageOrUdim(pattern, searchDirectory, error, tiles, linearize);
+        return loadImageOrUdim(pattern, searchDirectory, error, tiles, srgbColor, cs);
     }
     logInfo("MaterialX image file='" + file + "' colorspace='" + cs + "'");
-    return loadImageOrUdim(fileQ, searchDirectory, error, udimSet, linearize);
+    return loadImageOrUdim(fileQ, searchDirectory, error, udimSet, srgbColor, cs);
 }
 
 // Walk through multiply/mix/normalmap/bump wrappers to find an image node.
@@ -385,6 +396,34 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     material.subsurface = saturatef(material.subsurface);
     // Scale is metric (scene units); allow large values for cm-authored Radius maps.
     material.subsurfaceScale = srMax(0.0f, subsurfaceScale);
+
+    float coat = 0.0f, coatRoughness = 0.1f, coatIor = 1.5f, coatThickness = 0.0f;
+    setFloat("coat", coat);
+    setFloat("coat_roughness", coatRoughness);
+    setFloat("coat_IOR", coatIor);
+    setFloat("coat_thickness", coatThickness);
+    setColor("coat_color", material.coatColor);
+    material.coat = saturatef(coat);
+    material.coatRoughness = saturatef(coatRoughness);
+    material.coatIor = clampf(coatIor, 1.0f, 3.0f);
+    material.coatThickness = srMax(0.0f, coatThickness);
+
+    float sheen = 0.0f, sheenRoughness = 0.3f;
+    setFloat("sheen", sheen);
+    setFloat("sheen_roughness", sheenRoughness);
+    setColor("sheen_color", material.sheenColor);
+    material.sheen = saturatef(sheen);
+    material.sheenRoughness = saturatef(sheenRoughness);
+
+    float diffuseRoughness = 0.0f;
+    setFloat("diffuse_roughness", diffuseRoughness);
+    material.diffuseRoughness = saturatef(diffuseRoughness);
+
+    float specularAnisotropy = 0.0f, specularRotation = 0.0f;
+    setFloat("specular_anisotropy", specularAnisotropy);
+    setFloat("specular_rotation", specularRotation);
+    material.specularAnisotropy = saturatef(specularAnisotropy);
+    material.specularRotation = specularRotation - floorf(specularRotation);
 }
 
 #endif  // SOLSTICE_HAVE_MATERIALX
@@ -515,63 +554,63 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
 
     add("image", "color3", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "auto"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "color3", "0, 0, 0"}});
     add("image", "color4", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "auto"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "color4", "0, 0, 0, 1"}});
     add("image", "float", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "float", "0"}});
     add("image", "vector2", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "vector2", "0, 0"}});
     add("image", "vector3", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "vector3", "0, 0, 0"}});
     add("image", "vector4", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "vector4", "0, 0, 0, 1"}});
     add("tiledimage", "color3", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "auto"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "color3", "0, 0, 0"}});
     add("tiledimage", "float", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
          {"default", "float", "0"}});
     add("tiledimage", "vector3", "Texture",
         {{"file", "filename", {}},
-         {"colorspace", "string", "ACES - ACEScg"},
+         {"colorspace", "string", "Utility - Raw"},
          {"texcoord", "vector2", {}},
          {"uvtiling", "vector2", "1, 1"},
          {"uvoffset", "vector2", "0, 0"},
@@ -657,9 +696,21 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"subsurface_color", "color3", "1, 0.75, 0.55"},
          {"subsurface_radius", "color3", "1, 0.35, 0.2"},
          {"subsurface_scale", "float", "1"},
+         {"coat", "float", "0"},
+         {"coat_roughness", "float", "0.1"},
+         {"coat_IOR", "float", "1.5"},
+         {"coat_thickness", "float", "0"},
+         {"coat_color", "color3", "1, 1, 1"},
+         {"sheen", "float", "0"},
+         {"sheen_color", "color3", "1, 1, 1"},
+         {"sheen_roughness", "float", "0.3"},
+         {"diffuse_roughness", "float", "0"},
+         {"specular_anisotropy", "float", "0"},
+         {"specular_rotation", "float", "0"},
          {"opacity", "color3", "1, 1, 1"}});
     add("triplanarprojection", "color3", "Texture",
         {{"file", "filename", {}},
+         {"colorspace", "string", "auto"},
          {"input_per_axis", "boolean", "false"},
          {"filex", "filename", {}},
          {"filey", "filename", {}},
@@ -670,14 +721,14 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"blend", "float", "0.1"},
          {"default", "color3", "0.2, 0.5, 0.8"}});
     add("surfacematerial", "material", "PBR / Shading",
-        {{"surfaceshader", "surfaceshader", {}},
-         {"displacementshader", "displacementshader", {}},
-         {"volumeshader", "volumeshader", {}}});
+        {{"surface", "surfaceshader", {}},
+         {"displacement", "displacementshader", {}},
+         {"volume", "volumeshader", {}}});
     add("standard_volume", "volumeshader", "PBR / Shading",
         {{"density", "float", "1"},
          {"anisotropy", "float", "0"},
-         {"absorption", "color3", "0.5, 0.5, 0.5"},
-         {"scattering", "color3", "0.5, 0.5, 0.5"},
+         {"absorption", "color3", "0, 0, 0"},
+         {"scattering", "color3", "1, 1, 1"},
          {"emission", "float", "0"},
          {"emission_color", "color3", "1, 1, 1"}});
     // Arnold-like ray switch (surfaceshader). Incoming ray type selects the port
@@ -770,18 +821,39 @@ QVector<MaterialXNodeCatalogEntry> listMaterialXNodeCatalog() {
         entries.push_back(entry);
     }
 
-    // Solstice / Arnold extensions that are not in the stock MaterialX libs:
-    // merge so they still appear in Add Node when libraries load successfully.
+    // Solstice / Arnold extensions that are not in the stock MaterialX libs
+    // (or need Solstice short port names): merge/replace so Add Node stays complete.
     {
         const QVector<MaterialXNodeCatalogEntry> extras = fallbackMaterialXCatalog();
-        QSet<QString> have;
-        for (const MaterialXNodeCatalogEntry& e : entries) have.insert(e.category);
+        QHash<QString, int> indexByCategory;
+        for (int i = 0; i < entries.size(); ++i) indexByCategory.insert(entries[i].category, i);
         for (const MaterialXNodeCatalogEntry& e : extras) {
             if (e.category == QStringLiteral("ray_switch_shader") ||
-                e.category == QStringLiteral("ray_switch")) {
-                if (!have.contains(e.category)) {
+                e.category == QStringLiteral("ray_switch") ||
+                e.category == QStringLiteral("surfacematerial") ||
+                e.category == QStringLiteral("standard_volume")) {
+                const auto it = indexByCategory.constFind(e.category);
+                if (it == indexByCategory.constEnd()) {
+                    indexByCategory.insert(e.category, entries.size());
                     entries.push_back(e);
-                    have.insert(e.category);
+                } else {
+                    entries[*it] = e; // prefer Solstice port/param layout
+                }
+            } else if (e.category == QStringLiteral("standard_surface")) {
+                const auto it = indexByCategory.constFind(e.category);
+                if (it == indexByCategory.constEnd()) {
+                    indexByCategory.insert(e.category, entries.size());
+                    entries.push_back(e);
+                } else {
+                    MaterialXNodeCatalogEntry& dst = entries[*it];
+                    for (auto tit = e.inputsByType.constBegin(); tit != e.inputsByType.constEnd(); ++tit) {
+                        QVector<MaterialXNodeInputDef>& dstInputs = dst.inputsByType[tit.key()];
+                        QSet<QString> have;
+                        for (const MaterialXNodeInputDef& in : dstInputs) have.insert(in.name);
+                        for (const MaterialXNodeInputDef& in : tit.value()) {
+                            if (!have.contains(in.name)) dstInputs.push_back(in);
+                        }
+                    }
                 }
             }
         }
@@ -828,6 +900,17 @@ QString createDefaultMaterialXDocument() {
     ss->setInputValue("subsurface_color", mx::Color3(1.0f, 0.75f, 0.55f));
     ss->setInputValue("subsurface_radius", mx::Color3(1.0f, 0.35f, 0.2f));
     ss->setInputValue("subsurface_scale", 1.0f);
+    ss->setInputValue("coat", 0.0f);
+    ss->setInputValue("coat_roughness", 0.1f);
+    ss->setInputValue("coat_IOR", 1.5f);
+    ss->setInputValue("coat_thickness", 0.0f);
+    ss->setInputValue("coat_color", mx::Color3(1.0f, 1.0f, 1.0f));
+    ss->setInputValue("sheen", 0.0f);
+    ss->setInputValue("sheen_color", mx::Color3(1.0f, 1.0f, 1.0f));
+    ss->setInputValue("sheen_roughness", 0.3f);
+    ss->setInputValue("diffuse_roughness", 0.0f);
+    ss->setInputValue("specular_anisotropy", 0.0f);
+    ss->setInputValue("specular_rotation", 0.0f);
 
     // Place nodes left-to-right like Houdini Solaris MaterialX.
     ss->setAttribute("xpos", "0.0");
@@ -912,7 +995,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         }
 
         mx::NodePtr ss;
-        if (surface) ss = resolveConnectedNode(surface, "surfaceshader");
+        if (surface) ss = resolveMaterialPort(surface, "surface", "surfaceshader");
         if (!ss) {
             for (const mx::NodePtr& node : doc->getNodes()) {
                 if (node->getCategory() == "standard_surface") {
@@ -1121,8 +1204,9 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         bindSlot("normal", result.normalTexture, result.material.normalProc, true);
         bindSlot("subsurface_color", result.subsurfaceTexture, result.material.subsurfaceProc);
 
-        // MaterialX surfacematerial.displacementshader → height/scale/zero/autobump.
-        mx::NodePtr dispNode = surface ? resolveConnectedNode(surface, "displacementshader") : nullptr;
+        // surfacematerial.displacement / displacementshader → height/scale/zero/autobump.
+        mx::NodePtr dispNode =
+            surface ? resolveMaterialPort(surface, "displacement", "displacementshader") : nullptr;
         if (dispNode && dispNode->getCategory() == "displacement") {
             result.material.displacementScale = readNodeFloat(dispNode, "scale", 1.0f);
             result.material.displacementZeroValue = readNodeFloat(dispNode, "zero_value", 0.5f);
@@ -1184,21 +1268,22 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                     ", autobump=" + std::to_string(result.material.autobump) + ")");
         }
 
-        // MaterialX surfacematerial.volumeshader → standard_volume params.
-        mx::NodePtr volNode = surface ? resolveConnectedNode(surface, "volumeshader") : nullptr;
+        // surfacematerial.volume / volumeshader → standard_volume params.
+        mx::NodePtr volNode = surface ? resolveMaterialPort(surface, "volume", "volumeshader") : nullptr;
         if (volNode && (volNode->getCategory() == "standard_volume" || volNode->getType() == "volumeshader")) {
             result.material.hasVolumeShader = 1;
             result.material.volumeDensity = readNodeFloat(volNode, "density", 1.0f);
             result.material.volumeAnisotropy = readNodeFloat(volNode, "anisotropy", 0.0f);
             result.material.volumeEmissionStrength = readNodeFloat(volNode, "emission", 0.0f);
-            Vec3 absCol(0.5f), scaCol(0.5f), emCol(1.0f);
+            Vec3 absCol(0.0f), scaCol(1.0f), emCol(1.0f);
             parseColor3(inputValueString(volNode, "absorption"), absCol);
             parseColor3(inputValueString(volNode, "scattering"), scaCol);
             parseColor3(inputValueString(volNode, "emission_color"), emCol);
             result.material.volumeAbsorption = absCol;
             result.material.volumeScattering = scaCol;
             result.material.volumeEmission = emCol;
-            logInfo("MaterialX: volume shader (density=" + std::to_string(result.material.volumeDensity) + ")");
+            logInfo("MaterialX: volume shader (density=" + std::to_string(result.material.volumeDensity) +
+                    ", anisotropy=" + std::to_string(result.material.volumeAnisotropy) + ")");
         }
 
         // Drop dangling roots if a compile failed mid-way.

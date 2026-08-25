@@ -25,6 +25,7 @@
 
 #include "nodes/node_registry.h"
 #include "ui/connection_item.h"
+#include "ui/graph_view_nav.h"
 #include "ui/node_item.h"
 #include "ui/theme.h"
 
@@ -83,9 +84,28 @@ void NodeGraphScene::updateConnections() {
     }
 }
 
+void NodeGraphScene::dropNodeItem(Node* node) {
+    if (!node) return;
+    NodeItem* item = nodeItems_.take(node);
+    if (!item) return;
+    for (int i = connections_.size() - 1; i >= 0; --i) {
+        ConnectionItem* connection = connections_[i];
+        if (!connection) continue;
+        if (connection->source() == item || connection->destination() == item) {
+            removeItem(connection);
+            delete connection;
+            connections_.removeAt(i);
+        }
+    }
+    removeItem(item);
+    delete item;
+}
+
 void NodeGraphScene::refreshAllNodeItems() {
     for (auto it = nodeItems_.cbegin(); it != nodeItems_.cend(); ++it) {
-        if (it.value()) it.value()->refresh();
+        if (!it.value()) continue;
+        if (graph_ && !graph_->contains(it.key())) continue;
+        it.value()->refresh();
     }
 }
 
@@ -225,7 +245,8 @@ NodeGraphView::NodeGraphView(QWidget* parent) : QGraphicsView(parent) {
     setScene(graphScene_);
     setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing);
     setDragMode(QGraphicsView::RubberBandDrag);
-    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+    setTransformationAnchor(QGraphicsView::NoAnchor);
+    setResizeAnchor(QGraphicsView::NoAnchor);
     // Full updates avoid antialiased icon/shadow trails while dragging nodes.
     setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -241,17 +262,37 @@ NodeGraphView::NodeGraphView(QWidget* parent) : QGraphicsView(parent) {
     });
 }
 
+void NodeGraphView::disconnectGraph() {
+    if (graphChangedConnection_) disconnect(graphChangedConnection_);
+    if (nodeAddedConnection_) disconnect(nodeAddedConnection_);
+    if (nodeAboutToBeRemovedConnection_) disconnect(nodeAboutToBeRemovedConnection_);
+    if (displayNodeChangedConnection_) disconnect(displayNodeChangedConnection_);
+}
+
 void NodeGraphView::setGraph(NodeGraph* graph) {
+    disconnectGraph();
     graph_ = graph;
     graphScene_->setGraph(graph);
     if (!graph) return;
-    connect(graph, &NodeGraph::graphChanged, this, [this] { graphScene_->updateConnections(); });
-    connect(graph, &NodeGraph::nodeAdded, this, [this](Node*) { graphScene_->rebuild(); });
-    connect(graph, &NodeGraph::nodeAboutToBeRemoved, this, [this](Node*) {
-        // Rebuilt after removal completes so dangling items never get painted.
-        QMetaObject::invokeMethod(this, [this] { graphScene_->rebuild(); }, Qt::QueuedConnection);
+    graphChangedConnection_ =
+        connect(graph, &NodeGraph::graphChanged, this, [this] { graphScene_->updateConnections(); });
+    nodeAddedConnection_ =
+        connect(graph, &NodeGraph::nodeAdded, this, [this](Node*) { graphScene_->rebuild(); });
+    nodeAboutToBeRemovedConnection_ = connect(graph, &NodeGraph::nodeAboutToBeRemoved, this, [this](Node* node) {
+        if (dragSource_ && dragSource_->node() == node) {
+            if (dragWire_) {
+                graphScene_->removeItem(dragWire_);
+                delete dragWire_;
+                dragWire_ = nullptr;
+            }
+            dragSource_ = nullptr;
+            dragDestination_ = nullptr;
+            snapTarget_ = nullptr;
+        }
+        graphScene_->dropNodeItem(node);
     });
-    connect(graph, &NodeGraph::displayNodeChanged, this, [this](Node*) { graphScene_->refreshAllNodeItems(); });
+    displayNodeChangedConnection_ =
+        connect(graph, &NodeGraph::displayNodeChanged, this, [this](Node*) { graphScene_->refreshAllNodeItems(); });
     // Framing needs the final widget size, which is only known once the layout
     // has run, so it is deferred to the first show/resize.
     scheduleFrameAll();
@@ -456,14 +497,9 @@ NodeItem* NodeGraphView::nodeItemAt(QPoint viewPosition) const {
 }
 
 void NodeGraphView::wheelEvent(QWheelEvent* event) {
-    setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
-    const qreal factor = zoomFactorFromWheel(event);
-    const double newScale = transform().m11() * factor;
-    if (newScale < 0.12 || newScale > 4.0) {
-        event->accept();
-        return;
-    }
-    QGraphicsView::scale(factor, factor);
+    const qreal factor = graphicsViewWheelZoomFactor(event);
+    zoomGraphicsViewAtCursor(this, factor, event->globalPosition(),
+                             panning_ ? &panScenePoint_ : nullptr, 0.12, 4.0);
     event->accept();
 }
 
@@ -478,29 +514,21 @@ bool NodeGraphView::shouldBeginPan(const QMouseEvent* event) const {
     return false;
 }
 
-void NodeGraphView::beginPan(const QPoint& viewPos) {
+void NodeGraphView::beginPan(const QPointF& globalPos) {
     panning_ = true;
-    lastPanPoint_ = viewPos;
     savedDragMode_ = dragMode();
     savedAnchor_ = transformationAnchor();
     setDragMode(QGraphicsView::NoDrag);
-    // NoAnchor keeps 1:1 hand-drag — AnchorUnderMouse would warp the pan.
     setTransformationAnchor(QGraphicsView::NoAnchor);
-    // Grab the viewport (not the view): coords stay viewport-local and match
-    // mapToScene / mouse*Event. Grabbing QGraphicsView itself breaks pan.
+    setResizeAnchor(QGraphicsView::NoAnchor);
     viewport()->grabMouse();
     viewport()->setCursor(Qt::ClosedHandCursor);
+    panScenePoint_ = mapToScene(graphicsViewViewportPos(this, globalPos));
 }
 
-void NodeGraphView::updatePan(const QPoint& viewPos) {
+void NodeGraphView::updatePan(const QPointF& globalPos) {
     if (!panning_) return;
-    if (viewPos == lastPanPoint_) return;
-
-    // Sticky hand: keep the scene point that was under the cursor glued to it.
-    // mapToScene delta is already in scene units, so no manual /scale needed.
-    const QPointF delta = mapToScene(viewPos) - mapToScene(lastPanPoint_);
-    translate(delta.x(), delta.y());
-    lastPanPoint_ = viewPos;
+    glueGraphicsViewPan(this, panScenePoint_, globalPos);
 }
 
 void NodeGraphView::endPan() {
@@ -581,7 +609,7 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
     lastScenePosition_ = mapToScene(event->pos());
 
     if (shouldBeginPan(event)) {
-        beginPan(event->pos());
+        beginPan(event->globalPosition());
         event->accept();
         return;
     }
@@ -645,7 +673,7 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
 
 void NodeGraphView::mouseMoveEvent(QMouseEvent* event) {
     if (panning_) {
-        updatePan(event->pos());
+        updatePan(event->globalPosition());
         event->accept();
         return;
     }

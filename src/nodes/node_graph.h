@@ -25,6 +25,7 @@ public:
 
     const std::vector<NodePtr>& nodes() const { return nodes_; }
     Node* findNode(const QString& name) const;
+    bool contains(const Node* node) const;
     QString uniqueNodeName(const QString& base) const;
     std::vector<Node*> outputsOf(const Node* node) const;
 

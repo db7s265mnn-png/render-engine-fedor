@@ -7,14 +7,18 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QHBoxLayout>
+#include <QLayout>
 #include <QKeyEvent>
+#include <QAbstractButton>
 #include <QAction>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QResizeEvent>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QToolButton>
 #include <QVector3D>
@@ -22,10 +26,43 @@
 #include <algorithm>
 #include <cmath>
 
+#include "ui/dock_chrome.h"
 #include "ui/theme.h"
 
 namespace sol {
 namespace {
+
+constexpr int kChromeButtonHeight = 24;
+
+QString chromeToolButtonStyle(int minWidth) {
+    return QStringLiteral(
+               "QToolButton {"
+               "  color: #e8eaed;"
+               "  background: #3a3e44;"
+               "  border: 1px solid #4a4f57;"
+               "  border-radius: 6px;"
+               "  min-width: %1px;"
+               "  min-height: %2px;"
+               "  max-height: %2px;"
+               "  font-weight: 600;"
+               "  font-size: 11px;"
+               "  padding: 0 8px;"
+               "}"
+               "QToolButton:checked { %3 }"
+               "QToolButton:hover { background: #474c54; }"
+               "QToolButton:checked:hover { %4 }")
+        .arg(minWidth)
+        .arg(kChromeButtonHeight)
+        .arg(theme::checkedCss())
+        .arg(theme::checkedHoverCss());
+}
+
+void fitChromeButton(QAbstractButton* button) {
+    if (!button) return;
+    button->setFixedHeight(kChromeButtonHeight);
+    button->setFocusPolicy(Qt::NoFocus);
+    if (auto* tool = qobject_cast<QToolButton*>(button)) tool->setAutoRaise(true);
+}
 
 QString findPlaceholderAsset() {
     QStringList roots = {
@@ -233,45 +270,92 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     pal.setColor(QPalette::Window, theme::gridDark());
     setPalette(pal);
 
-    // Chrome strip above the framebuffer — matches app chrome (docks / status bar).
-    chromeBar_ = new QWidget(this);
-    chromeBar_->setObjectName("viewportChromeBar");
-    chromeBar_->setFixedHeight(theme::chromeBarHeight());
-    chromeBar_->setStyleSheet(
-        "QWidget#viewportChromeBar {"
+    // Chrome strip above the framebuffer. Detach lives in a 28px column on the
+    // RIGHT of this row so it cannot sit at (0,0) over Start.
+    chromeRow_ = new QWidget(this);
+    chromeRow_->setObjectName("viewportChromeRow");
+    chromeRow_->setFixedHeight(theme::chromeBarHeight());
+    chromeRow_->setStyleSheet(
+        "QWidget#viewportChromeRow {"
         "  background: #2e3136;"
         "  border-bottom: 1px solid #22242a;"
         "}");
+    auto* chromeRowLayout = new QHBoxLayout(chromeRow_);
+    chromeRowLayout->setContentsMargins(0, 0, 0, 0);
+    chromeRowLayout->setSpacing(0);
+
+    chromeBar_ = new QWidget(chromeRow_);
+    chromeBar_->setObjectName("viewportChromeBar");
+    chromeBar_->setStyleSheet(
+        "QWidget#viewportChromeBar { background: transparent; border: none; }");
+
+    detachSlot_ = new QWidget(chromeRow_);
+    detachSlot_->setObjectName("viewportDetachSlot");
+    detachSlot_->setFixedWidth(28);
+    detachSlot_->setStyleSheet(
+        "QWidget#viewportDetachSlot { background: transparent; border: none; }");
+    auto* detachSlotLayout = new QHBoxLayout(detachSlot_);
+    detachSlotLayout->setContentsMargins(0, 0, 6, 0);
+    detachSlotLayout->setSpacing(0);
+    detachButton_ = new DockDetachButton(detachSlot_);
+    detachSlotLayout->addWidget(detachButton_, 0, Qt::AlignVCenter | Qt::AlignRight);
+    connect(detachButton_, &QToolButton::clicked, this, [this] {
+        if (onDetach_) onDetach_();
+    });
+    chromeRowLayout->addWidget(chromeBar_, 1);
+    chromeRowLayout->addWidget(detachSlot_, 0);
+    detachSlot_->hide();
+    detachButton_->hide();
+
+    renderControlStrip_ = new QWidget(chromeBar_);
+    renderControlStrip_->setObjectName("viewportRenderControls");
+    renderControlStrip_->setStyleSheet(
+        "QWidget#viewportRenderControls { background: transparent; border: none; }");
+    auto* renderLayout = new QHBoxLayout(renderControlStrip_);
+    renderLayout->setContentsMargins(8, 4, 4, 4);
+    renderLayout->setSpacing(4);
+    startButton_ = new QToolButton(renderControlStrip_);
+    startButton_->setText(QStringLiteral("Start"));
+    startButton_->setCheckable(true);
+    startButton_->setStyleSheet(chromeToolButtonStyle(48));
+    fitChromeButton(startButton_);
+    stopButton_ = new QToolButton(renderControlStrip_);
+    stopButton_->setText(QStringLiteral("Stop"));
+    stopButton_->setCheckable(true);
+    stopButton_->setChecked(true);
+    stopButton_->setStyleSheet(chromeToolButtonStyle(48));
+    fitChromeButton(stopButton_);
+    renderLayout->addWidget(startButton_);
+    renderLayout->addWidget(stopButton_);
 
     toolStrip_ = new QWidget(chromeBar_);
     toolStrip_->setObjectName("viewportTransformStrip");
     toolStrip_->setStyleSheet(
-        "QWidget#viewportTransformStrip {"
-        "  background: transparent;"
-        "  border: none;"
-        "}"
-        "QToolButton {"
-        "  color: #e8eaed;"
-        "  background: #3a3e44;"
-        "  border: 1px solid #4a4f57;"
-        "  border-radius: 6px;"
-        "  min-width: 28px;"
-        "  min-height: 24px;"
-        "  font-weight: 700;"
-        "  font-size: 12px;"
-        "  padding: 0 4px;"
-        "}"
-        "QToolButton:checked {"
-        "  background: rgba(80, 170, 255, 90);"
-        "  border-color: #50aaff;"
-        "  color: #ffffff;"
-        "}"
-        "QToolButton:hover {"
-        "  background: #474c54;"
-        "}");
+        QStringLiteral(
+            "QWidget#viewportTransformStrip {"
+            "  background: transparent;"
+            "  border: none;"
+            "}"
+            "QToolButton {"
+            "  color: #e8eaed;"
+            "  background: #3a3e44;"
+            "  border: 1px solid #4a4f57;"
+            "  border-radius: 6px;"
+            "  min-width: 28px;"
+            "  min-height: 24px;"
+            "  max-height: 24px;"
+            "  font-weight: 700;"
+            "  font-size: 11px;"
+            "  padding: 0 4px;"
+            "}"
+            "QToolButton:checked { %1 }"
+            "QToolButton:hover {"
+            "  background: #474c54;"
+            "}")
+            .arg(theme::checkedCss()));
     auto* stripLayout = new QHBoxLayout(toolStrip_);
-    stripLayout->setContentsMargins(4, 3, 4, 3);
-    stripLayout->setSpacing(2);
+    stripLayout->setContentsMargins(4, 4, 4, 4);
+    stripLayout->setSpacing(4);
 
     cameraMenuButton_ = new QToolButton(toolStrip_);
     cameraMenuButton_->setText("persp");
@@ -281,13 +365,14 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     cameraMenuButton_->setStyleSheet(
         "QToolButton {"
         "  min-width: 72px; max-width: 140px;"
-        "  min-height: 24px;"
-        "  font-size: 10px; font-weight: 600;"
+        "  min-height: 24px; max-height: 24px;"
+        "  font-size: 11px; font-weight: 600;"
         "  text-align: left; padding-left: 6px; padding-right: 6px;"
         "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
         "}"
         "QToolButton:hover { background: #474c54; }"
         "QToolButton::menu-indicator { width: 10px; }");
+    fitChromeButton(cameraMenuButton_);
     stripLayout->addWidget(cameraMenuButton_);
     rebuildCameraMenu();
 
@@ -297,11 +382,12 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     homeButton_->setAutoRaise(true);
     homeButton_->setStyleSheet(
         "QToolButton {"
-        "  min-width: 44px; min-height: 24px;"
-        "  font-size: 10px; font-weight: 600;"
+        "  min-width: 44px; min-height: 24px; max-height: 24px;"
+        "  font-size: 11px; font-weight: 600;"
         "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
         "}"
         "QToolButton:hover { background: #474c54; }");
+    fitChromeButton(homeButton_);
     stripLayout->addWidget(homeButton_);
     connect(homeButton_, &QToolButton::clicked, this, [this] { frameAll(); });
 
@@ -323,9 +409,10 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         button->setAutoRaise(true);
         group->addButton(button);
         stripLayout->addWidget(button);
+        fitChromeButton(button);
         return button;
     };
-    selectButton_ = makeButton("Sel", "Select (Q) — click objects in the viewport");
+    selectButton_ = makeButton("Q", "Select (Q) — click objects in the viewport");
     translateButton_ = makeButton("T", "Translate (T)");
     rotateButton_ = makeButton("R", "Rotate (R)");
     scaleButton_ = makeButton("S", "Scale (S)");
@@ -348,17 +435,18 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         button->setToolTip(tip);
         button->setAutoRaise(true);
         button->setStyleSheet(
-            "QToolButton {"
-            "  min-width: 42px; min-height: 24px;"
-            "  font-size: 10px; font-weight: 600;"
-            "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
-            "}"
-            "QToolButton:checked {"
-            "  background: rgba(255, 190, 90, 90); border-color: #ffbe5a; color: #ffffff;"
-            "}"
-            "QToolButton:hover { background: #474c54; }");
+            QStringLiteral(
+                "QToolButton {"
+                "  min-width: 42px; min-height: 24px; max-height: 24px;"
+                "  font-size: 11px; font-weight: 600;"
+                "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
+                "}"
+                "QToolButton:checked { %1 }"
+                "QToolButton:hover { background: #474c54; }")
+                .arg(theme::checkedCss()));
         spaceGroup->addButton(button);
         stripLayout->addWidget(button);
+        fitChromeButton(button);
         return button;
     };
     localSpaceButton_ = makeSpaceButton("Local", "Local transform space");
@@ -368,8 +456,8 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     stripLayout->addSpacing(8);
     auto comboStyle = QStringLiteral(
         "QComboBox {"
-        "  min-height: 24px;"
-        "  font-size: 10px; font-weight: 600;"
+        "  min-height: 24px; max-height: 24px;"
+        "  font-size: 11px; font-weight: 600;"
         "  background: #3a3e44; border: 1px solid #4a4f57; border-radius: 6px; color: #e8eaed;"
         "  padding: 0 6px;"
         "}"
@@ -378,12 +466,13 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
 
     colorManagementCombo_ = new QComboBox(toolStrip_);
     colorManagementCombo_->addItem(QStringLiteral("Classic"), 0);
-    colorManagementCombo_->addItem(QStringLiteral("OCIO"), 1);
+    colorManagementCombo_->addItem(QStringLiteral("ACES"), 1);
     colorManagementCombo_->setCurrentIndex(1);
     colorManagementCombo_->setToolTip(
         QStringLiteral("Classic: linear → sRGB (no OCIO, no tone map; Houdini-style).\n"
-                       "OCIO: OpenColorIO Display/View from the config."));
+                       "ACES: OpenColorIO Display/View from the ACES config."));
     colorManagementCombo_->setStyleSheet(comboStyle + QStringLiteral(" QComboBox { max-width: 90px; }"));
+    colorManagementCombo_->setFixedHeight(kChromeButtonHeight);
     stripLayout->addWidget(colorManagementCombo_);
     connect(colorManagementCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int index) {
@@ -401,6 +490,7 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
         QStringLiteral("Monitor view transform.\n"
                        "Working space is set in Render Settings → Film."));
     viewTransformCombo_->setStyleSheet(comboStyle + QStringLiteral(" QComboBox { max-width: 110px; }"));
+    viewTransformCombo_->setFixedHeight(kChromeButtonHeight);
     stripLayout->addWidget(viewTransformCombo_);
     connect(viewTransformCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [this](int index) {
@@ -608,13 +698,68 @@ void RenderView::setFocusPickActive(bool active) {
 void RenderView::layoutToolStrip() {
     if (!chromeBar_ || !toolStrip_) return;
     const int chromeH = theme::chromeBarHeight();
-    chromeBar_->setGeometry(0, 0, width(), chromeH);
+    // QWidget::isVisible() is false while any ancestor is hidden, so it cannot
+    // drive this layout (slot stays hidden forever, or the button sits at 0,0).
+    const bool showDetach = bool(onDetach_);
+    if (chromeRow_) {
+        chromeRow_->setGeometry(0, 0, width(), chromeH);
+    } else {
+        chromeBar_->setGeometry(0, 0, width(), chromeH);
+    }
+    if (detachSlot_) {
+        detachSlot_->setFixedWidth(showDetach ? 28 : 0);
+        detachSlot_->setVisible(showDetach);
+    }
+    if (chromeRow_) {
+        if (QLayout* rowLayout = chromeRow_->layout()) rowLayout->activate();
+    }
+    if (detachButton_) detachButton_->setVisible(showDetach);
+    int left = 0;
+    if (renderControlStrip_) {
+        renderControlStrip_->adjustSize();
+        const int y = std::max(0, (chromeH - renderControlStrip_->height()) / 2);
+        renderControlStrip_->move(0, y);
+        left = renderControlStrip_->width() + 4;
+    }
     toolStrip_->adjustSize();
-    const int x = std::max(8, (chromeBar_->width() - toolStrip_->width()) / 2);
+    const int available = std::max(0, chromeBar_->width());
+    const int x = std::max(left, (available - toolStrip_->width()) / 2);
     const int y = std::max(0, (chromeH - toolStrip_->height()) / 2);
     toolStrip_->move(x, y);
+    if (chromeRow_)
+        chromeRow_->raise();
+    else
+        chromeBar_->raise();
+    if (renderControlStrip_) renderControlStrip_->raise();
     toolStrip_->raise();
-    chromeBar_->raise();
+}
+
+void RenderView::attachRenderActions(QAction* start, QAction* stop) {
+    if (startButton_ && start) {
+        startButton_->setDefaultAction(start);
+        startButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        startButton_->setStyleSheet(chromeToolButtonStyle(48));
+        fitChromeButton(startButton_);
+    }
+    if (stopButton_ && stop) {
+        stopButton_->setDefaultAction(stop);
+        stopButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        stopButton_->setStyleSheet(chromeToolButtonStyle(48));
+        fitChromeButton(stopButton_);
+    }
+    layoutToolStrip();
+}
+
+void RenderView::setOnDetach(std::function<void()> onDetach) {
+    onDetach_ = std::move(onDetach);
+    if (detachButton_) detachButton_->setToolTip(QStringLiteral("Detach"));
+    layoutToolStrip();
+}
+
+void RenderView::setViewportFloating(bool floating) {
+    if (detachButton_) {
+        detachButton_->setToolTip(floating ? QStringLiteral("Dock") : QStringLiteral("Detach"));
+    }
 }
 
 void RenderView::setCameraMenu(const QStringList& cameraNames, const QString& activeName) {
@@ -652,6 +797,11 @@ void RenderView::rebuildCameraMenu() {
 
 void RenderView::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
+    layoutToolStrip();
+}
+
+void RenderView::showEvent(QShowEvent* event) {
+    QWidget::showEvent(event);
     layoutToolStrip();
 }
 
@@ -752,6 +902,7 @@ void RenderView::beginNavigation(int mode, const QPoint& pos) {
         setCursor(Qt::ClosedHandCursor);
     }
     grabMouse();
+    emit cameraNavStarted();
 }
 
 bool RenderView::hasTransformTarget() const {
@@ -1145,7 +1296,11 @@ void RenderView::paintEvent(QPaintEvent*) {
     painter.fillRect(rect(), theme::gridDark());
 
     const QRect target = imageRect();
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    // Coarse nav film (1/32 … 1/4) is a splat: nearest upscale, not a blur.
+    const bool fatNavPixels =
+        !image_.isNull() && image_.width() > 0 && target.width() > 0 &&
+        image_.width() * 2 < target.width();
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, !fatNavPixels);
     if (!image_.isNull()) {
         painter.drawImage(target, image_);
     } else if (showPlaceholder_ && !placeholderImage_.isNull()) {
@@ -1172,31 +1327,62 @@ void RenderView::paintEvent(QPaintEvent*) {
 
     drawGizmo(painter);
 
-    if (!statusText_.isEmpty() || !statusTextRight_.isEmpty()) {
+    const bool showBar = hasBackendHud_ || !statusText_.isEmpty() || !statusTextRight_.isEmpty() ||
+                         focusPickActive_;
+    if (showBar) {
         QFont font = painter.font();
         font.setPointSizeF(8.5);
         painter.setFont(font);
+        const QFontMetrics fm(font);
         const QRect textRect(target.left(), target.bottom() - 22, target.width(), 20);
         painter.fillRect(textRect, QColor(0, 0, 0, 130));
-        painter.setPen(QColor(235, 237, 240));
-        if (!statusText_.isEmpty()) {
-            painter.drawText(textRect.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
-                             statusText_);
+
+        const int margin = 8;
+        int rightLimit = textRect.right() - margin;
+        if (hasBackendHud_) {
+            const QString sep = QStringLiteral("  ·  ");
+            const int activeW = fm.horizontalAdvance(backendActive_);
+            const int sepW = optixSupportText_.isEmpty() ? 0 : fm.horizontalAdvance(sep);
+            const int supportW =
+                optixSupportText_.isEmpty() ? 0 : fm.horizontalAdvance(optixSupportText_);
+            const int hudW = activeW + sepW + supportW;
+            const int hudX = std::max(textRect.left() + margin, rightLimit - hudW);
+            painter.setPen(QColor(235, 237, 240));
+            painter.drawText(QRect(hudX, textRect.top(), activeW, textRect.height()),
+                             Qt::AlignVCenter | Qt::AlignLeft, backendActive_);
+            if (!optixSupportText_.isEmpty()) {
+                painter.setPen(QColor(160, 164, 170));
+                painter.drawText(QRect(hudX + activeW, textRect.top(), sepW, textRect.height()),
+                                 Qt::AlignVCenter | Qt::AlignLeft, sep);
+                painter.setPen(optixSupportColor_);
+                painter.drawText(QRect(hudX + activeW + sepW, textRect.top(), supportW, textRect.height()),
+                                 Qt::AlignVCenter | Qt::AlignLeft, optixSupportText_);
+            }
+            rightLimit = hudX - margin;
+        }
+
+        QString leftText = statusText_;
+        if (leftText.isEmpty() && focusPickActive_) {
+            leftText = QStringLiteral("Focus Pick — click geometry to set DOF focus distance");
+        }
+        if (!leftText.isEmpty()) {
+            const int leftWidth = std::max(0, rightLimit - (textRect.left() + margin));
+            const QRect leftRect(textRect.left() + margin, textRect.top(), leftWidth, textRect.height());
+            painter.setPen(focusPickActive_ && statusText_.isEmpty() ? QColor(255, 210, 70)
+                                                                     : QColor(235, 237, 240));
+            painter.drawText(leftRect, Qt::AlignVCenter | Qt::AlignLeft,
+                             fm.elidedText(leftText, Qt::ElideRight, leftWidth));
         }
         if (!statusTextRight_.isEmpty()) {
-            // Slightly right of the spp strip — same bar, secondary status (dicing).
-            painter.drawText(textRect.adjusted(textRect.width() / 3, 0, -8, 0),
-                             Qt::AlignVCenter | Qt::AlignLeft, statusTextRight_);
+            const int diceLeft = textRect.left() + textRect.width() / 3;
+            const int diceWidth = std::max(0, rightLimit - diceLeft);
+            if (diceWidth > 24) {
+                painter.setPen(QColor(235, 237, 240));
+                painter.drawText(QRect(diceLeft, textRect.top(), diceWidth, textRect.height()),
+                                 Qt::AlignVCenter | Qt::AlignLeft,
+                                 fm.elidedText(statusTextRight_, Qt::ElideRight, diceWidth));
+            }
         }
-    } else if (focusPickActive_) {
-        QFont font = painter.font();
-        font.setPointSizeF(8.5);
-        painter.setFont(font);
-        const QRect textRect(target.left(), target.bottom() - 22, target.width(), 20);
-        painter.fillRect(textRect, QColor(0, 0, 0, 130));
-        painter.setPen(QColor(255, 210, 70));
-        painter.drawText(textRect.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
-                         "Focus Pick — click geometry to set DOF focus distance");
     }
 }
 
@@ -1321,10 +1507,11 @@ void RenderView::mouseReleaseEvent(QMouseEvent* event) {
         return;
     }
     if (mode_ != 0) {
+        const bool wasNav = mode_ == 1 || mode_ == 2 || mode_ == 3;
         mode_ = 0;
         releaseMouse();
         unsetCursor();
-        // Final soft-restart flush is unnecessary — camera already pushed live.
+        if (wasNav) emit cameraNavEnded();
         emit cameraMoved();
         event->accept();
         return;

@@ -1,14 +1,20 @@
-// RGB→spectrum upsampling for materials/lights authored in linear sRGB.
+// RGB→spectrum upsampling (pbrt-v4 ch. 4 / 10 / 12).
 //
-// Two paths:
-//   1) Linear RGB lobes — energy-safe under multiply. MUST be used for Monte Carlo
-//      path weights (f·cos/pdf) and aggregate NEE contribs. No round-trip "align":
-//      that fits RGB via spectrumToRgb and breaks under TerminateSecondary / glass.
-//   2) Jakob & Hanika (2019) tables — authored reflectance / emission. Honest
-//      spectra; neutrality comes from CIE→RGB with fixed illuminant-E white, not
-//      from post-hoc RGB matching.
+//   rgbToSpectrumLinear      — energy-safe under multiply. MC path weights
+//                              that are already f·cos/pdf aggregates, 1/η²,
+//                              and NEE RGB sums. Not a colour appearance model.
+//   rgbToSpectrumReflectance — RGBAlbedoSpectrum: Jakob albedo, [0,1]
+//                              (unbounded: scale = 2·max, lookup rgb/scale).
+//   rgbToSpectrumUnbounded   — RGBUnboundedSpectrum: Jakob illuminant table
+//                              with scale = 2·max (HDR / general RGB).
+//   rgbToSpectrumEmission    — RGBIlluminantSpectrum: unbounded Jakob × the
+//                              working-space illuminant (D65 / D60).
+//
+// ACEScg working space uses the D60-fitted AP1 tables; sRGB/Rec.2020/P3 keep
+// the E-fitted sRGB tables.
 #pragma once
 
+#include "render/illuminant_spd.h"
 #include "render/rgb_spectrum_tables.h"
 #include "render/spectrum.h"
 
@@ -35,6 +41,19 @@ inline void rgbLobeWeights(float lambdaNm, float& wr, float& wg, float& wb) {
     }
 }
 
+inline bool colorSpaceUsesAcesTables(const RGBColorSpace& cs) {
+    return cs.whiteIlluminant == kWhiteIlluminantD60;
+}
+
+inline rgb_spec::RgbSigmoidPolynomial fetchAlbedoPoly(Vec3 rgb, const RGBColorSpace& cs) {
+    return colorSpaceUsesAcesTables(cs) ? rgb_spec::fetchAlbedoAces(rgb) : rgb_spec::fetchAlbedo(rgb);
+}
+
+inline rgb_spec::RgbSigmoidPolynomial fetchIlluminantPoly(Vec3 rgb, const RGBColorSpace& cs) {
+    return colorSpaceUsesAcesTables(cs) ? rgb_spec::fetchIlluminantAces(rgb)
+                                        : rgb_spec::fetchIlluminant(rgb);
+}
+
 }  // namespace
 
 // Linear RGB→spectrum (energy-conserving under multiply). Use for PT/BDPT Spectral
@@ -52,9 +71,10 @@ inline SampledSpectrum rgbToSpectrumLinear(Vec3 rgb, const SampledWavelengths& w
     return s;
 }
 
-// Reflectance / albedo: Jakob albedo table (spectra in [0,1]). HDR albedo uses
-// the PBRT unbounded path (scale = 2·max, lookup rgb/scale).
-inline SampledSpectrum rgbToSpectrumReflectance(Vec3 rgb, const SampledWavelengths& w) {
+// Reflectance / albedo: pbrt RGBAlbedoSpectrum. HDR albedo uses the unbounded
+// path (scale = 2·max, lookup rgb/scale) on the albedo table.
+inline SampledSpectrum rgbToSpectrumReflectance(Vec3 rgb, const SampledWavelengths& w,
+                                                const RGBColorSpace& cs = colorSpaceSrgb()) {
     const float r = srMax(0.0f, rgb.x);
     const float g = srMax(0.0f, rgb.y);
     const float b = srMax(0.0f, rgb.z);
@@ -62,24 +82,37 @@ inline SampledSpectrum rgbToSpectrumReflectance(Vec3 rgb, const SampledWavelengt
     if (r <= 0.0f && g <= 0.0f && b <= 0.0f) return SampledSpectrum::zero(w.n);
 
     const float m = srMax(r, srMax(g, b));
-    if (m <= 1.0f) return rgb_spec::evalPolynomial(rgb_spec::fetchAlbedo(c), w);
+    if (m <= 1.0f) return rgb_spec::evalPolynomial(fetchAlbedoPoly(c, cs), w);
     const float scale = 2.0f * m;
-    return rgb_spec::evalPolynomial(rgb_spec::fetchAlbedo(c / scale), w, scale);
+    return rgb_spec::evalPolynomial(fetchAlbedoPoly(c / scale, cs), w, scale);
 }
 
-// Emission / illuminant: Jakob illuminant table + PBRT unbounded scaling for HDR.
-// Only for authored emission / light colours — not MC path weights.
-inline SampledSpectrum rgbToSpectrumEmission(Vec3 rgb, const SampledWavelengths& w) {
+// pbrt RGBUnboundedSpectrum: scale = 2·max(rgb), Jakob of rgb/scale.
+inline SampledSpectrum rgbToSpectrumUnbounded(Vec3 rgb, const SampledWavelengths& w,
+                                              const RGBColorSpace& cs = colorSpaceSrgb()) {
     const float r = srMax(0.0f, rgb.x);
     const float g = srMax(0.0f, rgb.y);
     const float b = srMax(0.0f, rgb.z);
-    const Vec3 c(r, g, b);
     if (r <= 0.0f && g <= 0.0f && b <= 0.0f) return SampledSpectrum::zero(w.n);
-
     const float m = srMax(r, srMax(g, b));
-    if (m <= 1.0f) return rgb_spec::evalPolynomial(rgb_spec::fetchIlluminant(c), w);
     const float scale = 2.0f * m;
-    return rgb_spec::evalPolynomial(rgb_spec::fetchIlluminant(c / scale), w, scale);
+    return rgb_spec::evalPolynomial(fetchIlluminantPoly(Vec3(r, g, b) / scale, cs), w, scale);
+}
+
+inline SampledSpectrum illuminantSpectrum(const SampledWavelengths& w,
+                                          const RGBColorSpace& cs = colorSpaceSrgb()) {
+    SampledSpectrum s(w.n);
+    for (int i = 0; i < w.n; ++i) s.values[i] = sampleColorSpaceIlluminant(cs, w.lambda[i]);
+    return s;
+}
+
+// Lights / HDR env / emission textures: pbrt RGBIlluminantSpectrum.
+inline SampledSpectrum rgbToSpectrumEmission(Vec3 rgb, const SampledWavelengths& w,
+                                             const RGBColorSpace& cs = colorSpaceSrgb()) {
+    SampledSpectrum s = rgbToSpectrumUnbounded(rgb, w, cs);
+    for (int i = 0; i < s.n && i < w.n; ++i)
+        s.values[i] *= sampleColorSpaceIlluminant(cs, w.lambda[i]);
+    return s;
 }
 
 }  // namespace sol

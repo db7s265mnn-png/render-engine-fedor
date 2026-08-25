@@ -1,4 +1,4 @@
-// Light sampling shared by the Embree and OptiX integrators.
+// Light sampling shared by the Embree integrator and the OptiX shade kernels.
 //
 // Conventions (matching Houdini/USD): rect and disk lights live in the XY plane
 // of their transform and emit along -Z, distant lights travel along -Z, sphere
@@ -11,6 +11,10 @@
 
 namespace sol {
 
+// Half-angle (radians) below this is a Dirac distant light: pdf 1, Le = irradiance.
+// Physical Sky Angular Size 0.01° is 8.7e-5 rad and must stay a finite cone.
+constexpr float kDistantDeltaHalfRad = 1e-8f;
+
 struct LightSample {
     Vec3 wi{0.0f, 1.0f, 0.0f};       // direction from the shading point to the light
     Vec3 radiance{0.0f, 0.0f, 0.0f}; // incident radiance
@@ -18,6 +22,16 @@ struct LightSample {
     float pdf = 0.0f;                // solid angle pdf of this light (light choice excluded)
     bool delta = false;
 };
+
+SR_INL SR_HD bool lightIsInfinite(const LightData& l) {
+    return l.type == kLightDome || l.type == kLightDistant;
+}
+
+// PBRT 4 BVHLightSampler: each infinite light is one discrete slot; all
+// bounded lights together are one slot. p_inf = n_inf / (n_inf + has_finite).
+// Flux ratios between a sun (irradiance) and a rect (power) are incomparable,
+// so a 20% clamp / uniform mix is not needed if the split is by slots.
+// pbrt-v4: one light sample, MIS with BSDF — no RIS.
 
 SR_INL SR_HD bool lightContributesCaustics(const LightData& l) { return l.contributeCaustics != 0; }
 
@@ -31,6 +45,14 @@ SR_INL SR_HD Vec3 envTexel(const EnvMapView& env, int x, int y) {
     y = y < 0 ? 0 : (y >= env.height ? env.height - 1 : y);
     const float* p = env.pixels + (size_t(y) * size_t(env.width) + size_t(x)) * 4;
     return Vec3(p[0], p[1], p[2]);
+}
+
+SR_INL SR_HD void envDirectionToTexel(const EnvMapView& env, Vec3 dirLocal, int& x, int& y) {
+    const Vec2 uv = directionToEquirect(normalize(dirLocal));
+    x = int(uv.x * float(env.width));
+    y = int(uv.y * float(env.height));
+    x = x < 0 ? 0 : (x >= env.width ? env.width - 1 : x);
+    y = y < 0 ? 0 : (y >= env.height ? env.height - 1 : y);
 }
 
 SR_INL SR_HD Vec3 envLookup(const EnvMapView& env, Vec3 dirLocal) {
@@ -51,6 +73,15 @@ SR_INL SR_HD Vec3 envLookup(const EnvMapView& env, Vec3 dirLocal) {
     const Vec3 c01 = envTexel(env, xa, y0 + 1);
     const Vec3 c11 = envTexel(env, xb, y0 + 1);
     return lerp(lerp(c00, c10, tx), lerp(c01, c11, tx), ty);
+}
+
+// Discrete texel that owns `envPdf` — NEE must use this, not bilinear. Mixing a
+// dark sampled texel with a neighbouring sun texel is the classic HDRI firefly.
+SR_INL SR_HD Vec3 envLookupNearest(const EnvMapView& env, Vec3 dirLocal) {
+    if (!env.valid()) return Vec3(0.0f);
+    int x = 0, y = 0;
+    envDirectionToTexel(env, dirLocal, x, y);
+    return envTexel(env, x, y);
 }
 
 SR_INL SR_HD int cdfFindInterval(const float* cdf, int size, float u) {
@@ -78,10 +109,8 @@ SR_INL SR_HD float envPdf(const EnvMapView& env, Vec3 dirLocal) {
     const Vec2 uv = directionToEquirect(normalize(dirLocal));
     const float sinTheta = sinf(clampf(uv.y, 0.0f, 1.0f) * kPi);
     if (sinTheta <= 0.0f) return 0.0f;
-    int x = int(uv.x * float(env.width));
-    int y = int(uv.y * float(env.height));
-    x = x < 0 ? 0 : (x >= env.width ? env.width - 1 : x);
-    y = y < 0 ? 0 : (y >= env.height ? env.height - 1 : y);
+    int x = 0, y = 0;
+    envDirectionToTexel(env, dirLocal, x, y);
     const float funcValue = env.func[size_t(y) * size_t(env.width) + size_t(x)];
     const float pdfUv = funcValue / env.integral;
     return pdfUv / (kTwoPi * kPi * sinTheta);
@@ -181,13 +210,16 @@ SR_INL SR_HD Vec3 areaLightNormal(const LightData& l) {
 }
 
 // Radiance of the dome light for a world space direction.
-SR_INL SR_HD Vec3 domeRadiance(const SceneView& scene, const LightData& l, Vec3 dirWorld) {
+// `nearestTexel`: must match `envPdf` (NEE / MIS after a bounce). Camera rays
+// keep bilinear so a 1-pixel sun disc does not look like a stair.
+SR_INL SR_HD Vec3 domeRadiance(const SceneView& scene, const LightData& l, Vec3 dirWorld,
+                               bool nearestTexel = false) {
     Vec3 tint = l.emittedRadiance();
     if (l.envIndex >= 0 && l.envIndex < scene.envMapCount) {
         const EnvMapView& env = scene.envMaps[l.envIndex];
         if (env.valid()) {
             const Vec3 dirLocal = normalize(transformVector(l.xformInv, dirWorld));
-            return tint * envLookup(env, dirLocal);
+            return tint * (nearestTexel ? envLookupNearest(env, dirLocal) : envLookup(env, dirLocal));
         }
     }
     return tint;
@@ -212,7 +244,7 @@ SR_INL SR_HD bool sampleLight(const SceneView& scene, int lightIndex, Vec3 refP,
             const Vec3 axis = normalize(lightAxisZ(l));
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
             out.distance = kFloatMax;
-            if (halfAngle < 1e-4f) {
+            if (halfAngle < kDistantDeltaHalfRad) {
                 out.wi = axis;
                 out.pdf = 1.0f;
                 out.delta = true;
@@ -328,7 +360,14 @@ SR_INL SR_HD bool sampleLight(const SceneView& scene, int lightIndex, Vec3 refP,
             out.distance = kFloatMax;
             out.pdf = pdf;
             out.delta = false;
-            out.radiance = domeRadiance(scene, l, dirWorld);
+            // Camera rays keep bilinear domeRadiance; NEE uses the discrete PDF texel.
+            Vec3 tint = l.emittedRadiance();
+            if (l.envIndex >= 0 && l.envIndex < scene.envMapCount &&
+                scene.envMaps[l.envIndex].valid()) {
+                out.radiance = tint * envLookupNearest(scene.envMaps[l.envIndex], dirLocal);
+            } else {
+                out.radiance = tint;
+            }
             return true;
         }
         default: return false;
@@ -368,7 +407,7 @@ SR_INL SR_HD float lightPdfDirection(const SceneView& scene, int lightIndex, Vec
         }
         case kLightDistant: {
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
-            if (halfAngle < 1e-4f) return 0.0f;
+            if (halfAngle < kDistantDeltaHalfRad) return 0.0f;
             const float cosThetaMax = cosf(halfAngle);
             if (dot(normalize(lightAxisZ(l)), wi) < cosThetaMax) return 0.0f;
             return 1.0f / (kTwoPi * (1.0f - cosThetaMax));
@@ -384,96 +423,208 @@ SR_INL SR_HD float lightPdfDirection(const SceneView& scene, int lightIndex, Vec
     }
 }
 
-// Approximate emitted flux used to pick lights (brighter / larger → more samples).
+// pbrt-v4 Φ: scene radius r (world AABB). Default r=1 when bounds are empty (tests).
+SR_INL SR_HD float sceneRadius(const SceneView& scene) {
+    const float r = scene.worldBounds.radius();
+    return r > 1e-3f ? r : 1.0f;
+}
+
 SR_INL SR_HD float lightFluxWeight(const SceneView& scene, int lightIndex) {
     if (lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
     const LightData& l = scene.lights[lightIndex];
     const float intens = srMax(1e-8f, average(vmax(Vec3(0.0f), l.emittedRadiance())));
+    const Vec3 Le = vmax(Vec3(0.0f), lightRadiance(l));
+    const float lum = srMax(1e-8f, average(Le));
+    const float r = sceneRadius(scene);
+    const float piR2 = kPi * r * r;
     switch (l.type) {
-        case kLightDome:
+        case kLightDome: {
+            float integ = 4.0f * kPi;
             if (l.envIndex >= 0 && l.envIndex < scene.envMapCount && scene.envMaps[l.envIndex].sampled())
-                return intens * srMax(1e-4f, scene.envMaps[l.envIndex].integral);
-            return intens * 4.0f;
+                integ = srMax(1e-4f, scene.envMaps[l.envIndex].integral);
+            // Φ_env = (∫ L dω) · π r²
+            return intens * integ * piR2;
+        }
         case kLightRect:
-            return intens * srMax(1e-6f, rectLightArea(l));
-        case kLightDisk:
-            return intens * srMax(1e-6f, diskLightArea(l));
+        case kLightDisk: {
+            const float area = l.type == kLightRect ? rectLightArea(l) : diskLightArea(l);
+            // Φ_area = L · A · π · (two-sided ? 2 : 1)
+            return lum * srMax(1e-6f, area) * kPi * (l.twoSided ? 2.0f : 1.0f);
+        }
         case kLightSphere: {
-            const float r = sphereLightRadius(l);
-            return intens * srMax(1e-6f, 4.0f * kPi * r * r);
+            const float rad = sphereLightRadius(l);
+            const float area = 4.0f * kPi * rad * rad;
+            return lum * srMax(1e-6f, area) * kPi;
         }
         case kLightDistant: {
             const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
-            if (halfAngle < 1e-4f) return intens;
-            return intens * srMax(1e-6f, kTwoPi * (1.0f - cosf(halfAngle)));
+            float E = intens;
+            if (halfAngle >= kDistantDeltaHalfRad && !l.normalize) {
+                const float omega = kTwoPi * (1.0f - cosf(halfAngle));
+                E = lum * srMax(1e-12f, omega);
+            }
+            // Φ_distant = E · π r²
+            return E * piR2;
         }
         case kLightPoint:
-            return intens;
+            return intens * 4.0f * kPi;
         default:
             return intens;
     }
+}
+
+SR_INL SR_HD void lightGroupCounts(const SceneView& scene, int& nInf, int& nFin) {
+    nInf = 0;
+    nFin = 0;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        if (lightIsInfinite(scene.lights[i])) ++nInf;
+        else ++nFin;
+    }
+}
+
+SR_INL SR_HD void lightGroupFluxTotals(const SceneView& scene, float& wInf, float& wFin) {
+    wInf = 0.0f;
+    wFin = 0.0f;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        const float w = lightFluxWeight(scene, i);
+        if (lightIsInfinite(scene.lights[i])) wInf += w;
+        else wFin += w;
+    }
+}
+
+// PBRT 4 BVHLightSampler: n infinite slots + one slot for the whole finite set.
+SR_INL SR_HD float infiniteLightGroupProbability(int nInf, int nFin) {
+    if (nInf <= 0) return 0.0f;
+    if (nFin <= 0) return 1.0f;
+    return float(nInf) / float(nInf + 1);
+}
+
+SR_INL SR_HD int sampleInfiniteLightUniform(const SceneView& scene, float u, float pInf, float& pdf) {
+    int nInf = 0;
+    for (int i = 0; i < scene.lightCount; ++i)
+        if (lightIsInfinite(scene.lights[i])) ++nInf;
+    if (nInf <= 0 || pInf <= 0.0f) {
+        pdf = 0.0f;
+        return -1;
+    }
+    int k = int(clampf(u, 0.0f, 0.999999f) * float(nInf));
+    if (k >= nInf) k = nInf - 1;
+    int seen = 0;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        if (!lightIsInfinite(scene.lights[i])) continue;
+        if (seen == k) {
+            pdf = pInf / float(nInf);
+            return i;
+        }
+        ++seen;
+    }
+    pdf = 0.0f;
+    return -1;
 }
 
 SR_INL SR_HD float lightSelectionPdf(const SceneView& scene) {
     return scene.lightCount > 0 ? 1.0f / float(scene.lightCount) : 0.0f;
 }
 
-// Flux-weighted probability of selecting a specific light.
+// PBRT 4 BVHLightSampler discrete pdf: infinite lights uniform in their slots,
+// finite lights flux-weighted inside the single finite slot.
 SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, int lightIndex) {
     if (scene.lightCount <= 0 || lightIndex < 0 || lightIndex >= scene.lightCount) return 0.0f;
-    float total = 0.0f;
-    float chosen = 0.0f;
-    for (int i = 0; i < scene.lightCount; ++i) {
-        const float w = lightFluxWeight(scene, i);
-        total += w;
-        if (i == lightIndex) chosen = w;
+    int nInf = 0, nFin = 0;
+    lightGroupCounts(scene, nInf, nFin);
+    const float pInf = infiniteLightGroupProbability(nInf, nFin);
+    if (lightIsInfinite(scene.lights[lightIndex])) {
+        if (nInf <= 0 || pInf <= 0.0f) return 0.0f;
+        return pInf / float(nInf);
     }
-    if (total <= 1e-20f) return lightSelectionPdf(scene);
-    return chosen / total;
+    if (nFin <= 0 || pInf >= 1.0f) return 0.0f;
+    float wInf = 0.0f, wFin = 0.0f;
+    lightGroupFluxTotals(scene, wInf, wFin);
+    if (wFin <= 1e-20f) return (1.0f - pInf) / float(nFin);
+    const float w = lightFluxWeight(scene, lightIndex);
+    return (w / wFin) * (1.0f - pInf);
 }
 
-// Sample a light index with probability ∝ flux. `pdf` is the selection pdf.
+SR_INL SR_HD int sampleLightIndexInGroup(const SceneView& scene, float u, bool infinite, float groupFlux,
+                                         float groupProb, float& pdf) {
+    if (groupFlux <= 1e-20f || groupProb <= 0.0f) {
+        pdf = 0.0f;
+        return -1;
+    }
+    float r = clampf(u, 0.0f, 0.999999f) * groupFlux;
+    int last = -1;
+    float lastW = 0.0f;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        if (lightIsInfinite(scene.lights[i]) != infinite) continue;
+        const float w = lightFluxWeight(scene, i);
+        last = i;
+        lastW = w;
+        if (r < w) {
+            pdf = (w / groupFlux) * groupProb;
+            return i;
+        }
+        r -= w;
+    }
+    if (last < 0) {
+        pdf = 0.0f;
+        return -1;
+    }
+    pdf = (lastW / groupFlux) * groupProb;
+    return last;
+}
+
+// Sample a light index: PBRT 4 slot split, then uniform infinite / flux finite.
 SR_INL SR_HD int sampleLightIndex(const SceneView& scene, float u, float& pdf) {
     if (scene.lightCount <= 0) {
         pdf = 0.0f;
         return -1;
     }
-    float total = 0.0f;
-    for (int i = 0; i < scene.lightCount; ++i) total += lightFluxWeight(scene, i);
-    if (total <= 1e-20f) {
-        int idx = int(u * float(scene.lightCount));
-        if (idx >= scene.lightCount) idx = scene.lightCount - 1;
-        pdf = lightSelectionPdf(scene);
-        return idx;
+    int nInf = 0, nFin = 0;
+    lightGroupCounts(scene, nInf, nFin);
+    const float pInf = infiniteLightGroupProbability(nInf, nFin);
+    u = clampf(u, 0.0f, 0.999999f);
+    if (u < pInf && nInf > 0) {
+        const float uG = pInf > 0.0f ? u / pInf : 0.0f;
+        return sampleInfiniteLightUniform(scene, uG, pInf, pdf);
     }
-    float r = clampf(u, 0.0f, 0.999999f) * total;
-    for (int i = 0; i < scene.lightCount; ++i) {
-        const float w = lightFluxWeight(scene, i);
-        if (r < w) {
-            pdf = w / total;
-            return i;
-        }
-        r -= w;
-    }
-    pdf = lightFluxWeight(scene, scene.lightCount - 1) / total;
-    return scene.lightCount - 1;
+    float wInf = 0.0f, wFin = 0.0f;
+    lightGroupFluxTotals(scene, wInf, wFin);
+    const float pFin = 1.0f - pInf;
+    const float uG = pFin > 0.0f ? (u - pInf) / pFin : 0.0f;
+    int idx = sampleLightIndexInGroup(scene, uG, false, wFin, pFin, pdf);
+    pdf = (idx >= 0) ? lightSelectionPdfIndex(scene, idx) : 0.0f;
+    return idx;
 }
 
 // ---------------------------------------------------------------------------
 // BVH-accelerated light sampling (position-aware importance)
 // ---------------------------------------------------------------------------
 
-// Importance of a BVH node from refP. Uses distance to the AABB *center*
-// softened by the node's extent — not min-distance-to-box (that is zero under
-// the entire footprint and jumps at AABB faces → axis-aligned "bucket" noise
-// in caustic shadows on floors).
+// pbrt-v4 LightBounds::Importance: Φ · max(cos θ', 0) / d², zero when the
+// reference point is outside the emission cone (θ' ≥ θ_e + θ_u).
 SR_INL SR_HD float bvhNodeImportance(const LightBvhNode& node, Vec3 refP) {
     if (node.power <= 0.f) return 0.f;
-    const Vec3 center = (node.bMin + node.bMax) * 0.5f;
+    const Vec3 pc = (node.bMin + node.bMax) * 0.5f;
     const Vec3 ext = node.bMax - node.bMin;
-    const float r2 = 0.25f * (ext.x * ext.x + ext.y * ext.y + ext.z * ext.z) + 1e-4f;
-    const float d2 = lengthSquared(refP - center);
-    return node.power / (d2 + r2);
+    const float radius = 0.5f * sqrtf(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
+    Vec3 d = refP - pc;
+    float d2 = lengthSquared(d);
+    if (d2 <= radius * radius * 1.0002f) return node.power;
+    const float dist = sqrtf(srMax(d2, 1e-12f));
+    const Vec3 wi = d * (1.0f / dist);
+    float cosTheta = dot(node.coneAxis, wi);
+    if (node.twoSided) cosTheta = fabsf(cosTheta);
+    const float sinTheta = sqrtf(srMax(0.0f, 1.0f - cosTheta * cosTheta));
+    const float cosThetaO = node.cosThetaO;
+    const float sinThetaO = sqrtf(srMax(0.0f, 1.0f - cosThetaO * cosThetaO));
+    float cosThetaP = cosTheta * cosThetaO + sinTheta * sinThetaO;
+    if (cosTheta > cosThetaO) cosThetaP = 1.0f;
+    const float theta = acosf(clampf(cosTheta, -1.0f, 1.0f));
+    const float thetaO = acosf(clampf(cosThetaO, -1.0f, 1.0f));
+    const float thetaU = asinf(clampf(radius / dist, 0.0f, 1.0f));
+    const float thetaE = acosf(clampf(node.cosThetaE, -1.0f, 1.0f));
+    if (theta - thetaO - thetaU >= thetaE) return 0.f;
+    return node.power * srMax(0.0f, cosThetaP) / d2;
 }
 
 // Returns true if the BVH subtree rooted at `nodeIdx` contains `lightIdx`.
@@ -501,42 +652,35 @@ SR_INL SR_HD bool bvhContainsLight(const LightBvhNode* nodes, int nodeCount,
 
 // Position-aware light selection via the prebuilt BVH (center+extent importance).
 // Infinite lights (dome/distant) are weighted by flux and kept outside the BVH.
-// Falls back to the flux-only overload when the BVH is unavailable (or skipped
-// for scenes with few finite lights).
+// Falls back to the flux-only overload when the BVH is unavailable.
 SR_INL SR_HD int sampleLightIndex(const SceneView& scene, Vec3 refP, float u, float& pdf) {
     if (scene.lightCount <= 0) { pdf = 0.f; return -1; }
 
     if (!scene.lightBvh || scene.lightBvhNodeCount == 0)
         return sampleLightIndex(scene, u, pdf);
 
-    const float wInf = scene.infiniteLightPower;
     const float wFin = bvhNodeImportance(scene.lightBvh[0], refP);
-    const float wTotal = wInf + wFin;
-    if (wTotal <= 1e-30f) return sampleLightIndex(scene, u, pdf);
+    const int nInf = scene.infiniteLightCount;
+    const float pInf = infiniteLightGroupProbability(nInf, 1);
+    u = clampf(u, 0.f, 0.999999f);
 
-    float r = clampf(u, 0.f, 0.999999f) * wTotal;
-
-    // -- Infinite-light branch --------------------------------------------------
-    if (r < wInf && scene.infiniteLightCount > 0) {
-        float cumW = 0.f;
-        for (int i = 0; i < scene.infiniteLightCount; ++i) {
-            const int   idx = scene.infiniteLightIndices[i];
-            const float w   = lightFluxWeight(scene, idx);
-            cumW += w;
-            if (r < cumW || i == scene.infiniteLightCount - 1) {
-                pdf = (wInf > 0.f ? w / wInf : 1.f) * (wInf / wTotal);
-                if (pdf <= 0.f) { pdf = 0.f; return -1; }
-                return idx;
-            }
-        }
+    // -- Infinite-light branch: uniform among infinite slots (PBRT 4) ----------
+    if (u < pInf && nInf > 0) {
+        const float uInf = pInf > 0.f ? u / pInf : 0.f;
+        int k = int(uInf * float(nInf));
+        if (k >= nInf) k = nInf - 1;
+        pdf = pInf / float(nInf);
+        if (pdf <= 0.f) { pdf = 0.f; return -1; }
+        return scene.infiniteLightIndices[k];
     }
 
     // -- Finite-light branch: traverse BVH -------------------------------------
-    if (wFin <= 0.f) {
+    const float pFin = 1.f - pInf;
+    if (wFin <= 0.f || pFin <= 0.f) {
         pdf = 0.f; return -1;
     }
-    float uFin = clampf((r - wInf) / wFin, 0.f, 0.999999f);
-    float travPdf = wFin / wTotal;
+    float uFin = pFin > 0.f ? clampf((u - pInf) / pFin, 0.f, 0.999999f) : 0.f;
+    float travPdf = pFin;
 
     int nodeIdx = 0;
     for (int depth = 0; depth < 64 && !scene.lightBvh[nodeIdx].isLeaf; ++depth) {
@@ -576,18 +720,18 @@ SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int
         lightIndex < 0 || lightIndex >= scene.lightCount)
         return lightSelectionPdfIndex(scene, lightIndex);
 
-    const float wInf   = scene.infiniteLightPower;
-    const float wFin   = bvhNodeImportance(scene.lightBvh[0], refP);
-    const float wTotal = wInf + wFin;
-    if (wTotal <= 1e-30f) return lightSelectionPdfIndex(scene, lightIndex);
-
+    const float wFin = bvhNodeImportance(scene.lightBvh[0], refP);
+    const int nInf = scene.infiniteLightCount;
+    const float pInf = infiniteLightGroupProbability(nInf, 1);
     const LightData& l = scene.lights[lightIndex];
     if (l.type == kLightDome || l.type == kLightDistant) {
-        return lightFluxWeight(scene, lightIndex) / wTotal;
+        if (nInf <= 0 || pInf <= 0.f) return 0.f;
+        return pInf / float(nInf);
     }
+    if (wFin <= 0.f) return 0.f;
 
     // Walk BVH path to the leaf containing lightIndex.
-    float travPdf = wFin / wTotal;
+    float travPdf = 1.f - pInf;
     int nodeIdx = 0;
     for (int depth = 0; depth < 64 && !scene.lightBvh[nodeIdx].isLeaf; ++depth) {
         const LightBvhNode& nd = scene.lightBvh[nodeIdx];
@@ -610,6 +754,64 @@ SR_INL SR_HD float lightSelectionPdfIndex(const SceneView& scene, Vec3 refP, int
         }
     }
     return travPdf;
+}
+
+// Volume NEE: same LightSampler as surfaces. HG belongs in MIS, not selection.
+SR_INL SR_HD int sampleVolumeLightIndex(const SceneView& scene, Vec3 refP, Vec3 wo, float g, float u,
+                                        float& pdf) {
+    (void)wo;
+    (void)g;
+    return sampleLightIndex(scene, refP, u, pdf);
+}
+
+SR_INL SR_HD float volumeLightSelectionPdfIndex(const SceneView& scene, Vec3 refP, Vec3 wo, float g,
+                                                int lightIndex) {
+    (void)wo;
+    (void)g;
+    return lightSelectionPdfIndex(scene, refP, lightIndex);
+}
+
+SR_INL SR_HD float lightSelectionPdfIndexMaybeVolume(const SceneView& scene, Vec3 origin, int lightIndex,
+                                                     bool volumePhaseMis, Vec3 woVol, float volumeG) {
+    if (volumePhaseMis)
+        return volumeLightSelectionPdfIndex(scene, origin, woVol, volumeG, lightIndex);
+    return lightSelectionPdfIndex(scene, origin, lightIndex);
+}
+
+// Solar disc for Physical Sky distant lights. The baked sky map has no disc
+// (avoids double lighting / HDRI fireflies); camera and glossy rays see this.
+SR_INL SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec3 dirWorld, float bsdfPdf,
+                                        bool specularBounce, bool primary, bool skipNonCausticLights,
+                                        bool volumePhaseMis, Vec3 volumeWo, float volumeG) {
+    Vec3 sum(0.0f);
+    const Vec3 wi = normalize(dirWorld);
+    for (int i = 0; i < scene.lightCount; ++i) {
+        const LightData& l = scene.lights[i];
+        if (l.type != kLightDistant || l.cameraSunDisc == 0) continue;
+        if (primary && l.visibleCamera == 0) continue;
+        if (skipNonCausticLights && !lightContributesCaustics(l)) continue;
+        const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
+        if (halfAngle < kDistantDeltaHalfRad) continue;
+        const Vec3 axis = normalize(lightAxisZ(l));
+        const float cosThetaMax = cosf(halfAngle);
+        if (dot(axis, wi) < cosThetaMax) continue;
+        const Vec3 Le = lightRadiance(l);
+        float weight = 1.0f;
+        if (!specularBounce) {
+            const float lightPdf = lightPdfDirection(scene, i, origin, wi, origin, axis);
+            const float lp = lightPdf * lightSelectionPdfIndexMaybeVolume(
+                                             scene, origin, i, volumePhaseMis, volumeWo, volumeG);
+            weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
+        }
+        sum += Le * weight;
+    }
+    return sum;
+}
+
+SR_INL SR_HD Vec3 cameraSunDiscRadiance(const SceneView& scene, Vec3 origin, Vec3 dirWorld, float bsdfPdf,
+                                        bool specularBounce, bool primary, bool skipNonCausticLights) {
+    return cameraSunDiscRadiance(scene, origin, dirWorld, bsdfPdf, specularBounce, primary,
+                                 skipNonCausticLights, false, Vec3(0.0f, 1.0f, 0.0f), 0.0f);
 }
 
 }  // namespace sol

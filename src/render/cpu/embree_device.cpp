@@ -9,10 +9,8 @@
 
 #include "core/log.h"
 #include "core/thread_pool.h"
-#include "render/blue_noise.h"
 #include "render/film_tile.h"
 #include "render/pixel_filter.h"
-#include "render/rsequence.h"
 #include "render/sobol.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/integrator.h"
@@ -106,6 +104,7 @@ public:
 
     std::string name() const override { return "CPU / Embree 4"; }
     bool isAvailable() const override { return device_ != nullptr; }
+    int lastCompletedSamples() const override { return lastCompletedSamples_; }
 
     bool buildScene(const ScenePtr& scene, std::string& error) override {
         if (!device_) {
@@ -218,7 +217,7 @@ public:
 #if SOLSTICE_HAVE_OPENPGL
         if (pathGuiding_) {
             const int threads = pool_ ? pool_->threadCount() : threadCount_;
-            pathGuiding_->reset(view_.worldBounds, threads);
+            pathGuiding_->reset(view_.worldBounds, threads, view_.settings.maxDepth);
         }
 #endif
 
@@ -231,29 +230,37 @@ public:
     }
 
     void renderSample(Framebuffer& fb, int sampleIndex, const std::atomic<bool>& cancel,
-                      const RenderMidProgressFn& midProgress) override {
+                      const RenderMidProgressFn& midProgress, const RenderSampleOptions* options) override {
+        lastCompletedSamples_ = 0;
         if (!topScene_ || !scene_) return;
         const RenderSettingsData& settings = view_.settings;
         const int width = fb.width();
         const int height = fb.height();
         if (width <= 0 || height <= 0) return;
+        const RenderSampleOptions opt = options ? *options : RenderSampleOptions{};
+        int clipX0 = 0, clipY0 = 0, clipX1 = width, clipY1 = height;
+        if (opt.clipX1 > opt.clipX0 && opt.clipY1 > opt.clipY0) {
+            clipX0 = std::max(0, opt.clipX0);
+            clipY0 = std::max(0, opt.clipY0);
+            clipX1 = std::min(width, opt.clipX1);
+            clipY1 = std::min(height, opt.clipY1);
+        }
+        const bool clipped = clipX0 > 0 || clipY0 > 0 || clipX1 < width || clipY1 < height;
 
         const int tileSize = settings.tileSize <= 0
                                  ? chooseFilmTileSize(width, height, pool_->threadCount())
                                  : std::clamp(settings.tileSize, 8, 256);
         const int tilesX = (width + tileSize - 1) / tileSize;
-        const int tilesY = (height + tileSize - 1) / tileSize;
-        const int tileCount = tilesX * tilesY;
 
         SceneView scene = view_;  // local copy: carries the progressive pass index
         scene.settings.progressiveSample = sampleIndex;
+        bindFilmToFramebuffer(scene, width, height);
         const uint32_t frameSeed = uint32_t(settings.seed) * 9781u + uint32_t(sampleIndex) * 6271u;
 
         const bool pathTracer = settings.integrator == kIntegratorPathTracer;
-        const bool useSpectralBdpt = settings.integrator == kIntegratorSpectralBdpt;
-        const bool useBdpt = settings.integrator == kIntegratorBdpt || useSpectralBdpt;
-        const bool useSpectralPt = settings.integrator == kIntegratorSpectralPath;
-        const bool useSpectral = useSpectralPt || useSpectralBdpt;
+        const bool wantBdpt = settings.integrator == kIntegratorBdpt ||
+                              settings.integrator == kIntegratorSpectralBdpt;
+        const bool hasVolumes = scene.volumeCount > 0 && scene.volumes != nullptr;
         // Diagnostic integrators (AO / Direct / Wireframe) must stay on the plain
         // PathIntegrator path — never Photon/MNEE/BDPT — otherwise Wireframe never
         // hits shadeWireframe and can crash/misbehave under default caustics-on.
@@ -261,61 +268,67 @@ public:
             settings.integrator == kIntegratorAmbientOcclusion ||
             settings.integrator == kIntegratorDirectLighting ||
             settings.integrator == kIntegratorWireframe;
-        // MNEE+Photon routes rough refractive casters to Photon, delta-only to MNEE.
-        // PT Spectral has no MNEE/photon; BDPT Spectral keeps BDPT caustic estimators.
+        // pbrt: Path Tracer and BDPT are spectral (hero-λ). Path Tracer + VDB
+        // stays on SpectralPathIntegrator (AABB enter/exit + heterogeneous fog
+        // walk — the density field, not the bounds proxy). BDPT + volumes falls
+        // back to the same spectral PT. MNEE/photon stay off volumes.
         const bool usePhoton =
-            !diagnosticIntegrator && !useSpectralPt && causticsUsePhotonMap(settings, &scene);
-        const bool useMnee = pathTracer && causticsUseMnee(settings, &scene);
+            !diagnosticIntegrator && !hasVolumes && causticsUsePhotonMap(settings, &scene);
+        const bool useMnee =
+            !diagnosticIntegrator && !hasVolumes && causticsUseMnee(settings, &scene);
+        const bool causticSpecialized = usePhoton || useMnee;
+        const bool useSpectralBdpt = wantBdpt && !hasVolumes && !diagnosticIntegrator;
+        const bool useSpectralPt = !diagnosticIntegrator && !(pathTracer && causticSpecialized) &&
+                                   (settings.integrator == kIntegratorSpectralPath || pathTracer ||
+                                    (wantBdpt && hasVolumes));
+        const bool useBdpt = wantBdpt;
+        const bool useBdptPath = false;
 #if SOLSTICE_HAVE_OPENPGL
         // OpenPGL guides eye-path diffuse sampling on PT and BDPT (RGB + Spectral).
         // Specular / near-spec vertices are recorded as delta (radiance propagates for
         // caustic training) but never guide-sampled; MNEE/photon energy trains
         // diffuse receivers when Indirect Guides is on.
-        const bool useGuiding = settings.pathGuiding != 0 && pathGuiding_ && pathGuiding_->available() &&
-                                (pathTracer || useBdpt);
+        const bool useGuiding = settings.pathGuiding != 0 && pathGuiding_ &&
+                                pathGuiding_->available() && (pathTracer || useBdpt);
 #else
         const bool useGuiding = false;
 #endif
 
-        if (useSpectral) {
-            const int bins = std::clamp(settings.spectralBins, 8, 32);
-            if (spectralBins_.width != width || spectralBins_.height != height || spectralBins_.bins != bins)
-                spectralBins_.resize(width, height, bins);
-            if (sampleIndex == 0) spectralBins_.clear();
-        }
-
         const CausticPhotonMap* photonPtr = nullptr;
         if (usePhoton) {
-            // Rebuild each progressive pass (independent estimate averaged in the FB).
-            const uint32_t photonSeed =
-                hashCombine(uint32_t(settings.seed) * 9176u, uint32_t(sampleIndex) * 2654435761u);
-            EmbreeTracer photonTracer{topScene_};
-            photonTracer.time = scene.settings.motionBlur ? 0.5f : 0.0f;
-            photonMap_.build(scene, photonTracer, srMax(0, settings.photonCount), photonSeed);
+            if (!opt.skipPhotonRebuild) {
+                // Rebuild each progressive pass (independent estimate averaged in the FB).
+                const uint32_t photonSeed =
+                    hashCombine(uint32_t(settings.seed) * 9176u, uint32_t(sampleIndex) * 2654435761u);
+                EmbreeTracer photonTracer{topScene_};
+                photonTracer.time = scene.settings.motionBlur ? 0.5f : 0.0f;
+                photonMap_.build(scene, photonTracer, srMax(0, settings.photonCount), photonSeed);
+            }
             // Always pass the map when Photon engine is active — even if empty
             // (Contribute to Caustics off) — so the integrator suppresses BSDF
             // caustic hits instead of falling back to MNEE/BSDF leakage.
             photonPtr = &photonMap_;
-        } else {
+        } else if (!opt.skipPhotonRebuild) {
             photonMap_.clear();
         }
 
-        if (sampleIndex == 0) {
+        if (sampleIndex == 0 && !clipped && !opt.navPreview) {
             if (useSpectralBdpt)
                 logInfo(std::string("Integrator: BDPT Spectral (hero λ=") +
-                        std::to_string(std::clamp(settings.spectralSamples, 2, 16)) + ", bins=" +
-                        std::to_string(std::clamp(settings.spectralBins, 8, 32)) + ")" +
+                        std::to_string(kMaxSpectrumSamples) + ")" +
                         (useGuiding ? " + OpenPGL guiding" : "") +
                         (usePhoton ? " + Photon caustics" : " + LT/MNEE caustics"));
             else if (useSpectralPt)
                 logInfo(std::string("Integrator: PT Spectral (hero λ=") +
-                        std::to_string(std::clamp(settings.spectralSamples, 2, 16)) + ", bins=" +
-                        std::to_string(std::clamp(settings.spectralBins, 8, 32)) + ")");
-            else if (usePhoton)
+                        std::to_string(kMaxSpectrumSamples) + ")");
+            if (usePhoton)
                 logInfo(std::string("Caustics: Photon map (VCM-style gather, ") +
                         std::to_string(photonMap_.size()) + " photons, r=" +
                         std::to_string(settings.photonRadius) +
                         (settings.causticsEngine == kCausticsEngineAuto ? ", MNEE+Photon→rough)" : ")"));
+            else if (useBdpt && hasVolumes)
+                logInfo("BDPT skipped: scene has VDB volumes — using Path Tracer "
+                        "(no light subpath from sky/sun; fog walk is PT-only)");
             else if (useBdpt)
                 logInfo(std::string("Caustics: BDPT (bidirectional + light-tracing splats)") +
                         (settings.caustics == 0 ? " [caustics flag off — specular chains suppressed]"
@@ -335,11 +348,6 @@ public:
             else if (settings.integrator == kIntegratorDirectLighting)
                 logInfo("Integrator: Direct Lighting");
 
-            const char* samplerName = "Sobol";
-            if (settings.pixelSampler == kPixelSamplerBlueNoise) samplerName = "BlueNoise64";
-            else if (settings.pixelSampler == kPixelSamplerXorshift) samplerName = "Xorshift";
-            else if (settings.pixelSampler == kPixelSamplerGenPnt2D) samplerName = "GenPnt2D";
-            else if (settings.pixelSampler == kPixelSamplerManualTest) samplerName = "ManualTest";
             const char* engineName = "Buckets";
             if (settings.samplingEngine == kSamplingEngineProgressive) engineName = "Progressive";
             std::string engineDetail = engineName;
@@ -350,7 +358,9 @@ public:
                 engineDetail += " (scanlines)";
             }
             logInfo(std::string("Sampling Type: ") + engineDetail +
-                    "; Pixel Sampler: " + samplerName + "; Path: OwenSobol");
+                    "; Sampler: Owen-scrambled Sobol (PBRT4)");
+            if (useGuiding && hasVolumes)
+                logInfo("OpenPGL: volume phase mixed with HG product (Indirect Guides)");
             if (settings.samplingDebug != kSamplingDebugOff) {
                 static const char* kDiagNames[] = {"Off", "PixelJitter", "PathRng", "Bucket", "PixelHash"};
                 const int d = std::clamp(settings.samplingDebug, 0, 4);
@@ -362,7 +372,8 @@ public:
         const int dispersionMaxIfaces = srMax(1, settings.dispersionMaxInterfaces);
 
         const int samplingEngine = std::clamp(settings.samplingEngine, 0, 1);
-        constexpr bool usePathSobol = true;  // PBRT4 Owen-scrambled Sobol for path dims
+        constexpr bool kPathSobolDefault = true;
+        const bool usePathSobol = kPathSobolDefault;
         const int pixelFilter = std::clamp(settings.pixelFilter, 0, 3);
         const float filterRadius = settings.filterRadius > 0.0f
                                        ? settings.filterRadius
@@ -383,43 +394,16 @@ public:
         auto evaluatePixelSample = [&](int x, int y, int threadId) -> PixelEval {
             EmbreeTracer tracer{topScene_};
             Rng rng = makePathRng(x, y);
-            // Camera AA / DoF — selectable Pixel Sampler.
             float jx = 0.5f, jy = 0.5f;
             float lensU = 0.5f, lensV = 0.5f;
-            const int pixelSampler = settings.pixelSampler;
-            if (pixelSampler == kPixelSamplerBlueNoise) {
-                blueNoisePixelJitter(x, y, sampleIndex, jx, jy);
-                blueNoiseLensSample(x, y, sampleIndex, lensU, lensV);
-            } else if (pixelSampler == kPixelSamplerXorshift) {
-                Rng xrng = makePixelRngXorshift32(x, y, sampleIndex, frameSeed, 0xCA7E11u);
-                jx = xrng.nextFloat();
-                jy = xrng.nextFloat();
-                lensU = xrng.nextFloat();
-                lensV = xrng.nextFloat();
-            } else if (pixelSampler == kPixelSamplerGenPnt2D) {
-                r2PixelJitter(x, y, sampleIndex, width, kR2IndexSpp, jx, jy);
-                r2LensSample(x, y, sampleIndex, width, kR2IndexSpp, lensU, lensV);
-            } else if (pixelSampler == kPixelSamplerManualTest) {
-                // Diagnostic: exact pixel center + U(-1,1)*mult, clamped to [0,1).
-                // Lens stays centered — only pixel jitter is under test.
-                const float mult = settings.manualTestMult;
-                Rng xrng = makePixelRngXorshift32(x, y, sampleIndex, frameSeed, 0x7E57u);
-                const float ux = xrng.nextFloat() * 2.0f - 1.0f;  // (-1, 1) approx from [0,1)
-                const float uy = xrng.nextFloat() * 2.0f - 1.0f;
-                jx = std::min(0.999999f, std::max(0.0f, 0.5f + ux * mult));
-                jy = std::min(0.999999f, std::max(0.0f, 0.5f + uy * mult));
-                lensU = 0.5f;
-                lensV = 0.5f;
-            } else {
-                // Default: Owen-scrambled Sobol (no fixed screen-space period).
-                pixelSample(x, y, sampleIndex, jx, jy);
-                lensSample(x, y, sampleIndex, lensU, lensV);
-            }
 
-            // Path dims: always Owen Sobol (PBRT4).
-            // Must live for this sample — qmcCtx points here.
+            // pbrt: one Owen-Sobol stream from dimension 0. Camera consumes 0–3.
             PathSobolStream pathSobol{};
             if (usePathSobol) attachPathSobol(rng, pathSobol, x, y, sampleIndex);
+            jx = rng.nextFloat();
+            jy = rng.nextFloat();
+            lensU = rng.nextFloat();
+            lensV = rng.nextFloat();
 
             auto done = [&](Vec3 L) -> PixelEval { return PixelEval{L, jx, jy}; };
 
@@ -457,7 +441,8 @@ public:
 
             // Light-tracing splats assume the pinhole/thin-lens projection —
             // polynomial optics rays and camera motion blur bypass it.
-            const bool allowSplats = !polyOptics_.active && scene.settings.motionBlur == 0;
+            const bool allowSplats =
+                !polyOptics_.active && scene.settings.motionBlur == 0;
             auto splatFbFor = [&](DispersionContext*) -> Framebuffer* {
                 return allowSplats ? &fb : nullptr;
             };
@@ -485,7 +470,7 @@ public:
                 return ctx;
             };
 
-            auto traceOnce = [&](Rng& r, Vec3 o, Vec3 d, DispersionContext* disp, int px, int py) -> Vec3 {
+            auto traceOnce = [&](Rng& r, Vec3 o, Vec3 d, DispersionContext* disp) -> Vec3 {
                 IntegratorSampleContext<EmbreeTracer> ctx;
                 ctx.scene = &scene;
                 ctx.tracer = &tracer;
@@ -504,13 +489,13 @@ public:
                 }
                 ctx.guiding = guidingPtr;
                 Vec3 radiance(0.0f);
-                if (useSpectralBdpt) {
+                if (useSpectralBdpt && !hasVolumes) {
                     SpectralBdptIntegrator<EmbreeTracer> integ;
-                    radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
+                    radiance = integ.Li(ctx);
                 } else if (useSpectralPt) {
                     SpectralPathIntegrator<EmbreeTracer> integ;
-                    radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
-                } else if (useBdpt) {
+                    radiance = integ.Li(ctx);
+                } else if (useBdptPath) {
                     radiance = BdptIntegrator<EmbreeTracer>{}.Li(ctx);
                 } else if (useMnee || usePhoton) {
                     radiance = PathMneeIntegrator<EmbreeTracer>{}.Li(ctx);
@@ -522,13 +507,13 @@ public:
                 (void)threadId;
                 (void)useGuiding;
                 Vec3 radiance(0.0f);
-                if (useSpectralBdpt) {
+                if (useSpectralBdpt && !hasVolumes) {
                     SpectralBdptIntegrator<EmbreeTracer> integ;
-                    radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
+                    radiance = integ.Li(ctx);
                 } else if (useSpectralPt) {
                     SpectralPathIntegrator<EmbreeTracer> integ;
-                    radiance = integ.LiPixel(ctx, px, py, &spectralBins_);
-                } else if (useBdpt) {
+                    radiance = integ.Li(ctx);
+                } else if (useBdptPath) {
                     radiance = BdptIntegrator<EmbreeTracer>{}.Li(ctx);
                 } else if (useMnee || usePhoton) {
                     radiance = PathMneeIntegrator<EmbreeTracer>{}.Li(ctx);
@@ -567,9 +552,6 @@ public:
 
             auto sampleShutter = [&](Rng& r) -> float {
                 if (scene.settings.motionBlur == 0) return 0.0f;
-                if (pixelSampler == kPixelSamplerGenPnt2D) {
-                    return r2ShutterSample(x, y, sampleIndex, width, kR2IndexSpp);
-                }
                 return r.nextFloat();
             };
 
@@ -588,7 +570,7 @@ public:
                     DispersionContext ctx = makeDispCtx(ch);
                     const float shutterTime = sampleShutter(rCh);
                     if (!generateRay(rCh, ch, origin, direction, lensTau, shutterTime)) continue;
-                    Vec3 r = traceOnce(rCh, origin, direction, &ctx, x, y);
+                    Vec3 r = traceOnce(rCh, origin, direction, &ctx);
                     r = r * std::max(0.0f, lensTau);
                     if (ctx.used) r = heroMask(r, ch);
                     radiance = radiance + r * (1.0f / 3.0f);
@@ -600,7 +582,7 @@ public:
                 if (!generateRay(rng, chromaticChannel, origin, direction, lensTau, shutterTime)) {
                     return done(Vec3(0.0f));
                 }
-                radiance = traceOnce(rng, origin, direction, &ctx, x, y);
+                radiance = traceOnce(rng, origin, direction, &ctx);
                 radiance = radiance * std::max(0.0f, lensTau);
 
                 if (chromaticChannel >= 0) {
@@ -611,19 +593,6 @@ public:
                         ctx.used;
                     if (doMask) radiance = heroMask(radiance, chromaticChannel);
                 }
-            }
-
-            if (useSpectral && settings.filmFalseColor != 0 && spectralBins_.bins > 0) {
-                // Replace beauty with this sample's contribution to the selected bin.
-                const int bin = std::clamp(settings.filmFalseColorBin, 0, spectralBins_.bins - 1);
-                // LiPixel already deposited into bins; approximate per-sample bin energy
-                // by using returned RGB luminance (stable progressive display).
-                const float lum = 0.2126f * radiance.x + 0.7152f * radiance.y + 0.0722f * radiance.z;
-                const float span = kSpectrumLambdaMax - kSpectrumLambdaMin;
-                const float lam =
-                    kSpectrumLambdaMin + (float(bin) + 0.5f) / float(spectralBins_.bins) * span;
-                radiance = wavelengthToFalseColor(lam) * lum;
-                (void)bin;
             }
 
             return done(radiance);
@@ -644,7 +613,10 @@ public:
         constexpr int kBootstrapStep = 2;
 
         auto runBootstrapOrFull = [&](auto&& renderPass) {
-            if (sampleIndex == 0) {
+            // 2x2 bootstrap is only useful if the session will blit each phase.
+            // Nav preview / hold-until-complete pass an empty hook — fill every
+            // pixel in one pass so the first present has no holes.
+            if (sampleIndex == 0 && !clipped && midProgress && !opt.navPreview) {
                 const int phaseCount = kBootstrapStep * kBootstrapStep;
                 for (int phase = 0; phase < phaseCount; ++phase) {
                     if (cancel.load(std::memory_order_relaxed)) break;
@@ -660,27 +632,33 @@ public:
             // True progressive: one work item = one scanline (no FilmTile / no buckets).
             // Non-box filters use a 1-row FilmTile with border so neighbours stay local.
             runBootstrapOrFull([&](int bootstrapPhase, bool useBootstrap) {
-                pool_->parallelFor(height, [&](int y, int threadId) {
+                pool_->parallelFor(clipY1 - clipY0, [&](int yi, int threadId) {
+                    const int y = clipY0 + yi;
                     if (cancel.load(std::memory_order_relaxed)) return;
                     if (trivialBox) {
-                        for (int x = 0; x < width; ++x) {
+                        for (int x = clipX0; x < clipX1; ++x) {
                             if (useBootstrap) {
                                 if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
                                     bootstrapPhase)
                                     continue;
                             }
+                            if (fb.skipPixel(x, y)) continue;
                             const PixelEval ev = evaluatePixelSample(x, y, threadId);
+                            fb.addNoiseSample(x, y, ev.radiance);
                             fb.addSample(x, y, ev.radiance);
                         }
                     } else {
-                        FilmTile tile(0, y, width, y + 1, filterBorder);
-                        for (int x = 0; x < width; ++x) {
+                        FilmTile tile(clipX0, y, clipX1, y + 1, filterBorder);
+                        for (int x = clipX0; x < clipX1; ++x) {
                             if (useBootstrap) {
                                 if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
                                     bootstrapPhase)
                                     continue;
                             }
-                            depositEval(tile, x, y, evaluatePixelSample(x, y, threadId));
+                            if (fb.skipPixel(x, y)) continue;
+                            const PixelEval ev = evaluatePixelSample(x, y, threadId);
+                            fb.addNoiseSample(x, y, ev.radiance);
+                            depositEval(tile, x, y, ev);
                         }
                         fb.mergeFilmTile(tile);
                     }
@@ -696,29 +674,64 @@ public:
                 const int y0 = ty * tileSize;
                 const int x1 = std::min(x0 + tileSize, width);
                 const int y1 = std::min(y0 + tileSize, height);
-                FilmTile tile(x0, y0, x1, y1, trivialBox ? 0 : filterBorder);
-                for (int y = y0; y < y1; ++y) {
+                const int rx0 = std::max(x0, clipX0);
+                const int ry0 = std::max(y0, clipY0);
+                const int rx1 = std::min(x1, clipX1);
+                const int ry1 = std::min(y1, clipY1);
+                if (rx0 >= rx1 || ry0 >= ry1) return;
+                FilmTile tile(rx0, ry0, rx1, ry1, trivialBox ? 0 : filterBorder);
+                for (int y = ry0; y < ry1; ++y) {
                     if (cancel.load(std::memory_order_relaxed)) break;
-                    for (int x = x0; x < x1; ++x) {
+                    for (int x = rx0; x < rx1; ++x) {
                         if (useBootstrap) {
                             if (((x % kBootstrapStep) + (y % kBootstrapStep) * kBootstrapStep) !=
                                 bootstrapPhase)
                                 continue;
                         }
-                        depositEval(tile, x, y, evaluatePixelSample(x, y, threadId));
+                        if (fb.skipPixel(x, y)) continue;
+                        const PixelEval ev = evaluatePixelSample(x, y, threadId);
+                        fb.addNoiseSample(x, y, ev.radiance);
+                        depositEval(tile, x, y, ev);
                     }
                 }
                 fb.mergeFilmTile(tile);
             };
             runBootstrapOrFull([&](int bootstrapPhase, bool useBootstrap) {
-                pool_->parallelFor(tileCount, [&](int tileIndex, int threadId) {
+                const int tx0 = clipX0 / tileSize;
+                const int ty0 = clipY0 / tileSize;
+                const int tx1 = (clipX1 + tileSize - 1) / tileSize;
+                const int ty1 = (clipY1 + tileSize - 1) / tileSize;
+                const int clipTilesX = std::max(0, tx1 - tx0);
+                const int clipTilesY = std::max(0, ty1 - ty0);
+                const int clipTileCount = clipTilesX * clipTilesY;
+                if (clipTileCount <= 0) return;
+                pool_->parallelFor(clipTileCount, [&](int clipTileIndex, int threadId) {
+                    const int tdx = clipTileIndex % clipTilesX;
+                    const int tdy = clipTileIndex / clipTilesX;
+                    const int tileIndex = (ty0 + tdy) * tilesX + (tx0 + tdx);
                     renderOneTile(tileIndex, threadId, bootstrapPhase, useBootstrap);
                 });
             });
         }
 
 #if SOLSTICE_HAVE_OPENPGL
-        if (useGuiding) pathGuiding_->commitSample();
+        if (useGuiding) {
+            if (opt.skipGuidingCommit) guidingNeedsCommit_ = true;
+            else {
+                pathGuiding_->commitSample();
+                guidingNeedsCommit_ = false;
+            }
+        }
+#endif
+        if (!cancel.load(std::memory_order_relaxed)) lastCompletedSamples_ = 1;
+    }
+
+    void finishSample() override {
+#if SOLSTICE_HAVE_OPENPGL
+        if (guidingNeedsCommit_ && pathGuiding_) {
+            pathGuiding_->commitSample();
+            guidingNeedsCommit_ = false;
+        }
 #endif
     }
 
@@ -727,15 +740,6 @@ public:
             view_ = scene_->view();
             polyOptics_.prepare(view_.camera);
         }
-    }
-
-    bool copySpectralBins(int& width, int& height, int& bins, std::vector<float>& accum) const override {
-        if (spectralBins_.bins <= 0 || spectralBins_.width <= 0) return false;
-        width = spectralBins_.width;
-        height = spectralBins_.height;
-        bins = spectralBins_.bins;
-        accum = spectralBins_.accum;
-        return true;
     }
 
     void release() override { releaseScene(); }
@@ -768,10 +772,11 @@ private:
     PolynomialOpticsCamera polyOptics_;
     std::unique_ptr<ThreadPool> pool_;
     int threadCount_ = 0;
+    int lastCompletedSamples_ = 1;
     CausticPhotonMap photonMap_;
-    SpectralBinBuffer spectralBins_;
 #if SOLSTICE_HAVE_OPENPGL
     std::unique_ptr<PathGuiding> pathGuiding_;
+    bool guidingNeedsCommit_ = false;
 #endif
 };
 

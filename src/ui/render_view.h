@@ -10,8 +10,12 @@
 #include "core/math.h"
 #include "nodes/node.h"
 
+#include <QColor>
+
 class QToolButton;
 class QComboBox;
+class QAction;
+class QShowEvent;
 
 namespace sol {
 
@@ -56,6 +60,15 @@ public:
     // Right side of the same bottom strip (e.g. dicing progress next to spp).
     void setStatusTextRight(const QString& text) {
         statusTextRight_ = text;
+        update();
+    }
+    // Far-right HUD: live device (Embree / OptiX / XPU). Support text is empty on Embree.
+    void setBackendHud(const QString& activeBackend, const QString& supportText,
+                       const QColor& supportColor) {
+        backendActive_ = activeBackend;
+        optixSupportText_ = supportText;
+        optixSupportColor_ = supportColor;
+        hasBackendHud_ = true;
         update();
     }
     void setResolution(int width, int height);
@@ -106,8 +119,18 @@ public:
     // Look-through camera menu (Houdini-style). empty activeName → free view.
     void setCameraMenu(const QStringList& cameraNames, const QString& activeName);
 
+    // Start / Stop live on the viewport chrome (left of camera / transform tools).
+    void attachRenderActions(QAction* start, QAction* stop);
+
+    // Detach square on the existing chrome (no second "Viewport" title bar).
+    void setOnDetach(std::function<void()> onDetach);
+    void setViewportFloating(bool floating);
+
 signals:
     void cameraMoved();
+    // Alt+LMB / MMB / Alt+RMB drag (not wheel, not the TRS gizmo).
+    void cameraNavStarted();
+    void cameraNavEnded();
     // Fired while dragging (values already written quietly — do not cook/IPR).
     void transformEdited(sol::Node* node);
     // Fired on mouse release after a gizmo drag — safe to cook/IPR.
@@ -132,6 +155,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void showEvent(QShowEvent* event) override;
 
 private:
     enum class GizmoAxis { None = 0, X, Y, Z, Center };
@@ -173,6 +197,10 @@ private:
     int fadeDurationMs_ = 1000;
     QString statusText_;
     QString statusTextRight_;
+    QString backendActive_;
+    QString optixSupportText_;
+    QColor optixSupportColor_{255, 80, 80};
+    bool hasBackendHud_ = false;
     ViewCamera camera_;
     PickCallback pickCallback_;
     ObjectPickCallback objectPickCallback_;
@@ -201,8 +229,15 @@ private:
     QString dragParameterName_;
     bool gizmoDidEdit_ = false;
 
+    QWidget* chromeRow_ = nullptr;
     QWidget* chromeBar_ = nullptr;
+    QWidget* renderControlStrip_ = nullptr;
     QWidget* toolStrip_ = nullptr;
+    QWidget* detachSlot_ = nullptr;
+    QToolButton* detachButton_ = nullptr;
+    std::function<void()> onDetach_;
+    QToolButton* startButton_ = nullptr;
+    QToolButton* stopButton_ = nullptr;
     QToolButton* cameraMenuButton_ = nullptr;
     QToolButton* homeButton_ = nullptr;
     QToolButton* selectButton_ = nullptr;

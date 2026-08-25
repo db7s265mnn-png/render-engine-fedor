@@ -17,7 +17,9 @@
 
 #include "core/log.h"
 #include "core/math.h"
+#include "io/ocio_util.h"
 #include "io/tx_cache.h"
+#include "io/tx_convert.h"
 #include "render/framebuffer.h"
 #include "solstice_config.h"
 
@@ -109,6 +111,34 @@ bool readHdrScanline(std::FILE* file, std::vector<unsigned char>& scanline, int 
     return true;
 }
 
+bool parseRadianceResolution(const char* line, int& width, int& height, int& nSlow, int& nFast,
+                             char& axisSlow, char& signSlow, char& axisFast, char& signFast) {
+    char s0 = 0, a0 = 0, s1 = 0, a1 = 0;
+    int n0 = 0, n1 = 0;
+    if (std::sscanf(line, " %c%c %d %c%c %d", &s0, &a0, &n0, &s1, &a1, &n1) != 6) return false;
+    a0 = static_cast<char>(std::toupper(static_cast<unsigned char>(a0)));
+    a1 = static_cast<char>(std::toupper(static_cast<unsigned char>(a1)));
+    if ((a0 != 'X' && a0 != 'Y') || (a1 != 'X' && a1 != 'Y') || a0 == a1) return false;
+    if (n0 <= 0 || n1 <= 0) return false;
+    signSlow = s0;
+    axisSlow = a0;
+    nSlow = n0;
+    signFast = s1;
+    axisFast = a1;
+    nFast = n1;
+    width = (a0 == 'X' || a1 == 'X') ? ((a0 == 'X') ? n0 : n1) : 0;
+    height = (a0 == 'Y' || a1 == 'Y') ? ((a0 == 'Y') ? n0 : n1) : 0;
+    return width > 0 && height > 0;
+}
+
+int radianceAxisIndex(char axis, char sign, int i, int n) {
+    // Image y=0 is the top row; x=0 is the left column.
+    // Radiance -Y: first scanline is the top. +Y: first scanline is the bottom.
+    // Radiance +X: first pixel is the left. -X: first pixel is the right.
+    if (axis == 'Y') return (sign == '-') ? i : (n - 1 - i);
+    return (sign == '+') ? i : (n - 1 - i);
+}
+
 bool loadHdr(const std::string& path, Image& out, std::string& error) {
     std::FILE* file = std::fopen(path.c_str(), "rb");
     if (!file) {
@@ -117,7 +147,6 @@ bool loadHdr(const std::string& path, Image& out, std::string& error) {
     }
     char line[512];
     bool isRadiance = false;
-    float exposure = 1.0f;
     while (std::fgets(line, sizeof(line), file)) {
         std::string text(line);
         while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
@@ -126,7 +155,8 @@ bool loadHdr(const std::string& path, Image& out, std::string& error) {
             continue;
         }
         if (text.empty()) break;  // end of header
-        if (text.rfind("EXPOSURE=", 0) == 0) exposure = std::strtof(text.c_str() + 9, nullptr);
+        // RGBE pixel values are used as-is (stb_image / Blender / Arnold).
+        // Applying EXPOSURE= from the header crushes HDR suns.
     }
     if (!isRadiance) {
         std::fclose(file);
@@ -138,31 +168,31 @@ bool loadHdr(const std::string& path, Image& out, std::string& error) {
         error = "truncated HDR header";
         return false;
     }
-    int width = 0, height = 0;
-    if (std::sscanf(line, "-Y %d +X %d", &height, &width) != 2) {
+    int width = 0, height = 0, nSlow = 0, nFast = 0;
+    char axisSlow = 0, signSlow = 0, axisFast = 0, signFast = 0;
+    if (!parseRadianceResolution(line, width, height, nSlow, nFast, axisSlow, signSlow, axisFast,
+                                 signFast)) {
         std::fclose(file);
         error = "unsupported HDR resolution line";
         return false;
     }
-    if (width <= 0 || height <= 0) {
-        std::fclose(file);
-        error = "invalid HDR resolution";
-        return false;
-    }
 
     out.resize(width, height);
-    std::vector<unsigned char> scanline(size_t(width) * 4);
-    const float invExposure = exposure > 0.0f ? 1.0f / exposure : 1.0f;
-    for (int y = 0; y < height; ++y) {
-        if (!readHdrScanline(file, scanline, width)) {
+    std::vector<unsigned char> scanline(size_t(nFast) * 4);
+    for (int s = 0; s < nSlow; ++s) {
+        if (!readHdrScanline(file, scanline, nFast)) {
             std::fclose(file);
             error = "truncated HDR scanline data";
             return false;
         }
-        for (int x = 0; x < width; ++x) {
-            unsigned char rgbe[4] = {scanline[size_t(x) * 4 + 0], scanline[size_t(x) * 4 + 1],
-                                     scanline[size_t(x) * 4 + 2], scanline[size_t(x) * 4 + 3]};
-            out.setRgb(x, y, rgbeToLinear(rgbe) * invExposure, 1.0f);
+        for (int f = 0; f < nFast; ++f) {
+            const int x = (axisSlow == 'X') ? radianceAxisIndex('X', signSlow, s, nSlow)
+                                            : radianceAxisIndex('X', signFast, f, nFast);
+            const int y = (axisSlow == 'Y') ? radianceAxisIndex('Y', signSlow, s, nSlow)
+                                            : radianceAxisIndex('Y', signFast, f, nFast);
+            unsigned char rgbe[4] = {scanline[size_t(f) * 4 + 0], scanline[size_t(f) * 4 + 1],
+                                     scanline[size_t(f) * 4 + 2], scanline[size_t(f) * 4 + 3]};
+            out.setRgb(x, y, rgbeToLinear(rgbe), 1.0f);
         }
     }
     std::fclose(file);
@@ -266,55 +296,6 @@ bool writeExr(const std::string& path, const Image& image, std::string& error, i
         return false;
     }
 }
-
-bool writeExrSpectral(const std::string& path, const Image& image, int width, int height, int bins,
-                      const std::vector<float>& binAccum, int sampleCount, std::string& error) {
-    try {
-        if (width <= 0 || height <= 0 || bins <= 0) return writeExr(path, image, error);
-        Imf::Header header(width, height);
-        header.channels().insert("R", Imf::Channel(Imf::FLOAT));
-        header.channels().insert("G", Imf::Channel(Imf::FLOAT));
-        header.channels().insert("B", Imf::Channel(Imf::FLOAT));
-        for (int b = 0; b < bins; ++b) {
-            const std::string name = "S" + std::to_string(b);
-            header.channels().insert(name.c_str(), Imf::Channel(Imf::FLOAT));
-        }
-        const size_t npix = size_t(width) * size_t(height);
-        std::vector<float> R(npix), G(npix), B(npix);
-        std::vector<std::vector<float>> S(size_t(bins), std::vector<float>(npix, 0.0f));
-        const float invS = 1.0f / float(std::max(1, sampleCount));
-        for (int y = 0; y < height; ++y) {
-            for (int x = 0; x < width; ++x) {
-                const size_t i = size_t(y) * size_t(width) + size_t(x);
-                const Vec3 c = (x < image.width() && y < image.height()) ? image.rgb(x, y) : Vec3(0.0f);
-                R[i] = c.x;
-                G[i] = c.y;
-                B[i] = c.z;
-                for (int b = 0; b < bins; ++b) {
-                    const size_t bi = i * size_t(bins) + size_t(b);
-                    if (bi < binAccum.size()) S[size_t(b)][i] = binAccum[bi] * invS;
-                }
-            }
-        }
-        Imf::OutputFile file(path.c_str(), header);
-        Imf::FrameBuffer fb;
-        fb.insert("R", Imf::Slice(Imf::FLOAT, (char*)R.data(), sizeof(float), sizeof(float) * size_t(width)));
-        fb.insert("G", Imf::Slice(Imf::FLOAT, (char*)G.data(), sizeof(float), sizeof(float) * size_t(width)));
-        fb.insert("B", Imf::Slice(Imf::FLOAT, (char*)B.data(), sizeof(float), sizeof(float) * size_t(width)));
-        for (int b = 0; b < bins; ++b) {
-            const std::string name = "S" + std::to_string(b);
-            fb.insert(name.c_str(),
-                      Imf::Slice(Imf::FLOAT, (char*)S[size_t(b)].data(), sizeof(float),
-                                 sizeof(float) * size_t(width)));
-        }
-        file.setFrameBuffer(fb);
-        file.writePixels(height);
-        return true;
-    } catch (const std::exception& e) {
-        error = std::string("OpenEXR spectral: ") + e.what();
-        return false;
-    }
-}
 #endif
 
 bool loadLdr(const std::string& path, Image& out, std::string& error, bool srgbColor) {
@@ -413,7 +394,10 @@ void writeDecodedPixel(std::vector<float>& rgba, uint32_t w, uint32_t imgX, uint
                        int colInRow, uint16_t samples, uint16_t bits, uint16_t sampleFormat,
                        uint16_t photometric, bool linearize, const void* rowBase) {
     float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
-    if (photometric == PHOTOMETRIC_MINISBLACK || samples == 1) {
+    // OIIO/maketx sometimes tags RGB(A) TX as MINISBLACK. Only treat true
+    // greyscale (1 sample) or grey+alpha (2 samples) as luminance.
+    const bool grey = samples == 1 || (photometric == PHOTOMETRIC_MINISBLACK && samples <= 2);
+    if (grey) {
         r = g = b =
             decodeTiffChannel(rowBase, colInRow, 0, samples, bits, sampleFormat, linearize);
         if (samples > 1)
@@ -643,11 +627,9 @@ bool imageFormatIsHdr(const std::string& path) {
     return ext == "hdr" || ext == "exr" || ext == "rgbe" || ext == "pic";
 }
 
-bool loadImage(const std::string& path, Image& out, std::string& error, bool srgbColor) {
-    // When the TX cache is active, try to convert the source to a .tx mipmap
-    // before loading.  If conversion fails the original path is used as-is.
-    const std::string resolved = txCacheResolve(path);
-    const std::string& loadPath = resolved;
+namespace {
+
+bool loadImageDirect(const std::string& loadPath, Image& out, std::string& error, bool srgbColor) {
     const std::string ext = toLowerExtension(loadPath);
     if (ext == "hdr" || ext == "rgbe" || ext == "pic") return loadHdr(loadPath, out, error);
     if (ext == "exr") {
@@ -676,6 +658,49 @@ bool loadImage(const std::string& path, Image& out, std::string& error, bool srg
 #endif
     }
     return loadLdr(loadPath, out, error, srgbColor);
+}
+
+void convertImageToAcescg(Image& image, const std::string& cs) {
+    if (image.empty() || txSkipColorConvert(cs)) return;
+    const int levels = std::max(1, image.mipCount());
+    for (int level = 0; level < levels; ++level) {
+        const int w = image.mipWidth(level);
+        const int h = image.mipHeight(level);
+        float* p = image.mipData(level);
+        if (!p || w <= 0 || h <= 0) continue;
+        const size_t n = size_t(w) * size_t(h);
+        for (size_t i = 0; i < n; ++i, p += 4) {
+            const Vec3 c = ocioConvertToAcescg(Vec3(p[0], p[1], p[2]), cs);
+            p[0] = c.x;
+            p[1] = c.y;
+            p[2] = c.z;
+        }
+    }
+}
+
+}  // namespace
+
+bool loadImage(const std::string& path, Image& out, std::string& error, bool srgbColor,
+               const std::string& inputColorSpace) {
+    const std::string cs = txResolveInputColorSpace(inputColorSpace, path, srgbColor);
+    const bool skipConvert = txSkipColorConvert(cs);
+    // TX (and OCIO) own the colour transform — load files as stored, do not
+    // apply a second sRGB EOTF on 8-bit maps that will be converted to ACEScg.
+    const std::string resolved = txCacheResolve(path, cs);
+    const bool loadedTx = resolved != path;
+    if (loadImageDirect(resolved, out, error, /*srgbColor=*/false)) {
+        if (!loadedTx && !skipConvert) convertImageToAcescg(out, cs);
+        return true;
+    }
+    if (loadedTx) {
+        logWarning("tx_cache: failed to load converted texture '" + resolved + "': " + error +
+                   " — falling back to " + path);
+        error.clear();
+        if (!loadImageDirect(path, out, error, /*srgbColor=*/false)) return false;
+        if (!skipConvert) convertImageToAcescg(out, cs);
+        return true;
+    }
+    return false;
 }
 
 bool pathHasUdimToken(const QString& path) {
@@ -765,7 +790,8 @@ bool resolveUdimPattern(const QString& pathIn, const QString& searchDirectory, Q
 }
 
 std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& searchDirectory, std::string& error,
-                                       const std::vector<int>& explicitUdims, bool srgbColor) {
+                                       const std::vector<int>& explicitUdims, bool srgbColor,
+                                       const std::string& inputColorSpace) {
     QString path = makeAbsoluteTexturePath(pathIn, searchDirectory);
 
     // MaterialX: unresolved <UDIM> in file + tile list from udimset / disk.
@@ -790,7 +816,7 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
             if (!QFileInfo::exists(tilePath)) continue;
             auto tile = std::make_shared<Image>();
             std::string loadError;
-            if (!loadImage(tilePath.toStdString(), *tile, loadError, srgbColor)) {
+            if (!loadImage(tilePath.toStdString(), *tile, loadError, srgbColor, inputColorSpace)) {
                 logWarning("UDIM tile failed (" + tilePath.toStdString() + "): " + loadError);
                 continue;
             }
@@ -852,7 +878,7 @@ std::shared_ptr<Image> loadImageOrUdim(const QString& pathIn, const QString& sea
         return nullptr;
     }
     auto image = std::make_shared<Image>();
-    if (!loadImage(path.toStdString(), *image, error, srgbColor)) return nullptr;
+    if (!loadImage(path.toStdString(), *image, error, srgbColor, inputColorSpace)) return nullptr;
     return image;
 }
 
@@ -893,20 +919,6 @@ bool saveImageExr(const std::string& path, const Image& linearImage, std::string
     (void)bitDepth;
     error = "this build has no OpenEXR support";
     return false;
-#endif
-}
-
-bool saveImageExrSpectral(const std::string& path, const Image& linearImage, int width, int height, int bins,
-                          const std::vector<float>& binAccum, int sampleCount, std::string& error) {
-#if SOLSTICE_HAVE_OPENEXR
-    return writeExrSpectral(path, linearImage, width, height, bins, binAccum, sampleCount, error);
-#else
-    (void)width;
-    (void)height;
-    (void)bins;
-    (void)binAccum;
-    (void)sampleCount;
-    return saveImageExr(path, linearImage, error);
 #endif
 }
 

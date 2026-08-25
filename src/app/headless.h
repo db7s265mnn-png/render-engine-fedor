@@ -15,7 +15,7 @@ struct HeadlessOptions {
     int samples = 0;        // 0 keeps the value from the render settings node
     int width = 0;
     int height = 0;
-    int backend = -1;       // -1 keeps the scene value, 0 CPU, 1 GPU
+    int backend = -1;       // -1 keeps the scene value, 0 CPU, 1 GPU, 2 XPU
     int threads = -1;
     bool verbose = false;
 };

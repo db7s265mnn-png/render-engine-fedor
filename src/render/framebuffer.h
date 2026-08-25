@@ -20,12 +20,29 @@ public:
     // Drop accumulation storage entirely (Render teardown).
     void release();
 
+    // Karma-style variance oracle: Σ L(sample)² + skip mask. Thread-safe for
+    // disjoint pixels (same rule as addSample).
+    void addNoiseSample(int x, int y, Vec3 radiance, float count = 1.0f);
+    void copyLumSq(const float* src, size_t count);
+    void addLumSq(const float* src, size_t count);
+    void copySkipMask(const std::vector<uint8_t>& src);
+    void refreshNoiseOracle(float threshold, int sppDone, int maxSpp);
+    bool skipPixel(int x, int y) const;
+    bool noiseOracleDone() const { return noiseDone_; }
+    int noiseOracleSkipCount() const { return skipCount_; }
+    const std::vector<uint8_t>& skipMask() const { return skip_; }
+    const std::vector<float>& lumSq() const { return lumSq_; }
+
     int width() const { return width_; }
     int height() const { return height_; }
     int sampleCount() const { return samples_.load(std::memory_order_relaxed); }
     void setSampleCount(int n) { samples_.store(n, std::memory_order_relaxed); }
     bool hasAccumulatedData() const { return hasData_.load(std::memory_order_relaxed); }
     void markHasData() { hasData_.store(true, std::memory_order_relaxed); }
+    // Viewport may resolve the accum only after a finished sample (all pixels).
+    // Bootstrap / cancelled wavefronts set hasData without being presentable.
+    bool isPresentable() const { return presentable_.load(std::memory_order_relaxed); }
+    void setPresentable(bool v) { presentable_.store(v, std::memory_order_relaxed); }
 
     // Accumulates one sample. Safe as long as different threads own different
     // pixels, which is how the tile scheduler works. Prefer FilmTile + merge
@@ -111,10 +128,15 @@ private:
     int width_ = 0;
     int height_ = 0;
     std::vector<Vec4> accum_;
+    std::vector<float> lumSq_;
+    std::vector<uint8_t> skip_;
+    int skipCount_ = 0;
+    bool noiseDone_ = false;
     std::unique_ptr<std::atomic<double>[]> splat_;  // 3 doubles per pixel
     std::atomic<int64_t> splatPaths_{0};
     std::atomic<int> samples_{0};
     std::atomic<bool> hasData_{false};
+    std::atomic<bool> presentable_{false};
     mutable std::mutex mutex_;
 };
 

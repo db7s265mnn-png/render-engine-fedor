@@ -5,10 +5,17 @@
 
 namespace sol {
 
-// Optional host-side QMC stream (Owen-scrambled Sobol). When set, nextFloat()
-// pulls dimension sampleDim, sampleDim+1, … instead of PCG/xorshift. Device/CUDA
-// keeps qmcFn null and uses the selected backend only.
+// Optional QMC stream (Owen-scrambled Sobol). When useSobol is set, nextFloat()
+// pulls dimension sampleDim, sampleDim+1, … from the Sobol index/scramble stored
+// on this Rng — host and OptiX device share that path. qmcFn is a host-only
+// fallback for older call sites.
 using RngQmcFn = float (*)(void* ctx, uint32_t dimension);
+
+#if !defined(SOL_RNG_NO_SOBOL)
+// Defined in render/sobol.h (included below). Host table and device on-the-fly
+// direction numbers produce the same Owen-scrambled values.
+SR_HD float rngOwenSobolSample(uint32_t scramble, uint32_t index, uint32_t dimension);
+#endif
 
 enum RngBackend : uint8_t {
     kRngBackendPcg = 0,         // PCG32 (default)
@@ -25,7 +32,10 @@ struct Rng {
     // Host QMC (Sobol path dims). Null on GPU / when unused.
     void* qmcCtx = nullptr;
     RngQmcFn qmcFn = nullptr;
-    uint32_t sampleDim = 4u;  // dims 0-3 reserved for pixel/lens
+    uint32_t sampleDim = 0u;  // pbrt: camera+path share one stream from dim 0
+    uint32_t sobolScramble = 0u;
+    uint32_t sobolIndex = 0u;
+    uint8_t useSobol = 0;
 
     Rng() = default;
 
@@ -40,7 +50,10 @@ struct Rng {
         nextUintPcg();
         qmcCtx = nullptr;
         qmcFn = nullptr;
-        sampleDim = 4u;
+        sampleDim = 0u;
+        sobolScramble = 0u;
+        sobolIndex = 0u;
+        useSobol = 0;
         xsState = 1u;
     }
 
@@ -51,7 +64,10 @@ struct Rng {
         backend = kRngBackendXorshift32;
         qmcCtx = nullptr;
         qmcFn = nullptr;
-        sampleDim = 4u;
+        sampleDim = 0u;
+        sobolScramble = 0u;
+        sobolIndex = 0u;
+        useSobol = 0;
         xsState = inSeed ? inSeed : 1u;
     }
 
@@ -79,6 +95,9 @@ struct Rng {
     }
 
     SR_HD float nextFloat() {
+#if !defined(SOL_RNG_NO_SOBOL)
+        if (useSobol) return rngOwenSobolSample(sobolScramble, sobolIndex, sampleDim++);
+#endif
 #if !defined(__CUDACC__)
         if (qmcFn) return qmcFn(qmcCtx, sampleDim++);
 #endif
@@ -169,3 +188,7 @@ SR_INL SR_HD Rng makePixelRngXorshift32(int x, int y, int sampleIndex, uint32_t 
 }
 
 }  // namespace sol
+
+#ifndef SOL_RNG_NO_SOBOL
+#include "render/sobol.h"
+#endif

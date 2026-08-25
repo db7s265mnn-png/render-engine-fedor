@@ -1,37 +1,51 @@
 #include "ui/parameter_panel.h"
 
+#include <QAbstractButton>
+#include <QAbstractScrollArea>
 #include <QAbstractSpinBox>
+#include <QButtonGroup>
 #include <QCheckBox>
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QEvent>
 #include <QFileDialog>
+#include <QFont>
+#include <QFontMetrics>
 #include <QFormLayout>
+#include <QFrame>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLayout>
+#include <QLayoutItem>
 #include <QLineEdit>
+#include <QList>
 #include <QMimeData>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QVector3D>
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <vector>
 
 #include "nodes/node_registry.h"
 #include "core/expr_eval.h"
+#include "io/tx_convert.h"
 #include "render/pixel_filter.h"
 #include "ui/numeric_editors.h"
 #include "ui/texture_file_dialog.h"
@@ -39,6 +53,212 @@
 
 namespace sol {
 namespace {
+
+// Wrapping Houdini-style folder strip (QTabWidget cannot wrap in a 280px dock,
+// and Fusion + pane{top:-1px} can cover the tab bar entirely).
+class FlowLayout final : public QLayout {
+public:
+    explicit FlowLayout(QWidget* parent = nullptr, int hSpacing = 4, int vSpacing = 4)
+        : QLayout(parent), hSpacing_(hSpacing), vSpacing_(vSpacing) {}
+    ~FlowLayout() override {
+        while (QLayoutItem* item = takeAt(0)) delete item;
+    }
+
+    void addItem(QLayoutItem* item) override { items_.append(item); }
+    int count() const override { return items_.size(); }
+    QLayoutItem* itemAt(int index) const override { return items_.value(index); }
+    QLayoutItem* takeAt(int index) override {
+        if (index < 0 || index >= items_.size()) return nullptr;
+        return items_.takeAt(index);
+    }
+    Qt::Orientations expandingDirections() const override { return {}; }
+    bool hasHeightForWidth() const override { return true; }
+    int heightForWidth(int width) const override { return doLayout(QRect(0, 0, width, 0), true); }
+    void setGeometry(const QRect& rect) override {
+        QLayout::setGeometry(rect);
+        doLayout(rect, false);
+    }
+    QSize sizeHint() const override {
+        const QMargins m = contentsMargins();
+        const int inner = wrapWidth();
+        return QSize(inner + m.left() + m.right(), heightForWidth(inner + m.left() + m.right()));
+    }
+    QSize minimumSize() const override {
+        // Must be the wrapped height. QVBoxLayout shrinks Preferred children
+        // toward minimumSize when the stacked form's sizeHint is huge — a
+        // one-row minimum is why the second folder row was clipped.
+        const QMargins m = contentsMargins();
+        int minItem = 0;
+        for (QLayoutItem* item : items_) minItem = qMax(minItem, hintFor(item).width());
+        const int inner = qMax(minItem, wrapWidth());
+        return QSize(minItem + m.left() + m.right(), heightForWidth(inner + m.left() + m.right()));
+    }
+
+private:
+    int wrapWidth() const {
+        if (const QWidget* host = parentWidget()) {
+            const int w = host->contentsRect().width();
+            if (w >= 64) return w;
+        }
+        return 260;
+    }
+
+    static QSize hintFor(QLayoutItem* item) {
+        if (QWidget* widget = item->widget()) {
+            widget->ensurePolished();
+            return widget->sizeHint().expandedTo(widget->minimumSizeHint());
+        }
+        return item->sizeHint();
+    }
+
+    int doLayout(const QRect& rect, bool testOnly) const {
+        const QMargins m = contentsMargins();
+        const QRect area = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom());
+        struct Place {
+            QLayoutItem* item = nullptr;
+            int x = 0;
+            QSize hint;
+        };
+        int x = area.x();
+        int y = area.y();
+        int lineHeight = 0;
+        QList<Place> line;
+
+        auto flushLine = [&](bool more) {
+            if (line.isEmpty()) return;
+            if (!testOnly) {
+                for (const Place& p : line) {
+                    p.item->setGeometry(QRect(p.x, y, p.hint.width(), lineHeight));
+                }
+            }
+            y += lineHeight;
+            if (more) y += vSpacing_;
+            x = area.x();
+            lineHeight = 0;
+            line.clear();
+        };
+
+        for (QLayoutItem* item : items_) {
+            const QSize hint = hintFor(item);
+            if (x + hint.width() > area.x() + area.width() && !line.isEmpty()) flushLine(true);
+            line.push_back(Place{item, x, hint});
+            x += hint.width() + hSpacing_;
+            lineHeight = qMax(lineHeight, hint.height());
+        }
+        flushLine(false);
+        return (y - area.y()) + m.top() + m.bottom();
+    }
+
+    QList<QLayoutItem*> items_;
+    int hSpacing_ = 4;
+    int vSpacing_ = 4;
+};
+
+// Same height as viewport chrome (Start/Stop). Stylesheet must not add extra
+// min-height on top of the 1px border or the second wrap row gets clipped.
+constexpr int kFolderTabHeight = 24;
+
+class FolderTabButton final : public QPushButton {
+public:
+    explicit FolderTabButton(const QString& text, QWidget* parent = nullptr) : QPushButton(text, parent) {
+        setCheckable(true);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::NoFocus);
+        setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+        setFixedHeight(kFolderTabHeight);
+        setAttribute(Qt::WA_LayoutUsesWidgetRect);
+        setAttribute(Qt::WA_StyledBackground);
+    }
+
+    QSize sizeHint() const override {
+        const QFontMetrics metrics(font());
+        const int w = metrics.horizontalAdvance(text()) + 16;
+        return QSize(qMax(40, w), kFolderTabHeight);
+    }
+
+    QSize minimumSizeHint() const override { return sizeHint(); }
+};
+
+// Host for the wrapping folder buttons. QVBoxLayout will otherwise shrink this
+// strip toward a one-row minimum so the stacked form can keep its sizeHint.
+class FolderTabStrip final : public QWidget {
+public:
+    explicit FolderTabStrip(QWidget* parent = nullptr) : QWidget(parent) {
+        QSizePolicy policy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+        policy.setHeightForWidth(true);
+        setSizePolicy(policy);
+        setAttribute(Qt::WA_LayoutUsesWidgetRect);
+    }
+
+    bool hasHeightForWidth() const override { return true; }
+
+    int heightForWidth(int w) const override {
+        if (const QLayout* lay = layout()) return qMax(kFolderTabHeight, lay->heightForWidth(qMax(w, 1)));
+        return kFolderTabHeight;
+    }
+
+    QSize sizeHint() const override {
+        // width() is 0 on the first pass — use a typical Parameters dock width
+        // so we reserve two rows instead of stacking every tab vertically.
+        int w = width();
+        if (w < 64) w = 260;
+        return QSize(w, heightForWidth(w));
+    }
+
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+protected:
+    void resizeEvent(QResizeEvent* event) override {
+        QWidget::resizeEvent(event);
+        lockHeight(event->size().width());
+    }
+
+    bool event(QEvent* event) override {
+        if (event->type() == QEvent::LayoutRequest) lockHeight(width());
+        return QWidget::event(event);
+    }
+
+private:
+    void lockHeight(int w) {
+        if (locking_ || w <= 0) return;
+        const int h = heightForWidth(w);
+        if (h <= 0 || height() == h) return;
+        locking_ = true;
+        setFixedHeight(h);
+        setMinimumHeight(h);
+        locking_ = false;
+        updateGeometry();
+    }
+
+    bool locking_ = false;
+};
+
+QComboBox* makeColorSpaceCombo(const QString& current, const std::function<void(const QString&)>& commit) {
+    auto* combo = new QComboBox();
+    combo->setEditable(true);
+    combo->blockSignals(true);
+    QStringList curated;
+    for (const std::string& name : txCuratedColorSpaces()) curated << QString::fromStdString(name);
+    combo->addItems(curated);
+    const int idx = combo->findText(current);
+    if (idx >= 0) combo->setCurrentIndex(idx);
+    else combo->setEditText(current.isEmpty() ? QStringLiteral("auto") : current);
+    combo->blockSignals(false);
+    combo->setToolTip(QStringLiteral(
+        "Arnold-style input colour space. Cook converts textures to ACEScg.\n"
+        "auto: HDR/EXR \u2192 Linear sRGB, 8-bit \u2192 sRGB Texture, data \u2192 Raw.\n"
+        "ACEScg / Raw: no convert. Linear sRGB: Rec.709 primaries \u2192 AP1."));
+    QObject::connect(combo, &QComboBox::textActivated, combo, [commit](const QString& text) {
+        if (!text.isEmpty()) commit(text);
+    });
+    if (QLineEdit* edit = combo->lineEdit()) {
+        QObject::connect(edit, &QLineEdit::editingFinished, combo, [combo, commit] {
+            const QString text = combo->currentText();
+            if (!text.isEmpty()) commit(text);
+        });
+    }
+    return combo;
+}
 
 void applyExpressionFieldStyle(QWidget* widget, bool isExpression) {
     if (!widget) return;
@@ -383,25 +603,20 @@ QWidget* makeSpinSliderRow(QWidget* spin, double value, double minimum, double m
 }  // namespace
 
 ParameterPanel::ParameterPanel(QWidget* parent) : QWidget(parent) {
-    setMinimumWidth(280);
+    setMinimumWidth(180);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
 
-    auto* scroll = new QScrollArea(this);
-    scroll->setWidgetResizable(true);
-    scroll->setFrameShape(QFrame::NoFrame);
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    outer->addWidget(scroll);
-
+    // Folder tabs own their own scroll areas so the tab bar stays pinned
+    // (Houdini-style). MaterialX pages wrap themselves the same way.
     content_ = new QWidget();
     content_->setMinimumWidth(0);
-    content_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    content_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     contentLayout_ = new QVBoxLayout(content_);
     contentLayout_->setContentsMargins(8, 8, 8, 8);
     contentLayout_->setSpacing(8);
-    scroll->setWidget(content_);
+    outer->addWidget(content_);
 
     rebuild();
 }
@@ -486,7 +701,7 @@ void ParameterPanel::rebuild() {
 }
 
 void ParameterPanel::rebuildLop() {
-    // Header: node name plus type description.
+    // Header: node name plus type description (stays above the folder tabs).
     auto* header = new QGroupBox(node_->typeName());
     auto* headerLayout = new QFormLayout(header);
     nameEdit_ = new QLineEdit(node_->name());
@@ -514,7 +729,8 @@ void ParameterPanel::rebuildLop() {
     }
     contentLayout_->addWidget(header);
 
-    // One group box per parameter folder, ungrouped parameters first.
+    // Houdini-style wrapping folder buttons. Only the active folder's parameters
+    // are shown. Orange = selected.
     QStringList groups;
     groups << QString();
     for (const Parameter& parameter : node_->parameters()) {
@@ -522,33 +738,114 @@ void ParameterPanel::rebuildLop() {
         if (!groups.contains(parameter.group)) groups << parameter.group;
     }
 
-    for (const QString& group : groups) {
+    auto makeFolderPage = [](QFormLayout** formOut) -> QWidget* {
+        auto* scroll = new QScrollArea();
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setMinimumHeight(0);
+        scroll->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+        scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        auto* inner = new QWidget();
+        auto* layout = new QVBoxLayout(inner);
+        layout->setContentsMargins(6, 8, 6, 8);
+        layout->setSpacing(4);
+        auto* form = new QFormLayout();
+        form->setContentsMargins(0, 0, 0, 0);
+        form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+        form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+        layout->addLayout(form);
+        layout->addStretch(1);
+        scroll->setWidget(inner);
+        *formOut = form;
+        return scroll;
+    };
+
+    struct FolderPage {
+        QString name;
+        QWidget* page = nullptr;
         QFormLayout* form = nullptr;
+    };
+    std::vector<FolderPage> pages;
+
+    for (const QString& group : groups) {
+        FolderPage* folder = nullptr;
         for (Parameter& parameter : node_->parameters()) {
             if (parameter.name == "mtlx") continue;
             if (parameter.name.startsWith(QLatin1String("_"))) continue;
             if (parameter.group != group) continue;
             if (!evaluateVisibleWhen(parameter.visibleWhen, *node_)) continue;
-            if (!form) {
-                auto* box = new QGroupBox(group.isEmpty() ? QString("Parameters") : group);
-                form = new QFormLayout(box);
-                form->setLabelAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-                form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-                form->setRowWrapPolicy(QFormLayout::WrapLongRows);
-                contentLayout_->addWidget(box);
+            if (!folder) {
+                pages.emplace_back();
+                folder = &pages.back();
+                folder->name = group;
+                folder->page = makeFolderPage(&folder->form);
             }
             QWidget* editor = createEditor(parameter);
             if (!editor) continue;
             if (!parameter.tooltip.isEmpty()) editor->setToolTip(parameter.tooltip);
             // Buttons carry their own label text — avoid "Render: [Render]".
             if (parameter.type == ParamType::Button)
-                form->addRow(QString(), editor);
+                folder->form->addRow(QString(), editor);
             else
-                form->addRow(parameter.label, editor);
+                folder->form->addRow(parameter.label, editor);
         }
     }
 
-    contentLayout_->addStretch(1);
+    if (pages.empty()) {
+        contentLayout_->addStretch(1);
+        return;
+    }
+
+    auto* strip = new FolderTabStrip();
+    auto* flow = new FlowLayout(strip, 4, 4);
+    flow->setContentsMargins(0, 2, 0, 2);
+    auto* buttons = new QButtonGroup(strip);
+    buttons->setExclusive(true);
+    auto* stack = new QStackedWidget();
+    stack->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    stack->setMinimumHeight(0);
+
+    // No min/max-height in CSS — that is content-box and sits on top of the
+    // 1px border, so a 22px cap still paints taller than the layout cell.
+    const QString folderBtnCss = QStringLiteral(
+        "QPushButton { background:#2a2e33; color:#d0d4da; border:1px solid #666b73;"
+        " border-radius:2px; padding:0 8px; }"
+        "QPushButton:hover { background:#3a3f46; color:#f0f2f5; }"
+        "QPushButton:checked { %1 }")
+        .arg(theme::checkedCss());
+
+    int restore = 0;
+    const QString previous = lastFolderByType_.value(node_->typeName());
+    for (int i = 0; i < static_cast<int>(pages.size()); ++i) {
+        const FolderPage& folder = pages[static_cast<size_t>(i)];
+        const QString title =
+            folder.name.isEmpty() ? defaultParameterFolderTitle(node_->typeName()) : folder.name;
+        auto* btn = new FolderTabButton(title);
+        btn->setStyleSheet(folderBtnCss);
+        flow->addWidget(btn);
+        buttons->addButton(btn, i);
+        stack->addWidget(folder.page);
+        if (!previous.isEmpty() && title == previous) restore = i;
+    }
+    if (QAbstractButton* restored = buttons->button(restore)) restored->setChecked(true);
+    stack->setCurrentIndex(restore);
+    if (restore >= 0 && restore < stack->count())
+        lastFolderByType_[node_->typeName()] = buttons->button(restore)->text();
+
+    connect(buttons, &QButtonGroup::idClicked, this, [this, stack, buttons](int id) {
+        if (id < 0 || id >= stack->count()) return;
+        stack->setCurrentIndex(id);
+        if (node_) lastFolderByType_[node_->typeName()] = buttons->button(id)->text();
+    });
+
+    contentLayout_->addWidget(strip, 0);
+    contentLayout_->addWidget(stack, 1);
+    QTimer::singleShot(0, strip, [strip] {
+        const int w = strip->width();
+        if (w > 0) strip->setFixedHeight(strip->heightForWidth(w));
+    });
 }
 
 void ParameterPanel::rebuildMaterialX() {
@@ -738,28 +1035,9 @@ void ParameterPanel::rebuildMaterialX() {
             continue;
         }
 
-        // Arnold-style texture colour space (drives TX → ACEScg).
+        // Arnold-style texture colour space (drives TX / OCIO → ACEScg).
         if (inputName == QLatin1String("colorspace")) {
-            auto* combo = new QComboBox();
-            combo->setEditable(true);
-            const QStringList curated = {
-                QStringLiteral("ACES - ACEScg"),
-                QStringLiteral("Utility - sRGB - Texture"),
-                QStringLiteral("Utility - Linear - sRGB"),
-                QStringLiteral("Utility - Raw"),
-                QStringLiteral("Utility - Rec.709 - Texture"),
-                QStringLiteral("Output - sRGB"),
-            };
-            combo->addItems(curated);
-            const int idx = combo->findText(input.value);
-            if (idx >= 0) combo->setCurrentIndex(idx);
-            else combo->setEditText(input.value.isEmpty() ? curated.front() : input.value);
-            combo->setToolTip("Input colour space for this texture. TX conversion always "
-                              "targets ACEScg (skip when ACEScg / Raw).");
-            connect(combo, &QComboBox::currentTextChanged, this, [commit](const QString& text) {
-                if (!text.isEmpty()) commit(text);
-            });
-            form->addRow(label, combo);
+            form->addRow(label, makeColorSpaceCombo(input.value, commit));
             continue;
         }
 
@@ -880,8 +1158,12 @@ void ParameterPanel::rebuildMaterialX() {
         form->addRow(label, edit);
     }
 
-    contentLayout_->addWidget(paramsBox);
-    contentLayout_->addStretch(1);
+    auto* scroll = new QScrollArea();
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setWidget(paramsBox);
+    contentLayout_->addWidget(scroll, 1);
 }
 
 QWidget* ParameterPanel::createEditor(Parameter& parameter) {
@@ -1106,6 +1388,10 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             return container;
         }
         case ParamType::String: {
+            if (parameter.name == QLatin1String("colorspace"))
+                return makeColorSpaceCombo(parameter.hasExpression() ? parameter.expression
+                                                                     : parameter.toString(),
+                                           notifyText);
             auto* edit = new PathLineEdit(parameter.hasExpression() ? parameter.expression
                                                                     : parameter.toString());
             edit->setAcceptDrops(true);

@@ -9,6 +9,7 @@
 #include <QToolButton>
 #include <QTimer>
 #include <QIntValidator>
+#include <QFont>
 #include <QFontMetrics>
 #include <cmath>
 #include <algorithm>
@@ -21,12 +22,41 @@ namespace {
 // Shared chrome for start / playhead / end frame boxes.
 constexpr int kFrameBoxWidth = 40;
 constexpr int kFrameBoxHeight = 16;
+constexpr int kFrameNumberPixelSize = 11;
 constexpr qreal kPlayheadWidth = qreal(kFrameBoxWidth);
 constexpr qreal kPlayheadHeight = qreal(kFrameBoxHeight);
 
 QColor frameBoxBg() { return QColor(0x1a, 0x1c, 0x20); }
 QColor frameBoxBorder() { return QColor(0x7a, 0x7e, 0x86); }
 QColor frameBoxText() { return QColor(0xd8, 0xda, 0xe0); }
+
+// Playhead is a solid chip (ticks must not show through). Half the luminance of
+// the old #ffbe5a chip so it stays opaque without blowing out the timeline.
+QColor playheadFill() { return QColor(0x80, 0x5f, 0x2d); }
+QColor playheadStroke() { return QColor(0x6a, 0x4e, 0x24); }
+QColor playheadText() { return theme::checkedText(); }
+
+QFont frameNumberFont() {
+    QFont font;
+    font.setPixelSize(kFrameNumberPixelSize);
+    font.setBold(true);
+    return font;
+}
+
+QString frameBoxStyleSheet() {
+    return QStringLiteral(
+        "QLineEdit {"
+        "  background: #1a1c20;"
+        "  color: #d8dae0;"
+        "  border: 1px solid #7a7e86;"
+        "  border-radius: 2px;"
+        "  padding: 0px;"
+        "  font-size: %1px;"
+        "  font-weight: 700;"
+        "}"
+        "QLineEdit:focus { border: 1px solid #50aaff; }")
+        .arg(kFrameNumberPixelSize);
+}
 
 QIcon makeHoudiniTransportIcon(const QString& kind, int size = 18) {
     QPixmap pm(size, size);
@@ -142,9 +172,15 @@ int TimelineScrubber::frameAtX(qreal x) const {
 }
 
 QRectF TimelineScrubber::playheadRect() const {
-    const qreal x = xForFrame(frame_);
-    return QRectF(x - kPlayheadWidth * 0.5, height() * 0.5 - kPlayheadHeight * 0.5, kPlayheadWidth,
-                  kPlayheadHeight);
+    // Inset 1px so the 1px stroke is fully inside the widget (AA + a flush
+    // rect clips the top/bottom/start-end edges and the frame looks broken).
+    const qreal w = kPlayheadWidth;
+    const qreal h = std::min(kPlayheadHeight, std::max(2.0, qreal(height()) - 2.0));
+    const qreal minX = 1.0;
+    const qreal maxX = std::max(minX, qreal(width()) - w - 1.0);
+    const qreal x = std::clamp(xForFrame(frame_) - w * 0.5, minX, maxX);
+    const qreal y = (qreal(height()) - h) * 0.5;
+    return QRectF(x, y, w, h);
 }
 
 void TimelineScrubber::paintEvent(QPaintEvent*) {
@@ -171,17 +207,15 @@ void TimelineScrubber::paintEvent(QPaintEvent*) {
         p.drawLine(QPointF(x, track.center().y() - h), QPointF(x, track.center().y() + h));
     }
 
-    // Playhead — same grey chrome as start/end boxes, no center stem.
+    // Playhead — orange like selected tabs / checked buttons, crisp inset frame.
     const QRectF head = playheadRect();
-    p.setPen(QPen(frameBoxBorder(), 1.0));
-    p.setBrush(frameBoxBg());
-    p.drawRoundedRect(head, 2.0, 2.0);
+    const QRectF box = head.adjusted(0.5, 0.5, -0.5, -0.5);
+    p.setPen(QPen(playheadStroke(), 1.0));
+    p.setBrush(playheadFill());
+    p.drawRoundedRect(box, 2.0, 2.0);
 
-    QFont frameFont = font();
-    frameFont.setPointSizeF(9.0);
-    frameFont.setBold(true);
-    p.setFont(frameFont);
-    p.setPen(frameBoxText());
+    p.setFont(frameNumberFont());
+    p.setPen(playheadText());
     p.drawText(head, Qt::AlignCenter, QString::number(frame_));
 }
 
@@ -244,10 +278,12 @@ void TimelineScrubber::beginFrameEdit() {
     editor_->setAlignment(Qt::AlignCenter);
     editor_->setText(QString::number(frame_));
     editor_->setValidator(new QIntValidator(-999999, 999999, editor_));
-    editor_->setFixedSize(kFrameBoxWidth, kFrameBoxHeight + 2);
+    editor_->setFixedSize(kFrameBoxWidth, kFrameBoxHeight);
+    editor_->setFont(frameNumberFont());
+    editor_->setTextMargins(0, 0, 0, 0);
     editor_->setStyleSheet(
-        "QLineEdit { background: #1a1c20; color: #d8dae0; border: 1px solid #50aaff;"
-        " border-radius: 2px; padding: 0 2px; font-weight: 700; }");
+        "QLineEdit { background: #805f2d; color: #ffffff; border: 1px solid #6a4e24;"
+        " border-radius: 2px; padding: 0px; font-size: 11px; font-weight: 700; }");
     editor_->move(playheadRect().toRect().topLeft());
     editor_->selectAll();
     editor_->show();
@@ -292,17 +328,9 @@ QLineEdit* TimelineBar::makeRangeEdit(const QString& tip) {
     edit->setMaxLength(6);
     edit->setValidator(new QIntValidator(-999999, 999999, edit));
     edit->setToolTip(tip);
-    edit->setStyleSheet(QStringLiteral(
-        "QLineEdit {"
-        "  background: #1a1c20;"
-        "  color: #d8dae0;"
-        "  border: 1px solid #7a7e86;"
-        "  border-radius: 2px;"
-        "  padding: 0 2px;"
-        "  font-size: 11px;"
-        "  font-weight: 600;"
-        "}"
-        "QLineEdit:focus { border: 1px solid #50aaff; }"));
+    edit->setFont(frameNumberFont());
+    edit->setTextMargins(0, 0, 0, 0);
+    edit->setStyleSheet(frameBoxStyleSheet());
     return edit;
 }
 
@@ -323,10 +351,8 @@ TimelineBar::TimelineBar(QWidget* parent) : QWidget(parent) {
         "}"
         "QToolButton:hover { background: #474c54; }"
         "QToolButton:pressed { background: #2a2d32; }"
-        "QToolButton:checked {"
-        "  background: rgba(80, 170, 255, 70);"
-        "  border-color: #50aaff;"
-        "}"));
+        "QToolButton:checked { %1 }")
+        .arg(theme::checkedCss()));
 
     auto* root = new QVBoxLayout(this);
     root->setContentsMargins(8, 3, 8, 3);

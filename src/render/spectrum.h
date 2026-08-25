@@ -8,12 +8,9 @@
 #include "core/math.h"
 #include "render/cie_tables.h"
 #include "render/color_space.h"
+#include "render/spectrum_constants.h"
 
 namespace sol {
-
-constexpr int kMaxSpectrumSamples = 16;
-constexpr float kSpectrumLambdaMin = 360.0f;
-constexpr float kSpectrumLambdaMax = 830.0f;
 
 struct SampledWavelengths {
     float lambda[kMaxSpectrumSamples]{};
@@ -173,83 +170,35 @@ inline Xyz spectrumToXyz(const SampledSpectrum& s, const SampledWavelengths& w) 
     return Xyz(X * scale, Y * scale, Z * scale);
 }
 
-// SampledSpectrum → RGB via tabulated CIE CMFs + RGBColorSpace.
+// SampledSpectrum → RGB.
 //
-// White balance:
-//   • Multi-λ (secondaries alive): sample-matched ∫CMF estimator — equal-energy
-//     maps to (1,1,1) for the same wavelength samples (honest MC, not RGB align).
-//   • After TerminateSecondary / singular CMF: fixed illuminant-E integrals.
-// No per-sample RGB gamut clamp (negatives average in the film).
+//   • Multi-λ (secondaries alive): pbrt ToXYZ / CIE_Y, then the working-space
+//     matrix. ACEScg(D60) → (1,1,1). No illuminant-E white balance — that
+//     would pink-cast a D60 sky when the viewport expects ACEScg.
+//   • After TerminateSecondary / single λ: sample-matched E (X/Xw = s(λ)) so
+//     the lone wavelength is grey, not a CMF spike (volume fireflies).
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
                           const RGBColorSpace& cs = colorSpaceSrgb()) {
     if (s.n <= 0 || w.n <= 0) return Vec3(0.0f);
     const int n = std::min(s.n, w.n);
-    float X = 0.0f, Y = 0.0f, Z = 0.0f;
-    float Xw = 0.0f, Yw = 0.0f, Zw = 0.0f;
     int active = 0;
-    for (int i = 0; i < n; ++i) {
-        float cx, cy, cz;
-        cieXyzAtLambda(w.lambda[i], cx, cy, cz);
-        const float invPdf = safeDivSpectrum(1.0f, w.pdf[i]);
+    for (int i = 0; i < n; ++i)
         if (w.pdf[i] > 0.0f) ++active;
-        X += s.values[i] * cx * invPdf;
-        Y += s.values[i] * cy * invPdf;
-        Z += s.values[i] * cz * invPdf;
-        Xw += cx * invPdf;
-        Yw += cy * invPdf;
-        Zw += cz * invPdf;
-    }
-    const float invN = 1.0f / float(n);
-    X *= invN;
-    Y *= invN;
-    Z *= invN;
-    Xw *= invN;
-    Yw *= invN;
-    Zw *= invN;
 
-    const bool sampleWbOk = active >= 2 && Xw > 1e-5f && Yw > 1e-5f && Zw > 1e-5f &&
-                            !w.secondaryTerminated();
-    if (sampleWbOk) {
-        X /= Xw;
-        Y /= Yw;
-        Z /= Zw;
-    } else {
-        X /= cie_tab::kCieXIntegral1nm;
-        Y /= cie_tab::kCieYIntegral1nm;
-        Z /= cie_tab::kCieZIntegral1nm;
-    }
+    if (active >= 2 && !w.secondaryTerminated())
+        return cs.toRgb(spectrumToXyz(s, w));
 
-    Vec3 rgb = cs.toRgb(Xyz(X, Y, Z));
-    const Vec3 whiteRgb = cs.toRgb(Xyz(1.0f, 1.0f, 1.0f));
-    rgb.x /= srMax(1e-8f, whiteRgb.x);
-    rgb.y /= srMax(1e-8f, whiteRgb.y);
-    rgb.z /= srMax(1e-8f, whiteRgb.z);
-    return rgb;
+    // One live λ (TerminateSecondary): CMF chromaticity is a spectral-locus
+    // spike (and ȳ/z̄ can be ~0 in the tails, so X/Xw is unsafe). Emit grey at
+    // s(λ) — same as sample-matched E when all CMF channels are non-zero.
+    float hero = 0.0f;
+    for (int i = 0; i < n; ++i)
+        if (w.pdf[i] > 0.0f) hero = s.values[i];
+    return Vec3(hero, hero, hero);
 }
 
 inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w, int colorSpaceId) {
     return spectrumToRgb(s, w, colorSpaceById(colorSpaceId));
-}
-
-// False-color: map a spectral bin / wavelength to a visible debug color.
-inline Vec3 wavelengthToFalseColor(float lambdaNm) {
-    const float t = saturatef((lambdaNm - kSpectrumLambdaMin) / (kSpectrumLambdaMax - kSpectrumLambdaMin));
-    const float h = (1.0f - t) * 0.75f;
-    const float s = 1.0f, v = 1.0f;
-    const float c = v * s;
-    const float x = c * (1.0f - fabsf(fmodf(h * 6.0f, 2.0f) - 1.0f));
-    const float m = v - c;
-    float r = 0, g = 0, b = 0;
-    const int sector = int(h * 6.0f) % 6;
-    switch (sector) {
-        case 0: r = c; g = x; break;
-        case 1: r = x; g = c; break;
-        case 2: g = c; b = x; break;
-        case 3: g = x; b = c; break;
-        case 4: r = x; b = c; break;
-        default: r = c; b = x; break;
-    }
-    return Vec3(r + m, g + m, b + m);
 }
 
 }  // namespace sol

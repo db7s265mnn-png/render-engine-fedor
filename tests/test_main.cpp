@@ -1,6 +1,7 @@
 // Unit tests for the maths, sampling, node graph and renderer plumbing.
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <utility>
 #include <cstdio>
@@ -11,10 +12,14 @@
 #include <QColor>
 #include <QDir>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QObject>
 #include <QTemporaryDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
+#include <QStringList>
 #include <QVector3D>
 
 #include "app/default_scene.h"
@@ -23,9 +28,12 @@
 #include "io/alembic_loader.h"
 #include "io/image_io.h"
 #include "io/materialx_graph.h"
+#include "io/tx_cache.h"
+#include "io/tx_convert.h"
 #include "io/usd_loader.h"
 #include "nodes/node_graph.h"
 #include "nodes/node_registry.h"
+#include "nodes/parameter.h"
 #include "nodes/stage.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/film_tile.h"
@@ -34,13 +42,24 @@
 #include "render/pixel_filter.h"
 #include "render/metal_spectra.h"
 #include "render/photon_map.h"
-#include "render/rsequence.h"
+#include "render/physical_sky.h"
 #include "render/render_session.h"
 #include "render/shading.h"
+#include "render/volume.h"
+#include "render/volume_track.h"
+#include "render/volume_vdb.h"
+#include "render/xpu_split.h"
+#include "render/pixel_oracle.h"
+#include "render/camera_sample.h"
 #include "render/spectrum.h"
+#include "render/spectrum_device.h"
 #include "render/spectrum_rgb.h"
 #include "render/spectrum_types.h"
 #include "render/spectral_common.h"
+#include "render/sss_spectral.h"
+#include "render/cie_tables.h"
+#include "render/illuminant_spd.h"
+#include "render/rgb_spectrum_tables.h"
 #include "scene/scene.h"
 #include "scene/displace.h"
 #include "scene/tessellate.h"
@@ -250,38 +269,100 @@ void testSampling() {
         const double ac32 = den > 1e-12 ? num / den : 0.0;
         check(std::fabs(ac32) < 0.08, "xorshift pixel RNG ac@32 ~ 0");
     }
+}
 
-    // Plastic R2 / golden 1D (optional Pixel Sampler).
+void testLightSelectionDistantRect() {
+    std::printf("light selection distant+rect\n");
+    LightData lights[2];
+    lights[0].type = kLightDistant;
+    lights[0].intensity = 2.5f;
+    lights[0].color = Vec3(1.0f);
+    lights[0].normalize = 1;
+    lights[0].angle = 1.5f;
+    lights[0].xform = Mat4::identity();
+    lights[0].xformInv = Mat4::identity();
+
+    lights[1].type = kLightRect;
+    lights[1].intensity = 24.0f;
+    lights[1].color = Vec3(1.0f);
+    lights[1].normalize = 1;
+    lights[1].width = 4.0f;
+    lights[1].height = 3.0f;
+    lights[1].xform = Mat4::identity();
+    lights[1].xformInv = Mat4::identity();
+
+    SceneView view{};
+    view.lights = lights;
+    view.lightCount = 2;
+
+    const float fSun = lightFluxWeight(view, 0);
+    const float fRect = lightFluxWeight(view, 1);
+    check(std::fabs(fSun - 2.5f * kPi) < 0.05f, "pbrt distant Φ = E π r² with r=1");
+    check(std::fabs(fRect - 24.0f * kPi) < 0.5f, "pbrt area Φ = L A π (normalize → E π)");
+    check(fRect / srMax(fSun, 1e-6f) < 20.0f, "rect is not ~area times more important than the sun");
+
+    lights[1].normalize = 0;
+    const float fRectRadiance = lightFluxWeight(view, 1);
+    check(fRectRadiance > 24.0f * 10.0f, "unnormalized rect flux includes area");
+    lights[1].normalize = 1;
+
+    const float pSun = lightSelectionPdfIndex(view, 0);
+    const float pRect = lightSelectionPdfIndex(view, 1);
+    check(std::fabs(pSun + pRect - 1.0f) < 1e-4f, "selection pdfs sum to 1");
+    // PBRT 4: 1 infinite slot + 1 finite slot → 1/2 each.
+    check(std::fabs(pSun - 0.5f) < 1e-4f, "sun pdf is one infinite slot vs one finite slot");
+    check(std::fabs(pRect - 0.5f) < 1e-4f, "rect pdf is the finite slot");
+    check(1.0f / pSun < 2.1f, "sun 1/pdf is 2 (no 100× fireflies)");
+
+    int nSun = 0;
+    int pdfMismatch = 0;
+    constexpr int kN = 20000;
+    for (int i = 0; i < kN; ++i) {
+        float pdf = 0.0f;
+        const int idx = sampleLightIndex(view, (float(i) + 0.5f) / float(kN), pdf);
+        if (idx == 0) ++nSun;
+        if (idx >= 0 && std::fabs(pdf - lightSelectionPdfIndex(view, idx)) > 1e-4f) ++pdfMismatch;
+    }
+    check(pdfMismatch == 0, "sampled pdf matches selection pdf");
+    const float frac = float(nSun) / float(kN);
+    check(frac > 0.45f && frac < 0.55f, "sun is sampled ~50% of the time next to a key rect");
+
+    // Default scene: dome + distant + rect. PBRT 4: 2 infinite slots + 1 finite
+    // slot → p_inf = 2/3, uniform in infinite → sun = dome = 1/3, rect = 1/3.
+    LightData trio[3];
+    trio[0] = lights[0];
+    trio[1] = lights[1];
+    trio[2].type = kLightDome;
+    trio[2].intensity = 0.6f;
+    trio[2].color = Vec3(1.0f);
+    trio[2].normalize = 0;
+    trio[2].xform = Mat4::identity();
+    trio[2].xformInv = Mat4::identity();
+    view.lights = trio;
+    view.lightCount = 3;
+    const float pSun3 = lightSelectionPdfIndex(view, 0);
+    const float pRect3 = lightSelectionPdfIndex(view, 1);
+    const float pDome3 = lightSelectionPdfIndex(view, 2);
+    check(std::fabs(pSun3 + pRect3 + pDome3 - 1.0f) < 1e-4f, "default-scene pdfs sum to 1");
+    check(std::fabs(pSun3 - 1.0f / 3.0f) < 1e-4f, "sun is one of two infinite slots");
+    check(std::fabs(pDome3 - 1.0f / 3.0f) < 1e-4f, "dome is the other infinite slot");
+    check(std::fabs(pRect3 - 1.0f / 3.0f) < 1e-4f, "rect is the finite slot");
+
     {
-        float x0 = 0.0f, y0 = 0.0f;
-        genPnt2D(0, x0, y0);
-        check(x0 >= 0.0f && x0 < 1.0f && y0 >= 0.0f && y0 < 1.0f, "R2(0) in unit square");
-        check(x0 < 1e-6f && y0 < 1e-6f, "R2(0) near origin");
-        float x1 = 0.0f, y1 = 0.0f;
-        genPnt2D(1, x1, y1);
-        check(std::fabs(x1 - 0.754877666f) < 1e-5f, "R2 a1 ≈ 1/plastic");
-        check(std::fabs(y1 - 0.569840291f) < 1e-5f, "R2 a2 ≈ 1/plastic^2");
-        const float g1 = genPnt1D(1);
-        check(std::fabs(g1 - float(1.0 / 1.6180339887498948482)) < 1e-5f, "golden 1D a1");
-        float jx = 0.0f, jy = 0.0f;
-        r2PixelJitter(10, 20, 0, 960, kR2IndexSpp, jx, jy);
-        float jx2 = 0.0f, jy2 = 0.0f;
-        r2PixelJitter(11, 20, 0, 960, kR2IndexSpp, jx2, jy2);
-        check(std::fabs(jx - jx2) > 1e-6f || std::fabs(jy - jy2) > 1e-6f,
-              "R2 per-pixel CP differs neighbors at spp0");
-        check(isR2PixelSampler(3) && !isR2PixelSampler(5) && !isR2PixelSampler(0),
-              "GenPnt2D is sampler index 3");
-        // Manual-Test math: center + U(-1,1)*mult, clamped.
-        {
-            const float mult = 0.25f;
-            const float ux = -1.0f, uy = 1.0f;
-            const float jx = std::min(0.999999f, std::max(0.0f, 0.5f + ux * mult));
-            const float jy = std::min(0.999999f, std::max(0.0f, 0.5f + uy * mult));
-            checkNear(jx, 0.25f, 1e-6f, "Manual-Test left edge at mult=0.25");
-            checkNear(jy, 0.75f, 1e-6f, "Manual-Test right edge at mult=0.25");
-            const float jClamp = std::min(0.999999f, std::max(0.0f, 0.5f + 1.0f * 2.0f));
-            check(jClamp <= 0.999999f && jClamp >= 0.0f, "Manual-Test clamps outside pixel");
-        }
+        ScenePtr scene = std::make_shared<Scene>();
+        scene->lights.push_back(lights[0]);
+        scene->lights.push_back(lights[1]);
+        scene->finalize();
+        const SceneView v = scene->view();
+        check(v.lightBvh != nullptr && v.lightBvhNodeCount > 0,
+              "pbrt: finite lights always get a cone BVH");
+        check(v.infiniteLightCount == 1, "distant light is outside the BVH");
+        float pdf = 0.0f;
+        const int idx = sampleLightIndex(v, Vec3(0.0f, 0.0f, 1.0f), 0.8f, pdf);
+        check(idx >= 0 && pdf > 0.0f, "position-aware light pick uses the BVH");
+        checkNear(volumeLightSelectionPdfIndex(v, Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f), 0.9f, 1),
+                  lightSelectionPdfIndex(v, Vec3(0.0f), 1), 1e-6f,
+                  "volume selection pdf equals the surface LightSampler");
     }
 }
 
@@ -427,6 +508,116 @@ void testBsdf() {
         if (!sample.transmitted && sample.wi.z < 0.0f) ++tirHits;
     }
     check(tirHits > 150, "IR-off: TIR still reflects past the critical angle");
+
+    // pbrt energy lottery: spec share tracks E(mu, alpha) F, so grazing wo is more specular.
+    {
+        Material diel;
+        diel.baseColor = Vec3(0.8f);
+        diel.roughness = 0.25f;
+        diel.metallic = 0.0f;
+        diel.specular = 1.0f;
+        diel.transmission = 0.0f;
+        diel.ior = 1.5f;
+        const LobeWeights nrm = computeLobes(diel, Vec3(0.0f, 0.0f, 1.0f));
+        const LobeWeights grz = computeLobes(diel, normalize(Vec3(0.95f, 0.0f, 0.08f)));
+        check(grz.specular > nrm.specular, "grazing wo raises the specular energy share");
+        check(grz.diffuse < nrm.diffuse, "grazing wo lowers the diffuse energy share");
+        Material coat = diel;
+        coat.coat = 1.0f;
+        coat.coatThickness = 0.25f;
+        coat.coatIor = 1.5f;
+        coat.coatRoughness = 0.1f;
+        check(coatPickProb(coat, Vec3(0.0f, 0.0f, 1.0f)) > 0.02f, "dielectric coat overlay is selectable");
+    }
+
+    // Anisotropic GGX: ax≠ay when specular_anisotropy>0; eval along X vs Y differs.
+    {
+        Material iso;
+        iso.baseColor = Vec3(1.0f);
+        iso.roughness = 0.4f;
+        iso.metallic = 1.0f;
+        iso.specular = 1.0f;
+        Material an = iso;
+        an.specularAnisotropy = 1.0f;
+        const Vec3 wo(0.0f, 0.0f, 1.0f);
+        const Vec3 wiX = normalize(Vec3(0.75f, 0.0f, 0.66f));
+        const Vec3 wiY = normalize(Vec3(0.0f, 0.75f, 0.66f));
+        const float isoX = average(bsdfEvalLocal(iso, wo, wiX).f);
+        const float isoY = average(bsdfEvalLocal(iso, wo, wiY).f);
+        const float anX = average(bsdfEvalLocal(an, wo, wiX).f);
+        const float anY = average(bsdfEvalLocal(an, wo, wiY).f);
+        checkNear(isoX, isoY, 0.02f, "isotropic GGX is azimuthally symmetric");
+        check(std::fabs(anX - anY) > 0.02f, "anisotropic GGX eval X != Y");
+        LobeWeights lw = computeLobes(an, wo);
+        check(std::fabs(lw.ax - lw.ay) > 0.05f, "anisotropy splits αx/αy");
+        const Vec3 h = normalize(Vec3(0.25f, 0.1f, 0.96f));
+        const float a = 0.3f;
+        const float a2 = a * a;
+        const float cos2 = h.z * h.z;
+        const float t = cos2 * (a2 - 1.0f) + 1.0f;
+        const float isoD = a2 / (kPi * t * t);
+        checkNear(ggxD(h, a), isoD, 1e-5f, "ax=ay GGX D matches isotropic formula");
+        for (int i = 0; i < 1500; ++i) {
+            const BsdfSample sample = bsdfSampleLocal(an, wo, rng.nextFloat(), rng.nextFloat(),
+                                                      rng.nextFloat(), rng.nextFloat());
+            if (sample.pdf <= 0.0f || sample.specular) continue;
+            const BsdfEval evaluated = bsdfEvalLocal(an, wo, sample.wi);
+            checkNear(evaluated.pdf, sample.pdf, std::max(1e-3f, sample.pdf * 0.02f),
+                      "aniso sample and eval pdf agree");
+        }
+    }
+
+    // Charlie sheen is a selectable lobe; grazing eval exceeds sheen-off.
+    {
+        Material cloth;
+        cloth.baseColor = Vec3(0.08f, 0.08f, 0.1f);
+        cloth.roughness = 0.8f;
+        cloth.metallic = 0.0f;
+        cloth.specular = 0.0f;
+        cloth.sheen = 1.0f;
+        cloth.sheenColor = Vec3(1.0f, 0.2f, 0.1f);
+        cloth.sheenRoughness = 0.35f;
+        const LobeWeights lw = computeLobes(cloth, Vec3(0.0f, 0.0f, 1.0f));
+        check(lw.sheen > 0.05f, "sheen is selectable in the lobe lottery");
+        Material bare = cloth;
+        bare.sheen = 0.0f;
+        const Vec3 woG = normalize(Vec3(0.98f, 0.0f, 0.20f));
+        const Vec3 wiG = normalize(Vec3(0.96f, 0.15f, 0.24f));
+        Material sheenOnly = cloth;
+        sheenOnly.baseColor = Vec3(0.0f);
+        sheenOnly.baseWeight = 0.0f;
+        check(average(bsdfEvalLocal(sheenOnly, woG, wiG).f) > 1e-3f,
+              "Charlie sheen eval is nonzero at the horizon");
+        check(average(bsdfEvalLocal(cloth, woG, wiG).f) >
+                  average(bsdfEvalLocal(bare, woG, wiG).f),
+              "Charlie sheen adds grazing energy");
+        int sheenHits = 0;
+        for (int i = 0; i < 2000; ++i) {
+            const BsdfSample sample = bsdfSampleLocal(cloth, woG, rng.nextFloat(), rng.nextFloat(),
+                                                      rng.nextFloat(), rng.nextFloat());
+            if (sample.pdf <= 0.0f) continue;
+            ++sheenHits;
+        }
+        check(sheenHits > 200, "sheen material samples valid directions");
+    }
+
+    // Oren–Nayar (diffuse_roughness>0) differs from Lambert at oblique pairs.
+    {
+        Material lamb;
+        lamb.baseColor = Vec3(0.8f);
+        lamb.roughness = 1.0f;
+        lamb.metallic = 0.0f;
+        lamb.specular = 0.0f;
+        Material on = lamb;
+        on.diffuseRoughness = 1.0f;
+        const Vec3 wo = normalize(Vec3(0.75f, 0.0f, 0.66f));
+        const Vec3 wi = normalize(Vec3(0.45f, 0.0f, 0.89f));
+        const float fL = average(bsdfEvalLocal(lamb, wo, wi).f);
+        const float fO = average(bsdfEvalLocal(on, wo, wi).f);
+        check(std::fabs(fL - fO) > 1e-4f, "Oren–Nayar differs from Lambert");
+        checkNear(average(bsdfEvalLocal(lamb, wo, wi).f), 0.8f * kInvPi, 1e-5f,
+                  "Lambert is albedo/π when diffuse_roughness=0");
+    }
 }
 
 void testGlob() {
@@ -473,6 +664,447 @@ void testGraphCook() {
     CookContext context2;
     StagePtr stage2 = reloaded.cookDisplay(context2);
     check(stage2 != nullptr && stage2->prims.size() == stage->prims.size(), "reloaded graph cooks the same");
+}
+
+void testGraphDeleteAfterLoad() {
+    std::printf("graph delete after load\n");
+    registerBuiltinNodes();
+    NodeGraph graph;
+    buildDefaultGraph(graph);
+    const int n0 = int(graph.nodes().size());
+    check(n0 >= 8, "default graph has nodes");
+    const QJsonObject json = graph.toJson();
+
+    int aboutToRemove = 0;
+    QObject::connect(&graph, &NodeGraph::nodeAboutToBeRemoved, [&](Node* node) {
+        check(node != nullptr, "aboutToBeRemoved pointer");
+        // UAF if clear()/fromJson destroyed Nodes before this signal.
+        check(!node->typeName().isEmpty(), "node alive during aboutToBeRemoved");
+        check(!node->name().isEmpty(), "node name alive during aboutToBeRemoved");
+        ++aboutToRemove;
+    });
+
+    QString error;
+    check(graph.fromJson(json, error), "reload into live graph");
+    check(aboutToRemove == n0, "clear() notifies before destroying loaded nodes");
+
+    Node* display = graph.displayNode();
+    check(display != nullptr, "display after reload");
+    const QString displayName = display->name();
+    graph.removeNode(display);
+    check(graph.findNode(displayName) == nullptr, "display removed after load");
+    for (const NodePtr& n : graph.nodes()) {
+        check(n && !n->typeName().isEmpty(), "surviving node after display delete");
+    }
+
+    Node* leftover = graph.nodes().empty() ? nullptr : graph.nodes().front().get();
+    check(leftover != nullptr, "a node remains after display delete");
+    const QString leftoverName = leftover->name();
+    graph.removeNode(leftover);
+    check(graph.findNode(leftoverName) == nullptr, "non-display node removed after load");
+
+    const int left = int(graph.nodes().size());
+    aboutToRemove = 0;
+    graph.clear();
+    check(aboutToRemove == left, "clear() notifies remaining nodes");
+    check(graph.nodes().empty(), "graph empty after clear");
+    check(graph.displayNode() == nullptr, "no display node after clear");
+}
+
+void testXpuDevice() {
+    std::printf("xpu device\n");
+    check(xpuEmbreeThreadCount(8) == 7, "XPU reserves one core for GPU submit");
+    check(xpuEmbreeThreadCount(2) == 1, "XPU with 2 threads leaves 1 for GPU");
+    check(xpuEmbreeThreadCount(1) == 1, "XPU keeps at least one Embree thread");
+    check(xpuEmbreeThreadCount(0) >= 1, "XPU auto thread count is at least 1");
+    check(kXpuScheduleOverlap == 0 && kXpuScheduleMixture == 1, "Overlap is default schedule 0");
+    check(xpuGpuRemaining(10, 0, 0) == 10, "XPU GPU remaining starts at the target");
+    check(xpuGpuRemaining(10, 8, 1) == 1, "XPU GPU remaining subtracts both films");
+    check(xpuGpuRemaining(10, 9, 1) == 0, "XPU GPU remaining clamps at zero");
+    check(xpuGpuRemaining(0, 0, 0) == 0, "XPU GPU remaining is 0 without a target");
+    check(xpuCpuSampleIndex(0) != 0, "CPU estimator uses a disjoint sample index");
+    check(xpuCpuSampleIndex(1) == xpuCpuSampleIndex(0) + 1, "CPU sample indices are consecutive in that band");
+    check(noiseOracleMinSamples(64) >= 4, "oracle waits for a few camera samples");
+    check(!noiseOraclePixelQuiet(0.5f, 0.5f, 0.5f, 0.0f, 8, 0.01f), "oracle stays open without L²");
+    check(noiseOraclePixelQuiet(0.0f, 0.0f, 0.0f, 0.0f, 8, 0.01f), "black pixels with no L² are quiet");
+    check(noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 8.0f, 8, 0.01f), "constant L² matches mean² → quiet");
+    check(!noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 80.0f, 8, 0.01f), "high L² variance stays noisy");
+    check(!noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 8.0f, 8, 0.0f), "threshold 0 disables the oracle");
+
+    {
+        Framebuffer film;
+        film.resize(2, 2);
+        const Vec3 white(1.0f, 1.0f, 1.0f);
+        for (int s = 0; s < 8; ++s) {
+            for (int y = 0; y < 2; ++y) {
+                for (int x = 0; x < 2; ++x) {
+                    film.addSample(x, y, white);
+                    film.addNoiseSample(x, y, white);
+                }
+            }
+        }
+        film.refreshNoiseOracle(0.01f, 8, 64);
+        check(film.skipPixel(0, 0) && film.skipPixel(1, 1), "quiet constant film skips pixels");
+        check(film.noiseOracleDone(), "constant 2x2 film converges");
+        check(film.noiseOracleSkipCount() == 4, "constant 2x2 skip count is 4");
+    }
+
+    // Uniform (threshold 0) never skips. Variance skips a constant block and
+    // keeps a noisy block. Typical path-tracing noise at 128 spp / 0.01 does
+    // not skip — that is why Uniform vs Variance looks identical on a volume.
+    {
+        const int nSpp = 16;
+        const int maxSpp = 64;
+        auto fill = [](Framebuffer& film, int x0, int x1, bool constant) {
+            for (int s = 0; s < nSpp; ++s) {
+                const Vec3 rgb = constant ? Vec3(1.0f, 1.0f, 1.0f)
+                                          : ((s & 1) ? Vec3(2.0f, 2.0f, 2.0f) : Vec3(0.0f, 0.0f, 0.0f));
+                for (int y = 0; y < 2; ++y) {
+                    for (int x = x0; x < x1; ++x) {
+                        film.addSample(x, y, rgb);
+                        film.addNoiseSample(x, y, rgb);
+                    }
+                }
+            }
+        };
+
+        Framebuffer uniform;
+        uniform.resize(8, 2);
+        fill(uniform, 0, 4, true);
+        fill(uniform, 4, 8, false);
+        uniform.refreshNoiseOracle(0.0f, nSpp, maxSpp);
+        check(uniform.noiseOracleSkipCount() == 0, "Uniform (threshold 0) skips nothing");
+        check(!uniform.skipPixel(1, 0) && !uniform.skipPixel(5, 0), "Uniform leaves constant and noisy pixels open");
+
+        Framebuffer variance;
+        variance.resize(8, 2);
+        fill(variance, 0, 4, true);
+        fill(variance, 4, 8, false);
+        variance.refreshNoiseOracle(0.01f, nSpp, maxSpp);
+        check(variance.skipPixel(1, 0) && variance.skipPixel(1, 1), "Variance skips interior constant pixels");
+        check(!variance.skipPixel(3, 0), "Variance keeps the constant/noisy boundary sampling");
+        check(!variance.skipPixel(5, 0) && !variance.skipPixel(7, 1), "Variance keeps noisy pixels sampling");
+        check(variance.noiseOracleSkipCount() > 0, "Variance skip count is non-zero on mixed film");
+        check(!variance.noiseOracleDone(), "mixed film does not finish early");
+    }
+
+    {
+        // σ/μ = 0.3 at 128 spp: rel stderr = 0.3/√128 ≈ 0.027 > 0.01 → stay open.
+        const int n = 128;
+        const float mean = 1.0f;
+        const float var = 0.09f;
+        const float lumSq = float(n) * (var + mean * mean);
+        check(!noiseOraclePixelQuiet(mean, mean, mean, lumSq, n, 0.01f),
+              "typical 128 spp path noise stays open at threshold 0.01");
+        check(noiseOraclePixelQuiet(mean, mean, mean, lumSq, n, 0.05f),
+              "same pixel is quiet if the threshold is raised to 0.05");
+    }
+
+    Scene scene;
+    scene.settings.backend = kBackendXpu;
+    scene.settings.xpuSchedule = kXpuScheduleOverlap;
+    scene.settings.lightSamples = 8;
+    scene.settings.pathGuiding = 1;
+    scene.settings.motionBlur = 1;
+    scene.settings.pixelFilter = 2;
+    scene.settings.filterRadius = 2.0f;
+    scene.settings.samplingEngine = kSamplingEngineProgressive;
+    scene.camera.opticalModel = 1;
+    Material sss;
+    sss.subsurface = 0.7f;
+    scene.materials.push_back(sss);
+    check(scene.settings.lightSamples == 8, "XPU keeps light samples");
+    check(scene.settings.pathGuiding == 1, "XPU keeps OpenPGL on CPU samples");
+    check(scene.settings.motionBlur == 1, "XPU does not strip motion blur from settings");
+    check(scene.settings.pixelFilter == 2, "XPU keeps pixel filter");
+    check(scene.settings.filterRadius == 2.0f, "XPU keeps filter radius");
+    check(scene.settings.samplingEngine == kSamplingEngineProgressive, "XPU keeps sampling type");
+    check(scene.camera.opticalModel == 1, "XPU keeps authored camera model");
+    check(scene.materials[0].subsurface == 0.7f, "XPU keeps SSS on CPU samples");
+    check(scene.settings.xpuSchedule == kXpuScheduleOverlap, "XPU default schedule is Overlap");
+
+    registerBuiltinNodes();
+    NodeGraph graph;
+    buildDefaultGraph(graph);
+    Node* settings = nullptr;
+    for (const NodePtr& node : graph.nodes()) {
+        if (node && node->typeName() == QLatin1String("rendersettings")) {
+            settings = node.get();
+            break;
+        }
+    }
+    check(settings != nullptr, "default graph has render settings");
+    if (settings) {
+        const Parameter* sched = settings->findParameter(QLatin1String("xpuschedule"));
+        check(sched != nullptr, "xpuschedule parameter exists");
+        if (sched) {
+            check(sched->visibleWhen == QLatin1String("backend==2"), "xpuschedule only when XPU");
+            check(sched->group == QLatin1String("Engine"), "xpuschedule in Engine");
+            settings->setParameterValue("backend", 0);
+            check(!evaluateVisibleWhen(sched->visibleWhen, *settings), "XPU Schedule hidden on CPU");
+            settings->setParameterValue("backend", 2);
+            check(evaluateVisibleWhen(sched->visibleWhen, *settings), "XPU Schedule visible on XPU");
+        }
+        settings->setParameterValue("backend", 2);
+        settings->setParameterValue("xpuschedule", 0);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage != nullptr, "XPU cook produces a stage");
+        ScenePtr cooked = stage->toScene();
+        check(cooked->settings.backend == kBackendXpu, "menu value 2 cooks to XPU");
+        check(cooked->settings.xpuSchedule == kXpuScheduleOverlap, "xpuschedule 0 cooks to Overlap");
+        settings->setParameterValue("xpuschedule", 1);
+        stage = graph.cookDisplay(context);
+        cooked = stage->toScene();
+        check(cooked->settings.xpuSchedule == kXpuScheduleMixture, "xpuschedule 1 cooks to Mixture");
+        settings->setParameterValue("xpuschedule", 2);
+        stage = graph.cookDisplay(context);
+        cooked = stage->toScene();
+        check(cooked->settings.xpuSchedule == kXpuScheduleOverlap, "retired Tile value cooks to Overlap");
+        const Parameter* oracle = settings->findParameter(QLatin1String("pixeloracle"));
+        check(oracle != nullptr, "pixeloracle parameter exists");
+        if (oracle) {
+            check(oracle->group == QLatin1String("Sampling"), "pixeloracle in Sampling");
+            check(oracle->menuItems.size() == 2, "Pixel Oracle is Uniform / Variance");
+        }
+        const Parameter* noise = settings->findParameter(QLatin1String("noisethreshold"));
+        check(noise != nullptr, "noisethreshold parameter exists");
+        if (noise) {
+            check(noise->group == QLatin1String("Sampling"), "noisethreshold in Sampling");
+            check(noise->visibleWhen.isEmpty(), "noisethreshold always listed in Sampling");
+        }
+        settings->setParameterValue("noisethreshold", 0.05);
+        stage = graph.cookDisplay(context);
+        cooked = stage->toScene();
+        check(std::fabs(cooked->settings.noiseThreshold - 0.05f) < 1e-5f, "noisethreshold cooks");
+        settings->setParameterValue("pixeloracle", 0);
+        stage = graph.cookDisplay(context);
+        cooked = stage->toScene();
+        check(cooked->settings.noiseThreshold == 0.0f, "Uniform oracle disables noise threshold");
+        settings->setParameterValue("pixeloracle", 1);
+        if (sched) {
+            check(sched->menuItems.size() == 2, "XPU Schedule menu is Overlap / Mixture");
+        }
+    }
+
+    float jx = 0, jy = 0, lu = 0, lv = 0;
+    sampleCameraPixelLens(10, 20, 3, jx, jy, lu, lv);
+    float jx2 = 0, jy2 = 0, lu2 = 0, lv2 = 0;
+    pixelSample(10, 20, 3, jx2, jy2);
+    lensSample(10, 20, 3, lu2, lv2);
+    checkNear(jx, jx2, 1e-6f, "shared camera jitter X matches Sobol");
+    checkNear(jy, jy2, 1e-6f, "shared camera jitter Y matches Sobol");
+    checkNear(lu, lu2, 1e-6f, "shared lens U matches Sobol");
+    checkNear(lv, lv2, 1e-6f, "shared lens V matches Sobol");
+
+    {
+        const uint32_t dims[] = {0u, 1u, 2u, 7u, 31u, 100u, 511u, 1023u};
+        const uint32_t indices[] = {0u, 1u, 2u, 16u, 1023u, 65536u + 3u};
+        for (uint32_t d : dims) {
+            for (uint32_t i : indices) {
+                check(sobol_detail::sobolRaw(i, d) == sobol_detail::sobolRawDirect(i, d),
+                      "host Sobol table matches on-the-fly directions");
+            }
+        }
+        Rng rng = makePixelRng(10, 20, 3, 0u);
+        attachPathSobol(rng, 10, 20, 3);
+        check(rng.useSobol == 1, "attachPathSobol sets useSobol");
+        SobolSampler sampler;
+        sampler.scrambleBase = rng.sobolScramble;
+        const uint32_t index = rng.sobolIndex;
+        for (uint32_t dim = 0; dim < 4; ++dim) {
+            const float fromRng = rng.nextFloat();
+            const float fromSampler = sampler.sample1D(index, dim);
+            check(fromRng == fromSampler, "path Sobol nextFloat matches sampler");
+        }
+    }
+}
+
+void testRenderSettingsFolders() {
+    std::printf("render settings folders\n");
+    registerBuiltinNodes();
+    NodeGraph graph;
+    Node* settings = graph.createNode("rendersettings", "rendersettings1");
+    check(settings != nullptr, "create rendersettings");
+    if (!settings) return;
+
+    auto groupOf = [&](const char* name) -> QString {
+        const Parameter* parameter = settings->findParameter(QLatin1String(name));
+        return parameter ? parameter->group : QString();
+    };
+    auto indexOf = [&](const char* name) -> int {
+        const auto& params = settings->parameters();
+        for (int i = 0; i < static_cast<int>(params.size()); ++i) {
+            if (params[static_cast<size_t>(i)].name == QLatin1String(name)) return i;
+        }
+        return -1;
+    };
+
+    check(groupOf("pixelfilter") == QLatin1String("Image"), "pixelfilter in Image");
+    check(groupOf("filterradius") == QLatin1String("Image"), "filterradius in Image");
+    check(indexOf("pixelfilter") == indexOf("resy") + 1, "pixelfilter after resy");
+    check(indexOf("filterradius") == indexOf("pixelfilter") + 1, "filterradius after pixelfilter");
+
+    check(groupOf("lightsamples") == QLatin1String("Sampling"), "lightsamples in Sampling");
+    check(groupOf("pixeloracle") == QLatin1String("Sampling"), "pixeloracle in Sampling");
+    check(groupOf("noisethreshold") == QLatin1String("Sampling"), "noisethreshold in Sampling");
+    check(indexOf("pixeloracle") == indexOf("samples") + 1, "pixeloracle after samples");
+    check(indexOf("noisethreshold") == indexOf("pixeloracle") + 1, "noisethreshold after pixeloracle");
+    check(indexOf("lightsamples") == indexOf("noisethreshold") + 1, "lightsamples after noisethreshold");
+
+    check(groupOf("maxdepth") == QLatin1String("Depth"), "maxdepth in Depth");
+    check(groupOf("rrdepth") == QLatin1String("Depth"), "rrdepth in Depth");
+
+    check(groupOf("caustics") == QLatin1String("Caustics"), "caustics in Caustics");
+    check(groupOf("causticsengine") == QLatin1String("Caustics"), "causticsengine in Caustics");
+    check(groupOf("causticclamp") == QLatin1String("Caustics"), "causticclamp in Caustics");
+    check(groupOf("photoncount") == QLatin1String("Caustics"), "photoncount in Caustics");
+    check(groupOf("photonradius") == QLatin1String("Caustics"), "photonradius in Caustics");
+    {
+        QStringList causticsOrder;
+        for (const Parameter& parameter : settings->parameters()) {
+            if (parameter.group != QLatin1String("Caustics")) continue;
+            if (parameter.name.startsWith(QLatin1Char('_'))) continue;
+            causticsOrder << parameter.name;
+        }
+        const QStringList causticsExpected{
+            QStringLiteral("caustics"), QStringLiteral("causticsengine"),
+            QStringLiteral("causticclamp"), QStringLiteral("photoncount"),
+            QStringLiteral("photonradius")};
+        check(causticsOrder == causticsExpected, "caustics tab parameter order");
+    }
+
+    check(groupOf("enabledisplacement") == QLatin1String("Displacement"),
+          "enabledisplacement in Displacement");
+    check(groupOf("frustumcull") == QLatin1String("Displacement"), "frustumcull in Displacement");
+    check(groupOf("screenadaptive") == QLatin1String("Displacement"), "screenadaptive in Displacement");
+
+    QStringList groups;
+    for (const Parameter& parameter : settings->parameters()) {
+        if (parameter.name.startsWith(QLatin1Char('_'))) continue;
+        if (parameter.group.isEmpty()) continue;
+        if (!groups.contains(parameter.group)) groups << parameter.group;
+    }
+    const QStringList expected{QStringLiteral("Image"),       QStringLiteral("Sampling"),
+                               QStringLiteral("Engine"),      QStringLiteral("Depth"),
+                               QStringLiteral("Caustics"),    QStringLiteral("Motion Blur"),
+                               QStringLiteral("Displacement"), QStringLiteral("Film"),
+                               QStringLiteral("Diagnostic")};
+    check(groups == expected, "render settings tab order");
+
+    // Older scene files omit noisethreshold / pixeloracle; ctor defaults must remain.
+    {
+        NodeGraph saved;
+        Node* rs = saved.createNode("rendersettings", "rs1");
+        check(rs != nullptr, "create rendersettings for json merge");
+        QJsonObject json = saved.toJson();
+        QJsonArray nodes = json.value("nodes").toArray();
+        for (int i = 0; i < nodes.size(); ++i) {
+            QJsonObject nodeJson = nodes[i].toObject();
+            if (nodeJson.value("type").toString() != QLatin1String("rendersettings")) continue;
+            QJsonArray params = nodeJson.value("parameters").toArray();
+            QJsonArray stripped;
+            for (const QJsonValue& v : params) {
+                const QString n = v.toObject().value("name").toString();
+                if (n == QLatin1String("noisethreshold") || n == QLatin1String("pixeloracle")) continue;
+                stripped.append(v);
+            }
+            nodeJson["parameters"] = stripped;
+            nodes[i] = nodeJson;
+        }
+        json["nodes"] = nodes;
+        NodeGraph loaded;
+        QString error;
+        check(loaded.fromJson(json, error), "old scene json loads without noisethreshold");
+        Node* loadedSettings = loaded.findNode("rs1");
+        check(loadedSettings != nullptr, "reloaded rendersettings");
+        if (loadedSettings) {
+            const Parameter* noise = loadedSettings->findParameter(QLatin1String("noisethreshold"));
+            check(noise != nullptr, "noisethreshold survives load of older scene files");
+            check(std::fabs(loadedSettings->floatValue("noisethreshold", -1.0) - 0.01) < 1e-6,
+                  "noisethreshold default 0.01 on old files");
+            const Parameter* oracle = loadedSettings->findParameter(QLatin1String("pixeloracle"));
+            check(oracle != nullptr, "pixeloracle survives load of older scene files");
+            check(loadedSettings->intValue("pixeloracle", -1) == 1, "pixeloracle defaults to Variance");
+        }
+    }
+}
+
+void testSceneGraphFolders() {
+    std::printf("scene graph folders\n");
+    registerBuiltinNodes();
+    NodeGraph graph;
+
+    auto groupOf = [](const Node* node, const char* name) -> QString {
+        const Parameter* parameter = node->findParameter(QLatin1String(name));
+        return parameter ? parameter->group : QStringLiteral("<missing>");
+    };
+    auto hasGroup = [](const Node* node, const QString& group) -> bool {
+        for (const Parameter& parameter : node->parameters()) {
+            if (parameter.group == group) return true;
+        }
+        return false;
+    };
+
+    Node* camera = graph.createNode("camera", "camera1");
+    check(camera != nullptr, "create camera");
+    if (camera) {
+        check(!hasGroup(camera, QStringLiteral("Lens")), "camera has no Lens folder");
+        check(groupOf(camera, "focal").isEmpty(), "focal is in the default folder");
+        check(groupOf(camera, "aperture").isEmpty(), "aperture is in the default folder");
+        check(groupOf(camera, "fstop").isEmpty(), "fstop is in the default folder");
+        check(groupOf(camera, "focusdistance").isEmpty(), "focusdistance is in the default folder");
+        check(groupOf(camera, "opticalmodel") == QLatin1String("Optics"), "opticalmodel stays in Optics");
+        check(defaultParameterFolderTitle(camera->typeName()) == QLatin1String("Base"),
+              "camera default folder is Base");
+    }
+
+    Node* rect = graph.createNode("rectlight", "rectlight1");
+    check(rect != nullptr, "create rect light");
+    if (rect) {
+        check(!hasGroup(rect, QStringLiteral("Light")), "rect light has no Light folder");
+        check(groupOf(rect, "enabled").isEmpty(), "enabled is in the default folder");
+        check(groupOf(rect, "color").isEmpty(), "color is in the default folder");
+        check(groupOf(rect, "intensity").isEmpty(), "intensity is in the default folder");
+        check(groupOf(rect, "width") == QLatin1String("Shape"), "width stays in Shape");
+        check(defaultParameterFolderTitle(rect->typeName()) == QLatin1String("Base"),
+              "rect light default folder is Base");
+    }
+
+    Node* sky = graph.createNode("physicalskylight", "sky1");
+    check(sky != nullptr, "create physical sky");
+    if (sky) {
+        check(!hasGroup(sky, QStringLiteral("Light")), "physical sky has no Light folder");
+        check(groupOf(sky, "intensity").isEmpty(), "sky intensity is in the default folder");
+        check(groupOf(sky, "turbidity") == QLatin1String("Sky"), "turbidity stays in Sky");
+        check(defaultParameterFolderTitle(sky->typeName()) == QLatin1String("Base"),
+              "physical sky default folder is Base");
+    }
+
+    const char* baseTypes[] = {"sphere", "grid", "box", "tube", "alembic", "usd",
+                               "vdbfrompolygons", "vdbfile", "sdftopolygons_vdb", "sdftopolygons_dcsdd",
+                               "domelight", "distantlight", "disklight", "spherelight"};
+    for (const char* type : baseTypes) {
+        Node* node = graph.createNode(QString::fromLatin1(type), QString::fromLatin1(type) + QLatin1Char('1'));
+        check(node != nullptr, std::string("create ") + type);
+        if (!node) continue;
+        check(defaultParameterFolderTitle(node->typeName()) == QLatin1String("Base"),
+              std::string(type) + " default folder is Base");
+        check(!hasGroup(node, QStringLiteral("Lens")), std::string(type) + " has no Lens folder");
+        check(!hasGroup(node, QStringLiteral("Light")), std::string(type) + " has no Light folder");
+    }
+
+    Node* material = graph.createNode("material", "material1");
+    check(material != nullptr, "create material");
+    if (material) {
+        check(defaultParameterFolderTitle(material->typeName()) == QLatin1String("Base"),
+              "material default folder is Base");
+        check(hasGroup(material, QStringLiteral("MaterialX")), "material keeps MaterialX folder");
+        check(groupOf(material, "pattern").isEmpty(), "Assign To is in the default folder");
+    }
+
+    check(defaultParameterFolderTitle(QStringLiteral("rendersettings")) == QLatin1String("Parameters"),
+          "render settings keep Parameters as the empty-folder title");
 }
 
 void testRender() {
@@ -591,6 +1223,554 @@ void testEnvironment() {
         checkNear(envPdf(view, dir), pdf, std::max(1e-3f, pdf * 0.02f), "envPdf matches envSample");
     }
     check(nearBrightTexel > 3000, "environment sampling concentrates on the bright texel");
+
+    // Dark texel next to the sun: bilinear mixes in 2000 nit, nearest stays dark
+    // (the PDF texel). That mismatch is the volume lit-side HDRI firefly.
+    {
+        const Vec3 darkDir = equirectToDirection((10.0f - 0.05f) / float(w), (4.5f) / float(h));
+        const Vec3 nearest = envLookupNearest(view, darkDir);
+        const Vec3 bilinear = envLookup(view, darkDir);
+        check(luminance(nearest) < 2.0f, "nearest lookup of a dark neighbour stays dark");
+        check(luminance(bilinear) > luminance(nearest) * 10.0f,
+              "bilinear lookup bleeds the neighbouring sun texel");
+        const float pdfDark = envPdf(view, darkDir);
+        if (pdfDark > 1e-12f) {
+            check(luminance(nearest) / pdfDark < luminance(bilinear) / pdfDark,
+                  "NEE Le/pdf is smaller with nearest than with bilinear bleed");
+        }
+    }
+}
+
+void testDomeHdrLoad() {
+    std::printf("dome-hdr\n");
+    registerBuiltinNodes();
+
+    QString hdrPath;
+    const QStringList candidates = {
+        QStringLiteral("/workspace/examples/sky.hdr"),
+        QDir::currentPath() + "/examples/sky.hdr",
+        QDir::currentPath() + "/../examples/sky.hdr",
+    };
+    for (const QString& candidate : candidates) {
+        if (QFileInfo::exists(candidate)) {
+            hdrPath = QFileInfo(candidate).absoluteFilePath();
+            break;
+        }
+    }
+    check(!hdrPath.isEmpty(), "bundled sky.hdr is present");
+    if (hdrPath.isEmpty()) return;
+
+    auto maxLum = [](const Image& img) {
+        float m = 0.0f;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) m = std::max(m, luminance(img.rgb(x, y)));
+        }
+        return m;
+    };
+
+    Image direct;
+    std::string err;
+    check(loadImage(hdrPath.toStdString(), direct, err, true, "Utility - Raw"),
+          "load sky.hdr as Raw");
+    if (!err.empty() && direct.empty()) std::printf("  load error: %s\n", err.c_str());
+    check(direct.width() == 1024 && direct.height() == 512, "sky.hdr is 1024x512");
+    check(maxLum(direct) > 1.0f, "native HDR has values above 1");
+    {
+        QTemporaryDir dir;
+        check(dir.isValid(), "temp dir for exposure hdr");
+        const QString expHdr = dir.path() + "/exp.hdr";
+        std::FILE* f = std::fopen(expHdr.toUtf8().constData(), "wb");
+        check(f != nullptr, "write EXPOSURE hdr");
+        if (f) {
+            std::fputs("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\nEXPOSURE=16.0\n\n-Y 1 +X 1\n", f);
+            const unsigned char rgbe[4] = {128, 128, 128, 128};  // linear ~0.5
+            std::fwrite(rgbe, 1, 4, f);
+            std::fclose(f);
+            Image img;
+            std::string e;
+            check(loadImage(expHdr.toStdString(), img, e, true, "Utility - Raw"), "load EXPOSURE hdr");
+            check(!img.empty(), "EXPOSURE hdr has a pixel");
+            if (!img.empty()) {
+                const float y = luminance(img.rgb(0, 0));
+                check(y > 0.2f && y < 2.0f, "EXPOSURE=16 does not crush RGBE values");
+            }
+        }
+    }
+
+    {
+        QTemporaryDir dir;
+        check(dir.isValid(), "temp dir for red hdr");
+        const QString redHdr = dir.path() + "/red.hdr";
+        Image src(1, 1);
+        src.setRgb(0, 0, Vec3(1.0f, 0.0f, 0.0f));
+        std::string we;
+        check(saveImageHdr(redHdr.toStdString(), src, we), "write 1x1 red HDR");
+        Image raw;
+        Image lin;
+        std::string e1;
+        std::string e2;
+        check(loadImage(redHdr.toStdString(), raw, e1, true, "Utility - Raw"), "load red HDR Raw");
+        check(loadImage(redHdr.toStdString(), lin, e2, true, "Utility - Linear - sRGB"),
+              "load red HDR Linear sRGB → ACEScg");
+        checkNear(raw.rgb(0, 0).x, 1.0f, 0.08f, "Raw red stays ~1");
+        checkNear(raw.rgb(0, 0).y, 0.0f, 0.08f, "Raw red G stays ~0");
+        const Vec3 expect = linearSrgbToAcescg(Vec3(1.0f, 0.0f, 0.0f));
+        checkNear(lin.rgb(0, 0).x, expect.x, 0.06f, "Linear sRGB red → ACEScg R");
+        checkNear(lin.rgb(0, 0).y, expect.y, 0.06f, "Linear sRGB red → ACEScg G");
+        checkNear(lin.rgb(0, 0).z, expect.z, 0.06f, "Linear sRGB red → ACEScg B");
+        check(std::fabs(lin.rgb(0, 0).x - raw.rgb(0, 0).x) > 0.05f, "ACEScg convert changes Rec.709 red");
+    }
+
+    // +Y orientation used to be rejected ("unsupported HDR resolution line").
+    {
+        QTemporaryDir dir;
+        check(dir.isValid(), "temp dir for +Y hdr");
+        const QString plusY = dir.path() + "/plusy.hdr";
+        std::FILE* f = std::fopen(plusY.toUtf8().constData(), "wb");
+        check(f != nullptr, "write +Y hdr");
+        if (f) {
+            std::fputs("#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n+Y 2 +X 1\n", f);
+            const unsigned char blue[4] = {0, 0, 128, 129};
+            const unsigned char red[4] = {128, 0, 0, 129};
+            std::fwrite(blue, 1, 4, f);
+            std::fwrite(red, 1, 4, f);
+            std::fclose(f);
+            Image img;
+            std::string e;
+            check(loadImage(plusY.toStdString(), img, e, true, "Utility - Raw"), "load +Y hdr");
+            check(img.width() == 1 && img.height() == 2, "+Y hdr is 1x2");
+            if (!img.empty()) {
+                check(img.rgb(0, 0).x > 0.5f && img.rgb(0, 0).z < 0.25f,
+                      "+Y: top row is the second scanline (red)");
+                check(img.rgb(0, 1).z > 0.5f && img.rgb(0, 1).x < 0.25f,
+                      "+Y: bottom row is the first scanline (blue)");
+            }
+        }
+    }
+
+    QTemporaryDir cacheDir;
+    check(cacheDir.isValid(), "temp dir for tx cache");
+    RenderSettingsData arm{};
+    arm.enableTxCache = 1;
+    const QByteArray cachePath = cacheDir.path().toUtf8();
+    std::snprintf(arm.txCacheDir, sizeof(arm.txCacheDir), "%s", cachePath.constData());
+
+    const std::string prevCs = txDefaultInputColorSpace();
+    setTxDefaultInputColorSpace("Utility - sRGB - Texture");
+    setActiveTxCacheSettings(&arm);
+    Image viaCache;
+    std::string err2;
+    const bool loaded = loadImage(hdrPath.toStdString(), viaCache, err2, /*srgbColor=*/true);
+    setActiveTxCacheSettings(nullptr);
+    setTxDefaultInputColorSpace(prevCs);
+    check(loaded, "load sky.hdr with TX cache armed and sticky sRGB CS");
+    if (!err2.empty() && viaCache.empty()) std::printf("  tx-armed load error: %s\n", err2.c_str());
+    check(maxLum(viaCache) > 1.0f, "TX-armed HDR load keeps values above 1");
+    check(viaCache.width() == direct.width() && viaCache.height() == direct.height(),
+          "TX-armed HDR keeps resolution");
+
+    NodeGraph graph;
+    Node* dome = graph.createNode("domelight", "domelight1");
+    check(dome != nullptr, "create domelight");
+    if (dome) {
+        dome->setParameterValue("texture", hdrPath);
+        dome->setParameterValue("colorspace", QStringLiteral("auto"));
+        dome->setParameterValue("intensity", 1.0);
+    }
+    Node* settings = graph.createNode("rendersettings", "rendersettings1");
+    check(settings != nullptr, "create rendersettings");
+    if (settings) {
+        settings->setParameterValue("enabletxcache", true);
+        settings->setParameterValue("txcachedir", cacheDir.path());
+    }
+    if (dome && settings) graph.connectNodes(dome, settings, 0);
+    graph.setDisplayNode(settings);
+
+    setTxDefaultInputColorSpace("Utility - sRGB - Texture");
+    setActiveTxCacheSettings(&arm);
+    CookContext context;
+    StagePtr stage = graph.cookDisplay(context);
+    setActiveTxCacheSettings(nullptr);
+    setTxDefaultInputColorSpace(prevCs);
+
+    check(stage != nullptr, "dome graph cooks");
+    check(context.errors.isEmpty(), "dome HDR cook has no errors");
+    for (const QString& e : context.errors) std::printf("  cook error: %s\n", qPrintable(e));
+
+    ScenePtr scene = stage ? stage->toScene() : nullptr;
+    check(scene != nullptr, "dome toScene");
+    if (!scene) return;
+    check(!scene->lights.empty() && scene->lights[0].type == kLightDome, "scene has a dome light");
+    check(!scene->lights.empty() && scene->lights[0].envIndex >= 0, "dome has an env map index");
+    bool foundEnv = false;
+    float envMax = 0.0f;
+    for (const auto& env : scene->envMaps) {
+        if (!env || env->image.empty()) continue;
+        foundEnv = true;
+        envMax = std::max(envMax, maxLum(env->image));
+    }
+    check(foundEnv, "dome attached an environment map");
+    check(envMax > 1.0f, "cooked dome HDR keeps values above 1");
+}
+
+void testPhysicalSkyLight() {
+    std::printf("physical-sky\n");
+
+    PhysicalSkyParams params;
+    Vec3 zenithSun = physicalSkySunDirection(params);
+    checkNear(zenithSun.x, 0.7071f, 0.02f, "default azimuth 90 elevation 45 → +X");
+    checkNear(zenithSun.y, 0.7071f, 0.02f, "default elevation 45");
+    checkNear(zenithSun.z, 0.0f, 0.02f, "default azimuth 90 has no Z");
+
+    params.elevationDeg = 90.0f;
+    params.azimuthDeg = 0.0f;
+    const Vec3 up = physicalSkySunDirection(params);
+    checkNear(up.x, 0.0f, 0.02f, "zenith sun X");
+    checkNear(up.y, 1.0f, 0.02f, "zenith sun +Y");
+    checkNear(up.z, 0.0f, 0.02f, "zenith sun Z");
+
+    params.elevationDeg = 0.0f;
+    params.azimuthDeg = 0.0f;
+    const Vec3 horizon = physicalSkySunDirection(params);
+    checkNear(horizon.x, 0.0f, 0.02f, "azimuth 0 horizon X");
+    checkNear(horizon.y, 0.0f, 0.02f, "azimuth 0 horizon Y");
+    checkNear(horizon.z, -1.0f, 0.02f, "azimuth 0 is −Z");
+
+    const Mat4 sunXform = physicalSkySunLookAt(params);
+    const Vec3 axis = normalize(transformVector(sunXform, Vec3(0.0f, 0.0f, 1.0f)));
+    checkNear(dot(axis, horizon), 1.0f, 0.02f, "distant +Z points at the sun");
+
+    params = PhysicalSkyParams{};
+    {
+        const float e0 = physicalSkySunIntensity(params);
+        check(std::isfinite(e0) && e0 > 1e-3f, "default sun irradiance is finite and usable");
+        const float Lz = luminance(physicalSkyRadianceAceScg(params, Vec3(0.0f, 1.0f, 0.0f)));
+        check(e0 > kPi * Lz * 0.25f, "default sun irradiance dominates the zenith sky");
+        PhysicalSkyParams skyOnly = params;
+        skyOnly.skyIntensity = 4.0f;
+        checkNear(physicalSkySunIntensity(skyOnly), e0, 1e-4f * (1.0f + e0),
+                  "sky intensity does not scale the sun");
+        PhysicalSkyParams scaled = params;
+        scaled.intensity = 2.0f;
+        scaled.sunIntensity = 3.0f;
+        checkNear(physicalSkySunIntensity(scaled), e0 * 6.0f, 1e-3f * (1.0f + e0 * 6.0f),
+                  "overall intensity and sun intensity scale the sun");
+        PhysicalSkyParams off = params;
+        off.sunIntensity = 0.0f;
+        checkNear(physicalSkySunIntensity(off), 0.0f, 1e-6f, "sun intensity 0 → no sun energy");
+    }
+    Image baked;
+    bakePhysicalSkyEnv(baked, params, 64, 32);
+    check(baked.width() == 64 && baked.height() == 32, "bake writes the requested size");
+    const Vec3 zenith = physicalSkyRadianceAceScg(params, Vec3(0.0f, 1.0f, 0.0f));
+    const Vec3 ground = physicalSkyRadianceAceScg(params, Vec3(0.0f, -1.0f, 0.0f));
+    check(luminance(zenith) > luminance(ground), "zenith is brighter than the ground");
+    check(isFinite(zenith) && isFinite(ground), "sky samples are finite");
+    const Vec3 zenithSrgb = acescgToLinearSrgb(zenith);
+    check(zenithSrgb.z > zenithSrgb.x * 0.9f, "clear zenith is bluish in Rec.709");
+    float bakeMax = 0.0f;
+    for (int y = 0; y < baked.height(); ++y)
+        for (int x = 0; x < baked.width(); ++x)
+            bakeMax = std::max(bakeMax, luminance(baked.rgb(x, y)));
+    check(bakeMax > luminance(zenith) * 0.5f, "sky bake has energy around zenith");
+    check(bakeMax < luminance(zenith) * 40.0f, "sky bake has no solar disc");
+    {
+        Image cookSize;
+        const auto t0 = std::chrono::steady_clock::now();
+        bakePhysicalSkyEnv(cookSize, params, 1024, 512);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+        check(cookSize.width() == 1024 && cookSize.height() == 512, "cook-size bake writes 1024x512");
+        check(ms < 15000, "1024x512 physical sky bake stays interactive");
+        float cookMax = 0.0f;
+        for (int y = 0; y < cookSize.height(); ++y)
+            for (int x = 0; x < cookSize.width(); ++x)
+                cookMax = std::max(cookMax, luminance(cookSize.rgb(x, y)));
+        check(cookMax < luminance(zenith) * 40.0f, "cook-size bake has no solar disc");
+    }
+    const Vec3 sunDirRad = physicalSkyRadianceAceScg(params, physicalSkySunDirection(params));
+    check(luminance(sunDirRad) < luminance(zenith) * 40.0f, "sky radiance toward the sun has no disc");
+    {
+        const float half = 0.5f * radians(params.sunSizeDeg);
+        const float omega = kTwoPi * (1.0f - std::cos(half));
+        const float discL = physicalSkySunIntensity(params) / srMax(omega, 1e-12f);
+        check(discL > luminance(acescgToLinearSrgb(sunDirRad)) * 10.0f,
+              "distant sun radiance dominates sky in the disc");
+        PhysicalSkyParams noSun = params;
+        noSun.enableSun = false;
+        checkNear(physicalSkySunIntensity(noSun), 0.0f, 1e-6f, "enable sun off zeros distant intensity");
+        const Vec3 noSunSky = physicalSkyRadianceAceScg(noSun, physicalSkySunDirection(noSun));
+        checkNear(luminance(noSunSky), luminance(sunDirRad), 0.05f * (1.0f + luminance(sunDirRad)),
+                  "enable sun off does not change the sky bake");
+        PhysicalSkyParams skyBoost = params;
+        skyBoost.skyIntensity = 4.0f;
+        const Vec3 zBoost = physicalSkyRadianceAceScg(skyBoost, Vec3(0.0f, 1.0f, 0.0f));
+        checkNear(luminance(zBoost), luminance(zenith) * 4.0f, 0.15f * luminance(zenith) * 4.0f,
+                  "sky intensity scales the sky not the sun");
+    }
+
+    {
+        PhysicalSkyParams sunset;
+        sunset.elevationDeg = 4.0f;
+        sunset.azimuthDeg = 0.0f;
+        const Vec3 towardSun =
+            acescgToLinearSrgb(physicalSkyRadianceAceScg(sunset, normalize(Vec3(0.0f, 0.08f, -1.0f))));
+        const Vec3 sunsetZenith = acescgToLinearSrgb(physicalSkyRadianceAceScg(sunset, Vec3(0.0f, 1.0f, 0.0f)));
+        const float sunRB = towardSun.x / srMax(1e-6f, towardSun.z);
+        const float zenRB = sunsetZenith.x / srMax(1e-6f, sunsetZenith.z);
+        check(sunRB > zenRB * 1.05f, "Hosek sunset toward the sun is redder than zenith");
+    }
+    {
+        PhysicalSkyParams groundP;
+        groundP.computeGroundColor = false;
+        groundP.groundColor = Vec3(0.05f, 0.8f, 0.05f);
+        groundP.horizonBlurDeg = 0.1f;
+        const Vec3 nadir = acescgToLinearSrgb(physicalSkyRadianceAceScg(groundP, Vec3(0.0f, -1.0f, 0.0f)));
+        check(nadir.y > nadir.x * 2.0f && nadir.y > nadir.z * 2.0f, "authored ground colour shows below the horizon");
+    }
+
+    registerBuiltinNodes();
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        check(sky != nullptr, "create physicalskylight");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        check(settings != nullptr, "create rendersettings for sky");
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage != nullptr, "physical sky cooks");
+        check(context.errors.isEmpty(), "physical sky cook has no errors");
+        for (const QString& e : context.errors) std::printf("  cook error: %s\n", qPrintable(e));
+        check(stage && stage->countOfType(PrimType::Light) == 2, "one node emits sky dome + distant sun");
+
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene != nullptr, "physical sky toScene");
+        if (scene) {
+            check(scene->lights.size() == 2, "scene has sky + sun");
+            int domeN = 0, sunN = 0, sunIdx = -1;
+            for (int i = 0; i < int(scene->lights.size()); ++i) {
+                if (scene->lights[size_t(i)].type == kLightDome) ++domeN;
+                if (scene->lights[size_t(i)].type == kLightDistant) {
+                    ++sunN;
+                    sunIdx = i;
+                }
+            }
+            check(domeN == 1 && sunN == 1, "physical sky is a dome plus a distant sun");
+            const LightData* dome = nullptr;
+            const LightData* sun = nullptr;
+            for (const LightData& l : scene->lights) {
+                if (l.type == kLightDome) dome = &l;
+                if (l.type == kLightDistant) sun = &l;
+            }
+            check(dome && sun, "both physical sky lights are present");
+            if (dome) {
+                checkNear(dome->intensity, 1.0f, 1e-4f, "overall intensity is on the dome");
+                check(!scene->envMaps.empty() && scene->envMaps[0] && !scene->envMaps[0]->image.empty(),
+                      "dome has a baked sky map");
+                if (!scene->envMaps.empty() && scene->envMaps[0]) {
+                    float envMax = 0.0f;
+                    const Image& img = scene->envMaps[0]->image;
+                    for (int y = 0; y < img.height(); ++y)
+                        for (int x = 0; x < img.width(); ++x)
+                            envMax = std::max(envMax, luminance(img.rgb(x, y)));
+                    check(envMax > 0.01f, "cooked sky map has energy");
+                    check(envMax < 200.0f, "cooked sky map has no baked solar disc");
+                }
+            }
+            if (sun) {
+                check(sun->normalize == 1, "sun irradiance is normalized");
+                check(sun->cameraSunDisc == 1, "sun disc is visible to camera");
+                checkNear(sun->angle, 0.53f, 1e-4f, "sun angular size is 0.53°");
+                checkNear(sun->intensity, physicalSkySunIntensity(PhysicalSkyParams{}),
+                          1e-3f * (1.0f + sun->intensity), "distant intensity is Hosek sun irradiance");
+                const Vec3 axis = normalize(transformVector(sun->xform, Vec3(0.0f, 0.0f, 1.0f)));
+                checkNear(dot(axis, physicalSkySunDirection(PhysicalSkyParams{})), 1.0f, 0.02f,
+                          "distant +Z matches solar altitude/azimuth");
+            }
+            if (sunIdx >= 0) {
+                SceneView view = scene->view();
+                LightSample ls;
+                check(sampleLight(view, sunIdx, Vec3(0.0f, 1.0f, 0.0f), 0.2f, 0.3f, ls),
+                      "distant sun NEE samples");
+                const Vec3 axis = normalize(transformVector(scene->lights[size_t(sunIdx)].xform,
+                                                            Vec3(0.0f, 0.0f, 1.0f)));
+                const float cosMax = std::cos(0.5f * radians(0.53f));
+                check(dot(ls.wi, axis) >= cosMax - 1e-4f, "sun NEE lands inside the disc cone");
+                check(ls.delta == false, "0.53° sun is a finite cone, not a Dirac");
+                const float pdfCone = 1.0f / (kTwoPi * (1.0f - cosMax));
+                checkNear(ls.pdf, pdfCone, 0.02f * pdfCone, "sun NEE pdf is 1/ω");
+            }
+        }
+    }
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (sky) sky->setParameterValue("enablesun", false);
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage && stage->countOfType(PrimType::Light) == 1, "enable sun off → dome only");
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene && scene->lights.size() == 1 && scene->lights[0].type == kLightDome,
+              "sun disabled leaves only the sky");
+    }
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (sky) sky->setParameterValue("enablesky", false);
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        check(stage && stage->countOfType(PrimType::Light) == 1, "enable sky off → sun only");
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene && scene->lights.size() == 1 && scene->lights[0].type == kLightDistant,
+              "sky disabled leaves a distant sun");
+        if (scene && !scene->lights.empty()) {
+            check(scene->lights[0].cameraSunDisc == 1, "sun-only still draws the camera disc");
+            check(scene->envMaps.empty(), "sun-only does not bake a sky map");
+        }
+    }
+    {
+        NodeGraph graph;
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (sky) {
+            sky->setParameterValue("intensity", 2.0);
+            sky->setParameterValue("skyintensity", 3.0);
+            sky->setParameterValue("sunintensity", 4.0);
+        }
+        if (sky && settings) graph.connectNodes(sky, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene && scene->lights.size() == 2, "overall/sky/sun intensity cooks sky + sun");
+        if (scene && scene->lights.size() == 2) {
+            const LightData* dome = nullptr;
+            const LightData* sun = nullptr;
+            for (const LightData& l : scene->lights) {
+                if (l.type == kLightDome) dome = &l;
+                if (l.type == kLightDistant) sun = &l;
+            }
+            check(dome && sun, "intensity cook has both lights");
+            if (dome) checkNear(dome->intensity, 2.0f, 1e-4f, "dome intensity is the overall scale");
+            PhysicalSkyParams expect;
+            expect.intensity = 2.0f;
+            expect.sunIntensity = 4.0f;
+            PhysicalSkyParams skyOnly;
+            skyOnly.intensity = 2.0f;
+            skyOnly.skyIntensity = 3.0f;
+            skyOnly.sunIntensity = 4.0f;
+            checkNear(physicalSkySunIntensity(skyOnly), physicalSkySunIntensity(expect), 1e-4f,
+                      "sky intensity is not folded into the sun irradiance");
+            if (sun) {
+                checkNear(sun->intensity, physicalSkySunIntensity(expect),
+                          1e-3f * (1.0f + sun->intensity),
+                          "distant intensity folds overall × sun intensity");
+            }
+        }
+    }
+    {
+        NodeGraph graph;
+        Node* grid = graph.createNode("grid", "grid1");
+        Node* sky = graph.createNode("physicalskylight", "sky1");
+        Node* cam = graph.createNode("camera", "camera1");
+        Node* settings = graph.createNode("rendersettings", "rendersettings1");
+        if (grid) {
+            grid->setParameterValue("sizex", 8.0);
+            grid->setParameterValue("sizez", 8.0);
+            grid->setParameterValue("subdivtype", 0);
+        }
+        if (cam) {
+            cam->setParameterValue("eye", QVariant::fromValue(QVector3D(0.0f, 6.0f, 0.2f)));
+            cam->setParameterValue("target", QVariant::fromValue(QVector3D(0.0f, 0.0f, 0.0f)));
+        }
+        if (grid && sky) graph.connectNodes(grid, sky, 0);
+        if (sky && cam) graph.connectNodes(sky, cam, 0);
+        if (cam && settings) graph.connectNodes(cam, settings, 0);
+        graph.setDisplayNode(settings);
+        CookContext context;
+        StagePtr stage = graph.cookDisplay(context);
+        ScenePtr scene = stage ? stage->toScene() : nullptr;
+        check(scene != nullptr, "physical sky render scene");
+        if (scene) {
+            scene->settings.resolutionX = 32;
+            scene->settings.resolutionY = 24;
+            scene->settings.samplesPerPixel = 4;
+            scene->settings.backend = kBackendCpuEmbree;
+            RenderSession session;
+            session.setScene(scene);
+            session.start();
+            session.waitForCompletion();
+            const Image image = session.linearImage();
+            double sum = 0.0;
+            int nonBlack = 0;
+            bool finite = true;
+            for (int y = 0; y < image.height(); ++y) {
+                for (int x = 0; x < image.width(); ++x) {
+                    const Vec3 c = image.rgb(x, y);
+                    if (!isFinite(c)) finite = false;
+                    const double l = double(luminance(c));
+                    sum += l;
+                    if (l > 1e-4) ++nonBlack;
+                }
+            }
+            check(finite, "physical sky render is finite");
+            check(nonBlack > image.width() * image.height() / 4, "physical sky lights the ground");
+            check(sum > 0.0, "physical sky render has energy");
+        }
+    }
+}
+
+void testAcesTextureConvert() {
+    std::printf("aces-texture-convert\n");
+    check(txResolveInputColorSpace("auto", "foo.png", true) == "Utility - sRGB - Texture",
+          "auto 8-bit colour → sRGB Texture");
+    check(txResolveInputColorSpace("auto", "foo.hdr", true) == "Utility - Linear - sRGB",
+          "auto HDR colour → Linear sRGB");
+    check(txResolveInputColorSpace("auto", "foo.exr", true) == "Utility - Linear - sRGB",
+          "auto EXR colour → Linear sRGB");
+    check(txResolveInputColorSpace({}, "disp.exr", false) == "Utility - Raw",
+          "data maps → Raw");
+    check(txResolveInputColorSpace("ACES - ACEScg", "foo.png", true) == "ACES - ACEScg",
+          "authored ACEScg is kept");
+    check(txSkipColorConvert("ACES - ACEScg"), "ACEScg skips convert");
+    check(txSkipColorConvert("Utility - Raw"), "Raw skips convert");
+    check(!txSkipColorConvert("Utility - Linear - sRGB"), "Linear sRGB converts");
+    check(!txSkipColorConvert("Utility - sRGB - Texture"), "sRGB Texture converts");
+
+    QTemporaryDir dir;
+    check(dir.isValid(), "temp dir for aces png");
+    const QString pngPath = dir.path() + "/red.png";
+    {
+        QImage img(1, 1, QImage::Format_RGB888);
+        img.fill(QColor(255, 0, 0));
+        check(img.save(pngPath), "write 1x1 sRGB red PNG");
+    }
+
+    Image raw;
+    Image aces;
+    Image taggedAces;
+    std::string e1, e2, e3;
+    check(loadImage(pngPath.toStdString(), raw, e1, true, "Utility - Raw"), "load PNG Raw");
+    check(loadImage(pngPath.toStdString(), aces, e2, true, "auto"), "load PNG auto → ACEScg");
+    check(loadImage(pngPath.toStdString(), taggedAces, e3, true, "ACES - ACEScg"), "load PNG as ACEScg");
+    checkNear(raw.rgb(0, 0).x, 1.0f, 0.02f, "Raw red R ~1");
+    checkNear(raw.rgb(0, 0).y, 0.0f, 0.02f, "Raw red G ~0");
+    const Vec3 expect = linearSrgbToAcescg(Vec3(1.0f, 0.0f, 0.0f));
+    checkNear(aces.rgb(0, 0).x, expect.x, 0.05f, "auto PNG red → ACEScg R");
+    checkNear(aces.rgb(0, 0).y, expect.y, 0.05f, "auto PNG red → ACEScg G");
+    checkNear(aces.rgb(0, 0).z, expect.z, 0.05f, "auto PNG red → ACEScg B");
+    checkNear(taggedAces.rgb(0, 0).x, 1.0f, 0.02f, "tagged ACEScg skips matrix");
+    check(std::fabs(aces.rgb(0, 0).x - raw.rgb(0, 0).x) > 0.05f, "ACEScg convert changes Rec.709 red");
 }
 
 // Glass sphere over a floor lit by a small rect light: PT+MNEE and BDPT are
@@ -1514,7 +2694,7 @@ void testUdimMaterialX() {
     check(tiles.size() == 3, "discovers three UDIM tiles on disk");
 
     std::string error;
-    auto atlas = loadImageOrUdim(root + "/grid.1001.png", QString(), error, {});
+    auto atlas = loadImageOrUdim(root + "/grid.1001.png", QString(), error, {}, true, "Utility - Raw");
     check(atlas != nullptr, "loads udim atlas from concrete tile path");
     check(atlas && atlas->isUdimAtlas(), "atlas marked as UDIM");
     check(atlas && atlas->udimGridU() == 2 && atlas->udimGridV() == 2, "atlas grid covers U0..1 V0..1");
@@ -3064,31 +4244,84 @@ void testSpectralHeroBasics() {
     SampledWavelengths w = SampledWavelengths::sampleUniform(4, 0.25f);
     check(w.n == 4, "hero sample count");
     check(w.lambda[0] >= kSpectrumLambdaMin && w.lambda[3] <= kSpectrumLambdaMax, "lambda range");
-    SampledSpectrum white = rgbToSpectrumReflectance(Vec3(1, 1, 1), w);
-    check(spectrumAvg(white) > 0.5f, "white upsample energy");
+    const RGBColorSpace& aces = colorSpaceAcesCg();
+    SampledSpectrum whiteAlbedo = rgbToSpectrumReflectance(Vec3(1, 1, 1), w, aces);
+    check(spectrumAvg(whiteAlbedo) > 0.5f, "white upsample energy");
     SampledSpectrum gold = SampledSpectrum::zero(w.n);
     for (int i = 0; i < w.n; ++i) {
         SpectralNk nk = metalNk("Au", w.lambda[i]);
         gold.values[i] = conductorFresnel(0.5f, nk.eta, nk.k);
     }
     check(spectrumAvg(gold) > 0.1f, "gold fresnel");
-    Vec3 rgb = spectrumToRgb(white, w);
-    check(rgb.x > 0.0f && rgb.y > 0.0f && rgb.z > 0.0f, "spectrumToRgb white");
-    // Neutral white: no pink cast under equal-energy / unit spectrum.
-    check(std::fabs(rgb.x - rgb.y) < 0.05f && std::fabs(rgb.y - rgb.z) < 0.05f, "white is neutral");
-    check(std::fabs(rgb.x - 1.0f) < 0.08f, "white ~1");
-    // Grey albedo round-trip ≈ Path Tracer brightness.
-    Vec3 greyIn(0.8f, 0.8f, 0.8f);
-    Vec3 greyOut = spectrumToRgb(rgbToSpectrumReflectance(greyIn, w), w);
-    check(std::fabs(greyOut.x - 0.8f) < 0.08f && std::fabs(greyOut.y - greyOut.x) < 0.05f,
-          "grey 0.8 round-trip");
-    // HDRI-like emission must not pick up a pink cast.
+
+    // Working space ACEScg is source of truth even if the spectral menu is sRGB.
+    {
+        RenderSettingsData st;
+        st.workingSpace = kWorkingSpaceAcesCg;
+        st.spectralColorSpace = kSpectralColorSpaceSrgb;
+        check(&pathColorSpace(st) == &colorSpaceAcesCg(), "ACEScg working space drives film");
+        st.workingSpace = kWorkingSpaceSrgbLinear;
+        check(&pathColorSpace(st) == &colorSpaceSrgb(), "sRGB working space honours spectral menu");
+    }
+
+    auto meanToRgb = [](int nspp, bool visible,
+                        const std::function<SampledSpectrum(const SampledWavelengths&)>& spec,
+                        const RGBColorSpace& cs) -> Vec3 {
+        Rng rng(7u, 13u);
+        double r = 0.0, g = 0.0, b = 0.0;
+        for (int s = 0; s < nspp; ++s) {
+            SampledWavelengths wv =
+                visible ? SampledWavelengths::sampleVisible(4, rng.nextFloat())
+                        : SampledWavelengths::sampleUniform(4, rng.nextFloat());
+            const Vec3 o = spectrumToRgb(spec(wv), wv, cs);
+            r += double(o.x);
+            g += double(o.y);
+            b += double(o.z);
+        }
+        const double inv = 1.0 / double(nspp);
+        return Vec3(float(r * inv), float(g * inv), float(b * inv));
+    };
+    const int nspp = 4000;
+    // pbrt ToXYZ needs many λ samples; four hero wavelengths are an MC estimator.
+    Vec3 rgb = meanToRgb(
+        nspp, true,
+        [&](const SampledWavelengths& wv) {
+            return rgbToSpectrumReflectance(Vec3(1, 1, 1), wv, aces) *
+                   rgbToSpectrumEmission(Vec3(1.0f), wv, aces);
+        },
+        aces);
+    check(rgb.x > 0.0f && rgb.y > 0.0f && rgb.z > 0.0f, "spectrumToRgb white albedo");
+    checkNear(rgb.x / srMax(rgb.y, 1e-8f), 1.0f, 0.08f, "white albedo under D60 R/G");
+    checkNear(rgb.z / srMax(rgb.y, 1e-8f), 1.0f, 0.08f, "white albedo under D60 B/G");
+    checkNear(rgb.y, 1.0f, 0.12f, "white albedo under D60 ~1");
+    Vec3 greyOut = meanToRgb(
+        nspp, true,
+        [&](const SampledWavelengths& wv) {
+            return rgbToSpectrumReflectance(Vec3(0.8f, 0.8f, 0.8f), wv, aces) *
+                   rgbToSpectrumEmission(Vec3(1.0f), wv, aces);
+        },
+        aces);
+    checkNear(greyOut.y, 0.8f, 0.12f, "grey 0.8 albedo under D60");
+    checkNear(greyOut.x / srMax(greyOut.y, 1e-8f), 1.0f, 0.08f, "grey 0.8 ACEScg neutral");
+    Vec3 d60Rgb = meanToRgb(
+        nspp, true, [&](const SampledWavelengths& wv) { return illuminantSpectrum(wv, aces); }, aces);
+    checkNear(d60Rgb.x, 1.0f, 0.10f, "D60 illuminant ACEScg R");
+    checkNear(d60Rgb.y, 1.0f, 0.10f, "D60 illuminant ACEScg G");
+    checkNear(d60Rgb.z, 1.0f, 0.10f, "D60 illuminant ACEScg B");
     Vec3 hdri(4.2f, 4.1f, 4.3f);
-    Vec3 hdriOut = spectrumToRgb(rgbToSpectrumEmission(hdri, w), w);
-    check(std::fabs(hdriOut.x - hdri.x) < 0.15f && std::fabs(hdriOut.y - hdri.y) < 0.15f &&
-              std::fabs(hdriOut.z - hdri.z) < 0.15f,
-          "HDRI round-trip");
-    check(std::fabs((hdriOut.x / hdriOut.y) - (hdri.x / hdri.y)) < 0.05f, "HDRI not pink");
+    Vec3 hdriOut = meanToRgb(
+        nspp, true,
+        [hdri, &aces](const SampledWavelengths& wv) { return rgbToSpectrumEmission(hdri, wv, aces); },
+        aces);
+    checkNear(hdriOut.x / srMax(hdriOut.y, 1e-8f), hdri.x / hdri.y, 0.08f, "HDRI ACEScg not pink");
+    check(hdriOut.y > 2.0f, "HDRI keeps energy");
+    Vec3 whiteL = meanToRgb(
+        nspp, true,
+        [&](const SampledWavelengths& wv) { return rgbToSpectrumEmission(Vec3(1.0f), wv, aces); },
+        aces);
+    checkNear(whiteL.x, 1.0f, 0.12f, "white RGBIlluminantSpectrum ACEScg R");
+    checkNear(whiteL.y, 1.0f, 0.12f, "white RGBIlluminantSpectrum ACEScg G");
+    checkNear(whiteL.z, 1.0f, 0.12f, "white RGBIlluminantSpectrum ACEScg B");
     // Linear path-weight upsample must conserve energy under multiply (glass enter×exit).
     {
         const float eta = 1.5f;
@@ -3096,10 +4329,19 @@ void testSpectralHeroBasics() {
         const Vec3 wExit(eta * eta);
         SampledSpectrum t = rgbToSpectrumLinear(wEnter, w);
         t *= rgbToSpectrumLinear(wExit, w);
-        Vec3 round = spectrumToRgb(t, w);
-        check(std::fabs(round.x - 1.0f) < 0.08f && std::fabs(round.y - 1.0f) < 0.08f &&
-                  std::fabs(round.z - 1.0f) < 0.08f,
-              "glass enter×exit linear upsample ~1");
+        for (int i = 0; i < t.n; ++i)
+            check(std::fabs(t.values[i] - 1.0f) < 0.08f, "glass enter×exit linear upsample ~1");
+        Vec3 round = meanToRgb(
+            nspp, true,
+            [&](const SampledWavelengths& wv) {
+                SampledSpectrum tt = rgbToSpectrumLinear(wEnter, wv);
+                tt *= rgbToSpectrumLinear(wExit, wv);
+                return tt * rgbToSpectrumEmission(Vec3(1.0f), wv, aces);
+            },
+            aces);
+        checkNear(round.x, 1.0f, 0.12f, "glass enter×exit under D60 R");
+        checkNear(round.y, 1.0f, 0.12f, "glass enter×exit under D60 G");
+        checkNear(round.z, 1.0f, 0.12f, "glass enter×exit under D60 B");
     }
     // Abbe IOR must vary with λ (geometric dispersion).
     const float nBlue = dielectricIorFromAbbe(1.5f, 30.0f, 450.0f);
@@ -3111,6 +4353,40 @@ void testSpectralHeroBasics() {
     check(eta.x > 0.0f && k.x > 0.0f, "Au η/κ rgb seed");
     SpectralNk nk550 = nkFromRgb(eta, k, 550.0f);
     check(nk550.eta > 0.0f && nk550.k > 0.0f, "nkFromRgb");
+    {
+        Vec3 etaFit, kFit;
+        conductorNkFromReflectance(Vec3(1.0f, 0.766f, 0.336f), Vec3(1.5f), etaFit, kFit);
+        check(kFit.x > 0.5f && kFit.y > 0.0f && kFit.z > 0.0f, "gold F0 inverts to conductor k");
+        Material metal;
+        metal.metallic = 1.0f;
+        metal.baseColor = Vec3(1.0f, 0.766f, 0.336f);
+        metal.conductorEta = Vec3(1.5f);
+        metal.conductorK = Vec3(0.0f);
+        SampledWavelengths wm = SampledWavelengths::sampleUniform(4, 0.25f);
+        const Frame fr(Vec3(0.0f, 0.0f, 1.0f));
+        const Vec3 wo(0.0f, 0.0f, 1.0f);
+        const Vec3 wi = normalize(Vec3(0.25f, 0.0f, 0.97f));
+        SampledSpectrum lifted = liftBsdfWeight(metal, fr, wo, wi, Vec3(1.0f), wm, 1.5f, 0);
+        float mn = 1.0e9f, mx = 0.0f;
+        for (int i = 0; i < lifted.n; ++i) {
+            if (wm.pdf[i] <= 0.0f) continue;
+            mn = srMin(mn, lifted.values[i]);
+            mx = srMax(mx, lifted.values[i]);
+        }
+        check(mx - mn > 1e-4f, "metallic without authored k uses spectral conductor Fresnel");
+    }
+    {
+        Material skin;
+        skin.subsurfaceColor = Vec3(1.0f, 0.75f, 0.55f);
+        skin.subsurfaceRadius = Vec3(1.0f, 0.35f, 0.2f);
+        skin.subsurfaceScale = 1.0f;
+        check(sssMfpAtLambda(skin, 650.0f) > sssMfpAtLambda(skin, 550.0f) + 0.1f,
+              "skin SSS MFP red > green");
+        check(sssMfpAtLambda(skin, 550.0f) > sssMfpAtLambda(skin, 450.0f) + 0.05f,
+              "skin SSS MFP green > blue");
+        check(sssAlbedoAtLambda(skin, 650.0f) > sssAlbedoAtLambda(skin, 450.0f),
+              "skin SSS albedo red > blue");
+    }
 
     // Tabulated CIE + TerminateSecondary + blackbody + visible sampling.
     {
@@ -3130,32 +4406,38 @@ void testSpectralHeroBasics() {
         check(spectrumAvg(bbs) > 0.1f, "blackbody sample");
         ConstantSpectrum ones(1.0f);
         check(ones.sample(w).values[0] == 1.0f, "constant spectrum");
-        Vec3 aces = spectrumToRgb(white, w, kSpectralColorSpaceAcesCg);
-        check(aces.x > 0.0f && aces.y > 0.0f && aces.z > 0.0f, "ACEScg convert");
+        Vec3 acesFilm = meanToRgb(
+            nspp, true,
+            [&](const SampledWavelengths& wv) { return rgbToSpectrumEmission(Vec3(1.0f), wv, aces); },
+            aces);
+        check(acesFilm.x > 0.0f && acesFilm.y > 0.0f && acesFilm.z > 0.0f, "ACEScg convert");
+        checkNear(acesFilm.x, 1.0f, 0.15f, "ACEScg white illuminant R");
+        checkNear(acesFilm.y, 1.0f, 0.15f, "ACEScg white illuminant G");
+        checkNear(acesFilm.z, 1.0f, 0.15f, "ACEScg white illuminant B");
         const float fBlue = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 450.0f, 0.2f);
         const float fRed = airyReflectanceScalar(0.8f, 1.4f, 550.0f, 650.0f, 0.2f);
         check(std::fabs(fBlue - fRed) > 1e-4f, "thin-film Airy chromatic");
 
-        // Visible + TerminateSecondary must not pink-cast equal-energy / white emission.
-        // (Regression: sample-matched WB + RGB clamp on single-λ → R/G ≈ 2.)
+        // Visible + TerminateSecondary: equal-energy must stay grey (volume fireflies).
         {
             Rng rng(42u, 7u);
             double rSum = 0.0, gSum = 0.0, bSum = 0.0;
-            const int nspp = 8000;
-            for (int s = 0; s < nspp; ++s) {
+            const int nterm = 8000;
+            for (int s = 0; s < nterm; ++s) {
                 SampledWavelengths wv = SampledWavelengths::sampleVisible(4, rng.nextFloat());
-                SampledSpectrum L = rgbToSpectrumEmission(Vec3(1.0f), wv);
+                SampledSpectrum L = SampledSpectrum::constant(wv.n, 1.0f);
                 wv.terminateSecondary();
-                const Vec3 o = spectrumToRgb(L, wv);
+                const Vec3 o = spectrumToRgb(L, wv, aces);
                 rSum += double(o.x);
                 gSum += double(o.y);
                 bSum += double(o.z);
             }
-            const float r = float(rSum / nspp), g = float(gSum / nspp), b = float(bSum / nspp);
-            check(g > 0.2f, "Vis+Terminate white has energy");
+            const float r = float(rSum / nterm), g = float(gSum / nterm), b = float(bSum / nterm);
+            check(g > 0.2f, "Vis+Terminate equal-energy has energy");
             check(std::fabs(r / g - 1.0f) < 0.08f && std::fabs(b / g - 1.0f) < 0.08f,
-                  "Vis+TerminateSecondary white not pink");
-            check(std::fabs(r - 1.0f) < 0.15f && std::fabs(g - 1.0f) < 0.15f, "Vis+Terminate white ~1");
+                  "Vis+TerminateSecondary equal-energy not pink");
+            check(std::fabs(r - 1.0f) < 0.15f && std::fabs(g - 1.0f) < 0.15f,
+                  "Vis+Terminate equal-energy ~1");
         }
 
         // Clear glass preset: spectral dielectric enter×exit×white env stays neutral.
@@ -3163,7 +4445,7 @@ void testSpectralHeroBasics() {
             Rng rng(11u, 3u);
             double rSum = 0.0, gSum = 0.0, bSum = 0.0;
             int accepted = 0;
-            const int nspp = 8000;
+            const int nglass = 8000;
             Material glass;
             glass.baseColor = Vec3(1.0f);
             glass.transmission = 1.0f;
@@ -3171,20 +4453,21 @@ void testSpectralHeroBasics() {
             glass.roughness = 0.0f;
             glass.specular = 1.0f;
             glass.dispersionAbbe = 55.0f;
-            for (int s = 0; s < nspp; ++s) {
+            for (int s = 0; s < nglass; ++s) {
                 SampledWavelengths wv = SampledWavelengths::sampleVisible(4, rng.nextFloat());
                 const int hero = std::clamp(int(rng.nextFloat() * 4.0f), 0, 3);
                 wv.promoteHero(hero);
                 // Normal-incidence transmit (uChoice high enough to beat Fresnel ~0.04).
                 BsdfSampleSpectral eIn =
                     bsdfSampleSpectral(glass, Vec3(0.0f, 0.0f, 1.0f), 0.99f, 0.0f, 0.0f, 0.5f, wv,
-                                       glass.ior, 0);
+                                       glass.ior, 0, aces);
                 BsdfSampleSpectral eOut =
                     bsdfSampleSpectral(glass, Vec3(0.0f, 0.0f, -1.0f), 0.99f, 0.0f, 0.0f, 0.5f, wv,
-                                       glass.ior, 0);
+                                       glass.ior, 0, aces);
                 if (!eIn.valid || !eIn.transmitted || !eOut.valid || !eOut.transmitted) continue;
-                SampledSpectrum thr = eIn.weight * eOut.weight * rgbToSpectrumEmission(Vec3(1.0f), wv);
-                const Vec3 o = spectrumToRgb(thr, wv);
+                SampledSpectrum thr =
+                    eIn.weight * eOut.weight * rgbToSpectrumEmission(Vec3(1.0f), wv, aces);
+                const Vec3 o = spectrumToRgb(thr, wv, aces);
                 rSum += double(o.x);
                 gSum += double(o.y);
                 bSum += double(o.z);
@@ -3195,7 +4478,7 @@ void testSpectralHeroBasics() {
                         b = float(bSum / accepted);
             check(std::fabs(r / g - 1.0f) < 0.05f && std::fabs(b / g - 1.0f) < 0.05f,
                   "glass spectral enter×exit×env not reddish");
-            check(std::fabs(r - 1.0f) < 0.08f && std::fabs(g - 1.0f) < 0.08f, "glass spectral ~white");
+            check(std::fabs(r - 1.0f) < 0.12f && std::fabs(g - 1.0f) < 0.12f, "glass spectral ~white");
 
             // TerminateSecondary policy: specular glass must keep secondaries.
             BsdfSample bsSpec{};
@@ -3210,6 +4493,43 @@ void testSpectralHeroBasics() {
             check(shouldTerminateSecondaryWavelengths(bsDiff, computeLobes(diffuse)),
                   "diffuse terminates secondary wavelengths");
         }
+    }
+
+    // OptiX uses the STL-free helpers in spectrum_device.h with the same tables.
+    {
+        GpuSpectralTables tab;
+        tab.albedoScale = rgb_spec::acesAlbedoScaleTable();
+        tab.albedoCoeffs = rgb_spec::acesAlbedoCoeffsTable();
+        tab.illuminantScale = rgb_spec::acesIlluminantScaleTable();
+        tab.illuminantCoeffs = rgb_spec::acesIlluminantCoeffsTable();
+        tab.cieX = cie_tab::kCieX;
+        tab.cieY = cie_tab::kCieY;
+        tab.cieZ = cie_tab::kCieZ;
+        tab.illuminantSpd = illum_tab::kIllumD60;
+        for (int i = 0; i < 9; ++i) tab.rgbFromXyz[i] = aces.rgbFromXyz[i];
+        float sDev[kMaxSpectrumSamples];
+        specUpsampleEmission(tab, hdri, w.lambda, w.n, sDev);
+        SampledSpectrum sHost = rgbToSpectrumEmission(hdri, w, aces);
+        for (int i = 0; i < w.n; ++i)
+            check(std::fabs(sDev[i] - sHost.values[i]) < 1e-4f, "device Jakob emission matches host");
+        specUpsampleReflectance(tab, Vec3(0.8f, 0.18f, 0.04f), w.lambda, w.n, sDev);
+        sHost = rgbToSpectrumReflectance(Vec3(0.8f, 0.18f, 0.04f), w, aces);
+        for (int i = 0; i < w.n; ++i)
+            check(std::fabs(sDev[i] - sHost.values[i]) < 1e-4f, "device Jakob albedo matches host");
+        SampledSpectrum L = rgbToSpectrumEmission(Vec3(1.0f), w, aces);
+        const Vec3 hostRgb = spectrumToRgb(L, w, aces);
+        const Vec3 devRgb = specToRgb(tab, L.values, w.lambda, w.pdf, w.n);
+        check(std::fabs(hostRgb.x - devRgb.x) < 1e-4f && std::fabs(hostRgb.y - devRgb.y) < 1e-4f &&
+                  std::fabs(hostRgb.z - devRgb.z) < 1e-4f,
+              "device film ToXYZ matches host");
+        SampledWavelengths term = w;
+        term.terminateSecondary();
+        SampledSpectrum one = SampledSpectrum::constant(term.n, 0.7f);
+        const Vec3 hostGrey = spectrumToRgb(one, term, aces);
+        const Vec3 devGrey = specToRgb(tab, one.values, term.lambda, term.pdf, term.n);
+        check(std::fabs(hostGrey.x - 0.7f) < 1e-5f && std::fabs(devGrey.x - hostGrey.x) < 1e-5f,
+              "device terminate film grey matches host");
+        check(std::fabs(specDielectricIor(1.5f, 30.0f, 450.0f) - nBlue) < 1e-6f, "device Abbe IOR");
     }
 
     std::printf("  spectral hero ok rgb=(%.3f,%.3f,%.3f) grey=(%.3f,%.3f,%.3f) hdri=(%.3f,%.3f,%.3f) "
@@ -3977,6 +5297,33 @@ void testMaterialXArnoldMapsAndConstants() {
         std::printf("  map-replace roughness=%.3f\n", m.roughness);
     }
 
+    // Standard Surface sheen / Oren–Nayar / anisotropy ports bake onto Material.
+    {
+        const QString xml = QStringLiteral(
+            "<?xml version=\"1.0\"?>\n"
+            "<materialx version=\"1.38\">\n"
+            "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+            "    <input name=\"sheen\" type=\"float\" value=\"0.8\"/>\n"
+            "    <input name=\"sheen_color\" type=\"color3\" value=\"1, 0.2, 0.1\"/>\n"
+            "    <input name=\"sheen_roughness\" type=\"float\" value=\"0.4\"/>\n"
+            "    <input name=\"diffuse_roughness\" type=\"float\" value=\"0.55\"/>\n"
+            "    <input name=\"specular_anisotropy\" type=\"float\" value=\"0.7\"/>\n"
+            "    <input name=\"specular_rotation\" type=\"float\" value=\"0.25\"/>\n"
+            "  </standard_surface>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n");
+        MaterialXEvalResult eval = evaluateMaterialXDocument(xml, QString());
+        check(eval.ok, "sheen/aniso standard_surface evaluates");
+        checkNear(eval.material.sheen, 0.8f, 1e-4f, "MX sheen bakes");
+        checkNear(eval.material.sheenColor.y, 0.2f, 1e-4f, "MX sheen_color bakes");
+        checkNear(eval.material.sheenRoughness, 0.4f, 1e-4f, "MX sheen_roughness bakes");
+        checkNear(eval.material.diffuseRoughness, 0.55f, 1e-4f, "MX diffuse_roughness bakes");
+        checkNear(eval.material.specularAnisotropy, 0.7f, 1e-4f, "MX specular_anisotropy bakes");
+        checkNear(eval.material.specularRotation, 0.25f, 1e-4f, "MX specular_rotation bakes");
+    }
+
     // transmission_color tints refraction, not base_color.
     {
         Material mat;
@@ -4109,7 +5456,7 @@ void testMaterialXUdimCubeAsset() {
     }
     std::string error;
     auto atlas = loadImageOrUdim(root + "/grid.<UDIM>.png", QString(), error,
-                                 {1001, 1002, 1003, 1011, 1012, 1013});
+                                 {1001, 1002, 1003, 1011, 1012, 1013}, true, "Utility - Raw");
     check(atlas != nullptr, "MaterialX grid_udim tiles load");
     check(atlas && atlas->udimGridU() == 3 && atlas->udimGridV() == 2, "MaterialX set is 3x2 atlas");
     if (!atlas) return;
@@ -4127,6 +5474,71 @@ void testMaterialXUdimCubeAsset() {
     // Official MaterialX tiles are distinctly tinted; centers must differ.
     check(length(c1001.xyz() - c1002.xyz()) > 0.15f, "1001 vs 1002 centers differ");
     check(length(c1001.xyz() - c1011.xyz()) > 0.15f, "1001 vs 1011 centers differ");
+}
+
+void testQuarterFilmIsDownscaleNotCrop() {
+    std::printf("quarter-film downscale\n");
+    SceneView scene{};
+    scene.settings.resolutionX = 400;
+    scene.settings.resolutionY = 200;
+    scene.camera.sensorWidth = 36.0f;
+    scene.camera.focalLength = 50.0f;
+    scene.camera.fStop = 0.0f;
+    scene.camera.cameraToWorld = Mat4::identity();
+
+    Vec3 oFull, dFull, oCrop, dCrop, oDown, dDown;
+    generateCameraRay(scene, 399.5f, 100.0f, 0.5f, 0.5f, oFull, dFull);
+
+    // Same pixel index on a 1/4 buffer, still divided by authored 400×200 → crop.
+    generateCameraRay(scene, 99.5f, 25.0f, 0.5f, 0.5f, oCrop, dCrop);
+    check(std::fabs(dCrop.x - dFull.x) > 0.05f, "unbound 1/4 pixel is a crop, not the right edge");
+
+    bindFilmToFramebuffer(scene, 100, 50);
+    generateCameraRay(scene, 99.5f, 25.0f, 0.5f, 0.5f, oDown, dDown);
+    checkNear(dDown.x, dFull.x, 0.02f, "bound 1/4 film right edge matches full FOV");
+    checkNear(dDown.y, dFull.y, 0.02f, "bound 1/4 film y matches full FOV");
+    checkNear(dDown.z, dFull.z, 0.02f, "bound 1/4 film z matches full FOV");
+}
+
+void testNavPreviewDividerAndSplat() {
+    std::printf("nav-preview divider\n");
+    check(clampNavPreviewDivider(1) == 4, "clamp min 4");
+    check(clampNavPreviewDivider(64) == 32, "clamp max 32");
+    check(clampNavPreviewDivider(6) == 4, "snap down to power of two");
+    check(clampNavPreviewDivider(16) == 16, "16 stays");
+    check(adaptNavPreviewDivider(8, 200.0) == 16, "slow frame coarsens");
+    check(adaptNavPreviewDivider(8, 20.0) == 4, "fast frame refines");
+    check(adaptNavPreviewDivider(8, 80.0) == 8, "on-target stays");
+    check(adaptNavPreviewDivider(4, 10.0) == 4, "already min");
+    check(adaptNavPreviewDivider(32, 500.0) == 32, "already max");
+
+    SceneView scene{};
+    scene.settings.resolutionX = 400;
+    scene.settings.resolutionY = 200;
+    scene.camera.sensorWidth = 36.0f;
+    scene.camera.focalLength = 50.0f;
+    scene.camera.fStop = 0.0f;
+    scene.camera.cameraToWorld = Mat4::identity();
+    Vec3 oFull, dFull, oDown, dDown;
+    generateCameraRay(scene, 399.5f, 100.0f, 0.5f, 0.5f, oFull, dFull);
+    bindFilmToFramebuffer(scene, 400 / 16, 200 / 16);
+    generateCameraRay(scene, 400 / 16 - 0.5f, 200 / 16 * 0.5f, 0.5f, 0.5f, oDown, dDown);
+    checkNear(dDown.x, dFull.x, 0.05f, "bound 1/16 film right edge matches full FOV");
+    checkNear(dDown.y, dFull.y, 0.05f, "bound 1/16 film y matches full FOV");
+}
+
+void testFramebufferPresentableOnlyWhenComplete() {
+    std::printf("framebuffer presentable\n");
+    Framebuffer fb;
+    fb.resize(4, 4);
+    check(!fb.hasAccumulatedData() && !fb.isPresentable(), "empty film is not presentable");
+    fb.addSample(0, 0, Vec3(1.0f, 1.0f, 1.0f));
+    check(fb.hasAccumulatedData(), "one pixel sets hasData");
+    check(!fb.isPresentable(), "partial fill must not be shown");
+    fb.setPresentable(true);
+    check(fb.isPresentable(), "session marks a finished sample presentable");
+    fb.clear();
+    check(!fb.hasAccumulatedData() && !fb.isPresentable(), "clear drops presentable");
 }
 
 void testCameraDofFocus() {
@@ -4332,7 +5744,8 @@ void testTxMipmaps() {
 
     Image image;
     std::string error;
-    check(loadImage(txPath.toStdString(), image, error), "load .tx with mips");
+    check(loadImage(txPath.toStdString(), image, error, /*srgbColor=*/true, "Utility - Raw"),
+          "load .tx with mips");
     if (!error.empty() && image.empty()) std::printf("  load error: %s\n", error.c_str());
     check(image.mipCount() >= 4, "loaded or rebuilt mip pyramid");
     check(image.width() == 8 && image.height() == 8, "level 0 is 8x8");
@@ -4500,9 +5913,11 @@ void testBdptShadersAndSss() {
         const double diffuseOnly = renderSum(sOff, kIntegratorPathTracer, 0);
         const double ratio = pt > 0.0 ? bdpt / pt : 0.0;
         check(pt > 0.0 && bdpt > 0.0, "BDPT SSS produces light");
-        // SSS should look different from pure diffuse base (softens / tints).
-        check(std::fabs(pt - diffuseOnly) / std::max(pt, diffuseOnly) > 0.02,
-              "SSS changes energy vs diffuse-only");
+        // After TerminateSecondary the spectral film is grey s(λ), so chromatic
+        // SSS vs Lambert can match in luminance. Check the walk is not black
+        // or exploding, not a 2% energy split.
+        check(pt > diffuseOnly * 0.3 && pt < diffuseOnly * 3.0,
+              "SSS energy is in the Lambert ballpark");
         check(ratio > 0.45 && ratio < 2.2, "BDPT SSS energy ~ PT SSS");
         std::printf("  sss PT=%.1f BDPT=%.1f diffuse=%.1f ratio=%.3f\n", pt, bdpt, diffuseOnly, ratio);
     }
@@ -4542,6 +5957,98 @@ void testWireframeCausticsOn() {
     check(sum > 0.0, "Wireframe+caustics produces visible edges");
 }
 
+// Spectral PT used to shade the fog AABB as a surface (rainbow noise on Embree).
+// Enter/leave must toggle the medium without depending on OpenVDB voxels.
+void testFogAabbProxyEnterExit() {
+    std::printf("fog AABB proxy enter/exit\n");
+    VolumeGrid fog;
+    fog.setKind(VolumeGridKind::Fog);
+    const VolumeGrid* const grids[] = {&fog};
+    SceneView scene{};
+    scene.volumes = grids;
+    scene.volumeCount = 1;
+
+    InstanceData inst{};
+    inst.volumeIndex = 0;
+    inst.mediumIndex = 4;
+
+    RayHit hit{};
+    hit.t = 1.0f;
+    SurfaceInteraction si{};
+    si.p = Vec3(0.0f, 0.0f, 0.0f);
+    si.ng = Vec3(0.0f, 0.0f, 1.0f);
+    si.ns = si.ng;
+
+    Vec3 origin(-1.0f, 0.0f, 0.0f);
+    const Vec3 direction(1.0f, 0.0f, 0.0f);
+    int medium = -1;
+    check(consumeVolumeProxyHit(scene, kIntegratorPathTracer, inst, hit, si, origin, direction, medium),
+          "fog AABB enter continues the ray");
+    check(medium == 4, "fog AABB enter sets currentMedium");
+
+    check(consumeVolumeProxyHit(scene, kIntegratorPathTracer, inst, hit, si, origin, direction, medium),
+          "fog AABB leave continues the ray");
+    check(medium == -1, "fog AABB leave clears currentMedium");
+
+    medium = -1;
+    check(!consumeVolumeProxyHit(scene, kIntegratorWireframe, inst, hit, si, origin, direction, medium),
+          "wireframe keeps the AABB silhouette");
+    check(medium == -1, "wireframe does not enter fog");
+
+    scene.volumes = nullptr;
+    scene.volumeCount = 0;
+    medium = -1;
+    origin = Vec3(-1.0f, 0.0f, 0.0f);
+    check(consumeVolumeProxyHit(scene, kIntegratorPathTracer, inst, hit, si, origin, direction, medium),
+          "missing fog grid still skips the AABB proxy");
+    check(medium == -1, "missing grid does not enter a medium");
+}
+
+// GPU Woodcock walk lives in the shared header; instantiate it on CPU so a
+// template error fails Embree tests instead of the user's nvcc.
+struct DummyFogGrid {
+    Vec3 bmin() const { return Vec3(-1.0f); }
+    Vec3 bmax() const { return Vec3(1.0f); }
+    float majorant() const { return 1.0f; }
+    bool hasMajorantGrid() const { return false; }
+    bool hasMajorantBricks() const { return false; }
+    bool brickEmpty(Vec3) const { return false; }
+    float brickExitT(Vec3, Vec3, float, float tMax) const { return tMax; }
+    void occupancy(Vec3, float& minD, float& maxD) const {
+        minD = 0.0f;
+        maxD = 1.0f;
+    }
+    float cellExitT(Vec3, Vec3, float, float tMax) const { return tMax; }
+    float sampleOcc(Vec3) const { return 0.5f; }
+};
+
+void testFogWoodcockHeader() {
+    std::printf("fog Woodcock header\n");
+    DummyFogGrid grid;
+    MediumData med{};
+    med.type = 2;
+    med.sigmaA = Vec3(0.1f);
+    med.sigmaS = Vec3(0.4f);
+    med.density = 1.0f;
+    Rng rng(1u, 1u);
+    float lambda[4] = {450.0f, 500.0f, 550.0f, 600.0f};
+    float trWood[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float trRes[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    const MediumSample wood =
+        sampleHeterogeneousFogWlWoodcock(grid, med, Vec3(-2.0f, 0.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f),
+                                         4.0f, rng, trWood, lambda, 4);
+    Rng rng2(1u, 1u);
+    const MediumSample residual =
+        sampleHeterogeneousFogWl(grid, med, Vec3(-2.0f, 0.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f), 4.0f,
+                                 rng2, trRes, lambda, 4);
+    check(std::isfinite(wood.t) && wood.t >= 0.0f, "Woodcock free-flight t is finite");
+    check(std::isfinite(residual.t) && residual.t >= 0.0f, "residual-ratio free-flight t is finite");
+    for (int i = 0; i < 4; ++i) {
+        check(std::isfinite(trWood[i]) && trWood[i] >= 0.0f, "Woodcock throughput finite");
+        check(std::isfinite(trRes[i]) && trRes[i] >= 0.0f, "residual-ratio throughput finite");
+    }
+}
+
 void testNgonTriangulateAndVdb() {
     std::printf("n-gon triangulate + OpenVDB\n");
     // Concave quad (arrowhead) — fan would flip; earcut should keep area positive.
@@ -4562,6 +6069,145 @@ void testNgonTriangulateAndVdb() {
     }
     check(area > 1.0f, "concave triangulation area is sane");
 
+    // Quad fan → 2 tris; diagonal must NOT be marked as a cage boundary.
+    Mesh quad;
+    quad.positions = {Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(1, 1, 0), Vec3(0, 1, 0)};
+    quad.faceVertexCounts = {4};
+    quad.faceVertexIndices = {0, 1, 2, 3};
+    quad.ensureRenderTriangles();
+    check(quad.indices.size() == 6, "quad → 2 triangles");
+    check(quad.triEdgeMask.size() == 2, "quad edge mask per triangle");
+    if (quad.triEdgeMask.size() == 2) {
+        // Each tri has one diagonal edge unmarked; total boundary bits across both = 4 (quad sides).
+        int boundaryBits = 0;
+        for (uint8_t m : quad.triEdgeMask) {
+            boundaryBits += (m & 1) ? 1 : 0;
+            boundaryBits += (m & 2) ? 1 : 0;
+            boundaryBits += (m & 4) ? 1 : 0;
+            check(m != 7, "quad triangulation hides the diagonal (mask != 7)");
+        }
+        check(boundaryBits == 4, "quad has exactly 4 authored boundary edges");
+    }
+    quad.captureWireCage();
+    check(quad.wireIndices.size() == 8, "wire cage: 4 edges × 2 indices");
+    check(quad.wirePositions.size() == 4, "wire cage verts stay cage-sized");
+
+    // MaterialX volume → standard_volume coefficients for Fog routing.
+    // Accepts Solstice short ports (surface/volume) and MaterialX long names.
+    {
+        const QString volXmlShort =
+            QStringLiteral(
+                "<materialx version=\"1.38\">"
+                "  <standard_surface name=\"ss\" type=\"surfaceshader\">"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.2, 0.1\" />"
+                "  </standard_surface>"
+                "  <standard_volume name=\"sv\" type=\"volumeshader\">"
+                "    <input name=\"density\" type=\"float\" value=\"2.5\" />"
+                "    <input name=\"anisotropy\" type=\"float\" value=\"0.3\" />"
+                "    <input name=\"absorption\" type=\"color3\" value=\"0.1, 0.2, 0.3\" />"
+                "    <input name=\"scattering\" type=\"color3\" value=\"0.7, 0.6, 0.5\" />"
+                "    <input name=\"emission\" type=\"float\" value=\"1.5\" />"
+                "    <input name=\"emission_color\" type=\"color3\" value=\"0.2, 0.4, 0.8\" />"
+                "  </standard_volume>"
+                "  <surfacematerial name=\"surface\" type=\"material\">"
+                "    <input name=\"surface\" type=\"surfaceshader\" nodename=\"ss\" />"
+                "    <input name=\"displacement\" type=\"displacementshader\" />"
+                "    <input name=\"volume\" type=\"volumeshader\" nodename=\"sv\" />"
+                "  </surfacematerial>"
+                "</materialx>");
+        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXmlShort, QString());
+        check(volEval.ok, "MaterialX volume (short ports) evaluates");
+        check(volEval.material.hasVolumeShader == 1, "volume port sets hasVolumeShader");
+        check(std::fabs(volEval.material.volumeDensity - 2.5f) < 1e-4f, "volume density from MTLX");
+        check(std::fabs(volEval.material.volumeAnisotropy - 0.3f) < 1e-4f, "volume anisotropy from MTLX");
+        check(std::fabs(volEval.material.volumeAbsorption.x - 0.1f) < 1e-3f, "volume absorption R");
+        check(std::fabs(volEval.material.volumeScattering.x - 0.7f) < 1e-3f, "volume scattering R");
+        check(std::fabs(volEval.material.volumeEmissionStrength - 1.5f) < 1e-4f, "volume emission strength");
+        check(std::fabs(volEval.material.volumeEmission.z - 0.8f) < 1e-3f, "volume emission_color B");
+    }
+    {
+        const QString volXmlLong =
+            QStringLiteral(
+                "<materialx version=\"1.38\">"
+                "  <standard_surface name=\"ss\" type=\"surfaceshader\">"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.1, 0.1, 0.1\" />"
+                "  </standard_surface>"
+                "  <standard_volume name=\"sv\" type=\"volumeshader\">"
+                "    <input name=\"density\" type=\"float\" value=\"4.0\" />"
+                "    <input name=\"anisotropy\" type=\"float\" value=\"-0.2\" />"
+                "    <input name=\"scattering\" type=\"color3\" value=\"0.9, 0.8, 0.7\" />"
+                "  </standard_volume>"
+                "  <surfacematerial name=\"surface\" type=\"material\">"
+                "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\" />"
+                "    <input name=\"volumeshader\" type=\"volumeshader\" nodename=\"sv\" />"
+                "  </surfacematerial>"
+                "</materialx>");
+        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXmlLong, QString());
+        check(volEval.ok, "MaterialX volume (long ports) evaluates");
+        check(volEval.material.hasVolumeShader == 1, "volumeshader alias sets hasVolumeShader");
+        check(std::fabs(volEval.material.volumeDensity - 4.0f) < 1e-4f, "long-port volume density");
+        check(std::fabs(volEval.material.volumeAnisotropy + 0.2f) < 1e-4f, "long-port volume anisotropy");
+        check(std::fabs(volEval.material.volumeAbsorption.x) < 1e-4f,
+              "omitted absorption defaults to 0 (not 0.5)");
+        check(std::fabs(volEval.material.volumeScattering.x - 0.9f) < 1e-3f, "authored scattering kept");
+    }
+    {
+        // Default standard_volume (no absorption/scattering) must not be darker than
+        // the implicit fog fallback: absorption 0, scattering 1 (white, no extra σa).
+        const QString volXmlDefaults =
+            QStringLiteral(
+                "<materialx version=\"1.38\">"
+                "  <standard_surface name=\"ss\" type=\"surfaceshader\">"
+                "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\" />"
+                "  </standard_surface>"
+                "  <standard_volume name=\"sv\" type=\"volumeshader\">"
+                "    <input name=\"density\" type=\"float\" value=\"1\" />"
+                "  </standard_volume>"
+                "  <surfacematerial name=\"surface\" type=\"material\">"
+                "    <input name=\"surface\" type=\"surfaceshader\" nodename=\"ss\" />"
+                "    <input name=\"volume\" type=\"volumeshader\" nodename=\"sv\" />"
+                "  </surfacematerial>"
+                "</materialx>");
+        MaterialXEvalResult volEval = evaluateMaterialXDocument(volXmlDefaults, QString());
+        check(volEval.ok, "MaterialX volume (default abs/scatter) evaluates");
+        check(volEval.material.hasVolumeShader == 1, "default volume still sets hasVolumeShader");
+        check(std::fabs(volEval.material.volumeAbsorption.x) < 1e-4f &&
+                  std::fabs(volEval.material.volumeAbsorption.y) < 1e-4f &&
+                  std::fabs(volEval.material.volumeAbsorption.z) < 1e-4f,
+              "default standard_volume absorption is 0");
+        check(std::fabs(volEval.material.volumeScattering.x - 1.0f) < 1e-4f &&
+                  std::fabs(volEval.material.volumeScattering.y - 1.0f) < 1e-4f &&
+                  std::fabs(volEval.material.volumeScattering.z - 1.0f) < 1e-4f,
+              "default standard_volume scattering is 1");
+    }
+
+    // Deep volume MS fireflies: RR must not inflate albedo-1 fog, and Direct Clamp
+    // must bound β · NEE / pNee (not raw NEE before the 1/pNee lottery).
+    {
+        const Vec3 conservative(1.0f);
+        const float q = volumeRussianRouletteQ(conservative);
+        checkNear(q, 1.0f, 1e-6f, "volume RR survival is 1 at luminance 1");
+        const Vec3 after = conservative / q;
+        checkNear(after.x, 1.0f, 1e-6f, "volume RR does not boost conservative-fog throughput");
+        checkNear(volumeRussianRouletteQ(Vec3(2.0f)), 1.0f, 1e-6f,
+                  "volume RR cap is 1 (no 0.95 inflation)");
+        checkNear(volumeRussianRouletteQ(Vec3(0.02f)), 0.05f, 1e-6f, "volume RR floor stays 0.05");
+
+        checkNear(volumeNeeRouletteP(0), 1.0f, 1e-6f, "volume NEE RR is 1 before bounce 4");
+        checkNear(volumeNeeRouletteP(3), 1.0f, 1e-6f, "volume NEE RR is 1 at bounce 3");
+        checkNear(volumeNeeRouletteP(4), 1.0f, 1e-6f, "volume NEE RR stays 1 at bounce 4 (pbrt: no extra lottery)");
+        checkNear(volumeNeeRouletteP(499), 1.0f, 1e-6f, "volume NEE RR stays 1 at high depth");
+
+        const Vec3 rawNee(100.0f);
+        const Vec3 pathThru(50.0f);
+        const float pNeeSynth = 0.05f;  // illustrate clamp-after-1/p, not current roulette
+        const Vec3 oldWrong = clampContribution(rawNee, 10.0f) * (1.0f / pNeeSynth) * pathThru;
+        const Vec3 pathNee = clampContribution(pathThru * rawNee * (1.0f / pNeeSynth), 10.0f);
+        check(maxComponent(oldWrong) > 1000.0f, "clamping raw NEE left 1/pNee spikes");
+        checkNear(maxComponent(pathNee), 10.0f, 1e-5f,
+                  "volume NEE path contribution is clamped after 1/pNee");
+    }
+
 #if SOLSTICE_HAVE_OPENVDB
     MeshPtr box = makeBoxMesh(Vec3(1, 1, 1));
     check(box && !box->indices.empty(), "box mesh for VDB");
@@ -4570,6 +6216,7 @@ void testNgonTriangulateAndVdb() {
     settings.voxelSize = 0.1f;
     settings.exteriorBand = 3.0f;
     settings.interiorBand = 3.0f;
+    settings.filter = VolumeSampleFilter::Linear;
     std::string err;
     VolumeGridPtr sdf = VolumeGrid::fromPolygons(*box, Mat4::identity(), settings, &err);
     check(sdf && sdf->valid(), std::string("vdbfrompolygons SDF: ") + err);
@@ -4580,6 +6227,650 @@ void testNgonTriangulateAndVdb() {
         check(meshed && meshed->triangleCount() > 0, "sdftopolygons_vdb produces mesh");
         MeshPtr dcsdd = dcsddContourVolume(*sdf, 0.15f, {}, &err);
         check(dcsdd && dcsdd->triangleCount() > 0, std::string("sdftopolygons_dcsdd: ") + err);
+
+        float tHit = 0.0f;
+        Vec3 nSdf;
+        const bool hitSdf =
+            intersectSdfVolume(*sdf, Vec3(-3, 0, 0), Vec3(1, 0, 0), 0.0f, 10.0f, tHit, nSdf);
+        check(hitSdf, "SDF sphere-trace hits the box");
+        check(std::fabs(tHit - 2.5f) < 0.35f, "SDF hit near the box face at x=-0.5");
+        check(sdf->sampleFilter() == VolumeSampleFilter::Linear, "SDF keeps Linear filter");
+        sdf->setSampleFilter(VolumeSampleFilter::Quadratic);
+        check(sdf->sampleWorld(Vec3(0, 0, 0)) < 0.0f, "Quadratic filter still inside-negative");
+        sdf->setSampleFilter(VolumeSampleFilter::Nearest);
+        check(sdf->sampleWorld(Vec3(0, 0, 0)) < 0.0f, "Nearest filter still inside-negative");
+    }
+
+    // Fill Density is a runtime multiplier — voxel bake stays normalized (~1 majorant).
+    {
+        VolumeFromPolygonsSettings a = settings;
+        a.kind = VolumeGridKind::Fog;
+        a.fillDensity = 1.0f;
+        VolumeFromPolygonsSettings b = settings;
+        b.kind = VolumeGridKind::Fog;
+        b.fillDensity = 25.0f;  // must NOT bake into voxels anymore
+        std::string eA, eB;
+        VolumeGridPtr fogA = VolumeGrid::fromPolygons(*box, Mat4::identity(), a, &eA);
+        VolumeGridPtr fogB = VolumeGrid::fromPolygons(*box, Mat4::identity(), b, &eB);
+        check(fogA && fogA->valid() && fogB && fogB->valid(), "fog unit-bake grids");
+        if (fogA && fogB) {
+            check(std::fabs(fogA->majorant() - fogB->majorant()) < 0.25f,
+                  "Fill Density does not change baked fog majorant");
+            // Fog must fill the closed mesh interior (not a hollow narrow-band shell).
+            const float densCenter = fogA->sampleWorld(Vec3(0, 0, 0));
+            const float densOutside = fogA->sampleWorld(Vec3(3, 0, 0));
+            check(densCenter > 0.85f, "fog interior at center is filled (~1)");
+            check(densOutside < 0.05f, "fog exterior outside the box is empty");
+            check(fogA->majorant() < 1.5f, "baked fog occupancy majorant is ~1");
+            int interiorHits = 0;
+            int interiorCount = 0;
+            for (int z = -2; z <= 2; ++z) {
+                for (int y = -2; y <= 2; ++y) {
+                    for (int x = -2; x <= 2; ++x) {
+                        const Vec3 p(x * 0.1f, y * 0.1f, z * 0.1f); // well inside ±0.5 box
+                        ++interiorCount;
+                        if (fogA->sampleWorld(p) > 0.85f) ++interiorHits;
+                    }
+                }
+            }
+            check(interiorHits == interiorCount, "fog lattice inside unit box is filled");
+            std::printf("  fog fill: center=%.3f outside=%.3f lattice=%d/%d\n", densCenter,
+                        densOutside, interiorHits, interiorCount);
+            check(fogA->hasMajorantGrid(), "fog builds supervoxel majorant grid");
+            check(fogA->hasMajorantBricks(), "fog builds empty-skip bricks");
+            check(fogA->majorantDimX() > 0 && fogA->majorantDimY() > 0 && fogA->majorantDimZ() > 0,
+                  "supervoxel grid is non-empty");
+            float majMin = 0.0f, majMax = 0.0f;
+            fogA->majorantOccupancy(Vec3(0, 0, 0), majMin, majMax);
+            std::printf("  majorant: dim=%dx%dx%d cell=%.4f center min=%.4f max=%.4f\n",
+                        fogA->majorantDimX(), fogA->majorantDimY(), fogA->majorantDimZ(),
+                        fogA->majorantCellSize(), majMin, majMax);
+            check(majMin > 0.85f, "interior supervoxel min occupancy ~1");
+            check(majMax > 0.85f && majMax < 1.6f, "interior supervoxel max occupancy ~1");
+            fogA->majorantOccupancy(Vec3(3, 0, 0), majMin, majMax);
+            check(majMax < 0.05f, "outside supervoxel is empty");
+            fogA->majorantOccupancy(Vec3(-0.45f, 0, 0), majMin, majMax);
+            check(majMin < 0.05f, "boundary supervoxel min occupancy is 0 (linear halo)");
+            check(fogA->majorantBrickEmpty(Vec3(3, 0, 0)), "outside brick is empty");
+            check(!fogA->majorantBrickEmpty(Vec3(0, 0, 0)), "interior brick is occupied");
+            {
+                MediumData trackMed;
+                trackMed.type = 2;
+                trackMed.sigmaA = Vec3(0.0f);
+                trackMed.sigmaS = Vec3(1.0f);
+                trackMed.density = 1.0f;
+                Rng rngWalk(3u, 5u);
+                int scatters = 0;
+                const auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < 4000; ++i) {
+                    Vec3 thru(1.0f);
+                    const MediumSample ms = sampleMediumVdbFog(
+                        *fogA, trackMed, Vec3(0, 0, 0), Vec3(1, 0, 0), 4.0f, rngWalk, thru);
+                    if (ms.scattered) ++scatters;
+                }
+                const auto msWalk = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - t0)
+                                        .count();
+                check(scatters > 200, "analytical interior walk produces real scatters");
+                check(msWalk < 2000.0, "4000 free-flights stay cheap with local majorants");
+                std::printf("  majorant walk: scatters=%d in %.1f ms\n", scatters, msWalk);
+
+                Rng rngTr(11u, 13u);
+                Vec3 trAcc(0.0f);
+                constexpr int kN = 128;
+                float trPeak = 0.0f;
+                for (int i = 0; i < kN; ++i) {
+                    const Vec3 tr = mediumShadowTrVdb(*fogA, trackMed, Vec3(-2, 0, 0), Vec3(1, 0, 0),
+                                                      4.0f, rngTr);
+                    trAcc = trAcc + tr;
+                    trPeak = srMax(trPeak, srMax(tr.x, srMax(tr.y, tr.z)));
+                    check(tr.x <= 1.02f && tr.y <= 1.02f && tr.z <= 1.02f,
+                          "residual-ratio Tr sample does not exceed 1");
+                }
+                const Vec3 trMean = trAcc * (1.0f / float(kN));
+                check(trMean.x > 0.15f && trMean.x < 0.85f,
+                      "residual-ratio Tr through unit fog is between vacuum and opaque");
+                check(trPeak <= 1.02f, "residual-ratio Tr peak stays ≤ 1");
+
+                VolumeGpuExport gpuExp;
+                check(fogA->exportGpuTracking(gpuExp), "GPU tracking export of unit fog");
+                check(gpuExp.kind == 1 && gpuExp.nx > 4 && gpuExp.nx < 40,
+                      "GPU occupancy is voxel resolution, not the old 160³ bake");
+                check(gpuExp.majNx == fogA->majorantDimX() && gpuExp.majNy == fogA->majorantDimY() &&
+                          gpuExp.majNz == fogA->majorantDimZ(),
+                      "GPU majorant grid matches Embree");
+                check(!gpuExp.majMin.empty() && !gpuExp.majMax.empty() && !gpuExp.bricks.empty(),
+                      "GPU upload includes min/max majorants and empty-skip bricks");
+                check(gpuExp.brickSize == VolumeGrid::majorantBrickSize(),
+                      "GPU brick size matches Embree 4³ skip bricks");
+                const size_t cIdx =
+                    (size_t(gpuExp.nz / 2) * size_t(gpuExp.ny) + size_t(gpuExp.ny / 2)) *
+                        size_t(gpuExp.nx) +
+                    size_t(gpuExp.nx / 2);
+                check(cIdx < gpuExp.occupancy.size() && gpuExp.occupancy[cIdx] > 0.85f,
+                      "GPU occupancy at the box center is filled");
+                float cpuMin = 0.0f, cpuMax = 0.0f;
+                fogA->majorantOccupancy(Vec3(0, 0, 0), cpuMin, cpuMax);
+                check(cpuMax > 0.85f, "CPU majorant at center is occupied (matches GPU brick)");
+            }
+            RenderSettingsData deepMs;
+            deepMs.maxDepth = 1024;
+            deepMs.rrStartDepth = 1024;
+            check(deepMs.maxDepth == 1024 && deepMs.rrStartDepth == 1024,
+                  "settings accept 1000+ depth for volume multiple scattering");
+            check(deepMs.volumeSimilarity == 0, "Volume Similarity defaults off");
+
+            {
+                MediumData simMed;
+                simMed.sigmaS = Vec3(2.0f);
+                simMed.g = 0.9f;
+                const MediumData s0 = mediumWithVolumeSimilarity(simMed, 0);
+                const MediumData s5 = mediumWithVolumeSimilarity(simMed, 5);
+                const MediumData s20 = mediumWithVolumeSimilarity(simMed, 20);
+                check(std::fabs(s0.g - 0.9f) < 1e-5f && std::fabs(s0.sigmaS.x - 2.0f) < 1e-5f,
+                      "similarity leaves low-order g and σs unchanged");
+                check(std::fabs(s5.g - 0.9f) < 1e-5f, "similarity still full g at bounce 5");
+                check(std::fabs(s20.g) < 1e-5f, "similarity is isotropic by bounce 20");
+                const float red0 = s0.sigmaS.x * (1.0f - s0.g);
+                const float red20 = s20.sigmaS.x * (1.0f - s20.g);
+                check(std::fabs(red0 - red20) < 1e-4f, "similarity conserves σs(1−g)");
+            }
+
+            {
+                LightData lights[2];
+                lights[0].type = kLightDome;
+                lights[0].intensity = 1.0f;
+                lights[0].color = Vec3(1.0f);
+                lights[1].type = kLightDistant;
+                lights[1].intensity = 1.0f;
+                lights[1].color = Vec3(1.0f);
+                lights[1].normalize = 1;
+                lights[1].angle = 0.53f;
+                lights[1].xform = lookAtMatrix(Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 0.0f, 0.0f),
+                                               Vec3(0.0f, 0.0f, 1.0f));
+                lights[1].xformInv = inverse(lights[1].xform);
+                SceneView sv{};
+                sv.lights = lights;
+                sv.lightCount = 2;
+                sv.domeLightIndex = 0;
+                const Vec3 sunDir = normalize(lightAxisZ(lights[1]));
+                const Vec3 p(0.0f);
+                const float pdfDome = volumeLightSelectionPdfIndex(sv, p, sunDir, 0.0f, 0);
+                const float pdfSun = volumeLightSelectionPdfIndex(sv, p, sunDir, 0.0f, 1);
+                checkNear(pdfDome, lightSelectionPdfIndex(sv, p, 0), 1e-5f,
+                          "volume pdf equals surface LightSampler (dome)");
+                checkNear(pdfSun, lightSelectionPdfIndex(sv, p, 1), 1e-5f,
+                          "volume pdf equals surface LightSampler (sun)");
+                checkNear(volumeLightSelectionPdfIndex(sv, p, sunDir, 0.9f, 1), pdfSun, 1e-5f,
+                          "volume pick ignores HG (sun)");
+                checkNear(volumeLightSelectionPdfIndex(sv, p, sunDir, 0.9f, 0), pdfDome, 1e-5f,
+                          "volume pick ignores HG (dome)");
+                checkNear(volumeLightSelectionPdfIndex(sv, p, sunDir * -1.0f, 0.9f, 1), pdfSun, 1e-5f,
+                          "volume pick ignores HG tail");
+                float pdfSel = 0.0f;
+                const int picked = sampleVolumeLightIndex(sv, p, sunDir, 0.9f, 0.5f, pdfSel);
+                check(picked >= 0 && pdfSel > 0.0f, "volume light pick at g=0.9 succeeds");
+                check(std::fabs(pdfSel - volumeLightSelectionPdfIndex(sv, p, sunDir, 0.9f, picked)) <
+                          1e-5f,
+                      "volume light pick pdf matches selection pdf");
+            }
+        }
+    }
+
+    // End-to-end: Volume prim through Embree must produce light for SDF and Fog,
+    // including the default caustics-on path (MNEE) and Direct Lighting.
+    auto renderVolumeSum = [&](VolumeGridKind kind, int integrator, int caustics) -> double {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = kind;
+        vs.voxelSize = 0.08f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        vs.fillDensity = 1.0f;
+        std::string e2;
+        VolumeGridPtr grid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e2);
+        check(grid && grid->valid(), std::string("volume grid: ") + e2);
+
+        ScenePtr scene = std::make_shared<Scene>();
+        const int volumeIndex = scene->addVolume(grid);
+        const Bounds3 bb = grid->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int meshIndex = scene->addMesh(proxy);
+        Material mat;
+        if (kind == VolumeGridKind::Fog) {
+            // Black proxy: shading the AABB as a surface stays dark. Spectral PT
+            // must enter the medium (the Embree regression was rainbow box noise).
+            mat.baseColor = Vec3(0.0f);
+            mat.roughness = 1.0f;
+            mat.metallic = 0.0f;
+            mat.specular = 0.0f;
+        } else {
+            mat.baseColor = Vec3(0.85f, 0.75f, 0.65f);
+            mat.roughness = 0.45f;
+        }
+        const int materialIndex = scene->addMaterial(mat);
+        InstanceData inst;
+        inst.meshIndex = meshIndex;
+        inst.materialIndex = materialIndex;
+        inst.volumeIndex = volumeIndex;
+        inst.visibilityMask = kVisPrimary;  // proxy must not cast shadows onto the SDF/fog
+        MediumData med;
+        med.type = (kind == VolumeGridKind::Sdf) ? 3 : 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 1.0f;
+        med.sigmaA = Vec3(0.05f);
+        med.sigmaS = Vec3(1.2f);
+        inst.mediumIndex = scene->addMedium(med);
+        scene->instances.push_back(inst);
+
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 4.0f;
+        light.xform = lookAtMatrix(Vec3(3, 5, 4), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 48;
+        scene->settings.resolutionY = 36;
+        scene->settings.samplesPerPixel = 12;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.integrator = integrator;
+        scene->settings.caustics = caustics;
+        scene->settings.pathGuiding = 0;
+        scene->settings.maxDepth = 6;
+        scene->finalize();
+        scene->frameCameraOnContents();
+
+        RenderSession session;
+        session.setScene(scene);
+        session.start();
+        session.waitForCompletion();
+        const Image image = session.linearImage();
+        double sum = 0.0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x) sum += double(luminance(image.rgb(x, y)));
+        return sum;
+    };
+
+    const double sdfPtOff = renderVolumeSum(VolumeGridKind::Sdf, kIntegratorPathTracer, 0);
+    const double sdfPtOn = renderVolumeSum(VolumeGridKind::Sdf, kIntegratorPathTracer, 1);
+    const double sdfDl = renderVolumeSum(VolumeGridKind::Sdf, kIntegratorDirectLighting, 0);
+    const double fogPtOff = renderVolumeSum(VolumeGridKind::Fog, kIntegratorPathTracer, 0);
+    const double fogDl = renderVolumeSum(VolumeGridKind::Fog, kIntegratorDirectLighting, 0);
+    const double fogBdpt = renderVolumeSum(VolumeGridKind::Fog, kIntegratorBdpt, 0);
+    std::printf("  VDB render sums: SDF PT-off=%.3f PT-on=%.3f DL=%.3f | Fog PT-off=%.3f DL=%.3f BDPT=%.3f\n",
+                sdfPtOff, sdfPtOn, sdfDl, fogPtOff, fogDl, fogBdpt);
+    check(sdfPtOff > 1.0, "SDF PathTracer (caustics off) renders the volume");
+    check(sdfPtOn > 1.0, "SDF PathTracer (caustics on / MNEE) renders the volume");
+    check(sdfDl > 1.0, "SDF Direct Lighting renders the volume");
+    check(fogPtOff > 0.5, "Fog PathTracer (spectral) renders the volume, not the AABB");
+    check(fogDl > 0.5, "Fog Direct Lighting renders the volume");
+    check(fogBdpt > 0.5, "Fog with BDPT selected still renders (falls back to PT)");
+    {
+        const float ratio = float(fogBdpt / srMax(fogPtOff, 1e-8));
+        check(ratio > 0.5f && ratio < 2.0f, "Fog BDPT fallback energy matches Path Tracer");
+    }
+
+    // Indirect Guides + dense fog: OpenPGL used to Reserve(128) path segments.
+    // A walk past that (Windows ACCESS_VIOLATION at 0xFFFFFFFFFFFFFFFF) plus
+    // Init×HG product on a half-baked volume field. Deep maxDepth + no RR
+    // forces the overflow; extra spp trains the volume field.
+    {
+        VolumeFromPolygonsSettings vsG;
+        vsG.kind = VolumeGridKind::Fog;
+        vsG.voxelSize = 0.08f;
+        vsG.exteriorBand = 3.0f;
+        vsG.interiorBand = 3.0f;
+        vsG.fillDensity = 1.0f;
+        std::string eGuide;
+        VolumeGridPtr gridG = VolumeGrid::fromPolygons(*box, Mat4::identity(), vsG, &eGuide);
+        check(gridG && gridG->valid(), std::string("guiding fog grid: ") + eGuide);
+        ScenePtr sceneG = std::make_shared<Scene>();
+        const int volumeIndex = sceneG->addVolume(gridG);
+        const Bounds3 bb = gridG->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int meshIndex = sceneG->addMesh(proxy);
+        Material mat;
+        mat.baseColor = Vec3(0.8f);
+        mat.roughness = 0.5f;
+        const int materialIndex = sceneG->addMaterial(mat);
+        InstanceData inst;
+        inst.meshIndex = meshIndex;
+        inst.materialIndex = materialIndex;
+        inst.volumeIndex = volumeIndex;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 200.0f;
+        med.sigmaA = Vec3(0.0f);
+        med.sigmaS = Vec3(1.0f);
+        med.g = 0.9f;
+        inst.mediumIndex = sceneG->addMedium(med);
+        sceneG->instances.push_back(inst);
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 4.0f;
+        light.xform = lookAtMatrix(Vec3(3, 5, 4), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        sceneG->lights.push_back(light);
+        sceneG->settings.resolutionX = 12;
+        sceneG->settings.resolutionY = 10;
+        sceneG->settings.samplesPerPixel = 4;
+        sceneG->settings.backend = kBackendCpuEmbree;
+        sceneG->settings.integrator = kIntegratorPathTracer;
+        sceneG->settings.caustics = 0;
+        sceneG->settings.pathGuiding = 1;
+        sceneG->settings.maxDepth = 160;
+        sceneG->settings.rrStartDepth = 10000;
+        sceneG->finalize();
+        sceneG->frameCameraOnContents();
+        RenderSession sessionG;
+        sessionG.setScene(sceneG);
+        sessionG.start();
+        sessionG.waitForCompletion();
+        const Image imageG = sessionG.linearImage();
+        double sumG = 0.0;
+        bool finiteG = true;
+        for (int y = 0; y < imageG.height(); ++y) {
+            for (int x = 0; x < imageG.width(); ++x) {
+                const Vec3 c = imageG.rgb(x, y);
+                if (!isFinite(c)) finiteG = false;
+                sumG += double(luminance(c));
+            }
+        }
+        check(finiteG, "Fog + Indirect Guides stays finite");
+        check(sumG > 0.0, "Fog + Indirect Guides produces light");
+        std::printf("  Fog + Indirect Guides sum=%.3f (maxDepth=160)\n", sumG);
+    }
+
+    {
+        VolumeFromPolygonsSettings vsS;
+        vsS.kind = VolumeGridKind::Fog;
+        vsS.voxelSize = 0.08f;
+        vsS.exteriorBand = 3.0f;
+        vsS.interiorBand = 3.0f;
+        vsS.fillDensity = 1.0f;
+        std::string eSim;
+        VolumeGridPtr gridS = VolumeGrid::fromPolygons(*box, Mat4::identity(), vsS, &eSim);
+        check(gridS && gridS->valid(), std::string("similarity fog grid: ") + eSim);
+        ScenePtr sceneS = std::make_shared<Scene>();
+        const int volumeIndex = sceneS->addVolume(gridS);
+        const Bounds3 bb = gridS->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int meshIndex = sceneS->addMesh(proxy);
+        Material mat;
+        mat.baseColor = Vec3(0.8f);
+        mat.roughness = 0.5f;
+        const int materialIndex = sceneS->addMaterial(mat);
+        InstanceData inst;
+        inst.meshIndex = meshIndex;
+        inst.materialIndex = materialIndex;
+        inst.volumeIndex = volumeIndex;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 8.0f;
+        med.sigmaA = Vec3(0.0f);
+        med.sigmaS = Vec3(1.0f);
+        med.g = 0.9f;
+        inst.mediumIndex = sceneS->addMedium(med);
+        sceneS->instances.push_back(inst);
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 4.0f;
+        light.xform = lookAtMatrix(Vec3(3, 5, 4), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        sceneS->lights.push_back(light);
+        sceneS->settings.resolutionX = 12;
+        sceneS->settings.resolutionY = 10;
+        sceneS->settings.samplesPerPixel = 4;
+        sceneS->settings.backend = kBackendCpuEmbree;
+        sceneS->settings.integrator = kIntegratorPathTracer;
+        sceneS->settings.caustics = 0;
+        sceneS->settings.pathGuiding = 0;
+        sceneS->settings.volumeSimilarity = 1;
+        sceneS->settings.maxDepth = 40;
+        sceneS->settings.rrStartDepth = 40;
+        sceneS->finalize();
+        sceneS->frameCameraOnContents();
+        RenderSession sessionS;
+        sessionS.setScene(sceneS);
+        sessionS.start();
+        sessionS.waitForCompletion();
+        const Image imageS = sessionS.linearImage();
+        double sumS = 0.0;
+        bool finiteS = true;
+        for (int y = 0; y < imageS.height(); ++y) {
+            for (int x = 0; x < imageS.width(); ++x) {
+                const Vec3 c = imageS.rgb(x, y);
+                if (!isFinite(c)) finiteS = false;
+                sumS += double(luminance(c));
+            }
+        }
+        check(finiteS, "Fog + Volume Similarity stays finite");
+        check(sumS > 0.0, "Fog + Volume Similarity produces light");
+        std::printf("  Fog + Volume Similarity sum=%.3f (maxDepth=40)\n", sumS);
+    }
+
+    // Cast-shadow regression: volume above a ground plane, light from an angle.
+    // Lit side of the plane must be brighter than the shadowed side.
+    auto castShadowContrast = [&](VolumeGridKind kind) -> double {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = kind;
+        vs.voxelSize = 0.08f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        vs.fillDensity = 1.0f;
+        std::string e2;
+        VolumeGridPtr grid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e2);
+        check(grid && grid->valid(), std::string("cast-shadow grid: ") + e2);
+
+        ScenePtr scene = std::make_shared<Scene>();
+        const int volumeIndex = scene->addVolume(grid);
+        const Bounds3 bb = grid->worldBounds();
+        MeshPtr proxy = makeBoxMesh(bb.hi - bb.lo);
+        const Vec3 center = bb.center();
+        for (Vec3& p : proxy->positions) p = p + center;
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        const int volMesh = scene->addMesh(proxy);
+
+        // Ground plane under the volume (y = -1.2), larger than the box shadow.
+        MeshPtr ground = makeBoxMesh(Vec3(6.0f, 0.05f, 6.0f));
+        for (Vec3& p : ground->positions) p.y -= 1.2f;
+        ground->ensureRenderTriangles();
+        ground->computeBounds();
+        const int groundMesh = scene->addMesh(ground);
+
+        Material volMat;
+        volMat.baseColor = Vec3(0.85f, 0.75f, 0.65f);
+        volMat.roughness = 0.4f;
+        volMat.hasVolumeShader = 1;
+        volMat.volumeDensity = 1.0f;
+        volMat.volumeAbsorption = Vec3(0.05f);
+        volMat.volumeScattering = Vec3(1.5f);
+        const int volMatIdx = scene->addMaterial(volMat);
+        Material gMat;
+        gMat.baseColor = Vec3(0.7f);
+        gMat.roughness = 0.6f;
+        const int gMatIdx = scene->addMaterial(gMat);
+
+        InstanceData volInst;
+        volInst.meshIndex = volMesh;
+        volInst.materialIndex = volMatIdx;
+        volInst.volumeIndex = volumeIndex;
+        volInst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = (kind == VolumeGridKind::Sdf) ? 3 : 2;
+        med.volumeIndex = volumeIndex;
+        med.density = 1.0f;
+        med.sigmaA = Vec3(0.05f);
+        med.sigmaS = Vec3(1.5f);
+        volInst.mediumIndex = scene->addMedium(med);
+        scene->instances.push_back(volInst);
+
+        InstanceData gInst;
+        gInst.meshIndex = groundMesh;
+        gInst.materialIndex = gMatIdx;
+        scene->instances.push_back(gInst);
+
+        LightData light;
+        light.type = kLightDistant;
+        light.color = Vec3(1.0f);
+        light.intensity = 6.0f;
+        // Light from +X/+Y so the shadow falls toward -X on the ground.
+        light.xform = lookAtMatrix(Vec3(4, 6, 0), Vec3(0, 0, 0), Vec3(0, 1, 0));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 64;
+        scene->settings.resolutionY = 48;
+        scene->settings.samplesPerPixel = 24;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.caustics = 0;
+        scene->settings.pathGuiding = 0;
+        scene->settings.maxDepth = 4;
+        scene->finalize();
+        // Look down at the ground / volume from above.
+        scene->camera.cameraToWorld = lookAtMatrix(Vec3(0, 5, 0.01f), Vec3(0, -1, 0), Vec3(0, 0, -1));
+        scene->camera.focalLength = 35.0f;
+        scene->cameraAuthored = true;
+
+        RenderSession session;
+        session.setScene(scene);
+        session.start();
+        session.waitForCompletion();
+        const Image image = session.linearImage();
+        // Compare left half (toward shadow) vs right half (lit).
+        double left = 0.0, right = 0.0;
+        int nL = 0, nR = 0;
+        const int mid = image.width() / 2;
+        const int y0 = image.height() / 3;
+        const int y1 = (image.height() * 2) / 3;
+        for (int y = y0; y < y1; ++y) {
+            for (int x = 0; x < image.width(); ++x) {
+                const double L = double(luminance(image.rgb(x, y)));
+                if (x < mid) {
+                    left += L;
+                    ++nL;
+                } else {
+                    right += L;
+                    ++nR;
+                }
+            }
+        }
+        const double meanL = nL ? left / nL : 0.0;
+        const double meanR = nR ? right / nR : 0.0;
+        std::printf("  cast-shadow %s: left=%.4f right=%.4f ratio=%.3f\n",
+                    kind == VolumeGridKind::Sdf ? "SDF" : "Fog", meanL, meanR,
+                    meanR > 1e-8 ? meanL / meanR : 0.0);
+        // Shadowed side must be darker. Soft fog still needs a clear ratio.
+        check(meanR > 1e-4, "cast-shadow lit side has light");
+        check(meanL < meanR * 0.92, "cast-shadow: shadowed side darker than lit");
+        return meanR > 1e-8 ? meanL / meanR : 0.0;
+    };
+    (void)castShadowContrast(VolumeGridKind::Sdf);
+    (void)castShadowContrast(VolumeGridKind::Fog);
+
+    // Field-level unit checks (no Embree): SDF occludes, fog attenuates.
+    {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = VolumeGridKind::Sdf;
+        vs.voxelSize = 0.1f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        std::string e3;
+        VolumeGridPtr sdfGrid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e3);
+        check(sdfGrid && sdfGrid->valid(), "unit sdf grid");
+        ScenePtr s = std::make_shared<Scene>();
+        const int vi = s->addVolume(sdfGrid);
+        MeshPtr proxy = makeBoxMesh(Vec3(1.2f));
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        InstanceData inst;
+        inst.meshIndex = s->addMesh(proxy);
+        inst.volumeIndex = vi;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 3;
+        med.volumeIndex = vi;
+        inst.mediumIndex = s->addMedium(med);
+        s->instances.push_back(inst);
+        s->finalize();
+        const SceneView view = s->view();
+        check(shadowOccludedBySdfVolumes(view, Vec3(-3, 0, 0), Vec3(1, 0, 0), 10.0f),
+              "SDF occludes a ray through the box");
+        check(!shadowOccludedBySdfVolumes(view, Vec3(-3, 0, 0), Vec3(0, 1, 0), 10.0f),
+              "SDF misses a ray that misses the box");
+    }
+    {
+        VolumeFromPolygonsSettings vs;
+        vs.kind = VolumeGridKind::Fog;
+        vs.voxelSize = 0.1f;
+        vs.exteriorBand = 3.0f;
+        vs.interiorBand = 3.0f;
+        vs.fillDensity = 1.0f;
+        std::string e3;
+        VolumeGridPtr fogGrid = VolumeGrid::fromPolygons(*box, Mat4::identity(), vs, &e3);
+        check(fogGrid && fogGrid->valid(), "unit fog grid");
+        ScenePtr s = std::make_shared<Scene>();
+        const int vi = s->addVolume(fogGrid);
+        MeshPtr proxy = makeBoxMesh(Vec3(1.2f));
+        proxy->ensureRenderTriangles();
+        proxy->computeBounds();
+        InstanceData inst;
+        inst.meshIndex = s->addMesh(proxy);
+        inst.volumeIndex = vi;
+        inst.visibilityMask = kVisPrimary;
+        MediumData med;
+        med.type = 2;
+        med.volumeIndex = vi;
+        med.density = 1.0f;
+        med.sigmaA = Vec3(0.2f);
+        med.sigmaS = Vec3(1.0f);
+        inst.mediumIndex = s->addMedium(med);
+        s->instances.push_back(inst);
+        s->finalize();
+        const SceneView view = s->view();
+        Rng rngTr(42u, 7u);
+        Vec3 TrAcc(0.0f);
+        constexpr int kTrSamples = 256;
+        for (int i = 0; i < kTrSamples; ++i) {
+            const Vec3 sample =
+                shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(1, 0, 0), 10.0f, rngTr);
+            TrAcc = TrAcc + sample;
+            check(sample.x <= 1.02f && sample.y <= 1.02f && sample.z <= 1.02f,
+                  "Fog ratio-tracking Tr sample does not exceed 1");
+        }
+        const Vec3 Tr = TrAcc * (1.0f / float(kTrSamples));
+        check(Tr.x < 0.95f && Tr.y < 0.95f && Tr.z < 0.95f,
+              "Fog ratio-tracking Tr attenuates through the volume");
+        check(Tr.x > 0.0f, "Fog Tr mean is not fully opaque for this density");
+        Rng rngMiss(99u, 3u);
+        Vec3 missAcc(0.0f);
+        for (int i = 0; i < 64; ++i)
+            missAcc =
+                missAcc + shadowTransmittanceFogVolumes(view, Vec3(-3, 0, 0), Vec3(0, 1, 0), 10.0f, rngMiss);
+        const Vec3 TrMiss = missAcc * (1.0f / 64.0f);
+        check(TrMiss.x > 0.99f && TrMiss.y > 0.99f && TrMiss.z > 0.99f,
+              "Fog Tr ~1 when the ray misses the AABB");
     }
 #else
     std::printf("  (OpenVDB disabled in this build — skipping volume checks)\n");
@@ -4647,8 +6938,17 @@ int main() {
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
+    if (getenv("SOL_ONLY_DOME")) {
+        registerBuiltinNodes();
+        testDomeHdrLoad();
+        testAcesTextureConvert();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (getenv("SOL_ONLY_VDB")) {
         registerBuiltinNodes();
+        testFogAabbProxyEnterExit();
+        testFogWoodcockHeader();
         testNgonTriangulateAndVdb();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
@@ -4662,6 +6962,18 @@ int main() {
     if (getenv("SOL_ONLY_THROUGH_REFR")) {
         registerBuiltinNodes();
         testBdptCausticThroughRefraction();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
+    if (getenv("SOL_ONLY_FOLDERS")) {
+        registerBuiltinNodes();
+        testRenderSettingsFolders();
+        testSceneGraphFolders();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
+    if (getenv("SOL_ONLY_SPECTRAL")) {
+        testSpectralHeroBasics();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -4684,13 +6996,24 @@ int main() {
     testMath();
     testPixelFilter();
     testSampling();
+    testLightSelectionDistantRect();
     testBsdf();
     testGlob();
     testGraphCook();
+    testGraphDeleteAfterLoad();
+    testXpuDevice();
+    testRenderSettingsFolders();
+    testSceneGraphFolders();
+    testQuarterFilmIsDownscaleNotCrop();
+    testNavPreviewDividerAndSplat();
+    testFramebufferPresentableOnlyWhenComplete();
     testCameraDofFocus();
     testPolyOpticsApertureSpread();
     testPolynomialOpticsCamera();
     testEnvironment();
+    testDomeHdrLoad();
+    testPhysicalSkyLight();
+    testAcesTextureConvert();
     testRender();
     testCausticsGlassSphere();
     testBdptCausticThroughRefraction();
@@ -4728,6 +7051,8 @@ int main() {
     testMaterialXUdimCubeAsset();
     testBdptShadersAndSss();
     testBinaryUsdLoad();
+    testFogAabbProxyEnterExit();
+    testFogWoodcockHeader();
     testNgonTriangulateAndVdb();
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

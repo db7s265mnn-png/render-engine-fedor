@@ -94,4 +94,30 @@ ParamType paramTypeFromName(const QString& name);
 // Evaluate a Parameter::visibleWhen expression against a node’s current values.
 bool evaluateVisibleWhen(const QString& expression, const class Node& node);
 
+// Empty-group tab title. Scene-graph sources (geo / file / lights / camera / vdb)
+// and material nodes use "Base"; everyone else keeps "Parameters".
+inline QString defaultParameterFolderTitle(const QString& nodeType) {
+    static const QStringList kBaseTypes{
+        QStringLiteral("alembic"),
+        QStringLiteral("usd"),
+        QStringLiteral("sphere"),
+        QStringLiteral("grid"),
+        QStringLiteral("box"),
+        QStringLiteral("tube"),
+        QStringLiteral("camera"),
+        QStringLiteral("domelight"),
+        QStringLiteral("distantlight"),
+        QStringLiteral("rectlight"),
+        QStringLiteral("disklight"),
+        QStringLiteral("spherelight"),
+        QStringLiteral("physicalskylight"),
+        QStringLiteral("vdbfrompolygons"),
+        QStringLiteral("vdbfile"),
+        QStringLiteral("sdftopolygons_vdb"),
+        QStringLiteral("sdftopolygons_dcsdd"),
+        QStringLiteral("material"),
+    };
+    return kBaseTypes.contains(nodeType) ? QStringLiteral("Base") : QStringLiteral("Parameters");
+}
+
 }  // namespace sol

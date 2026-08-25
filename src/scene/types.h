@@ -4,6 +4,8 @@
 
 #include "core/math.h"
 
+#include "render/spectrum_constants.h"
+
 namespace sol {
 
 // Arnold-like ray switch: absolute indices into SceneView::materials (-1 = use
@@ -122,13 +124,30 @@ struct Material {
     // dielectric skip Fresnel reflections (TIR still reflects — nowhere else to go).
     float internalReflections = 1.0f;
 
+    // Separate dielectric coat (pbrt-style overlay, not mixed into the base lobes).
+    // thickness is an optical depth in the coat medium (Beer–Lambert); 0 = clear.
+    float coat = 0.0f;
+    float coatRoughness = 0.1f;
+    float coatIor = 1.5f;
+    float coatThickness = 0.0f;
+    Vec3 coatColor{1.0f, 1.0f, 1.0f};
+
+    // Autodesk Standard Surface sheen (Charlie / Estevez–Kulla) and Oren–Nayar.
+    float sheen = 0.0f;
+    float sheenRoughness = 0.3f;
+    Vec3 sheenColor{1.0f, 1.0f, 1.0f};
+    float diffuseRoughness = 0.0f;
+    // Specular GGX anisotropy (0 = isotropic) and tangent-plane rotation (0–1 = 0–360°).
+    float specularAnisotropy = 0.0f;
+    float specularRotation = 0.0f;
+
     // MaterialX volumeshader (connected to surfacematerial.volumeshader).
     // When hasVolumeShader != 0, fog/VDB path uses these coefficients.
     int hasVolumeShader = 0;
     float volumeDensity = 1.0f;
     float volumeAnisotropy = 0.0f;  // HG g
-    Vec3 volumeAbsorption{0.5f, 0.5f, 0.5f};
-    Vec3 volumeScattering{0.5f, 0.5f, 0.5f};
+    Vec3 volumeAbsorption{0.0f, 0.0f, 0.0f};
+    Vec3 volumeScattering{1.0f, 1.0f, 1.0f};
     Vec3 volumeEmission{0.0f, 0.0f, 0.0f};
     float volumeEmissionStrength = 0.0f;
 
@@ -242,6 +261,14 @@ struct MeshView {
     // Key 0 usually aliases `positions`. Null / count 1 = static mesh.
     const Vec3* motionPositions = nullptr;
     int motionKeyCount = 1;
+    // Optional per-triangle edge mask (see Mesh::triEdgeMask). Null = draw all edges.
+    const uint8_t* triEdgeMask = nullptr;
+    // Optional cage wire overlay (authored n-gon edges). Null = unused.
+    const uint32_t* wireIndices = nullptr;
+    const Vec3* wirePositions = nullptr;
+    const Vec3* wireNormals = nullptr;
+    uint32_t wireEdgeCount = 0;     // number of edges (== wireIndices pairs)
+    uint32_t wireVertexCount = 0;
 };
 
 // Visibility bits for primary vs shadow rays (Embree mask / OptiX visibilityMask).
@@ -327,6 +354,9 @@ struct LightData {
     // participate in caustic transport (MNEE / BDPT light-tracing delta chains /
     // BSDF specular→light after a diffuse bounce).
     int contributeCaustics = 1;
+    // Physical Sky distant sun: draw the solar disc on camera / reflection misses.
+    // Regular distant lights stay invisible (NEE only). The sky env map has no disc.
+    int cameraSunDisc = 0;
 
     SR_HD Vec3 emittedRadiance() const { return color * (intensity * exp2f(exposure)); }
 };
@@ -344,6 +374,11 @@ struct LightBvhNode {
     int   childOrLight = -1;          // leaf: scene light index; interior: left child node index
     int   rightChild   = -1;          // interior only; -1 for leaves
     int   isLeaf       = 0;
+    // pbrt-v4 LightBounds emission cone: axis w, θ_o (emit cone), θ_e (falloff).
+    Vec3  coneAxis{0.0f, 0.0f, 1.0f};
+    float cosThetaO = -1.0f;          // cos of emit-cone half-angle (–1 = 4π)
+    float cosThetaE = 0.0f;           // cos of extra falloff (0 = π/2 Lambert)
+    int   twoSided  = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -356,7 +391,7 @@ struct CameraData {
     float fStop = 0.0f;           // 0 disables depth of field
     float focusDistance = 5.0f;
 
-    // 0 = thin lens (default), 1 = polynomial optics (Embree only; OptiX falls back).
+    // 0 = thin lens (Embree + OptiX). 1 = polynomial optics (Embree only).
     int opticalModel = 0;
     // Index into polynomialOpticsLensNames() when opticalModel == 1.
     int lensModel = 19;  // cooke__speed_panchro__1920__50mm
@@ -375,8 +410,30 @@ struct CameraData {
 // Render settings
 // ---------------------------------------------------------------------------
 enum ToneMapper : int { kToneNone = 0, kToneReinhard = 1, kToneAces = 2 };  // legacy (removed from UI)
-enum RenderBackendType : int { kBackendCpuEmbree = 0, kBackendGpuOptix = 1 };
-// BDPT is CPU / Embree only; OptiX falls back to the unidirectional path tracer.
+enum RenderBackendType : int {
+    kBackendCpuEmbree = 0,
+    kBackendGpuOptix = 1,
+    kBackendXpu = 2,  // Embree + OptiX together (Karma / RenderMan XPU)
+};
+
+SR_INL SR_HD bool renderDeviceUsesGpu(int backend) {
+    return backend == kBackendGpuOptix || backend == kBackendXpu;
+}
+SR_INL SR_HD bool renderDeviceUsesCpu(int backend) {
+    return backend == kBackendCpuEmbree || backend == kBackendXpu;
+}
+SR_INL SR_HD bool renderDeviceIsXpu(int backend) { return backend == kBackendXpu; }
+
+// XPU work schedule (Render Settings → Engine, visible only when backend is XPU).
+// Overlap (default): GPU Iray-batches consecutive PCG spp until Embree finishes
+// one Sobol spp (disjoint index band), then one D2H add.
+// Mixture: Karma-style independent full-frame estimators, host blend, automatic spp share.
+enum XpuSchedule : int {
+    kXpuScheduleOverlap = 0,
+    kXpuScheduleMixture = 1,
+};
+// BDPT / spectral / wireframe are CPU / Embree only; GPU and XPU require Path Tracer
+// and stop with an error (no Embree fallback).
 // Menu order matches these values: Path Tracer, BDPT, Direct Lighting, AO,
 // PT Spectral, BDPT Spectral, Wireframe.
 enum IntegratorMode : int {
@@ -402,16 +459,6 @@ enum CausticsEngine : int {
     kCausticsEnginePhoton = 2,
 };
 
-// Camera AA / DoF primary samples. Path bounce dims use Owen-scrambled Sobol (PBRT4).
-enum PixelSampler : int {
-    kPixelSamplerSobol = 0,        // Owen-scrambled Sobol
-    kPixelSamplerBlueNoise = 1,    // 64×64 BN CP tile
-    kPixelSamplerXorshift = 2,     // Marsaglia xorshift32 white jitter
-    kPixelSamplerGenPnt2D = 3,     // plastic-number R2 (Roberts), n = sampleIndex
-    // Diagnostic: pixel center + U(-1,1)*manualTestMult per axis, clamped to [0,1).
-    kPixelSamplerManualTest = 4,
-};
-
 // How the image is scheduled / written (Render Settings → Sampling Type).
 enum SamplingEngine : int {
     // PBRT-style FilmTile buckets: local accum + mergeFilmTile, strong (x,y,spp) seed.
@@ -423,7 +470,7 @@ enum SamplingEngine : int {
 // Render Settings → Diagnostic: replace beauty with a sampling/seed field.
 enum SamplingDebug : int {
     kSamplingDebugOff = 0,
-    kSamplingDebugPixelJitter = 1,  // R=jx G=jy — shows BN period vs Sobol/Xorshift
+    kSamplingDebugPixelJitter = 1,  // R=jx G=jy — Owen-Sobol camera jitter
     kSamplingDebugPathRng = 2,      // first path-RNG float as gray — seed seams
     kSamplingDebugBucket = 3,       // color by render bucket (tileSize)
     kSamplingDebugPixelHash = 4,    // RGB from hashPixelSample(x,y,spp,seed)
@@ -493,10 +540,9 @@ struct RenderSettingsData {
     int resolutionX = 960;
     int resolutionY = 540;
     int samplesPerPixel = 64;
-    int maxDepth = 8;
-
-    int rrStartDepth = 3;
-    int lightSamples = 2;          // NEE samples per bounce (MIS with BSDF)
+    int maxDepth = 8;       // surfaces + volume scatters; UI up to 4096 for dense MS
+    int rrStartDepth = 3;   // raise near maxDepth for deep volume multiple scattering
+    int lightSamples = 2;          // UI; integrators take one NEE sample (pbrt-v4)
     int seed = 0;
     int integrator = kIntegratorPathTracer;
 
@@ -516,13 +562,14 @@ struct RenderSettingsData {
     // Film reconstruction filter (Box = current 1-pixel behaviour).
     int pixelFilter = kPixelFilterBox;
     float filterRadius = 0.5f;  // pixels; 0 = use defaultFilterRadius(pixelFilter)
+    // Karma XPU variance oracle. 0 = off (always take Samples Per Pixel).
+    // Default 0.01 matches Karma's Variance Threshold.
+    float noiseThreshold = 0.01f;
 
     int backend = kBackendCpuEmbree;
+    int xpuSchedule = kXpuScheduleOverlap;  // ignored unless backend == XPU
     int envVisibleCamera = 1;
     int tileSize = 32;             // bucket size; 0 = PBRT-style auto
-    int pixelSampler = kPixelSamplerSobol;  // camera AA / DoF generator
-    // Manual-Test only: pixel jitter = 0.5 + U(-1,1)*mult, clamped to [0,1).
-    float manualTestMult = 0.0f;
     int samplingEngine = kSamplingEngineBuckets;  // Buckets / Progressive
     int threads = 0;               // 0 = hardware concurrency
 
@@ -530,6 +577,9 @@ struct RenderSettingsData {
     // Wireframe integrator: edge half-width in screen pixels (anti-aliased).
     float wireframeThickness = 1.0f;
     int pathGuiding = 0;           // OpenPGL indirect guides (CPU / Embree); PT + BDPT
+    // Opt-in, biased: Hyperion similarity on deep volume MS (Engine checkbox).
+    // Off (default) keeps authored g / σs. On: lerp g→0 from volume bounce 5..20.
+    int volumeSimilarity = 0;
     // Enable caustic light transport (specular→diffuse). Off = dark glass shadows
     // (soften per-material with shadow_opacity / contribute_caustics).
     int caustics = 1;
@@ -566,17 +616,12 @@ struct RenderSettingsData {
     // Master switch: off = render cages, skip subdiv + geometric displacement.
     int enableDisplacement = 1;
 
-    // PT Spectral / BDPT Spectral.
-    int spectralSamples = 4;      // hero λ count (UI: 2..16)
-    int spectralBins = 16;        // fixed bins for multilayer spectral EXR (8..32)
-    int spectralExr = 0;          // write spectral multilayer EXR on save when set
-    // Beauty conversion color space (default linear sRGB). See SpectralColorSpace.
-    int spectralColorSpace = 0;   // kSpectralColorSpaceSrgb
+    // PT Spectral / BDPT Spectral. Wavelength count is pbrt-v4 NSpectrumSamples.
+    int spectralSamples = kMaxSpectrumSamples;
+    // Beauty conversion color space. Default ACEScg — same as workingSpace.
+    int spectralColorSpace = 1;   // kSpectralColorSpaceAcesCg
     // Wavelength sampling: 0 = visible importance (pbrt), 1 = uniform stratified.
     int spectralWavelengthSampling = 0;
-    // Film: false-color debug from spectral bins (PT Spectral). Diagnostic group.
-    int filmFalseColor = 0;
-    int filmFalseColorBin = 0;    // which bin to visualise (0 .. spectralBins-1)
     // Sampling / seed diagnostics (skip light transport; write debug RGB).
     int samplingDebug = 0;        // SamplingDebug enum
 
@@ -604,6 +649,7 @@ struct SceneView {
     const ProceduralNode* procedurals = nullptr;
     const MediumData* media = nullptr;
     // Host CPU only — OpenVDB grids (indexed by InstanceData::volumeIndex).
+    // OptiX uses LaunchParams::volumes (occupancy + the same majorant bricks).
     const VolumeGrid* const* volumes = nullptr;
 
     int meshCount = 0;
@@ -629,7 +675,7 @@ struct SceneView {
     int cameraMotionKeyCount = 1;
 
     // Light BVH for position-aware light selection (finite lights only).
-    // Null on the OptiX GPU path — sampling falls back to the flux-only code.
+    // Uploaded to OptiX; flux-only fallback if the tree is empty.
     const LightBvhNode* lightBvh          = nullptr;
     int                 lightBvhNodeCount  = 0;
     // Infinite lights (dome, distant) are kept outside the BVH.

@@ -1,8 +1,10 @@
 #include "ui/theme.h"
 
+#include <QIcon>
 #include <QLocale>
 #include <QPainter>
 #include <QPalette>
+#include <QPixmap>
 #include <QProxyStyle>
 #include <QStyleFactory>
 #include <QStyleOption>
@@ -40,7 +42,24 @@ public:
         QProxyStyle::drawControl(element, option, painter, widget);
     }
 
+    QIcon standardIcon(StandardPixmap icon, const QStyleOption* option = nullptr,
+                       const QWidget* widget = nullptr) const override {
+        if (icon == SP_TitleBarNormalButton) return detachSquareIcon();
+        return QProxyStyle::standardIcon(icon, option, widget);
+    }
+
 private:
+    static QIcon detachSquareIcon() {
+        QPixmap pixmap(16, 16);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.fillRect(3, 3, 10, 10, QColor(0x5c, 0x60, 0x66));
+        painter.setPen(QColor(0x2a, 0x2d, 0x32));
+        painter.drawRect(3, 3, 9, 9);
+        painter.end();
+        return QIcon(pixmap);
+    }
     static void drawGrip(const QStyleOption* option, QPainter* painter) {
         if (!option || !painter) return;
         const QRect r = option->rect;
@@ -106,7 +125,19 @@ void applyDarkTheme(QApplication& application) {
 
     application.setStyleSheet(R"(
         QToolTip { color: #dcdee2; background-color: #3a3e44; border: 1px solid #22242a; }
-        QDockWidget { titlebar-close-icon: none; font-weight: bold; }
+        QDockWidget {
+            titlebar-close-icon: none;
+            titlebar-normal-icon: none;
+            font-weight: bold;
+        }
+        QDockWidget::float-button, QDockWidget::close-button {
+            width: 0px;
+            height: 0px;
+            padding: 0px;
+            margin: 0px;
+            image: none;
+        }
+        QTabBar { padding-right: 28px; }
         QDockWidget::title {
             background: #2e3136;
             padding: 0 10px;
@@ -123,6 +154,30 @@ void applyDarkTheme(QApplication& application) {
         }
         QGroupBox { border: 1px solid #3a3e44; border-radius: 2px; margin-top: 14px; padding-top: 6px; }
         QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #ffa82e; }
+        QTabWidget::pane {
+            border: 1px solid #555960;
+            background: #3a3e44;
+            padding: 2px;
+        }
+        QTabBar::tab {
+            background: #2a2e33;
+            color: #d0d4da;
+            padding: 6px 12px;
+            margin-right: 2px;
+            border: 1px solid #555960;
+            min-height: 22px;
+            min-width: 4em;
+        }
+        QTabBar::tab:selected {
+            background: rgba(255, 190, 90, 90);
+            color: #ffffff;
+            border: 1px solid #ffbe5a;
+        }
+        QTabBar::tab:hover:!selected {
+            color: #e8eaed;
+            background: #32363c;
+        }
+        QTabBar::scroller { width: 24px; }
         QLineEdit, QComboBox, QPlainTextEdit, QTreeWidget {
             background: #22242a; border: 1px solid #3a3e44; border-radius: 2px; padding: 2px 4px;
         }
@@ -143,7 +198,7 @@ void applyDarkTheme(QApplication& application) {
         QSlider::handle:horizontal {
             background: #8a8f98; width: 10px; margin: -4px 0; border-radius: 5px;
         }
-        QSlider::handle:horizontal:hover { background: #ffa82e; }
+        QSlider::handle:horizontal:hover { background: #ffbe5a; }
         QStatusBar { background: #2e3136; }
         QHeaderView::section { background: #2e3136; padding: 3px; border: none; }
     )");

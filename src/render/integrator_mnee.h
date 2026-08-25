@@ -121,7 +121,7 @@ SR_INL ChainState traceChain(const SceneView& scene, const Tracer& tracer, Vec3 
 
         Vec3 dNext;
         float etaRel = 1.0f, fr = 0.0f;
-        const LobeWeights lw = computeLobes(mat);
+        const LobeWeights lw = computeLobes(mat, Frame(si.ns).toLocal(-d));
         if (!refractTravel(d, si.ns, lw.eta, dNext, etaRel, fr)) return st;  // TIR → fail
         // Radiance scaling 1/eta² per interface cancels over enter/exit pairs.
         T = T * lw.transmissionTint * ((1.0f - fr) / srMax(1e-4f, etaRel * etaRel));
@@ -563,7 +563,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 if (!(mneeFamily && !lightContributesCaustics(dome))) {
                 const bool primary = depth == 0 && passThrough == 0;
                 if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
-                    Vec3 envL = domeRadiance(scene, dome, direction);
+                    Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
                     if (!isBlack(envL)) {
                         float weight = 1.0f;
                         if (!specularBounce) {
@@ -573,8 +573,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                             weight = powerHeuristic(1.0f, bsdfPdf, 1.0f, lp);
                         }
                         Vec3 contrib = throughput * envL * weight;
-                        if (depth > 0 && !specularBounce)
-                            contrib = clampContribution(contrib, settings.clampDirect);
+                        if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
                         radiance += contrib;
 #if !defined(__CUDACC__)
                         if (guiding && guiding->active())
@@ -582,6 +581,18 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 #endif
                     }
                 }
+                }
+            }
+            {
+                const bool primarySun = depth == 0 && passThrough == 0;
+                if (!(primarySun && !settings.envVisibleCamera)) {
+                    const Vec3 sunL =
+                        cameraSunDiscRadiance(scene, origin, direction, bsdfPdf, specularBounce,
+                                              primarySun, mneeFamily);
+                    if (!isBlack(sunL)) {
+                        Vec3 contrib = throughput * sunL;
+                        radiance += contrib;
+                    }
                 }
             }
             break;
@@ -594,7 +605,6 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         if (si.lightIndex >= 0 && depth == 0 && !inst.visibleCamera) {
             origin = offsetRayOrigin(si.p, si.ng, direction);
             ++passThrough;
-            if (passThrough > 16) break;
             continue;
         }
 
@@ -709,7 +719,6 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
             origin = offsetRayOrigin(si.p, si.ng, direction);
             ++passThrough;
-            if (passThrough > 32) break;
             continue;
         }
 
@@ -717,7 +726,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 
         const Vec3 wo = -direction;
         const Frame frame(si.ns);
-        const LobeWeights lw = computeLobes(mat);
+        const Vec3 woLocal = frame.toLocal(wo);
+        const LobeWeights lw = computeLobes(mat, woLocal);
 
         // Arnold / Autodesk Standard Surface base mix — same lottery as PathIntegrator.
         // PathMnee previously skipped SSS entirely whenever caustics were on.
@@ -725,7 +735,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         if (materialSupportsSss(mat) && rng.nextFloat() < sssWeight) {
             Material specMat = sssSpecularEntryMaterial(mat);
             const Vec3 woLocalEntry = frame.toLocal(wo);
-            const LobeWeights specLw = computeLobes(specMat);
+            const LobeWeights specLw = computeLobes(specMat, woLocalEntry);
             const float pSpec = sssEntrySpecularProb(specMat, woLocalEntry);
 
             if (pSpec > 0.0f) {
@@ -766,6 +776,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             if (pSpec > 0.0f && pSpec < 0.999f) throughput /= (1.0f - pSpec);
 
             const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
+            if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
             Material lambert = sssExitLambertMaterial();
             SurfaceInteraction ssSi = si;
             ssSi.p = walk.exitP;
@@ -840,7 +851,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 #endif
                 }
             }
-            const int nLightSamples = srMax(1, settings.lightSamples);
+            (void)settings.lightSamples;
+            const int nLightSamples = 1;  // pbrt-v4: one light sample per vertex, MIS with BSDF
             Vec3 neeSum(0.0f);
             Vec3 neeSumGuide(0.0f);  // clear-path + MNEE at diffuse receivers
             for (int ls = 0; ls < nLightSamples; ++ls) {
@@ -968,7 +980,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     }
                 }
             }
-            const float invLs = 1.0f / float(srMax(1, settings.lightSamples));
+            const float invLs = 1.0f;
             const Vec3 nee = neeSum * invLs;
             Vec3 contrib = throughput * nee;
             if (depth > 0 && !specularBounce) contrib = clampContribution(contrib, settings.clampDirect);
@@ -979,7 +991,6 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         }
 
         // --- BSDF continuation (guided mixture) ------------------------------
-        const Vec3 woLocal = frame.toLocal(wo);
         BsdfSample bs;
         bool gotSample = false;
 #if !defined(__CUDACC__)

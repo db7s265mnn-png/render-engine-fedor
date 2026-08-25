@@ -8,8 +8,10 @@
                                        ┌────────────────────────────────┴─────────┐
                                        ▼                                          ▼
                               ┌──────────────────┐                     ┌────────────────────┐
-                              │ Embree backend   │  shared integrator  │  OptiX backend     │
-                              │ (CPU, tiled)     │◀───────────────────▶│  (GPU, GAS + IAS)  │
+                              │ Embree backend   │                     │ OptiX wavefront    │
+                              │ (CPU, tiled)     │                     │ init/intersect/    │
+                              │ integrator.h     │                     │ shade modules      │
+                              │ full features    │                     │ pinhole, basic BSDF│
                               └────────┬─────────┘                     └─────────┬──────────┘
                                        └───────────► Framebuffer ◀───────────────┘
 ```
@@ -53,16 +55,18 @@ pixel at a time and accumulates it into a `Framebuffer`. Cancellation is a flag 
 backends, which is what makes edits feel instant: the UI stops the session, re-cooks and
 starts a fresh one.
 
-Both backends implement the same two operations — `intersect` and `occluded` — and hand them
-to `traceRadiance()` in `src/render/integrator.h`, which is a template over the tracer. The
-result is that the CPU and GPU produce the same image from the same sampling decisions:
+The Embree backend implements `intersect` / `occluded` and hands them to `traceRadiance()` in
+`src/render/integrator.h` (volumes, SSS, procedurals, BDPT, MNEE, polynomial optics). OptiX does
+**not** compile that header. Like Cycles, GPU path tracing is a **wavefront** of small kernels:
+`init_from_camera`, `intersect_closest`, `intersect_shadow`, `shade_surface`, `shade_background`,
+`shade_shadow`. `optixTrace` lives only in the intersect modules; the BSDF lives only in
+`shade_surface`. That is what keeps `cicc` from seeing one megakernel.
 
-* **Camera rays** are generated from a physical camera model: focal length and sensor width
-  define the field of view, and a non-zero f-stop enables a thin lens depth of field.
-* **Surfaces** use a principled BSDF: Lambert diffuse, GGX specular with Smith masking and
-  VNDF sampling, and a rough dielectric transmission lobe. Nearly smooth lobes collapse to
-  delta distributions. Opaque back faces are shaded two sided, which keeps geometry from
-  DCCs with inconsistent winding from turning black.
+* **Camera rays (CPU)** use the physical camera: focal length and sensor width define FOV, a
+  non-zero f-stop is a thin lens, `opticalModel == 1` is polynomial optics. **OptiX is pinhole
+  only.**
+* **Surfaces (CPU)** use the full principled BSDF plus procedurals / SSS. **OptiX** evaluates
+  2D image maps and Lambert / GGX / dielectric transmission only.
 * **Lights** are sampled analytically (rect and disk by area, sphere by cone, distant by its
   angular diameter, dome through the environment CDF) and combined with BSDF sampling using
   the power heuristic.
@@ -81,7 +85,21 @@ distributed across a persistent thread pool.
 
 Each mesh becomes a compacted GAS; instances become an IAS with `instanceId` set to the
 instance index. Materials, lights, instances and the environment CDF tables are uploaded once
-per scene build and referenced by a `SceneView` inside the launch parameters. Device programs
-live in `src/render/optix/optix_programs.cu`, are compiled to PTX by `nvcc` at build time and
-embedded into the binary by `cmake/embed_binary.cmake`. Two ray types are used: radiance with
-six payload registers, and shadow rays that terminate on the first hit.
+per scene build and referenced by a `SceneView` inside the launch parameters.
+
+Device programs are split the way Cycles splits GPU work:
+
+* `optix_hit_miss.cu` — tiny closest-hit / miss payload writers.
+* `optix_intersect_closest.cu` / `optix_intersect_shadow.cu` — the only TUs that call
+  `optixTrace` (Cycles `__raygen__kernel_optix_integrator_intersect_*`).
+* `optix_init_from_camera.cu` — pinhole raygen (no DoF / optics).
+* `optix_shade_surface.cu` / `optix_shade_background.cu` / `optix_shade_shadow.cu` — shading.
+  Lambert / GGX / glass + 2D maps. No `optixTrace`.
+
+Volumes, SSS, MaterialX procedurals, BDPT, MNEE, wireframe, AO, and polynomial-optics cameras
+stay on Embree. This engine does not ship SVM / MDL, so there is no on-the-fly shader JIT.
+
+Each `.cu` is a separate `nvcc -ptx` job (ninja compiles them in parallel) and a separate OptiX
+module in one pipeline. The host launches the raygen for the current wavefront stage, swapping
+the SBT raygen record like Cycles. Two ray types: radiance (six payload registers) and shadow
+rays that terminate on the first hit.

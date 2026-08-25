@@ -45,8 +45,10 @@ Houdini-like VDB SOPs. Output of `vdbfrompolygons` is a **Volume prim only** (no
 | **SDF to Polygons (DCSDD)** (`sdftopolygons_dcsdd`) | Dual Contouring of Signed Distance Data (Carrera et al. 2026) |
 
 CPU path tracer renders SDF level sets by sphere tracing and Fog volumes with delta tracking.
-Assign a MaterialX graph with `surfacematerial.volumeshader` → `standard_volume` (density,
-absorption, scattering, emission, anisotropy) for volume shading; the surface shader shades SDF hits.
+Assign a MaterialX graph with `surfacematerial.volume` → `standard_volume` (density, anisotropy,
+absorption, scattering, emission, emission_color) for volume shading; the surface shader shades SDF
+hits. Material container ports are short names (`surface`, `displacement`, `volume`); MaterialX
+long names (`surfaceshader`, `displacementshader`, `volumeshader`) still resolve when loading XML.
 
 ## Utility
 
@@ -115,9 +117,22 @@ parameters, and *Look Through Camera Node* goes back to the authored camera.
 
 | Group | Parameters |
 | --- | --- |
-| Image | Resolution X/Y, Samples Per Pixel |
-| Engine | Render Backend (CPU Embree or GPU OptiX), Integrator (Path Tracer, Direct Lighting, Ambient Occlusion), Max Ray Depth, Russian Roulette Depth, Direct Clamp, Indirect Clamp, Seed, CPU Threads, Tile Size, AO Distance |
-| Film | Tone Map (None, Reinhard, ACES), Exposure, Gamma, Environment Visible To Camera |
+| Image | Resolution X/Y, Pixel Filter, Filter Radius, Output Path, Bit Depth, TX cache |
+| Sampling | Samples Per Pixel, Pixel Oracle (Uniform / Variance), Noise Threshold, Light Samples, Sampling Type, Bucket Size, Seed, Direct / Indirect Clamp. Camera and path use Owen-scrambled Sobol (PBRT4). Variance overlay shows `N% skip`; at 0.01 a noisy 128 spp frame is often 0%. |
+| Engine | Render Device (CPU Embree, GPU OptiX, or XPU), Integrator, spectral options, CPU Threads, AO Distance, Dispersion, Indirect Guides, Volume Similarity |
+| Depth | Max Ray Depth, Russian Roulette Depth |
+| Caustics | Caustics, Caustics Engine, Caustic Firefly Clamp, Photon Count / Radius |
+| Motion Blur | Enable Motion Blur, Motion Keys, Shutter Length |
+| Displacement | Frustum Cull, Screen Adaptive, Enable Displacement, Dicing Camera |
+| Film | Working Space, OCIO, Environment Visible To Camera |
+| Diagnostic | Sampling Debug |
+
+Folders are Houdini-style tabs in the parameter panel: click a tab to show only that group.
+
+XPU (`Render Device` = Embree+OptiX) is Path Tracer only. **Overlap** (default) Iray-batches
+consecutive GPU (PCG) spp until Embree finishes one Sobol spp, then one film add. **Mixture**
+keeps independent CPU/GPU films and blends them (~12 Hz GPU snapshot). If OptiX cannot start,
+rendering stops with an error (no Embree fallback). Non-PT integrators also stop on GPU/XPU.
 
 Film settings are applied when the framebuffer is displayed or written to an LDR file; `.exr`
 and `.hdr` outputs stay linear.

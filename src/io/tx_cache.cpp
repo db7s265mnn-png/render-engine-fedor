@@ -2,6 +2,7 @@
 
 #include "io/tx_convert.h"
 
+#include <cctype>
 #include <mutex>
 #include <string>
 
@@ -102,14 +103,24 @@ static bool getActiveTxSettings(RenderSettingsData& out) {
     return true;
 }
 
+bool txCacheGetActiveSettings(RenderSettingsData& out) {
+    return getActiveTxSettings(out);
+}
+
 std::string txCacheResolve(const std::string& sourcePath) {
+    return txCacheResolve(sourcePath, txDefaultInputColorSpace());
+}
+
+std::string txCacheResolve(const std::string& sourcePath, const std::string& inputColorSpace) {
     RenderSettingsData settings{};
     if (!getActiveTxSettings(settings)) return sourcePath;
+
+    const std::string cs = txResolveInputColorSpace(inputColorSpace, sourcePath, true);
 
     // Single concrete path (including one UDIM tile). Convert in place.
     std::string outPath;
     std::string error;
-    if (!ensureTxTexture(sourcePath, settings, txDefaultInputColorSpace(), outPath, error)) {
+    if (!ensureTxTexture(sourcePath, settings, cs, outPath, error)) {
         if (!error.empty()) logWarning("tx_cache: " + error);
         return sourcePath;
     }
@@ -120,8 +131,9 @@ std::string txCacheResolve(const std::string& sourcePath) {
     // Fallback: allocate and convert one.
     TxConvertRequest req;
     req.sourcePath = sourcePath;
-    req.outputPath = txAllocateOutputPath(sourcePath, resolveCacheDir(settings.txCacheDir));
-    req.inputColorSpace = txDefaultInputColorSpace();
+    req.outputPath =
+        txAllocateOutputPath(sourcePath, resolveCacheDir(settings.txCacheDir), TxOutputFormat::Tx, cs);
+    req.inputColorSpace = cs;
     req.ocioConfigPath = txResolveOcioConfig(settings.ocioUseEnv != 0, settings.ocioConfigPath);
     const TxConvertResult r = txConvertOne(req);
     return r.ok ? r.outputPath : sourcePath;

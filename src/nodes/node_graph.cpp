@@ -75,10 +75,15 @@ void NodeGraph::removeNode(Node* node) {
 
 void NodeGraph::clear() {
     displayNode_ = nullptr;
+    // Views hold raw Node* (NodeItem, Parameters). Drop them before destroy.
+    for (const NodePtr& node : nodes_) {
+        if (node) emit nodeAboutToBeRemoved(node.get());
+    }
     nodes_.clear();
     filePath_.clear();
     setModified(false);
     emit displayNodeChanged(nullptr);
+    emit connectionsChanged();
     emit graphChanged();
 }
 
@@ -87,6 +92,14 @@ Node* NodeGraph::findNode(const QString& name) const {
         if (node->name() == name) return node.get();
     }
     return nullptr;
+}
+
+bool NodeGraph::contains(const Node* node) const {
+    if (!node) return false;
+    for (const NodePtr& candidate : nodes_) {
+        if (candidate.get() == node) return true;
+    }
+    return false;
 }
 
 std::vector<Node*> NodeGraph::outputsOf(const Node* node) const {

@@ -6,6 +6,7 @@
 #include <QGraphicsView>
 #include <QHash>
 #include <QList>
+#include <QMetaObject>
 
 #include "nodes/node_graph.h"
 
@@ -30,6 +31,7 @@ public:
     void rebuild();
     void updateConnections();
     void refreshAllNodeItems();
+    void dropNodeItem(Node* node);
     NodeItem* itemForNode(Node* node) const;
 
 protected:
@@ -112,22 +114,28 @@ private:
     QPointF snapWireEndpoint(QPoint viewPosition, bool draggingFromOutput);
     void updateDragWire(QPoint viewPosition);
     bool shouldBeginPan(const QMouseEvent* event) const;
-    void beginPan(const QPoint& viewPos);
-    void updatePan(const QPoint& viewPos);
+    void beginPan(const QPointF& globalPos);
+    void updatePan(const QPointF& globalPos);
     void endPan();
     qreal zoomFactorFromWheel(const QWheelEvent* event) const;
+
+    void disconnectGraph();
 
     NodeGraph* graph_ = nullptr;
     NodeGraphScene* graphScene_ = nullptr;
     NodeCreateMenu* createMenu_ = nullptr;
+    QMetaObject::Connection graphChangedConnection_;
+    QMetaObject::Connection nodeAddedConnection_;
+    QMetaObject::Connection nodeAboutToBeRemovedConnection_;
+    QMetaObject::Connection displayNodeChangedConnection_;
 
     bool panning_ = false;
     bool spaceHeld_ = false;
     bool pendingFrameAll_ = true;
-    QPoint lastPanPoint_;
+    QPointF panScenePoint_;
     QPointF lastScenePosition_;
     QGraphicsView::DragMode savedDragMode_ = QGraphicsView::RubberBandDrag;
-    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::AnchorUnderMouse;
+    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::NoAnchor;
 
     // Wire dragging state.
     NodeItem* dragSource_ = nullptr;

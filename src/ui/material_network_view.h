@@ -126,17 +126,17 @@ private:
     void frameGraph();
     void scheduleFrameGraph();
     bool shouldBeginPan(const QMouseEvent* event) const;
-    void beginPan(const QPoint& viewPosition);
-    void updatePan(const QPoint& viewPosition);
+    void beginPan(const QPointF& globalPos);
+    void updatePan(const QPointF& globalPos);
     void endPan();
 
     QGraphicsScene* graphScene_ = nullptr;
     bool pendingFrame_ = false;
     bool panning_ = false;
     bool spacePressed_ = false;
-    QPoint lastPanPoint_;
+    QPointF panScenePoint_;
     QGraphicsView::DragMode savedDragMode_ = QGraphicsView::RubberBandDrag;
-    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::AnchorUnderMouse;
+    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::NoAnchor;
 };
 
 // Internal left-to-right MaterialX canvas (inside one material container).
@@ -222,8 +222,8 @@ private:
     void syncNodePositions();
     void persistLayoutQuietly();
     bool shouldBeginPan(const QMouseEvent* event) const;
-    void beginPan(const QPoint& viewPosition);
-    void updatePan(const QPoint& viewPosition);
+    void beginPan(const QPointF& globalPos);
+    void updatePan(const QPointF& globalPos);
     void endPan();
     void beginWire(const QString& sourceName, QPointF sourcePosition);
     void updateWire(QPointF scenePosition);
@@ -255,11 +255,11 @@ private:
     bool wiring_ = false;
     bool suppressMaterialSignal_ = false;
     bool mouseMovedSincePress_ = false;
-    QPoint lastPanPoint_;
+    QPointF panScenePoint_;
     QPoint lastMousePoint_;
     QPoint mousePressPoint_;
     QGraphicsView::DragMode savedDragMode_ = QGraphicsView::RubberBandDrag;
-    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::AnchorUnderMouse;
+    QGraphicsView::ViewportAnchor savedAnchor_ = QGraphicsView::NoAnchor;
     QString wireSourceNode_;
     QPointF wireSourcePosition_;
     QString clickImageNode_;

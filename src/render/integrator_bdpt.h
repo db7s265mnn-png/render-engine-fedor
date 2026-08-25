@@ -388,7 +388,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
                 const InstanceData& inst = scene.instances[si.instanceIndex];
                 if (count == 1 && !inst.visibleCamera) {
                     origin = offsetRayOrigin(si.p, si.ng, dir);
-                    if (++passThrough > 16) break;
+                    ++passThrough;
                     continue;
                 }
                 Vert v{};
@@ -414,7 +414,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         // Stochastic cutout — pass through without creating a vertex.
         if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
             origin = offsetRayOrigin(si.p, si.ng, dir);
-            if (++passThrough > 16) break;
+            ++passThrough;
             continue;
         }
 
@@ -429,7 +429,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         v.mediumIndex = scene.instances[si.instanceIndex].mediumIndex;
         v.pdfFwd = toAreaPdf(pdfSaFwd, prev.p, si.p, si.ns);
         {
-            const LobeWeights lw = computeLobes(mat);
+            const LobeWeights lw = computeLobes(mat, Frame(si.ns).toLocal(-dir));
             v.delta = lw.delta && lw.diffuse < 1e-4f;
             v.connectable = !v.delta;
             // Include rough refractive casters so Photon/LT family partition matches
@@ -461,7 +461,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         // exit; light paths only keep the specular entry layer (eye owns BSSRDF).
         if (materialSupportsSss(cur.mat) && rng.nextFloat() < saturatef(cur.mat.subsurface)) {
             Material specMat = sssSpecularEntryMaterial(cur.mat);
-            const LobeWeights specLw = computeLobes(specMat);
+            const LobeWeights specLw = computeLobes(specMat, woLocal);
             const float pSpec = sssEntrySpecularProb(specMat, woLocal);
 
             if (pSpec > 0.0f && rng.nextFloat() < pSpec) {
@@ -509,7 +509,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         // Guide only diffuse-ish eye vertices — near-spec / delta glass is owned
         // by MNEE / light tracing; mixing a guide PDF there fights MIS.
         bool guideReady = false;
-        const LobeWeights curLw = computeLobes(cur.mat);
+        const LobeWeights curLw = computeLobes(cur.mat, woLocal);
         if (!haveSample && cfg.eyePath && cfg.guiding && cfg.guiding->active() && !cur.delta &&
             !cur.nearSpec && curLw.diffuse > 1e-4f) {
             guideReady = cfg.guiding->prepare(cur.p, cur.ns, rng);
@@ -581,7 +581,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
             const bool entering = dot(cur.ng, wiWorld) < 0.0f;
             currentMedium = entering ? cur.mediumIndex : -1;
         }
-        if (cfg.eyePath) rayKind = nextRayShadeKind(bs, computeLobes(cur.mat));
+        if (cfg.eyePath) rayKind = nextRayShadeKind(bs, computeLobes(cur.mat, woLocal));
         passThrough = 0;
     }
     return count;
@@ -866,7 +866,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             const bool primary = t == 2;
             if (primary && (!settings.envVisibleCamera || !l.visibleCamera)) break;
             const Vec3 dirW = -v.wo;
-            Vec3 Le = domeRadiance(scene, l, dirW);
+            Vec3 Le = domeRadiance(scene, l, dirW, /*nearestTexel=*/t > 2);
             if (!isBlack(Le)) {
                 float w = 1.0f;
                 const Vert& prev = eye[t - 2];
@@ -951,30 +951,31 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         const LightData& l = scene.lights[li];
 
         if (l.type == kLightDome || l.type == kLightDistant) {
-            // PT-style env NEE with power heuristic (no deeper strategies exist).
+            // pbrt: one LightSampler sample, MIS with BSDF (no RIS).
             LightSample ls;
-            if (!sampleLight(scene, li, E.p, rng.nextFloat(), rng.nextFloat(), ls)) continue;
-            if (ls.pdf <= 0.0f || isBlack(ls.radiance)) continue;
+            if (!sampleLight(scene, li, E.p, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
+                isBlack(ls.radiance))
+                continue;
+            const Vec3 f = bsdfF(E, E.wo, ls.wi);
+            if (isBlack(f)) continue;
+            const float lightPdf = ls.pdf * selectPdf;
+            const Vec3 unshadowed = f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) / lightPdf);
             float visibility = 1.0f;
-            if (l.shadowEnable) {
+            if (scene.lights[li].shadowEnable) {
                 const Vec3 o = offsetRayOrigin(E.p, E.ng, ls.wi);
                 visibility = shadowVisibility(scene, tracer, o, ls.wi, 1.0e8f);
             }
             if (visibility <= 1e-5f) continue;
-            const Vec3 f = bsdfF(E, E.wo, ls.wi);
-            if (isBlack(f)) continue;
             const float bsdfPdf = ls.delta ? 0.0f : bsdfPdfSa(E, E.wo, ls.wi);
-            const float lightPdf = ls.pdf * selectPdf;
             const float w = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, bsdfPdf);
-            Vec3 c = E.beta * f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf);
+            Vec3 local = unshadowed * (w * visibility);
+            Vec3 c = E.beta * local;
             if (t >= 2) c = clampContribution(c, settings.clampDirect);
             if (E.nearSpec) c = clampContribution(c, causticFireflyCap(settings));
             L += c;
 #if SOLSTICE_HAVE_OPENPGL
             if (guiding && guiding->active() && E.guideSeg && !E.nearSpec)
-                guiding->addScatteredAt(
-                    E.guideSeg,
-                    f * ls.radiance * (fabsf(dot(E.ns, ls.wi)) * w * visibility / lightPdf));
+                guiding->addScatteredAt(E.guideSeg, local);
 #endif
             continue;
         }

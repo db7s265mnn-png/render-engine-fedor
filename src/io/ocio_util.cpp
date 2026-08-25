@@ -1,11 +1,16 @@
 #include "io/ocio_util.h"
 
+#include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "core/log.h"
+#include "io/tx_cache.h"
+#include "io/tx_convert.h"
 #include "solstice_config.h"
 
 #if SOLSTICE_HAVE_OCIO
@@ -28,6 +33,7 @@ OCIO_NS::ConstCPUProcessorRcPtr g_procRec709;
 OCIO_NS::ConstCPUProcessorRcPtr g_procRec2020;
 OCIO_NS::ConstCPUProcessorRcPtr g_procActive;
 int g_procWorkingSpace = -1;
+std::unordered_map<std::string, OCIO_NS::ConstCPUProcessorRcPtr> g_convertProcs;
 #endif
 
 int g_preparedView = -1;
@@ -273,6 +279,7 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
         g_procRec709.reset();
         g_procRec2020.reset();
         g_procActive.reset();
+        g_convertProcs.clear();
         g_procWorkingSpace = -1;
         g_preparedView = -1;
         if (path.empty()) {
@@ -415,6 +422,107 @@ Vec3 ocioApplyViewPrepared(Vec3 linearWorking) {
     g_procActive->applyRGB(rgb);
     return Vec3(saturatef(rgb[0]), saturatef(rgb[1]), saturatef(rgb[2]));
 #endif
+}
+
+namespace {
+
+std::string lowerCopy(std::string s) {
+    for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+Vec3 classicConvertToAcescg(Vec3 rgb, const std::string& inputColorSpace) {
+    if (txSkipColorConvert(inputColorSpace)) return rgb;
+    const std::string lower = lowerCopy(inputColorSpace);
+    const bool texture = lower.find("srgb - texture") != std::string::npos ||
+                         lower.find("srgb_texture") != std::string::npos ||
+                         lower.find("rec.709 - texture") != std::string::npos ||
+                         lower == "output - srgb" || lower == "srgb" ||
+                         lower == "utility - rec.709 - texture";
+    const bool linearSrgb = lower.find("linear - srgb") != std::string::npos ||
+                            lower.find("lin_srgb") != std::string::npos ||
+                            lower.find("linear rec.709") != std::string::npos ||
+                            lower.find("scene-linear rec 709") != std::string::npos ||
+                            lower == "linear";
+    Vec3 c = rgb;
+    if (texture)
+        c = Vec3(srgbToLinearUnclamped(c.x), srgbToLinearUnclamped(c.y), srgbToLinearUnclamped(c.z));
+    if (texture || linearSrgb) return linearSrgbToAcescg(c);
+    return rgb;
+}
+
+#if SOLSTICE_HAVE_OCIO
+OCIO_NS::ConstCPUProcessorRcPtr convertProcessor(const std::string& inputColorSpace) {
+    if (!g_config || txSkipColorConvert(inputColorSpace)) return nullptr;
+    auto it = g_convertProcs.find(inputColorSpace);
+    if (it != g_convertProcs.end()) return it->second;
+
+    const std::string dst = pickColorSpace(g_config, {"ACES - ACEScg", "ACEScg", "acescg"});
+    if (dst.empty()) return nullptr;
+
+    std::vector<std::string> srcNames = {inputColorSpace};
+    const std::string lower = lowerCopy(inputColorSpace);
+    if (lower.find("srgb - texture") != std::string::npos || lower == "srgb") {
+        srcNames.insert(srcNames.end(),
+                        {"Utility - sRGB - Texture", "sRGB", "srgb_texture", "Input - Generic - sRGB - Texture"});
+    } else if (lower.find("linear - srgb") != std::string::npos || lower.find("lin_srgb") != std::string::npos ||
+               lower == "linear") {
+        srcNames.insert(srcNames.end(), {"Utility - Linear - sRGB", "Linear Rec.709 (sRGB)", "lin_srgb",
+                                         "scene-linear Rec 709/sRGB", "Linear Rec.709"});
+    } else if (lower.find("rec.709 - texture") != std::string::npos) {
+        srcNames.insert(srcNames.end(), {"Utility - Rec.709 - Texture", "Rec.709", "rec709"});
+    } else if (lower.find("output - srgb") != std::string::npos) {
+        srcNames.insert(srcNames.end(), {"Output - sRGB", "sRGB"});
+    }
+
+    std::string src = pickColorSpace(g_config, srcNames);
+    if (src.empty()) return nullptr;
+
+    try {
+        OCIO_NS::ColorSpaceTransformRcPtr xf = OCIO_NS::ColorSpaceTransform::Create();
+        xf->setSrc(src.c_str());
+        xf->setDst(dst.c_str());
+        OCIO_NS::ConstProcessorRcPtr proc = g_config->getProcessor(xf);
+        OCIO_NS::ConstCPUProcessorRcPtr cpu = proc->getDefaultCPUProcessor();
+        g_convertProcs[inputColorSpace] = cpu;
+        return cpu;
+    } catch (const OCIO_NS::Exception& ex) {
+        logDebug(std::string("OCIO colorconvert failed (") + inputColorSpace + " → " + dst + "): " +
+                 ex.what());
+        g_convertProcs[inputColorSpace] = nullptr;
+        return nullptr;
+    } catch (...) {
+        g_convertProcs[inputColorSpace] = nullptr;
+        return nullptr;
+    }
+}
+#endif
+
+void ensureConvertConfigLoaded() {
+    RenderSettingsData settings{};
+    if (txCacheGetActiveSettings(settings)) {
+        ocioEnsureConfig(settings.ocioUseEnv != 0, settings.ocioConfigPath);
+        return;
+    }
+    ocioEnsureConfig(true, {});
+}
+
+}  // namespace
+
+Vec3 ocioConvertToAcescg(Vec3 rgb, const std::string& inputColorSpace) {
+    if (txSkipColorConvert(inputColorSpace)) return rgb;
+    ensureConvertConfigLoaded();
+#if SOLSTICE_HAVE_OCIO
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (OCIO_NS::ConstCPUProcessorRcPtr proc = convertProcessor(inputColorSpace)) {
+            float v[3] = {rgb.x, rgb.y, rgb.z};
+            proc->applyRGB(v);
+            return Vec3(v[0], v[1], v[2]);
+        }
+    }
+#endif
+    return classicConvertToAcescg(rgb, inputColorSpace);
 }
 
 }  // namespace sol

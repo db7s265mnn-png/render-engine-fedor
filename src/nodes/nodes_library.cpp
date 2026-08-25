@@ -6,6 +6,7 @@
 #include <QString>
 #include <QRegularExpression>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <map>
 
@@ -19,7 +20,9 @@
 #include "io/usd_loader.h"
 #include "nodes/node_registry.h"
 #include "render/cpu/polynomial_optics.h"
+#include "render/physical_sky.h"
 #include "render/render_device.h"
+#include "render/spectrum_constants.h"
 
 namespace sol {
 
@@ -446,15 +449,25 @@ public:
                 if (!xml.isEmpty()) setParameterValue("mtlx", xml);
             }
 
-            MaterialXEvalResult evaluated = evaluateMaterialXDocument(xml, context.sceneDirectory);
-            if (!evaluated.ok) {
-                if (!evaluated.error.isEmpty()) context.reportError(this, evaluated.error);
-                // Fallback constant material so the scene still renders.
-                evaluated.material = Material{};
-                evaluated.material.baseColor = Vec3(0.8f);
-                evaluated.material.roughness = 0.35f;
-                evaluated.procedurals.clear();
-                evaluated.proceduralImages.clear();
+            // Density / filter tweaks on an upstream VDB dirty this node even when
+            // the MaterialX document is unchanged. Reuse the last eval so we do not
+            // re-parse XML (or reload textures) on every slider tick.
+            MaterialXEvalResult evaluated;
+            const bool cacheHit = evalCacheValid_ && cachedXml_ == xml &&
+                                  cachedSearchDir_ == context.sceneDirectory;
+            if (cacheHit) {
+                evaluated = cachedEval_;
+            } else {
+                evaluated = evaluateMaterialXDocument(xml, context.sceneDirectory);
+                if (!evaluated.ok) {
+                    if (!evaluated.error.isEmpty()) context.reportError(this, evaluated.error);
+                    // Fallback constant material so the scene still renders.
+                    evaluated.material = Material{};
+                    evaluated.material.baseColor = Vec3(0.8f);
+                    evaluated.material.roughness = 0.35f;
+                    evaluated.procedurals.clear();
+                    evaluated.proceduralImages.clear();
+                }
             }
             // Legacy spectralMetalPreset → conductor_eta / conductor_k in MaterialX.
             const int legacyPreset = intValue("spectralmetalpreset", 0);
@@ -532,12 +545,25 @@ public:
                 prim.procedurals = evaluated.procedurals;
                 prim.proceduralImages = evaluated.proceduralImages;
             }
+
+            cachedXml_ = xml;
+            cachedSearchDir_ = context.sceneDirectory;
+            cachedEval_ = std::move(evaluated);
+            evalCacheValid_ = true;
         } catch (const std::exception& e) {
+            evalCacheValid_ = false;
             context.reportError(this, QString("MaterialX cook failed: %1").arg(e.what()));
         } catch (...) {
+            evalCacheValid_ = false;
             context.reportError(this, "MaterialX cook failed: unknown error");
         }
     }
+
+private:
+    QString cachedXml_;
+    QString cachedSearchDir_;
+    MaterialXEvalResult cachedEval_;
+    bool evalCacheValid_ = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -549,23 +575,18 @@ public:
     LightNode(const QString& typeName, const QString& name, LightType type) : Node(typeName, name), type_(type) {
         addParameter(Parameter::makeString("primname", "Prim Name", name));
         addParameter(Parameter::makeBool("enabled", "Enabled", true)
-                         .withGroup("Light")
                          .withTooltip("Uncheck to turn this light off without deleting the node"));
-        addParameter(Parameter::makeColor("color", "Color", Vec3(1.0f, 1.0f, 1.0f)).withGroup("Light"));
+        addParameter(Parameter::makeColor("color", "Color", Vec3(1.0f, 1.0f, 1.0f)));
         addParameter(Parameter::makeFloat("colortemperature", "Color Temperature (K)", 0.0, 0.0, 20000.0)
-                         .withGroup("Light")
                          .withTooltip("Blackbody CCT in Kelvin for spectral integrators.\n"
                                       "0 = off (RGB Color only). Typical: 2700 warm, 6500 daylight.\n"
                                       "RGB Path Tracer ignores this (uses Color)."));
-        addParameter(Parameter::makeFloat("intensity", "Intensity", defaultIntensity(), 0.0, 100.0, false)
-                         .withGroup("Light"));
-        addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -10.0, 10.0).withGroup("Light"));
+        addParameter(Parameter::makeFloat("intensity", "Intensity", defaultIntensity(), 0.0, 100.0, false));
+        addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -10.0, 10.0));
         addParameter(Parameter::makeBool("shadows", "Cast Shadows", true)
-                         .withGroup("Light")
                          .withTooltip("When off, this light ignores occluders (no shadows). "
                                       "For HDRI/dome lights, off removes hard environment shadows"));
         addParameter(Parameter::makeBool("caustics", "Contribute to Caustics", true)
-                         .withGroup("Light")
                          .withTooltip("When off, this light still illuminates surfaces directly but "
                                       "does not cast caustics through glass (MNEE / BDPT / photon map / "
                                       "specular→light paths). Works for area, sun, and dome lights."));
@@ -601,6 +622,12 @@ public:
                 addParameter(Parameter::makeFile("texture", "HDRI Texture", "",
                                                  "Environment maps (*.hdr *.exr *.png *.jpg *.jpeg)")
                                  .withGroup("Environment"));
+                addParameter(Parameter::makeString("colorspace", "Color Space", "auto")
+                                 .withGroup("Environment")
+                                 .withTooltip("Arnold-style input colour space. Cook converts to ACEScg.\n"
+                                              "auto: HDR/EXR → Utility - Linear - sRGB, 8-bit → sRGB Texture.\n"
+                                              "ACES - ACEScg / Utility - Raw: no convert.\n"
+                                              "Utility - Linear - sRGB: Rec.709 primaries → ACEScg (typical HDRI)."));
                 addParameter(Parameter::makeBool("visiblecamera", "Visible To Camera", true)
                                  .withGroup("Environment")
                                  .withTooltip("Show the HDRI as the background"));
@@ -647,18 +674,22 @@ public:
 
         if (type_ == kLightDome) {
             const QString texture = resolvePath(context, stringValue("texture"));
+            const QString cs = stringValue("colorspace", "auto");
             if (!texture.isEmpty()) {
-                if (texture != envPath_ || !environment_) {
+                if (texture != envPath_ || cs != envCs_ || !environment_) {
                     auto env = std::make_shared<EnvironmentMap>();
                     std::string error;
-                    if (!loadImage(texture.toStdString(), env->image, error)) {
+                    const std::string texPath = texture.toStdString();
+                    if (!loadImage(texPath, env->image, error, /*srgbColor=*/true, cs.toStdString())) {
                         context.reportError(this, QString::fromStdString(error));
                     } else {
                         env->path = texture.toStdString();
                         env->buildSamplingTables();
                         environment_ = std::move(env);
                         envPath_ = texture;
-                        logInfo("Dome light loaded " + texture.toStdString() + " (" +
+                        envCs_ = cs;
+                        logInfo("Dome light loaded " + texture.toStdString() + " colorspace='" +
+                                cs.toStdString() + "' (" +
                                 std::to_string(environment_->image.width()) + "x" +
                                 std::to_string(environment_->image.height()) + ")");
                     }
@@ -667,6 +698,7 @@ public:
             } else {
                 environment_.reset();
                 envPath_.clear();
+                envCs_.clear();
             }
         }
 
@@ -678,9 +710,9 @@ private:
     double defaultIntensity() const {
         switch (type_) {
             case kLightDistant: return 3.0;
-            // A white dome without a texture acts as a soft ambient fill, so it
-            // is dialled back to keep the default lighting readable.
-            case kLightDome: return 0.35;
+            // Textured HDRI needs intensity 1 so the sun in the map is not dimmed.
+            // An untextured white dome is also 1 (user can lower it).
+            case kLightDome: return 1.0;
             case kLightRect: return 40.0;
             case kLightDisk: return 30.0;
             case kLightSphere: return 40.0;
@@ -690,7 +722,204 @@ private:
 
     LightType type_;
     QString envPath_;
+    QString envCs_;
     std::shared_ptr<EnvironmentMap> environment_;
+};
+
+// Hosek–Wilkie Physical Sky: one node, two lights (Karma).
+// Dome = sky/ground bake, no disc. Distant = cone-sampled sun (Angular Size).
+class PhysicalSkyLightNode : public Node {
+public:
+    explicit PhysicalSkyLightNode(const QString& name) : Node("physicalskylight", name) {
+        addParameter(Parameter::makeString("primname", "Prim Name", name));
+        addParameter(Parameter::makeBool("enabled", "Enabled", true)
+                         .withTooltip("Uncheck to turn this light off without deleting the node"));
+        addParameter(Parameter::makeFloat("intensity", "Intensity", 1.0, 0.0, 100.0, false)
+                         .withTooltip("Overall scale for both the sky dome and the sun.\n"
+                                      "Sky Intensity and Sun Intensity are extra multipliers"));
+        addParameter(Parameter::makeFloat("exposure", "Exposure", 0.0, -10.0, 10.0)
+                         .withTooltip("2^exposure multiplier on sky and sun"));
+        addParameter(Parameter::makeBool("shadows", "Cast Shadows", true));
+        addParameter(Parameter::makeBool("caustics", "Contribute to Caustics", true)
+                         .withTooltip("When off, sky and sun still light surfaces directly but "
+                                      "do not cast caustics through glass"));
+        addParameter(Parameter::makeBool("visiblecamera", "Visible To Camera", true)
+                         .withTooltip("Show the sky and sun disc in the camera (both lights).\n"
+                                      "Off hides the background and disc; they still light the scene"));
+
+        addParameter(Parameter::makeFloat("turbidity", "Turbidity", 3.0, 1.0, 10.0)
+                         .withGroup("Sky")
+                         .withTooltip("Hosek–Wilkie aerosol content (Karma Physical Sky).\n"
+                                      "2 = arctic, 3 = clear temperate, 6 = warm/moist, 10 = hazy"));
+        addParameter(Parameter::makeColor("groundalbedo", "Ground Albedo", Vec3(0.1f, 0.1f, 0.1f))
+                         .withGroup("Sky")
+                         .withTooltip("Ground reflectivity that affects sky colour"));
+        addParameter(Parameter::makeBool("computegroundcolor", "Compute Ground Color", true)
+                         .withGroup("Sky")
+                         .withTooltip("On: ground from albedo × sky. Off: use Ground Color"));
+        addParameter(Parameter::makeColor("groundcolor", "Ground Color", Vec3(0.1f, 0.1f, 0.1f))
+                         .withGroup("Sky")
+                         .withVisibleWhen("computegroundcolor==0")
+                         .withTooltip("Visual ground colour when Compute Ground Color is off"));
+        addParameter(Parameter::makeFloat("horizonblur", "Horizon Blur Falloff", 5.0, 0.0, 30.0)
+                         .withGroup("Sky")
+                         .withTooltip("Degrees below the horizon over which sky blends into ground"));
+        addParameter(Parameter::makeColor("skytint", "Sky Tint", Vec3(1.0f, 1.0f, 1.0f))
+                         .withGroup("Sky")
+                         .withTooltip("Karma Sky Color — tints the dome (not the sun)"));
+        addParameter(Parameter::makeFloat("elevation", "Solar Altitude", 45.0, 0.0, 90.0)
+                         .withGroup("Sky")
+                         .withTooltip("Vertical angle of the sun from the horizon (90 = zenith)"));
+        addParameter(Parameter::makeFloat("azimuth", "Solar Azimuth", 90.0, 0.0, 360.0)
+                         .withGroup("Sky")
+                         .withTooltip("Horizontal angle along the horizon. 0 = −Z, 90 = +X"));
+        addParameter(Parameter::makeBool("enablesky", "Enable Sky Light", true)
+                         .withGroup("Sky")
+                         .withTooltip("Creates the sky dome. Off keeps the distant sun only"));
+        addParameter(Parameter::makeFloat("skyintensity", "Sky Intensity", 1.0, 0.0, 100.0, false)
+                         .withGroup("Sky")
+                         .withVisibleWhen("enablesky")
+                         .withTooltip("Extra multiplier on the sky dome only"));
+
+        addParameter(Parameter::makeBool("enablesun", "Enable Sun Light", true)
+                         .withGroup("Sun")
+                         .withTooltip("Distant sun with cone NEE (Angular Size).\n"
+                                      "Off keeps sky colour from the sun position but no disc"));
+        addParameter(Parameter::makeFloat("sunintensity", "Sun Intensity", 1.0, 0.0, 100.0, false)
+                         .withGroup("Sun")
+                         .withVisibleWhen("enablesun")
+                         .withTooltip("Extra multiplier on the sun only"));
+        addParameter(Parameter::makeColor("suntint", "Sun Color", Vec3(1.0f, 1.0f, 1.0f))
+                         .withGroup("Sun")
+                         .withVisibleWhen("enablesun"));
+        addParameter(Parameter::makeFloat("sunsize", "Angular Size", 0.53, 0.01, 10.0)
+                         .withGroup("Sun")
+                         .withVisibleWhen("enablesun")
+                         .withTooltip("Angular diameter of the distant sun, in degrees.\n"
+                                      "Scene brightness stays the same (irradiance is normalized)"));
+
+        addTransformParameters(*this);
+    }
+
+    void cook(CookContext& context, const std::vector<StagePtr>&, Stage& stage) override {
+        if (!boolValue("enabled", true)) return;
+
+        PhysicalSkyParams params;
+        params.turbidity = float(floatValue("turbidity", 3.0));
+        params.groundAlbedo = vec3Value("groundalbedo", Vec3(0.1f));
+        params.skyTint = vmax(Vec3(0.0f), vec3Value("skytint", Vec3(1.0f)));
+        params.elevationDeg = float(floatValue("elevation", 45.0));
+        params.azimuthDeg = float(floatValue("azimuth", 90.0));
+        params.intensity = float(floatValue("intensity", 1.0));
+        params.skyIntensity = float(floatValue("skyintensity", 1.0));
+        params.exposure = float(floatValue("exposure", 0.0));
+        params.enableSky = boolValue("enablesky", true);
+        params.enableSun = boolValue("enablesun", true);
+        params.sunIntensity = float(floatValue("sunintensity", 1.0));
+        params.sunTint = vmax(Vec3(0.0f), vec3Value("suntint", Vec3(1.0f)));
+        params.sunSizeDeg = float(floatValue("sunsize", 0.53));
+        params.computeGroundColor = boolValue("computegroundcolor", true);
+        params.groundColor = vec3Value("groundcolor", Vec3(0.1f));
+        params.horizonBlurDeg = float(floatValue("horizonblur", 5.0));
+
+        const Mat4 nodeXform = transformFromParameters(*this);
+        const int shadows = boolValue("shadows", true) ? 1 : 0;
+        const int caustics = boolValue("caustics", true) ? 1 : 0;
+        const int visible = boolValue("visiblecamera", true) ? 1 : 0;
+        const QString basePath = primPathFor(*this, "lights", stringValue("primname"));
+
+        if (params.enableSky) {
+            if (!skyCacheValid(params)) {
+                auto env = std::make_shared<EnvironmentMap>();
+                bakePhysicalSkyEnv(env->image, params, 1024, 512);
+                env->path = "physical_sky";
+                env->buildSamplingTables();
+                environment_ = std::move(env);
+                cacheTurbidity_ = params.turbidity;
+                cacheElevation_ = params.elevationDeg;
+                cacheAzimuth_ = params.azimuthDeg;
+                cacheAlbedo_ = params.groundAlbedo;
+                cacheGroundColor_ = params.groundColor;
+                cacheSkyTint_ = params.skyTint;
+                cacheComputeGround_ = params.computeGroundColor;
+                cacheHorizonBlur_ = params.horizonBlurDeg;
+                cacheSkyIntensity_ = params.skyIntensity;
+                logInfo("Physical Sky (Hosek–Wilkie) baked " +
+                        std::to_string(environment_->image.width()) + "x" +
+                        std::to_string(environment_->image.height()) + " (turbidity " +
+                        std::to_string(params.turbidity) + ")");
+            }
+            if (!environment_) {
+                context.reportError(this, "Physical Sky bake failed");
+                return;
+            }
+
+            StagePrim domePrim;
+            domePrim.type = PrimType::Light;
+            domePrim.sourceNode = name();
+            domePrim.path = basePath;
+            domePrim.xform = nodeXform;
+            domePrim.environment = environment_;
+
+            LightData dome;
+            dome.type = kLightDome;
+            dome.color = Vec3(1.0f);
+            dome.intensity = params.intensity;
+            dome.exposure = params.exposure;
+            dome.shadowEnable = shadows;
+            dome.contributeCaustics = caustics;
+            dome.visibleCamera = visible;
+            domePrim.light = dome;
+            stage.addPrim(std::move(domePrim));
+        }
+
+        if (params.enableSun) {
+            StagePrim sunPrim;
+            sunPrim.type = PrimType::Light;
+            sunPrim.sourceNode = name();
+            sunPrim.path = basePath + "_sun";
+            sunPrim.xform = nodeXform * physicalSkySunLookAt(params);
+
+            LightData sun;
+            sun.type = kLightDistant;
+            sun.color = physicalSkySunColorAceScg(params);
+            sun.intensity = physicalSkySunIntensity(params);
+            sun.exposure = params.exposure;
+            sun.angle = srMax(0.01f, params.sunSizeDeg);
+            sun.normalize = 1;
+            sun.shadowEnable = shadows;
+            sun.contributeCaustics = caustics;
+            sun.visibleCamera = visible;
+            sun.cameraSunDisc = 1;
+            sunPrim.light = sun;
+            stage.addPrim(std::move(sunPrim));
+        }
+    }
+
+private:
+    bool skyCacheValid(const PhysicalSkyParams& p) const {
+        if (!environment_ || environment_->image.empty()) return false;
+        return std::fabs(cacheTurbidity_ - p.turbidity) < 1e-4f &&
+               std::fabs(cacheElevation_ - p.elevationDeg) < 1e-4f &&
+               std::fabs(cacheAzimuth_ - p.azimuthDeg) < 1e-4f &&
+               lengthSquared(cacheAlbedo_ - p.groundAlbedo) < 1e-8f &&
+               lengthSquared(cacheGroundColor_ - p.groundColor) < 1e-8f &&
+               lengthSquared(cacheSkyTint_ - p.skyTint) < 1e-8f &&
+               cacheComputeGround_ == p.computeGroundColor &&
+               std::fabs(cacheHorizonBlur_ - p.horizonBlurDeg) < 1e-4f &&
+               std::fabs(cacheSkyIntensity_ - p.skyIntensity) < 1e-4f;
+    }
+
+    std::shared_ptr<EnvironmentMap> environment_;
+    float cacheTurbidity_ = -1.0f;
+    float cacheElevation_ = -1.0f;
+    float cacheAzimuth_ = -1.0f;
+    Vec3 cacheAlbedo_{};
+    Vec3 cacheGroundColor_{};
+    Vec3 cacheSkyTint_{};
+    bool cacheComputeGround_ = true;
+    float cacheHorizonBlur_ = -1.0f;
+    float cacheSkyIntensity_ = -1.0f;
 };
 
 // ---------------------------------------------------------------------------
@@ -702,19 +931,15 @@ public:
     explicit CameraNode(const QString& name) : Node("camera", name) {
         addParameter(Parameter::makeString("primname", "Prim Name", name));
         addParameter(Parameter::makeFloat("focal", "Focal Length (mm)", 50.0, 8.0, 300.0)
-                         .withGroup("Lens")
                          .withTooltip("Focal length in millimetres (Houdini camera convention). "
                                       "Use the preset menu for common lens lengths"));
         addParameter(Parameter::makeFloat("aperture", "Sensor Width (mm)", 36.0, 4.0, 100.0)
-                         .withGroup("Lens")
                          .withTooltip("Horizontal aperture in millimetres"));
         addParameter(Parameter::makeFloat("fstop", "F-Stop", 0.0, 0.0, 64.0)
-                         .withGroup("Lens")
                          .withTooltip("Aperture. Lower = stronger bokeh. 0 = wide open. "
                                       "Polynomial Optics cannot open wider than the real lens "
                                       "(e.g. f/1 on an f/1.1 optic = wide open)."));
         addParameter(Parameter::makeFloat("focusdistance", "Focus Distance", 5.0, 0.01, 1000.0, false)
-                         .withGroup("Lens")
                          .withTooltip(units::focusDistanceTooltip()));
         addParameter(Parameter::makeMenu("opticalmodel", "Camera Model",
                                          QStringList{"Thin Lens", "Polynomial Optics (Embree)"}, 0)
@@ -781,11 +1006,28 @@ public:
 class RenderSettingsNode : public Node {
 public:
     explicit RenderSettingsNode(const QString& name) : Node("rendersettings", name) {
-        // Group order follows first appearance: Image → Sampling → Engine → …
+        // Tab order follows first appearance:
+        // Image → Sampling → Engine → Depth → Caustics → Motion Blur → Displacement → Film → Diagnostic.
 
         // --- Image --------------------------------------------------------------------
         addParameter(Parameter::makeInt("resx", "Resolution X", 960, 16, 8192, false).withGroup("Image"));
         addParameter(Parameter::makeInt("resy", "Resolution Y", 540, 16, 8192, false).withGroup("Image"));
+        addParameter(Parameter::makeMenu("pixelfilter", "Pixel Filter",
+                                         {"Box", "Triangle", "Gaussian", "Mitchell"}, 0)
+                         .withGroup("Image")
+                         .withTooltip("Film reconstruction filter — how each continuous sample is "
+                                      "weighted into neighbouring pixels (PBRT / Arnold).\n"
+                                      "Box (default): hard 1×1 pixels — sharp but makes 1spp noise "
+                                      "look blocky when zoomed.\n"
+                                      "Triangle / Gaussian / Mitchell: softer AA; softens the "
+                                      "visible pixel grid at low spp.\n"
+                                      "Does not change the camera sampler (Owen-scrambled Sobol)."));
+        addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.5, 0.0, 8.0, false)
+                         .withGroup("Image")
+                         .withTooltip("Filter support in pixels. Changing Pixel Filter fills the "
+                                      "PBRT-v4 recommended radius (Box 0.5, Triangle 2, "
+                                      "Gaussian 1.5, Mitchell 2). You can still override.\n"
+                                      "Larger = softer / more blur."));
         addParameter(Parameter::makeFile("outputpath", "Output Path", "render.exr",
                                          "OpenEXR (*.exr);;All Files (*)")
                          .withGroup("Image")
@@ -814,31 +1056,35 @@ public:
         // --- Sampling -----------------------------------------------------------------
         addParameter(Parameter::makeInt("samples", "Samples Per Pixel", 128, 1, 100000, false)
                          .withGroup("Sampling"));
-        addParameter(Parameter::makeMenu("pixelsampler", "Pixel Sampler",
-                                         {"Sobol (Owen)", "Blue Noise", "Xorshift", "GenPnt2D",
-                                          "Manual-Test"},
-                                         0)
+        addParameter(Parameter::makeMenu("pixeloracle", "Pixel Oracle",
+                                         {"Uniform", "Variance"}, 1)
                          .withGroup("Sampling")
                          .withTooltip(
-                             "Camera AA / DoF / shutter primary samples.\n"
-                             "Path bounces always use Owen-scrambled Sobol (PBRT4).\n"
-                             "Sobol: stratified per pixel — recommended.\n"
-                             "Blue Noise: CP dither from a 64×64 mask with per-tile phase.\n"
-                             "Xorshift: Marsaglia xorshift32 white jitter.\n"
-                             "GenPnt2D: plastic-number R2 (Roberts), n = sampleIndex + "
-                             "per-pixel CP phase; shutter uses golden 1D.\n"
-                             "Manual-Test: sample at pixel center, then add U(-1,1)×Mult "
-                             "per axis (clamped to the pixel). For grid diagnostics.\n"
-                             "Active sampler is shown in the viewport spp overlay."));
-        addParameter(Parameter::makeFloat("manualtestmult", "Manual-Test Mult", 0.0, 0.0, 2.0, false)
+                             "Karma XPU pixel oracle.\n"
+                             "Variance (default): after a few camera samples, quiet pixels stop "
+                             "when their relative luminance error is below Noise Threshold.\n"
+                             "Uniform: always take every Samples Per Pixel (oracle off).\n"
+                             "The viewport overlay shows `noise off` (Uniform) or `noise 0.01  N% skip` "
+                             "(Variance). On a noisy path / volume at 128 spp and 0.01, N is often 0 — "
+                             "beauty looks identical until you raise the threshold or have large "
+                             "constant regions (sky, black)."));
+        addParameter(Parameter::makeFloat("noisethreshold", "Noise Threshold", 0.01, 0.0, 1.0, true)
                          .withGroup("Sampling")
-                         .withVisibleWhen("pixelsampler==4")
-                         .withTooltip("Manual-Test only. Pixel jitter = 0.5 + U(-1,1)×Mult on X and Y "
-                                      "(same Mult), then clamped to [0,1).\n"
-                                      "0 = exact pixel center. Raise to scatter samples inside "
-                                      "(and, if Mult>0.5, would leave the pixel — but we clamp)."));
-        // Hidden: marks menus that include Manual-Test (index 4). Older files used 4/5 for R2 modes.
-        addParameter(Parameter::makeBool("_pixel_sampler_manual_v1", "", true));
+                         .withTooltip(
+                             "Karma XPU Variance Threshold (this engine labels it Noise Threshold).\n"
+                             "After a few camera samples, pixels whose relative luminance error "
+                             "(and their 4-neighbours) is below this value stop receiving more "
+                             "samples. Max samples is still Samples Per Pixel.\n"
+                             "0.01 = Karma default. Lower = cleaner, slower. 0 = off "
+                             "(always take every sample).\n"
+                             "Relative stderr of luminance: at 128 spp a pixel with ~30% sample noise "
+                             "is still above 0.01, so Variance will not stop it. Raise to 0.05 to see "
+                             "adaptive stop, or watch the overlay skip %. Sampling Debug forces off.\n"
+                             "Used when Pixel Oracle is Variance. Uniform ignores this."));
+        addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
+                         .withGroup("Sampling")
+                         .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
+                                      "Higher = less light/reflection noise, slower."));
         // Hidden: old menu was Legacy / FilmTile / Progressive (0/1/2).
         addParameter(Parameter::makeBool("_sampling_type_v2", "", true));
         addParameter(Parameter::makeMenu("samplingengine", "Sampling Type",
@@ -856,53 +1102,63 @@ public:
                                       "0 = Auto (~8× threads tiles, side 8/16/32/64).\n"
                                       "Ignored by Progressive."));
         addParameter(Parameter::makeInt("seed", "Seed", 0, 0, 100000, false).withGroup("Sampling"));
-        addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
-                         .withGroup("Sampling")
-                         .withTooltip("Next-event estimation samples per bounce (MIS with BSDF). "
-                                      "Higher = less light/reflection noise, slower."));
         addParameter(Parameter::makeFloat("clampdirect", "Direct Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Sampling")
                          .withTooltip("Caps eye-path sample contributions in linear pixel radiance "
-                                      "(Arnold Direct Clamp). Applies to PT/BDPT eye paths, NEE, "
+                                      "(Arnold Direct Clamp). Applies to PT/BDPT eye paths, NEE "
+                                      "(including volume scatter from area lights and HDRI / Physical Sky), "
                                       "MNEE, and photon gather.\n"
-                                      "Default 10; ~100 is a soft look. 0 disables."));
+                                      "The camera-facing sun/sky (primary env miss) is not clamped.\n"
+                                      "Default 10; ~100 is a soft look. 0 disables (unbiased)."));
         addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Sampling")
                          .withTooltip("Caps BDPT light-tracing splat contributions in linear pixel "
                                       "radiance (Arnold Indirect Clamp). Raw LT deposits carry "
                                       "camera PDF — they are scaled to radiance before clamping.\n"
                                       "Affects BDPT / BDPT Spectral caustics from LT. 0 disables."));
-        addParameter(Parameter::makeMenu("pixelfilter", "Pixel Filter",
-                                         {"Box", "Triangle", "Gaussian", "Mitchell"}, 0)
-                         .withGroup("Sampling")
-                         .withTooltip("Film reconstruction filter — how each continuous sample is "
-                                      "weighted into neighbouring pixels (PBRT / Arnold).\n"
-                                      "Box (default): hard 1×1 pixels — sharp but makes 1spp noise "
-                                      "look blocky when zoomed.\n"
-                                      "Triangle / Gaussian / Mitchell: softer AA; softens the "
-                                      "visible pixel grid at low spp.\n"
-                                      "Does not change the Pixel Sampler (Sobol / GenPnt2D / …)."));
-        addParameter(Parameter::makeFloat("filterradius", "Filter Radius", 0.5, 0.0, 8.0, false)
-                         .withGroup("Sampling")
-                         .withTooltip("Filter support in pixels. Changing Pixel Filter fills the "
-                                      "PBRT-v4 recommended radius (Box 0.5, Triangle 2, "
-                                      "Gaussian 1.5, Mitchell 2). You can still override.\n"
-                                      "Larger = softer / more blur."));
 
         // --- Engine -------------------------------------------------------------------
         // OptiX is optional at compile time — label the menu so artists know when
         // this binary has no GPU backend (Windows CI historically shipped Embree-only).
         const QStringList backends =
             optixBackendCompiledIn()
-                ? QStringList{"CPU (Embree)", "GPU (OptiX)"}
-                : QStringList{"CPU (Embree)", "GPU (OptiX) — not in this build"};
-        addParameter(Parameter::makeMenu("backend", "Render Backend", backends, 0)
+                ? QStringList{"CPU (Embree)", "GPU (OptiX)", "XPU (Embree+OptiX)"}
+                : QStringList{"CPU (Embree)", "GPU (OptiX) — not in this build",
+                              "XPU (Embree+OptiX) — not in this build"};
+        addParameter(Parameter::makeMenu("backend", "Render Device", backends, 0)
                          .withGroup("Engine")
                          .withTooltip(optixBackendCompiledIn()
-                                          ? QStringLiteral("CPU uses Embree. GPU requires an NVIDIA GPU "
-                                                           "and a build with OptiX enabled.")
+                                          ? QStringLiteral("CPU (Embree): full feature set on the host.\n"
+                                                           "GPU (OptiX): NVIDIA Iray-style wavefront path tracer.\n"
+                                                           "XPU (Embree+OptiX): CPU (full PT: MNEE / SSS / "
+                                                           "OpenPGL / N lights / filters, Owen-Sobol) and GPU "
+                                                           "(OptiX Iray wavefront, PCG) run together. Default "
+                                                           "schedule is Overlap: GPU Iray-batches consecutive "
+                                                           "spp until Embree finishes one spp, then one add "
+                                                           "(no 1:1 wait). Mixture is independent films plus "
+                                                           "a ~12 Hz GPU snapshot. Set "
+                                                           "XPU Schedule when this device is selected.\n"
+                                                           "XPU is Path Tracer only. BDPT, spectral, "
+                                                           "wireframe, AO stay CPU (Embree).\n"
+                                                           "If OptiX cannot start, GPU/XPU stop with an "
+                                                           "error — they do not switch to Embree.")
                                           : QStringLiteral("This executable was built without OptiX/CUDA. "
-                                                          "GPU (OptiX) will fall back to Embree.")));
+                                                          "GPU (OptiX) and XPU will stop with an error — "
+                                                          "they do not fall back to Embree.")));
+        addParameter(Parameter::makeMenu("xpuschedule", "XPU Schedule",
+                                         {"Overlap", "Mixture"}, 0)
+                         .withGroup("Engine")
+                         .withVisibleWhen("backend==2")
+                         .withTooltip("Only when Render Device is XPU.\n"
+                                      "Overlap (default): GPU keeps Iray-batching consecutive PCG "
+                                      "spp into device accum until Embree finishes one Sobol spp, "
+                                      "then one D2H add. "
+                                      "Faster GPU ⇒ more GPU spp per CPU spp. Same film, no 1:1 wait. "
+                                      "This is the fast XPU mode.\n"
+                                      "Mixture (Karma): CPU and GPU each own a full-frame film; host "
+                                      "adds them. GPU never waits to render; snapshots copy at ~12 Hz "
+                                      "so the UI step is not a D2H barrier. Wall time is still paced "
+                                      "by one Embree spp per tick."));
         addParameter(Parameter::makeMenu("integrator", "Integrator",
                                          {"Path Tracer", "BDPT (Bidirectional)", "Direct Lighting",
                                           "Ambient Occlusion", "PT Spectral", "BDPT Spectral",
@@ -911,7 +1167,7 @@ public:
                          .withGroup("Engine")
                          .withTooltip("Path Tracer: unidirectional (+ MNEE or Photon caustics).\n"
                                       "BDPT: bidirectional + light-tracing / Photon caustics "
-                                      "(CPU only — OptiX falls back to Path Tracer).\n"
+                                      "(CPU only — GPU/XPU stop with an error).\n"
                                       "PT Spectral: hero-wavelength path tracer (CPU / Embree).\n"
                                       "BDPT Spectral: bidirectional + spectral transport "
                                       "(LT / MNEE / Photon + Indirect Guides; CPU / Embree).\n"
@@ -922,35 +1178,20 @@ public:
         // Hidden migration marker: legacy menu was PT / DL / AO / BDPT.
         // New nodes default to v2; legacy files without this key are remapped on load.
         addParameter(Parameter::makeBool("_integrator_menu_v2", "", true));
-        addParameter(Parameter::makeInt("spectralsamples", "Spectral Samples", 4, 2, 16)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==4||integrator==5")
-                         .withTooltip("Spectral integrators: number of hero wavelengths per path "
-                                      "(2–16, default 4). Higher = cleaner colour, slower."));
-        addParameter(Parameter::makeInt("spectralbins", "Spectral Bins", 16, 8, 32)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==4||integrator==5")
-                         .withTooltip("Spectral: fixed wavelength bins for multilayer spectral "
-                                      "EXR / false-color (8–32)."));
-        addParameter(Parameter::makeBool("spectralexr", "Write Spectral EXR Layers", false)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==4||integrator==5")
-                         .withTooltip("When saving EXR with a spectral integrator, also write "
-                                      "fixed spectral bin layers (S0..Sn)."));
         addParameter(Parameter::makeMenu("spectralcolorspace", "Spectral Color Space",
-                                         {"sRGB Linear", "ACEScg", "Rec.2020", "Display P3"}, 0)
+                                         {"sRGB Linear", "ACEScg", "Rec.2020", "Display P3"}, 1)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==4||integrator==5")
-                         .withTooltip("Color space for spectral → beauty RGB (default sRGB Linear).\n"
-                                      "Uses tabulated CIE XYZ + RGBColorSpace matrices."));
+                         .withTooltip("Color space for spectral → beauty RGB.\n"
+                                      "ACEScg (default) matches Film working space so sky/HDRI "
+                                      "match OptiX. Overridden to ACEScg whenever working space "
+                                      "is ACEScg."));
         addParameter(Parameter::makeMenu("spectralwavesamp", "Wavelength Sampling",
                                          {"Visible (importance)", "Uniform"}, 0)
                          .withGroup("Engine")
                          .withVisibleWhen("integrator==4||integrator==5")
                          .withTooltip("Visible: pbrt-style PDF peaked near 538 nm (less colour noise).\n"
                                       "Uniform: stratified across 360–830 nm."));
-        addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 64).withGroup("Engine"));
-        addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 64).withGroup("Engine"));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
@@ -964,47 +1205,6 @@ public:
                          .withVisibleWhen("integrator==6")
                          .withTooltip("Wireframe: edge half-width in screen pixels (anti-aliased). "
                                       "Higher = thicker mesh lines."));
-        addParameter(Parameter::makeBool("caustics", "Caustics", true)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
-                         .withTooltip("Enable caustic light transport (light focused through glass "
-                                      "and off mirrors).\n"
-                                      "Engine picks the estimator (MNEE / MNEE+Photon / Photon).\n"
-                                      "Per-light and per-material Contribute to Caustics can disable "
-                                      "individual sources or casters.\n"
-                                      "Off: glass casts dark shadows (soften with shadow_opacity)."));
-        addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
-                                         {"MNEE (manifolds)", "MNEE+Photon", "Photon / VCM"}, 1)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
-                         .withTooltip("MNEE: manifold next-event — best for near-delta glass + "
-                                      "area lights.\n"
-                                      "MNEE+Photon: picks one estimator for the scene — delta-only "
-                                      "glass → MNEE; if any rough refractive caster exists → "
-                                      "Photon / VCM. When Photon is active, MNEE / LT / eye-path "
-                                      "BSDF caustics are turned off (no stacking).\n"
-                                      "Photon / VCM: caustic-only photon map — rough glass and "
-                                      "black bases through refraction."));
-        // Hidden migration: legacy menu was Automatic / MNEE / Photon (0/1/2).
-        addParameter(Parameter::makeBool("_caustics_engine_menu_v2", "", true));
-        addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)
-                         .withGroup("Engine")
-                         .withVisibleWhen("caustics==1&&causticsengine==1||caustics==1&&causticsengine==2")
-                         .withTooltip("Photons emitted per progressive pass when Caustics Engine "
-                                      "is Photon / VCM or MNEE+Photon (Auto→Photon)."));
-        addParameter(Parameter::makeFloat("photonradius", "Photon Radius", 0.08, 0.001, 10.0, false)
-                         .withGroup("Engine")
-                         .withVisibleWhen("caustics==1&&causticsengine==1||caustics==1&&causticsengine==2")
-                         .withTooltip("Initial gather radius (scene units) for the caustic photon "
-                                      "map. Shrinks as samples accumulate."));
-        addParameter(Parameter::makeFloat("causticclamp", "Caustic Firefly Clamp", 0.0, 0.0, 1000.0, false)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
-                         .withTooltip("Extra cap on paths that look through glass/mirrors at a light "
-                                      "(the sparkle inside refractive objects).\n"
-                                      "Even at 0, a safety cap of 10 is applied to those paths — they "
-                                      "never converge with more samples when the light is small.\n"
-                                      "Raise to tighten further; the caustic on the floor is not capped."));
         addParameter(Parameter::makeMenu(
                          "dispersionmode", "Dispersion Mode",
                          {"Hero (default)", "Optimized", "Spectral RGB ×3", "Fake tint"}, 0)
@@ -1034,6 +1234,68 @@ public:
                                       "caustic radiance (MNEE / photons / paths through glass) trains "
                                       "the field at the floor so guides learn bright caustic regions.\n"
                                       "Kicks in after the first training passes."));
+        addParameter(Parameter::makeBool("volumesimilarity", "Volume Similarity", false)
+                         .withGroup("Engine")
+                         .withTooltip("Biased Disney/Hyperion similarity for deep volume multiple "
+                                      "scattering. Off (default) keeps authored anisotropy.\n"
+                                      "On: from volume bounce 5 to 20, lerp g toward 0 and stretch "
+                                      "the mean free path so σs(1−g) stays constant. Low-order "
+                                      "scatters stay anisotropic. Does not change the walk when off."));
+
+        // --- Depth --------------------------------------------------------------------
+        addParameter(Parameter::makeInt("maxdepth", "Max Ray Depth", 8, 1, 4096)
+                         .withGroup("Depth")
+                         .withTooltip("Max path bounces after the camera (surfaces + volume scatters).\n"
+                                      "Dense fog / clouds with deep multiple scattering need 1000+.\n"
+                                      "Also raise Russian Roulette Depth, or RR will kill deep paths early."));
+        addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 4096)
+                         .withGroup("Depth")
+                         .withTooltip("Start Russian roulette after this depth.\n"
+                                      "For deep volume multiple scattering, set near Max Ray Depth."));
+
+        // --- Caustics -----------------------------------------------------------------
+        addParameter(Parameter::makeBool("caustics", "Caustics", true)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
+                         .withTooltip("Enable caustic light transport (light focused through glass "
+                                      "and off mirrors).\n"
+                                      "Engine picks the estimator (MNEE / MNEE+Photon / Photon).\n"
+                                      "Per-light and per-material Contribute to Caustics can disable "
+                                      "individual sources or casters.\n"
+                                      "Off: glass casts dark shadows (soften with shadow_opacity)."));
+        addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
+                                         {"MNEE (manifolds)", "MNEE+Photon", "Photon / VCM"}, 1)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
+                         .withTooltip("MNEE: manifold next-event — best for near-delta glass + "
+                                      "area lights.\n"
+                                      "MNEE+Photon: picks one estimator for the scene — delta-only "
+                                      "glass → MNEE; if any rough refractive caster exists → "
+                                      "Photon / VCM. When Photon is active, MNEE / LT / eye-path "
+                                      "BSDF caustics are turned off (no stacking).\n"
+                                      "Photon / VCM: caustic-only photon map — rough glass and "
+                                      "black bases through refraction."));
+        // Hidden migration: legacy menu was Automatic / MNEE / Photon (0/1/2).
+        addParameter(Parameter::makeBool("_caustics_engine_menu_v2", "", true));
+        addParameter(Parameter::makeFloat("causticclamp", "Caustic Firefly Clamp", 0.0, 0.0, 1000.0, false)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("integrator==0||integrator==1||integrator==5")
+                         .withTooltip("Extra cap on paths that look through glass/mirrors at a light "
+                                      "(the sparkle inside refractive objects).\n"
+                                      "Even at 0, a safety cap of 10 is applied to those paths — they "
+                                      "never converge with more samples when the light is small.\n"
+                                      "Raise to tighten further; the caustic on the floor is not capped."));
+        addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("caustics==1&&causticsengine==1||caustics==1&&causticsengine==2")
+                         .withTooltip("Photons emitted per progressive pass when Caustics Engine "
+                                      "is Photon / VCM or MNEE+Photon (Auto→Photon)."));
+        addParameter(Parameter::makeFloat("photonradius", "Photon Radius", 0.08, 0.001, 10.0, false)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("caustics==1&&causticsengine==1||caustics==1&&causticsengine==2")
+                         .withTooltip("Initial gather radius (scene units) for the caustic photon "
+                                      "map. Shrinks as samples accumulate."));
+
         addParameter(Parameter::makeBool("motionblur", "Enable Motion Blur", false)
                          .withGroup("Motion Blur")
                          .withTooltip("Camera and geometry motion blur across the shutter "
@@ -1048,16 +1310,16 @@ public:
                                       "the current frame). Default 0.5 ≈ 180° shutter / ~1/48 s at "
                                       "24 fps (close to 1/50). Open=-Length/2, Close=+Length/2."));
         addParameter(Parameter::makeBool("frustumcull", "Frustum Cull", true)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip("Meshes outside the dicing-camera frustum (plus padding) "
                                       "skip subdivision and only displace the cage. "
                                       "Close-ups on large faces still count as inside "
                                       "(screen-covering triangles / camera rays)."));
         addParameter(Parameter::makeFloat("frustumpadding", "Frustum Padding (%)", 10.0, 0.0, 100.0, false)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip("Screen-space margin as a percent of resolution width/height."));
         addParameter(Parameter::makeBool("screenadaptive", "Screen Adaptive", false)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip(
                              "Karma / Mantra / RenderMan-style raster dicing: split until projected "
                              "edge length ≈ 1/DicingQuality pixels (Quality 1 ≈ 1 micropolygon per "
@@ -1066,22 +1328,22 @@ public:
                              "Re-tessellates on Start; animated Alembic/USD also re-dice on frame "
                              "change while Start is armed."));
         addParameter(Parameter::makeBool("enabledisplacement", "Enable Displacement", true)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip(
                              "Master switch for geometric displacement and densify/dicing. "
                              "Off: render authored cages with no subdiv and no displace "
                              "(fast Play / lookdev). On: normal tessellation + displace."));
         addParameter(Parameter::makeInt("dicingpolylimitm", "Dicing Poly Limit (M)", 10, 1, 200)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip("Safety fuse: stop densify / Screen Adaptive once the mesh "
                                       "reaches this many million triangles (default 10)."));
         addParameter(Parameter::makeMenu("dicingcamera", "Dicing Camera",
                                          {"Render Camera", "Custom"}, 0)
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip("Camera used for frustum cull and screen-space dicing. "
                                       "Custom locks density to another camera prim."));
         addParameter(Parameter::makeString("dicingcamerapath", "Dicing Camera Path", "")
-                         .withGroup("Subdivision")
+                         .withGroup("Displacement")
                          .withTooltip("Stage prim path of the custom dicing camera "
                                       "(e.g. /cameras/dice). Empty falls back to the render camera."));
         addParameter(Parameter::makeMenu("workingspace", "Working Space",
@@ -1115,22 +1377,13 @@ public:
                          .withGroup("Diagnostic")
                          .withTooltip("Replace beauty with a sampling/seed visualisation "
                                       "(no light transport).\n"
-                                      "Pixel Jitter XY: R=jx G=jy from Pixel Sampler — Blue Noise "
-                                      "shows a 64px period; Sobol/Xorshift/GenPnt2D should not.\n"
+                                      "Pixel Jitter XY: R=jx G=jy from Owen-scrambled Sobol "
+                                      "(PBRT4 camera dims 0–1).\n"
                                       "Path RNG u0: first Owen-Sobol / PCG float — look for "
                                       "faint seams from correlated seeds.\n"
                                       "Bucket ID: color by Bucket Size tiles (threading only).\n"
                                       "Pixel Hash: RGB from the per-pixel seed hash.\n"
                                       "Tip: set View to Raw for a clearer diagnostic."));
-        addParameter(Parameter::makeBool("filmfalsecolor", "Spectral False Color", false)
-                         .withGroup("Diagnostic")
-                         .withVisibleWhen("integrator==4||integrator==5")
-                         .withTooltip("Spectral integrators: visualise one spectral bin as "
-                                      "false-color instead of beauty RGB (debug)."));
-        addParameter(Parameter::makeInt("filmfalsecolorbin", "False Color Bin", 0, 0, 31)
-                         .withGroup("Diagnostic")
-                         .withVisibleWhen("integrator==4&&filmfalsecolor==1||integrator==5&&filmfalsecolor==1")
-                         .withTooltip("Which spectral bin to show when Spectral False Color is on."));
     }
 
     void cook(CookContext&, const std::vector<StagePtr>&, Stage& stage) override {
@@ -1138,23 +1391,29 @@ public:
         settings.resolutionX = intValue("resx", 960);
         settings.resolutionY = intValue("resy", 540);
         settings.samplesPerPixel = intValue("samples", 128);
-        settings.backend = intValue("backend", 0) == 1 ? kBackendGpuOptix : kBackendCpuEmbree;
+        {
+            // Pixel Oracle: Uniform (0) always takes every sample; Variance (1) uses
+            // Noise Threshold (Karma XPU Variance Threshold).
+            const int oracle = intValue("pixeloracle", 1);
+            float noise = std::max(0.0f, float(floatValue("noisethreshold", 0.01)));
+            if (oracle == 0) noise = 0.0f;
+            settings.noiseThreshold = noise;
+        }
+        settings.backend = std::clamp(intValue("backend", 0), 0, 2);
+        {
+            int sched = intValue("xpuschedule", 0);
+            if (sched >= 2) sched = 0;  // retired Tile schedule
+            settings.xpuSchedule = std::clamp(sched, 0, 1);
+        }
         settings.integrator = std::clamp(intValue("integrator", 0), 0, 6);
-        settings.maxDepth = intValue("maxdepth", 8);
-        settings.rrStartDepth = intValue("rrdepth", 3);
+        settings.maxDepth = std::clamp(intValue("maxdepth", 8), 1, 4096);
+        settings.rrStartDepth = std::clamp(intValue("rrdepth", 3), 1, 4096);
         settings.lightSamples = std::max(1, intValue("lightsamples", 2));
         settings.clampDirect = float(floatValue("clampdirect", 10.0));
         settings.clampIndirect = float(floatValue("clamp", 10.0));
         settings.seed = intValue("seed", 0);
         settings.threads = intValue("threads", 0);
         settings.tileSize = std::clamp(intValue("tilesize", 32), 0, 256);
-        // Pixel Sampler. Before Manual-Test, indices 4/5 were R2 salt/linear → GenPnt2D.
-        {
-            int ps = intValue("pixelsampler", 0);
-            if (!boolValue("_pixel_sampler_manual_v1", false) && ps >= 4) ps = 3;
-            settings.pixelSampler = std::clamp(ps, 0, 4);
-        }
-        settings.manualTestMult = float(floatValue("manualtestmult", 0.0));
         // Sampling Type v2: Buckets=0 / Progressive=1.
         // Old menu was Legacy=0 / FilmTile=1 / Progressive=2.
         if (!boolValue("_sampling_type_v2", false)) {
@@ -1168,6 +1427,7 @@ public:
         settings.wireframeThickness =
             std::clamp(float(floatValue("wireframethickness", 1.0)), 0.25f, 8.0f);
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
+        settings.volumeSimilarity = boolValue("volumesimilarity", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
         settings.causticsEngine = std::clamp(intValue("causticsengine", 1), 0, 2);
         settings.causticClamp = float(floatValue("causticclamp", 0.0));
@@ -1185,10 +1445,8 @@ public:
         settings.dicingPolyLimitM = std::clamp(intValue("dicingpolylimitm", 10), 1, 200);
         settings.dicingCameraMode =
             intValue("dicingcamera", 0) == 1 ? kDicingCameraCustom : kDicingCameraRender;
-        settings.spectralSamples = std::clamp(intValue("spectralsamples", 4), 2, 16);
-        settings.spectralBins = std::clamp(intValue("spectralbins", 16), 8, 32);
-        settings.spectralExr = boolValue("spectralexr", false) ? 1 : 0;
-        settings.spectralColorSpace = std::clamp(intValue("spectralcolorspace", 0), 0, 3);
+        settings.spectralSamples = kMaxSpectrumSamples;
+        settings.spectralColorSpace = std::clamp(intValue("spectralcolorspace", 1), 0, 3);
         settings.spectralWavelengthSampling = std::clamp(intValue("spectralwavesamp", 0), 0, 1);
         settings.workingSpace = std::clamp(intValue("workingspace", 1), 0, 1);
         {
@@ -1199,8 +1457,6 @@ public:
         settings.pixelFilter = std::clamp(intValue("pixelfilter", 0), 0, 3);
         settings.filterRadius = float(floatValue("filterradius", 0.5));
         settings.envVisibleCamera = boolValue("envvisible", true) ? 1 : 0;
-        settings.filmFalseColor = boolValue("filmfalsecolor", false) ? 1 : 0;
-        settings.filmFalseColorBin = std::clamp(intValue("filmfalsecolorbin", 0), 0, 31);
         settings.samplingDebug = std::clamp(intValue("samplingdebug", 0), 0, 4);
         settings.enableTxCache = boolValue("enabletxcache", true) ? 1 : 0;
         settings.ocioUseEnv = boolValue("ociousenv", true) ? 1 : 0;
@@ -1342,12 +1598,20 @@ void registerBuiltinNodes() {
             return std::make_unique<LightNode>("spherelight", name, kLightSphere);
         };
         registry.registerType(info);
+
+        info.typeName = "physicalskylight";
+        info.label = "Physical Sky";
+        info.description = "Hosek–Wilkie sky dome + distant sun (Karma-style, one node)";
+        info.factory = [](const QString& name) -> NodePtr {
+            return std::make_unique<PhysicalSkyLightNode>(name);
+        };
+        registry.registerType(info);
     }
 
     registry.registerType(
         makeType<CameraNode>("camera", "Camera", "Camera", "Render camera with lens controls", "#3a76b2"));
     registry.registerType(makeType<RenderSettingsNode>("rendersettings", "Render Settings", "Render",
-                                                       "Resolution, sampling and backend selection", "#8a4550"));
+                                                       "Resolution, sampling and render device", "#8a4550"));
 
     registerVdbNodes(registry);
 }

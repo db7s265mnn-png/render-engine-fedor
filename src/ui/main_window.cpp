@@ -4,6 +4,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QColor>
 #include <QDir>
 #include <QDockWidget>
 #include <QFileDialog>
@@ -17,19 +18,24 @@
 #include <QMetaObject>
 #include <QPixmap>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QShortcut>
+#include <QSizePolicy>
+#include <QToolButton>
 #include <QSignalBlocker>
 #include <QTimer>
-#include <QToolBar>
 #include <QVector3D>
 #include <QEventLoop>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <new>
+#include <string>
 
 #include "app/default_scene.h"
 #include "app/document.h"
@@ -42,6 +48,7 @@
 #include "nodes/node_registry.h"
 #include "nodes/node.h"
 #include "render/motion_blur.h"
+#include "render/render_device.h"
 #include "render/render_session.h"
 #include "render/scene_picker.h"
 #include "scene/types.h"
@@ -49,6 +56,7 @@
 #include "scene/tessellate.h"
 #include "scene/displace.h"
 #include "solstice_config.h"
+#include "ui/dock_chrome.h"
 #include "ui/log_panel.h"
 #include "ui/material_network_view.h"
 #include "ui/node_graph_view.h"
@@ -60,47 +68,29 @@
 namespace sol {
 namespace {
 
-class DockTitleBar : public QWidget {
+// Floating viewport host. Not a QDockWidget — putting the viewer in the dock
+// layout is what collapsed the central pane and blew up Scene Network.
+class ViewportFloatWindow : public QWidget {
 public:
-    explicit DockTitleBar(const QString& title, QWidget* parent = nullptr) : QWidget(parent) {
-        setObjectName("dockTitleBar");
-        setStyleSheet(
-            "QWidget#dockTitleBar {"
-            "  background: #2e3136;"
-            "  border-bottom: 1px solid #22242a;"
-            "}"
-            "QLabel {"
-            "  color: #dcdee2;"
-            "  font-weight: 700;"
-            "  background: transparent;"
-            "  border: none;"
-            "}");
-        auto* layout = new QHBoxLayout(this);
-        layout->setContentsMargins(10, 0, 10, 0);
+    explicit ViewportFloatWindow(QWidget* parent = nullptr) : QWidget(parent, Qt::Window) {
+        setObjectName(QStringLiteral("viewportFloatWindow"));
+        setWindowTitle(QStringLiteral("Viewport"));
+        setMinimumSize(320, 240);
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
         layout->setSpacing(0);
-        auto* label = new QLabel(title, this);
-        layout->addWidget(label, 1);
     }
 
-    QSize sizeHint() const override {
-        return {120, theme::chromeBarHeight()};
-    }
-    QSize minimumSizeHint() const override { return sizeHint(); }
+    void setOnClose(std::function<void()> onClose) { onClose_ = std::move(onClose); }
 
 protected:
-    // Let the dock handle drag / double-click float (Qt requirement for custom titles).
-    void mousePressEvent(QMouseEvent* event) override {
+    void closeEvent(QCloseEvent* event) override {
         event->ignore();
+        if (onClose_) onClose_();
     }
-    void mouseReleaseEvent(QMouseEvent* event) override {
-        event->ignore();
-    }
-    void mouseMoveEvent(QMouseEvent* event) override {
-        event->ignore();
-    }
-    void mouseDoubleClickEvent(QMouseEvent* event) override {
-        event->ignore();
-    }
+
+private:
+    std::function<void()> onClose_;
 };
 
 QMessageBox::StandardButton appMessageBox(QWidget* parent, const QString& title, const QString& text,
@@ -132,6 +122,28 @@ QImage toQImage(const Image& image) {
     return result;
 }
 
+QString formatElapsedHms(double seconds) {
+    if (seconds < 0.0) seconds = 0.0;
+    const int total = int(std::lround(seconds));
+    const int h = total / 3600;
+    const int m = (total % 3600) / 60;
+    const int s = total % 60;
+    return QStringLiteral("%1h:%2m:%3s")
+        .arg(h, 2, 10, QChar('0'))
+        .arg(m, 2, 10, QChar('0'))
+        .arg(s, 2, 10, QChar('0'));
+}
+
+bool isTypingFocus(QWidget* widget) {
+    while (widget) {
+        if (widget->inherits("QLineEdit") || widget->inherits("QAbstractSpinBox") ||
+            widget->inherits("QPlainTextEdit") || widget->inherits("QTextEdit"))
+            return true;
+        widget = widget->parentWidget();
+    }
+    return false;
+}
+
 }  // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
@@ -140,35 +152,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setWindowIcon(QIcon(QStringLiteral(":/icons/app_icon.png")));
     resize(1720, 1000);
 
-    auto* central = new QWidget(this);
-    auto* centralLayout = new QVBoxLayout(central);
-    centralLayout->setContentsMargins(0, 0, 0, 0);
-    centralLayout->setSpacing(0);
-
-    renderView_ = new RenderView(central);
-    centralLayout->addWidget(renderView_, 1);
-
-    // Compact Houdini-style timeline in the dark strip under the viewport
-    // (above Scene Network / Material Network docks).
-    timelineBar_ = new TimelineBar(central);
-    centralLayout->addWidget(timelineBar_, 0);
-
-    setCentralWidget(central);
-
-    // Viewport framing shortcuts work anywhere in the central column (viewport +
-    // timeline), without stealing F/H from Scene/Material Network docks.
-    auto* frameSelectedShortcut = new QShortcut(QKeySequence(Qt::Key_F), central);
-    frameSelectedShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(frameSelectedShortcut, &QShortcut::activated, renderView_, &RenderView::frameSelection);
-    auto* frameAllShortcut = new QShortcut(QKeySequence(Qt::Key_H), central);
-    frameAllShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(frameAllShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
-    auto* homeShortcut = new QShortcut(QKeySequence(Qt::Key_Home), central);
-    homeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(homeShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
-
-    createActions();
+    // Viewport stays the central widget (same proportions as before detach).
+    // Docks around it can float; the viewer itself floats via a dedicated window.
     createDocks();
+    createActions();
     createMenus();
     createToolBar();
     createTimeline();
@@ -190,6 +177,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(&graph_, &NodeGraph::displayNodeChanged, this, [this](Node*) { scheduleCook(0); });
 
     connect(renderView_, &RenderView::cameraMoved, this, &MainWindow::onCameraMoved);
+    connect(renderView_, &RenderView::cameraNavStarted, this, [this] {
+        if (!renderArmed()) return;
+        session_.setInteractivePreview(true);
+    });
+    connect(renderView_, &RenderView::cameraNavEnded, this, [this] { session_.setInteractivePreview(false); });
     connect(renderView_, &RenderView::viewTransformChanged, this, [this](int) {
         framePending_.store(true, std::memory_order_relaxed);
         onRenderTick();
@@ -208,7 +200,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         }
     });
     connect(&graph_, &NodeGraph::nodeAboutToBeRemoved, this, [this](Node* node) {
-        if (!node || node->typeName() != QLatin1String("camera")) return;
+        if (!node) return;
+        if (parameterPanel_ && parameterPanel_->node() == node) parameterPanel_->clearSelection();
+        if (renderView_ && renderView_->transformTarget() == node) renderView_->setTransformTarget(nullptr);
+        if (selectedSourceNode_ == node->name()) selectedSourceNode_.clear();
+        if (node->typeName() != QLatin1String("camera")) return;
         if (lookThroughCameraName_ == node->name()) {
             lookThroughCameraName_.clear();
             cameraOverride_ = true;
@@ -293,7 +289,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     session_.setUpdateCallback([this] { framePending_.store(true, std::memory_order_relaxed); });
     session_.setFinishedCallback([this] {
         framePending_.store(true, std::memory_order_relaxed);
-        QMetaObject::invokeMethod(this, [this] { maybeSaveStillFrame(); }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [this] { onRenderFinished(); }, Qt::QueuedConnection);
     });
 }
 
@@ -328,26 +324,22 @@ void MainWindow::createActions() {
     selectToolAction_ = new QAction("Select", this);
     selectToolAction_->setCheckable(true);
     selectToolAction_->setChecked(true);
-    selectToolAction_->setShortcut(QKeySequence("Q"));
     selectToolAction_->setToolTip("Select (Q)");
     transformGroup->addAction(selectToolAction_);
 
     translateToolAction_ = new QAction("T", this);
     translateToolAction_->setCheckable(true);
     translateToolAction_->setChecked(true);
-    translateToolAction_->setShortcut(QKeySequence("T"));
     translateToolAction_->setToolTip("Translate (T)");
     transformGroup->addAction(translateToolAction_);
 
     rotateToolAction_ = new QAction("R", this);
     rotateToolAction_->setCheckable(true);
-    rotateToolAction_->setShortcut(QKeySequence("R"));
     rotateToolAction_->setToolTip("Rotate (R)");
     transformGroup->addAction(rotateToolAction_);
 
     scaleToolAction_ = new QAction("S", this);
     scaleToolAction_->setCheckable(true);
-    scaleToolAction_->setShortcut(QKeySequence("S"));
     scaleToolAction_->setToolTip("Scale (S)");
     transformGroup->addAction(scaleToolAction_);
 
@@ -408,35 +400,32 @@ void MainWindow::createMenus() {
 }
 
 void MainWindow::createToolBar() {
-    QToolBar* toolBar = addToolBar("Render");
-    toolBar->setMovable(false);
-    // Same 6px radius as viewport Local/World / T/R/S.
-    toolBar->setStyleSheet(
-        "QToolButton {"
-        "  min-width: 48px;"
-        "  min-height: 24px;"
-        "  font-size: 11px;"
-        "  font-weight: 600;"
-        "  background: #3a3e44;"
-        "  border: 1px solid #4a4f57;"
-        "  border-radius: 6px;"
-        "  color: #e8eaed;"
-        "  padding: 3px 8px;"
-        "}"
-        "QToolButton:checked {"
-        "  background: rgba(255, 190, 90, 90);"
-        "  border-color: #ffbe5a;"
-        "  color: #ffffff;"
-        "}"
-        "QToolButton:hover { background: #474c54; }"
-        "QToolButton:checked:hover { background: rgba(255, 190, 90, 120); }");
-    // T/R/S live on the viewport chrome bar above the framebuffer.
-    toolBar->addAction(renderAction_);
-    toolBar->addAction(stopAction_);
+    // Start / Stop sit on the viewport chrome, styled like Home / Q / T / R / S.
+    addAction(renderAction_);
+    addAction(stopAction_);
+    addAction(selectToolAction_);
+    addAction(translateToolAction_);
+    addAction(rotateToolAction_);
+    addAction(scaleToolAction_);
+    renderView_->attachRenderActions(renderAction_, stopAction_);
+
+    auto bindToolKey = [this](Qt::Key key, QAction* action) {
+        auto* shortcut = new QShortcut(QKeySequence(key), this);
+        shortcut->setContext(Qt::WindowShortcut);
+        shortcut->setAutoRepeat(false);
+        connect(shortcut, &QShortcut::activated, this, [action] {
+            if (!action || isTypingFocus(QApplication::focusWidget())) return;
+            action->trigger();
+        });
+    };
+    bindToolKey(Qt::Key_Q, selectToolAction_);
+    bindToolKey(Qt::Key_T, translateToolAction_);
+    bindToolKey(Qt::Key_R, rotateToolAction_);
+    bindToolKey(Qt::Key_S, scaleToolAction_);
 }
 
 void MainWindow::createTimeline() {
-    // TimelineBar is created with the central widget (under the viewport).
+    // TimelineBar is created under the viewport (central pane).
     if (!timelineBar_) return;
     connect(timelineBar_, &TimelineBar::frameChanged, this, &MainWindow::onTimelineFrameChanged);
     // After scrubbing / stop, cook once more with full Embree quality when needed.
@@ -470,41 +459,135 @@ void MainWindow::createDocks() {
     // Keep the network pane at the bottom of the window, but put the tab bar
     // (Scene Network / Material Network / Log) on TOP of that pane.
     setTabPosition(Qt::BottomDockWidgetArea, QTabWidget::North);
+    setCorner(Qt::TopLeftCorner, Qt::LeftDockWidgetArea);
+    setCorner(Qt::TopRightCorner, Qt::RightDockWidgetArea);
+    setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+    setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
+
+    auto* viewportPane = new QWidget(this);
+    viewportPane->setObjectName(QStringLiteral("viewportPane"));
+    auto* viewportLayout = new QVBoxLayout(viewportPane);
+    viewportLayout->setContentsMargins(0, 0, 0, 0);
+    viewportLayout->setSpacing(0);
+
+    renderView_ = new RenderView(viewportPane);
+    viewportLayout->addWidget(renderView_, 1);
+
+    // Compact Houdini-style timeline stays with the viewport when that pane floats.
+    timelineBar_ = new TimelineBar(viewportPane);
+    viewportLayout->addWidget(timelineBar_, 0);
+
+    // Viewport + timeline stay the central widget so leftover space after the
+    // ~340px side docks and ~330px bottom network goes to the viewer — same
+    // split as before detach. Floating uses a separate QWidget window, not a
+    // competing QDockWidget (that is what inflated Scene Network).
+    auto* viewportHost = new QWidget(this);
+    viewportHost->setObjectName(QStringLiteral("viewportHost"));
+    viewportHost->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    auto* hostLayout = new QVBoxLayout(viewportHost);
+    hostLayout->setContentsMargins(0, 0, 0, 0);
+    hostLayout->setSpacing(0);
+
+    auto* viewportPlaceholder = new QWidget(viewportHost);
+    viewportPlaceholder->setObjectName(QStringLiteral("viewportPlaceholder"));
+    viewportPlaceholder->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    viewportPlaceholder->hide();
+
+    auto* viewportFloat = new ViewportFloatWindow(this);
+    auto* floatLayout = qobject_cast<QVBoxLayout*>(viewportFloat->layout());
+
+    auto redockViewport = [this, viewportHost, hostLayout, viewportPane, viewportPlaceholder,
+                           viewportFloat, floatLayout] {
+        if (viewportPane->parentWidget() == viewportHost) {
+            viewportFloat->hide();
+            return;
+        }
+        if (floatLayout) floatLayout->removeWidget(viewportPane);
+        viewportPlaceholder->hide();
+        viewportPane->setParent(viewportHost);
+        hostLayout->addWidget(viewportPane, 1);
+        viewportPane->show();
+        viewportFloat->hide();
+        renderView_->setViewportFloating(false);
+    };
+    auto detachViewport = [this, hostLayout, viewportPane, viewportPlaceholder, viewportFloat,
+                           floatLayout] {
+        if (viewportPane->parentWidget() == viewportFloat) {
+            viewportFloat->show();
+            viewportFloat->raise();
+            viewportFloat->activateWindow();
+            return;
+        }
+        hostLayout->removeWidget(viewportPane);
+        viewportPlaceholder->show();
+        if (floatLayout) floatLayout->addWidget(viewportPane, 1);
+        viewportPane->show();
+        viewportFloat->resize(std::max(640, viewportPane->width()),
+                              std::max(400, viewportPane->height()));
+        viewportFloat->show();
+        viewportFloat->raise();
+        viewportFloat->activateWindow();
+        renderView_->setViewportFloating(true);
+    };
+    viewportFloat->setOnClose(redockViewport);
+    renderView_->setOnDetach([viewportPane, viewportFloat, detachViewport, redockViewport] {
+        if (viewportPane->parentWidget() == viewportFloat) redockViewport();
+        else detachViewport();
+    });
+    hostLayout->addWidget(viewportPane, 1);
+    hostLayout->addWidget(viewportPlaceholder, 1);
+    setCentralWidget(viewportHost);
+
+    // Framing shortcuts stay scoped to the viewport pane so F/H are not stolen
+    // from Scene / Material Network docks.
+    auto* frameSelectedShortcut = new QShortcut(QKeySequence(Qt::Key_F), viewportPane);
+    frameSelectedShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(frameSelectedShortcut, &QShortcut::activated, renderView_, &RenderView::frameSelection);
+    auto* frameAllShortcut = new QShortcut(QKeySequence(Qt::Key_H), viewportPane);
+    frameAllShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(frameAllShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
+    auto* homeShortcut = new QShortcut(QKeySequence(Qt::Key_Home), viewportPane);
+    homeShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(homeShortcut, &QShortcut::activated, renderView_, &RenderView::frameAll);
 
     auto* networkDock = new QDockWidget("Scene Network", this);
     networkDock->setObjectName("networkDock");
     networkView_ = new NodeGraphView(networkDock);
     networkView_->setGraph(&graph_);
     networkDock->setWidget(networkView_);
-    addDockWidget(Qt::BottomDockWidgetArea, networkDock);
+    installDetachableTitleBar(networkDock);
 
     auto* materialNetworkDock = new QDockWidget("Material Network", this);
     materialNetworkDock->setObjectName("materialNetworkDock");
     materialNetworkView_ = new MaterialNetworkView(materialNetworkDock);
     materialNetworkDock->setWidget(materialNetworkView_);
-    addDockWidget(Qt::BottomDockWidgetArea, materialNetworkDock);
+    installDetachableTitleBar(materialNetworkDock);
 
     auto* parameterDock = new QDockWidget("Parameters", this);
     parameterDock->setObjectName("parameterDock");
-    parameterDock->setTitleBarWidget(new DockTitleBar("Parameters", parameterDock));
     parameterPanel_ = new ParameterPanel(parameterDock);
     parameterDock->setWidget(parameterPanel_);
-    parameterDock->setMinimumWidth(300);
-    addDockWidget(Qt::RightDockWidgetArea, parameterDock);
+    parameterDock->setMinimumWidth(200);
+    installDetachableTitleBar(parameterDock);
 
     auto* sceneDock = new QDockWidget("Scene Graph", this);
     sceneDock->setObjectName("sceneDock");
-    sceneDock->setTitleBarWidget(new DockTitleBar("Scene Graph", sceneDock));
     sceneGraphPanel_ = new SceneGraphPanel(sceneDock);
     sceneDock->setWidget(sceneGraphPanel_);
-    sceneDock->setMinimumWidth(300);
-    addDockWidget(Qt::LeftDockWidgetArea, sceneDock);
+    sceneDock->setMinimumWidth(80);
+    installDetachableTitleBar(sceneDock);
 
     auto* logDock = new QDockWidget("Log", this);
     logDock->setObjectName("logDock");
     logPanel_ = new LogPanel(logDock);
     logPanel_->installAsLogSink();
     logDock->setWidget(logPanel_);
+    installDetachableTitleBar(logDock);
+
+    addDockWidget(Qt::LeftDockWidgetArea, sceneDock);
+    addDockWidget(Qt::RightDockWidgetArea, parameterDock);
+    addDockWidget(Qt::BottomDockWidgetArea, networkDock);
+    addDockWidget(Qt::BottomDockWidgetArea, materialNetworkDock);
     addDockWidget(Qt::BottomDockWidgetArea, logDock);
 
     tabifyDockWidget(networkDock, materialNetworkDock);
@@ -512,12 +595,11 @@ void MainWindow::createDocks() {
     networkDock->raise();
 
     resizeDocks({networkDock}, {330}, Qt::Vertical);
-    // Match left/right dock widths so Parameters is as wide as Scene Graph.
     constexpr int kSideDockWidth = 340;
     resizeDocks({sceneDock, parameterDock}, {kSideDockWidth, kSideDockWidth}, Qt::Horizontal);
-    // Apply again after the first layout pass — early resizeDocks can be ignored.
-    QTimer::singleShot(0, this, [this, sceneDock, parameterDock, kSideDockWidth] {
+    QTimer::singleShot(0, this, [this, sceneDock, parameterDock, networkDock, kSideDockWidth] {
         resizeDocks({sceneDock, parameterDock}, {kSideDockWidth, kSideDockWidth}, Qt::Horizontal);
+        resizeDocks({networkDock}, {330}, Qt::Vertical);
     });
 
     materialNetworkView_->setGraph(&graph_);
@@ -852,19 +934,7 @@ void MainWindow::onSaveImage() {
     }
     std::string error;
     const RenderSettingsData settings = scene_ ? scene_->settings : RenderSettingsData();
-    bool ok = false;
-    if (settings.spectralExr != 0 && path.endsWith(".exr", Qt::CaseInsensitive)) {
-        int w = 0, h = 0, bins = 0;
-        std::vector<float> accum;
-        if (session_.copySpectralBins(w, h, bins, accum) && bins > 0) {
-            ok = saveImageExrSpectral(path.toStdString(), linear, w, h, bins, accum,
-                                      session_.framebuffer().sampleCount(), error);
-        } else {
-            ok = saveImageAuto(path.toStdString(), linear, settings, error);
-        }
-    } else {
-        ok = saveImageAuto(path.toStdString(), linear, settings, error);
-    }
+    const bool ok = saveImageAuto(path.toStdString(), linear, settings, error);
     if (!ok) {
         appMessageBox(this, "Save image", QString::fromStdString(error));
         return;
@@ -958,6 +1028,27 @@ void MainWindow::maybeSaveStillFrame() {
         QStringLiteral("Still frame written: %1").arg(stillFramePath_), 6000);
 }
 
+void MainWindow::onRenderFinished() {
+    const RenderProgress progress = session_.progress();
+    if (!progress.message.empty()) {
+        stillFramePending_ = false;
+        setRenderArmed(false);
+        renderRequested_ = false;
+        if (renderView_) renderView_->setNavigationEnabled(false);
+        const QString text = QString::fromStdString(progress.message);
+        statusBar()->showMessage(text, 0);
+        updateStatusBar();
+        const QString title = progress.backendName.find("XPU") != std::string::npos
+                                  ? QStringLiteral("XPU (Embree+OptiX)")
+                                  : (progress.backendName.find("OptiX") != std::string::npos
+                                         ? QStringLiteral("GPU (OptiX)")
+                                         : QStringLiteral("Render"));
+        appMessageBox(this, title, text);
+        return;
+    }
+    maybeSaveStillFrame();
+}
+
 // ---------------------------------------------------------------------------
 // Cook and render
 // ---------------------------------------------------------------------------
@@ -988,6 +1079,7 @@ void MainWindow::enterIdlePlaceholder() {
         renderView_->showPlaceholder(true);
     }
     framePending_.store(false, std::memory_order_relaxed);
+    updateStatusBar();
 }
 
 void MainWindow::onCookTimeout() { cookNow(); }
@@ -1433,8 +1525,12 @@ void MainWindow::onCameraMoved() {
         applyLensFromCameraNode(cam, scene_->camera);
     }
 
-    // Live IPR during tumble: soft-restart on the render thread (no UI join).
-    // Hard updateSceneData()+start() joined every mousemove and made orbit hitch.
+    session_.noteCameraMoved();
+    // During tumble keep the in-flight 1/4 x 1 spp running. Cancelling it
+    // every mouse-move aborts OptiX before D2H and leaves charcoal holes.
+    // The next launch picks up cameraEpoch_ after this frame presents.
+    if (session_.interactivePreview())
+        return;
     session_.pushInteractiveRestart();
 }
 
@@ -1601,23 +1697,93 @@ void MainWindow::updateWindowTitle() {
 void MainWindow::updateStatusBar() {
     const RenderProgress progress = session_.progress();
     QString overlay = QString("%1 / %2 spp").arg(progress.samplesDone).arg(progress.samplesTarget);
-    if (progress.elapsedSeconds > 0.0) overlay += QString("   %1 s").arg(progress.elapsedSeconds, 0, 'f', 1);
-    // Always show which camera sampler / engine is live — catches "I swear I
-    // switched to White but still see BN tiles" mismatches.
+    if (progress.elapsedSeconds > 0.0) overlay += QStringLiteral("   %1").arg(formatElapsedHms(progress.elapsedSeconds));
     if (scene_) {
         const RenderSettingsData& rs = scene_->settings;
-        const char* sampler = "Sobol";
-        if (rs.pixelSampler == kPixelSamplerBlueNoise) sampler = "BN";
-        else if (rs.pixelSampler == kPixelSamplerXorshift) sampler = "Xorshift";
-        else if (rs.pixelSampler == kPixelSamplerGenPnt2D) sampler = "GenPnt2D";
-        else if (rs.pixelSampler == kPixelSamplerManualTest) sampler = "ManualTest";
         const char* engine = "Buckets";
         if (rs.samplingEngine == kSamplingEngineProgressive) engine = "Progressive";
-        overlay += QString("   %1 · PathSobol · %2").arg(sampler, engine);
-        if (rs.pixelSampler == kPixelSamplerManualTest)
-            overlay += QString("  mult=%1").arg(rs.manualTestMult, 0, 'f', 2);
+        overlay += QString("   OwenSobol · %1").arg(engine);
+        if (rs.noiseThreshold > 0.0f) {
+            overlay += QString("   noise %1").arg(double(rs.noiseThreshold), 0, 'g', 3);
+            if (progress.noisePixelCount > 0) {
+                const int pct = int(100.0 * double(progress.noiseSkipCount) /
+                                        double(progress.noisePixelCount) +
+                                    0.5);
+                overlay += QString("  %1% skip").arg(pct);
+            }
+        } else {
+            overlay += QStringLiteral("   noise off");
+        }
     }
+    if (!progress.message.empty()) {
+        overlay += QStringLiteral("   %1").arg(QString::fromStdString(progress.message));
+    }
+    if (!renderView_) return;
     renderView_->setStatusText(overlay);
+
+    const bool wantGpu = [&] {
+        if (scene_) return renderDeviceUsesGpu(scene_->settings.backend);
+        for (const NodePtr& node : graph_.nodes()) {
+            if (node && node->typeName() == QLatin1String("rendersettings")) {
+                const int b = node->intValue("backend", 0);
+                return b == 1 || b == 2;
+            }
+        }
+        return false;
+    }();
+    const bool wantXpu = [&] {
+        if (scene_) return renderDeviceIsXpu(scene_->settings.backend);
+        for (const NodePtr& node : graph_.nodes()) {
+            if (node && node->typeName() == QLatin1String("rendersettings"))
+                return node->intValue("backend", 0) == 2;
+        }
+        return false;
+    }();
+
+    QString active = QStringLiteral("Embree");
+    const std::string& live = progress.backendName;
+    if (!live.empty()) {
+        if (live.find("XPU") != std::string::npos) active = QStringLiteral("XPU");
+        else if (live.find("OptiX") != std::string::npos) active = QStringLiteral("OptiX");
+        else if (live.find("Embree") != std::string::npos) active = QStringLiteral("Embree");
+    } else if (wantXpu && optixRuntimeAvailable()) {
+        active = QStringLiteral("XPU");
+    } else if (wantGpu && !wantXpu && optixRuntimeAvailable()) {
+        active = QStringLiteral("OptiX");
+    }
+    if (active.startsWith(QLatin1String("XPU")) && progress.backendGpuMs > 0.0) {
+        active = QStringLiteral("XPU %1 ms").arg(progress.backendGpuMs, 0, 'f', 1);
+    } else if (active.startsWith(QLatin1String("OptiX")) && progress.backendGpuMs > 0.0) {
+        active = QStringLiteral("OptiX %1 ms").arg(progress.backendGpuMs, 0, 'f', 1);
+    }
+
+    QString support;
+    QColor supportColor(255, 80, 80);
+    if (wantGpu) {
+        support = QStringLiteral("OptiX not supported");
+        if (!progress.message.empty()) {
+            support = QString::fromStdString(progress.message);
+            if (support.size() > 48) support = support.left(46) + QStringLiteral("…");
+            supportColor = QColor(255, 80, 80);
+            if (wantXpu && active.startsWith(QLatin1String("Embree"))) active = QStringLiteral("XPU");
+            else if (!wantXpu && active.startsWith(QLatin1String("Embree"))) active = QStringLiteral("OptiX");
+        } else if (!optixBackendCompiledIn()) {
+            support = QStringLiteral("OptiX not in this build");
+        } else if (optixRuntimeProbePending()) {
+            support = QStringLiteral("OptiX checking…");
+            supportColor = QColor(255, 210, 70);
+        } else {
+            std::string err;
+            if (optixRuntimeAvailable(&err)) {
+                support = QStringLiteral("OptiX supported");
+                supportColor = QColor(110, 210, 140);
+            } else if (!err.empty()) {
+                support = QString::fromStdString(err);
+                if (support.size() > 42) support = support.left(40) + QStringLiteral("…");
+            }
+        }
+    }
+    renderView_->setBackendHud(active, support, supportColor);
 }
 
 
@@ -1697,7 +1863,7 @@ void MainWindow::onShowShortcuts() {
                              "Render view (Houdini style)\n"
                              "  F             frame selected object\n"
                              "  H / Home      frame all\n"
-                             "  Sel / Q       select — LMB click geometry (Select tool only)\n"
+                             "  Q             select — LMB click geometry (Select tool only)\n"
                              "  T / R / S     translate / rotate / scale\n"
                              "  LMB on gizmo  transform (restarts render on release while Start)\n"
                              "  Focus Pick    camera Lens → click geo to set DOF focus\n"
@@ -1716,6 +1882,8 @@ void MainWindow::onShowShortcuts() {
                              "  |<<  /  ▶■  /  >>|   under scrubber (centered)\n"
                              "  Scrubber playhead    current frame (double-click to type)\n"
                              "  Frame → time         Alembic & USD sample time\n\n"
+                             "Layout\n"
+                             "  square on a pane title   detach / redock Scene Graph, Viewport, Parameters\n\n"
                              "General\n"
                              "  F5            Start cook + render (button stays pressed)\n"
                              "  Esc           Stop (no cook until Start; last frame held)\n"

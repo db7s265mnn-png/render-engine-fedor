@@ -47,7 +47,7 @@ void configureParser(QCommandLineParser& parser) {
     parser.setApplicationDescription(
         SOLSTICE_APP_NAME " - a node based path tracer.\n"
         "Loads Alembic and USD geometry, lights it with area and HDRI dome lights and renders\n"
-        "with the Embree CPU backend or the OptiX GPU backend.");
+        "with the Embree CPU device, the OptiX GPU device, or XPU (both).");
     parser.addHelpOption();
     parser.addVersionOption();
     parser.addPositionalArgument("scene", "Scene file to open (.scene)", "[scene]");
@@ -57,7 +57,7 @@ void configureParser(QCommandLineParser& parser) {
         {{"s", "samples"}, "Samples per pixel; overrides the render settings node.", "count"},
         {"width", "Image width override.", "pixels"},
         {"height", "Image height override.", "pixels"},
-        {{"b", "backend"}, "Render backend: cpu or gpu.", "name"},
+        {{"b", "backend"}, "Render device: cpu, gpu, or xpu.", "name"},
         {{"j", "threads"}, "CPU thread count (0 = all cores).", "count"},
         {{"a", "abc"}, "Alembic file to import when no scene file is given.", "path"},
         {{"e", "hdri"}, "HDRI used by the generated dome light.", "path"},
@@ -94,7 +94,9 @@ int main(int argc, char** argv) {
         if (parser.isSet("threads")) options.threads = parser.value("threads").toInt();
         if (parser.isSet("backend")) {
             const QString backend = parser.value("backend").toLower();
-            options.backend = (backend == "gpu" || backend == "optix") ? 1 : 0;
+            options.backend = (backend == "gpu" || backend == "optix")
+                                  ? 1
+                                  : ((backend == "xpu") ? 2 : 0);
         }
         options.saveScenePath = parser.value("save-scene");
         options.renderImage = !parser.isSet("no-render");
@@ -125,6 +127,9 @@ int main(int argc, char** argv) {
 
     // OCIO status at application start (library + OCIO env / config).
     sol::ocioLogStatus(true, {});
+#if SOLSTICE_IEEE_FP32
+    sol::logInfo("FP32: --use_fast_math --ftz=true, precise div/sqrt, FMA, OptiX DEFAULT.");
+#endif
 
     sol::MainWindow window;
     const QStringList positional = parser.positionalArguments();

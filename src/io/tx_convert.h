@@ -51,6 +51,10 @@ std::string txResolveOcioConfig(bool useEnv, const std::string& settingsPath);
 // True when input space should skip --colorconvert (already ACEScg / Raw / empty).
 bool txSkipColorConvert(const std::string& inputColorSpace);
 
+// Arnold-style `auto`: empty/"auto" → Raw (data), Linear sRGB (HDR/EXR), else sRGB Texture.
+std::string txResolveInputColorSpace(const std::string& authored, const std::string& sourcePath,
+                                     bool colorMap = true);
+
 // Probe on-disk pixel type (never returns Original). Falls back to Float if unknown.
 TxPixelType txProbePixelType(const std::string& path);
 
@@ -99,7 +103,8 @@ std::string txOutputExtension(TxOutputFormat format, const std::string& sourcePa
 // If that name is taken by a different source, use name_copy_1.ext, …
 // For .tx, a sibling `.txsrc` sidecar keeps re-runs stable.
 std::string txAllocateOutputPath(const std::string& sourcePath, const std::string& outputDir,
-                                 TxOutputFormat format = TxOutputFormat::Tx);
+                                 TxOutputFormat format = TxOutputFormat::Tx,
+                                 const std::string& colorSpaceTag = {});
 
 struct TxConvertRequest {
     std::string sourcePath;       // concrete file (already expanded)
