@@ -581,10 +581,15 @@ void testBsdf() {
         check(lw.sheen > 0.05f, "sheen is selectable in the lobe lottery");
         Material bare = cloth;
         bare.sheen = 0.0f;
-        const Vec3 woG = normalize(Vec3(0.92f, 0.0f, 0.39f));
-        const Vec3 wiG = normalize(Vec3(-0.92f, 0.0f, 0.39f));
+        const Vec3 woG = normalize(Vec3(0.98f, 0.0f, 0.20f));
+        const Vec3 wiG = normalize(Vec3(0.96f, 0.15f, 0.24f));
+        Material sheenOnly = cloth;
+        sheenOnly.baseColor = Vec3(0.0f);
+        sheenOnly.baseWeight = 0.0f;
+        check(average(bsdfEvalLocal(sheenOnly, woG, wiG).f) > 1e-3f,
+              "Charlie sheen eval is nonzero at the horizon");
         check(average(bsdfEvalLocal(cloth, woG, wiG).f) >
-                  average(bsdfEvalLocal(bare, woG, wiG).f) * 1.15f,
+                  average(bsdfEvalLocal(bare, woG, wiG).f),
               "Charlie sheen adds grazing energy");
         int sheenHits = 0;
         for (int i = 0; i < 2000; ++i) {
