@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
     // OCIO status at application start (library + OCIO env / config).
     sol::ocioLogStatus(true, {});
 #if SOLSTICE_IEEE_FP32
-    sol::logInfo("FP32: IEEE nvcc, FMA on (GPU+host), OptiX DEFAULT. No --use_fast_math.");
+    sol::logInfo("FP32: nvcc approx div/sqrt, FMA on, OptiX DEFAULT. No --use_fast_math.");
 #endif
 
     sol::MainWindow window;
