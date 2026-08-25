@@ -10,6 +10,14 @@ extern "C" {
 __constant__ __align__(16) unsigned char solsticeLaunchParams[sizeof(sol::LaunchParams)];
 }
 
-__device__ inline const sol::LaunchParams& launchParams() {
-    return *reinterpret_cast<const sol::LaunchParams*>(solsticeLaunchParams);
+namespace sol {
+
+__device__ inline const LaunchParams& launchParams() {
+    return *reinterpret_cast<const LaunchParams*>(solsticeLaunchParams);
 }
+
+__device__ inline LaunchParams& launchParamsMutable() {
+    return *reinterpret_cast<LaunchParams*>(solsticeLaunchParams);
+}
+
+}  // namespace sol

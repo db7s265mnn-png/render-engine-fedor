@@ -4,22 +4,24 @@
 // (pipelineLaunchParamsVariableName), even if the program never reads it.
 #include "render/optix/optix_wavefront.cuh"
 
-extern "C" __global__ void __miss__radiance() {
-    const int pixel = sol::wavefrontPixelIndex();
+namespace sol {
+
+__device__ inline void writeMissRadiance() {
+    const int pixel = wavefrontPixelIndex();
     if (pixel < 0) return;
-    sol::launchParams().hits[pixel] = sol::GpuHit{};
+    launchParamsMutable().hits[pixel] = GpuHit{};
 }
 
-extern "C" __global__ void __miss__shadow() {
-    const int pixel = sol::wavefrontPixelIndex();
+__device__ inline void writeMissShadow() {
+    const int pixel = wavefrontPixelIndex();
     if (pixel < 0) return;
-    sol::launchParams().shadows[pixel].occluded = 0;
+    launchParamsMutable().shadows[pixel].occluded = 0;
 }
 
-extern "C" __global__ void __closesthit__radiance() {
-    const int pixel = sol::wavefrontPixelIndex();
+__device__ inline void writeClosestHitRadiance() {
+    const int pixel = wavefrontPixelIndex();
     if (pixel < 0) return;
-    sol::GpuHit& hit = sol::launchParams().hits[pixel];
+    GpuHit& hit = launchParamsMutable().hits[pixel];
     const float2 barycentrics = optixGetTriangleBarycentrics();
     hit.didHit = 1;
     hit.t = optixGetRayTmax();
@@ -29,8 +31,18 @@ extern "C" __global__ void __closesthit__radiance() {
     hit.v = barycentrics.y;
 }
 
-extern "C" __global__ void __closesthit__shadow() {
-    const int pixel = sol::wavefrontPixelIndex();
+__device__ inline void writeClosestHitShadow() {
+    const int pixel = wavefrontPixelIndex();
     if (pixel < 0) return;
-    sol::launchParams().shadows[pixel].occluded = 1;
+    launchParamsMutable().shadows[pixel].occluded = 1;
 }
+
+}  // namespace sol
+
+extern "C" __global__ void __miss__radiance() { sol::writeMissRadiance(); }
+
+extern "C" __global__ void __miss__shadow() { sol::writeMissShadow(); }
+
+extern "C" __global__ void __closesthit__radiance() { sol::writeClosestHitRadiance(); }
+
+extern "C" __global__ void __closesthit__shadow() { sol::writeClosestHitShadow(); }
