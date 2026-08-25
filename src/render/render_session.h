@@ -37,8 +37,8 @@ public:
     // sample and restart accumulation on the *render* thread (no UI-thread join).
     // Call after mutating scene->camera (etc.). If idle, falls back to update+start.
     void pushInteractiveRestart();
-    // Mouse-drag orbit/pan/dolly: same scene, 1 spp, adaptive film (64→32→16→8→4).
-    // Display-only fat-pixel upscale; release holds until full-res 1 spp.
+    // Mouse-drag orbit/pan/dolly: same scene, 1 spp, adaptive film (16→8→4, up
+    // to 32). Display-only fat-pixel upscale; release holds until full-res 1 spp.
     void setInteractivePreview(bool on);
     bool interactivePreview() const { return interactivePreview_.load(std::memory_order_relaxed); }
     // Bump so the worker can pick up the latest camera after the current sample.

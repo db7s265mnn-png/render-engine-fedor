@@ -5352,15 +5352,14 @@ void testQuarterFilmIsDownscaleNotCrop() {
 void testNavPreviewDividerAndSplat() {
     std::printf("nav-preview divider\n");
     check(clampNavPreviewDivider(1) == 4, "clamp min 4");
-    check(clampNavPreviewDivider(128) == 64, "clamp max 64");
+    check(clampNavPreviewDivider(64) == 32, "clamp max 32");
     check(clampNavPreviewDivider(6) == 4, "snap down to power of two");
-    check(clampNavPreviewDivider(64) == 64, "64 stays");
+    check(clampNavPreviewDivider(16) == 16, "16 stays");
     check(adaptNavPreviewDivider(8, 200.0) == 16, "slow frame coarsens");
     check(adaptNavPreviewDivider(8, 20.0) == 4, "fast frame refines");
     check(adaptNavPreviewDivider(8, 80.0) == 8, "on-target stays");
     check(adaptNavPreviewDivider(4, 10.0) == 4, "already min");
-    check(adaptNavPreviewDivider(64, 500.0) == 64, "already max");
-    check(adaptNavPreviewDivider(64, 20.0) == 32, "start 1/64 refines to 1/32");
+    check(adaptNavPreviewDivider(32, 500.0) == 32, "already max");
 
     SceneView scene{};
     scene.settings.resolutionX = 400;

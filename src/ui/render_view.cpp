@@ -1296,7 +1296,7 @@ void RenderView::paintEvent(QPaintEvent*) {
     painter.fillRect(rect(), theme::gridDark());
 
     const QRect target = imageRect();
-    // Coarse nav film (1/64 … 1/4) is a splat: nearest upscale, not a blur.
+    // Coarse nav film (1/32 … 1/4) is a splat: nearest upscale, not a blur.
     const bool fatNavPixels =
         !image_.isNull() && image_.width() > 0 && target.width() > 0 &&
         image_.width() * 2 < target.width();

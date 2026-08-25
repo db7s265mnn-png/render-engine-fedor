@@ -484,7 +484,7 @@ void RenderSession::threadMain() {
             sample = 0;
             const int nextDiv = adaptNavPreviewDivider(navDivUsed, passMs);
             navDivider_.store(nextDiv, std::memory_order_relaxed);
-            // Same camera, cheaper than target: refine 64→32→16→8→4 without waiting.
+            // Same camera, cheaper than target: refine 16→8→4 without waiting.
             const bool refine = nextDiv < navDivUsed;
             while (!refine && !hardStop_.load(std::memory_order_relaxed) &&
                    !softRestart_.load(std::memory_order_relaxed) &&
