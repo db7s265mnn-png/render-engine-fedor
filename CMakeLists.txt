@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.9 LANGUAGES CXX)
+project(Solstice VERSION 0.9.10 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -84,6 +84,11 @@ endif()
 # roughly Haswell / Excavator / Zen 1 (~2013–2015). Embree still does its own
 # runtime ISA dispatch; this mainly accelerates our integrator / shading code.
 option(SOLSTICE_MODERN_CPU "Target x86-64-v3 (AVX2+); faster, not for ancient CPUs" ON)
+# Diagnostic: magenta/yellow/cyan cloud dots. Host never had -ffast-math;
+# OptiX PTX did (--use_fast_math deletes isfinite). Flip OFF after the test.
+option(SOLSTICE_IEEE_FP32
+    "IEEE-754 FP32: no host/GPU fast-math, no FMA contraction. Diagnostic, slower."
+    ON)
 
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 # Ninja writes bin/; Visual Studio would write bin/Release. Pin every config to
@@ -120,6 +125,33 @@ endif()
 
 if(SOLSTICE_MODERN_CPU)
     message(STATUS "CPU baseline: x86-64-v3 / AVX2 (SOLSTICE_MODERN_CPU=ON)")
+endif()
+
+if(SOLSTICE_IEEE_FP32)
+    set(SOLSTICE_IEEE_FP32_01 1)
+    set(SOLSTICE_BUILD_ID "${SOLSTICE_BUILD_ID}-ieee")
+    set(SOLSTICE_VERSION_FULL
+        "${PROJECT_VERSION} (${SOLSTICE_GIT_SHA}${SOLSTICE_GIT_DIRTY}, ${SOLSTICE_BUILD_DATE}, ieee-fp32)")
+    set(SOLSTICE_OUTPUT_NAME "${SOLSTICE_APP_DISPLAY_NAME}-${SOLSTICE_BUILD_ID}")
+    if(MSVC)
+        add_compile_options(/fp:precise)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            add_compile_options(
+                /clang:-fno-fast-math
+                /clang:-ffp-contract=off
+                /clang:-fhonor-nans
+                /clang:-fhonor-infinities)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        add_compile_options(-fno-fast-math -ffp-contract=off -fhonor-nans -fhonor-infinities)
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        add_compile_options(
+            -fno-fast-math -ffp-contract=off -fno-finite-math-only
+            -fno-associative-math -fno-reciprocal-math)
+    endif()
+    message(STATUS "IEEE FP32 diagnostic ON (no fast-math / FMA contract; title stamps -ieee)")
+else()
+    set(SOLSTICE_IEEE_FP32_01 0)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -849,6 +881,7 @@ message(STATUS "  OpenPGL guiding : ${SOLSTICE_HAVE_OPENPGL_01}")
 message(STATUS "  OpenSubdiv      : ${SOLSTICE_HAVE_OPENSUBDIV_01}")
 message(STATUS "  TinyUSDZ / USDC : ${SOLSTICE_HAVE_TINYUSDZ_01}")
 message(STATUS "  Modern CPU ISA  : ${SOLSTICE_MODERN_CPU}")
+message(STATUS "  IEEE FP32       : ${SOLSTICE_IEEE_FP32_01}")
 message(STATUS "")
 
 # OBJ -> Alembic converter for shipping demo assets.

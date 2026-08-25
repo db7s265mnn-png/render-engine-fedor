@@ -127,6 +127,9 @@ int main(int argc, char** argv) {
 
     // OCIO status at application start (library + OCIO env / config).
     sol::ocioLogStatus(true, {});
+#if SOLSTICE_IEEE_FP32
+    sol::logInfo("FP32: IEEE-754 (no host/GPU fast-math, no FMA contract). Diagnostic, slower.");
+#endif
 
     sol::MainWindow window;
     const QStringList positional = parser.positionalArguments();

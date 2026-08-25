@@ -123,11 +123,25 @@ endif()
 # VS 2026 STL (yvals_core.h STL1002) requires CUDA 13.2; CUDA 12.0 needs this define.
 set(_solstice_nvcc_unsupported)
 if(WIN32)
+    if(SOLSTICE_IEEE_FP32)
+        set(_solstice_nvcc_xcompiler -Xcompiler=/bigobj,/nologo,/fp:precise)
+    else()
+        set(_solstice_nvcc_xcompiler -Xcompiler=/bigobj,/nologo)
+    endif()
     set(_solstice_nvcc_unsupported
         --allow-unsupported-compiler
         -D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
         -D_ENABLE_EXTENDED_ALIGNED_STORAGE
-        -Xcompiler=/bigobj,/nologo)
+        ${_solstice_nvcc_xcompiler})
+endif()
+
+# --use_fast_math ⇒ ftz + approx div/sqrt + fmad, and isfinite() is compiled out.
+set(_solstice_nvcc_fp)
+if(SOLSTICE_IEEE_FP32)
+    set(_solstice_nvcc_fp --ftz=false --prec-div=true --prec-sqrt=true --fmad=false)
+    message(STATUS "OptiX PTX: IEEE FP32 (no --use_fast_math)")
+else()
+    set(_solstice_nvcc_fp --use_fast_math)
 endif()
 
 # Iray: thin wavefront stages (intersect vs shade) plus a separate tail megakernel
@@ -143,7 +157,7 @@ set(_solstice_nvcc_ptx_common
     -ptx
     -std=c++17
     -O${SOLSTICE_OPTIX_NVCC_OPT}
-    --use_fast_math
+    ${_solstice_nvcc_fp}
     --disable-warnings
     ${_solstice_nvcc_lineinfo}
     ${_solstice_nvcc_unsupported}
