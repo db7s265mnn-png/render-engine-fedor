@@ -5349,6 +5349,33 @@ void testQuarterFilmIsDownscaleNotCrop() {
     checkNear(dDown.z, dFull.z, 0.02f, "bound 1/4 film z matches full FOV");
 }
 
+void testNavPreviewDividerAndSplat() {
+    std::printf("nav-preview divider\n");
+    check(clampNavPreviewDivider(1) == 4, "clamp min 4");
+    check(clampNavPreviewDivider(64) == 32, "clamp max 32");
+    check(clampNavPreviewDivider(6) == 4, "snap down to power of two");
+    check(clampNavPreviewDivider(16) == 16, "16 stays");
+    check(adaptNavPreviewDivider(8, 200.0) == 16, "slow frame coarsens");
+    check(adaptNavPreviewDivider(8, 20.0) == 4, "fast frame refines");
+    check(adaptNavPreviewDivider(8, 80.0) == 8, "on-target stays");
+    check(adaptNavPreviewDivider(4, 10.0) == 4, "already min");
+    check(adaptNavPreviewDivider(32, 500.0) == 32, "already max");
+
+    SceneView scene{};
+    scene.settings.resolutionX = 400;
+    scene.settings.resolutionY = 200;
+    scene.camera.sensorWidth = 36.0f;
+    scene.camera.focalLength = 50.0f;
+    scene.camera.fStop = 0.0f;
+    scene.camera.cameraToWorld = Mat4::identity();
+    Vec3 oFull, dFull, oDown, dDown;
+    generateCameraRay(scene, 399.5f, 100.0f, 0.5f, 0.5f, oFull, dFull);
+    bindFilmToFramebuffer(scene, 400 / 16, 200 / 16);
+    generateCameraRay(scene, 400 / 16 - 0.5f, 200 / 16 * 0.5f, 0.5f, 0.5f, oDown, dDown);
+    checkNear(dDown.x, dFull.x, 0.05f, "bound 1/16 film right edge matches full FOV");
+    checkNear(dDown.y, dFull.y, 0.05f, "bound 1/16 film y matches full FOV");
+}
+
 void testFramebufferPresentableOnlyWhenComplete() {
     std::printf("framebuffer presentable\n");
     Framebuffer fb;
@@ -6827,6 +6854,7 @@ int main() {
     testRenderSettingsFolders();
     testSceneGraphFolders();
     testQuarterFilmIsDownscaleNotCrop();
+    testNavPreviewDividerAndSplat();
     testFramebufferPresentableOnlyWhenComplete();
     testCameraDofFocus();
     testPolyOpticsApertureSpread();

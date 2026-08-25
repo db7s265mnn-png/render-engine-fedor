@@ -11,6 +11,32 @@
 
 namespace sol {
 
+// Nav preview (tumble): same integrator / VDB / lights. Only the film shrinks.
+// Cycles resolution_divider + RenderMan Progressive Pixels: start coarse so the
+// first picture is a screenful of fat pixels, then refine 32→16→8→4 from the
+// last frame's wall time. Viewport nearest-neighbor upscale is the splat.
+constexpr int kNavPreviewDividerMin = 4;
+constexpr int kNavPreviewDividerMax = 32;
+constexpr int kNavPreviewDividerStart = 16;
+constexpr double kNavPreviewTargetMs = 80.0;
+
+inline int clampNavPreviewDivider(int d) {
+    if (d < kNavPreviewDividerMin) return kNavPreviewDividerMin;
+    if (d > kNavPreviewDividerMax) return kNavPreviewDividerMax;
+    int p = kNavPreviewDividerMin;
+    while (p * 2 <= d && p * 2 <= kNavPreviewDividerMax) p *= 2;
+    return p;
+}
+
+inline int adaptNavPreviewDivider(int divider, double frameMs,
+                                  double targetMs = kNavPreviewTargetMs) {
+    int d = clampNavPreviewDivider(divider);
+    if (!(frameMs > 0.0) || !(targetMs > 0.0)) return d;
+    if (frameMs > targetMs * 1.8 && d < kNavPreviewDividerMax) return d * 2;
+    if (frameMs < targetMs * 0.4 && d > kNavPreviewDividerMin) return d / 2;
+    return d;
+}
+
 struct RenderProgress {
     int samplesDone = 0;
     int samplesTarget = 0;

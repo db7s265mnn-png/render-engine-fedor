@@ -1296,7 +1296,11 @@ void RenderView::paintEvent(QPaintEvent*) {
     painter.fillRect(rect(), theme::gridDark());
 
     const QRect target = imageRect();
-    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    // Coarse nav film (1/8, 1/16, …) is a splat: nearest upscale, not a blur.
+    const bool fatNavPixels =
+        !image_.isNull() && image_.width() > 0 && target.width() > 0 &&
+        image_.width() * 2 < target.width();
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, !fatNavPixels);
     if (!image_.isNull()) {
         painter.drawImage(target, image_);
     } else if (showPlaceholder_ && !placeholderImage_.isNull()) {

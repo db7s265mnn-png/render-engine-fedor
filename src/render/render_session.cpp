@@ -149,6 +149,8 @@ void RenderSession::pushInteractiveRestart() {
 void RenderSession::setInteractivePreview(bool on) {
     const bool was = interactivePreview_.exchange(on, std::memory_order_relaxed);
     if (was == on) return;
+    // Coarsest first picture on press (RenderMan PP). Refine after each frame.
+    if (on) navDivider_.store(kNavPreviewDividerStart, std::memory_order_relaxed);
     completeFramesOnly_.store(true, std::memory_order_relaxed);
     if (rendering_.load(std::memory_order_relaxed) && thread_.joinable()) {
         softRestart_.store(true, std::memory_order_relaxed);
@@ -337,10 +339,12 @@ void RenderSession::threadMain() {
     const int fullHeight = std::max(1, settings.resolutionY);
     const int targetSamples = std::max(1, settings.samplesPerPixel);
 
+    int navDivUsed = 1;
     auto applyFilmSize = [&](int& sampleIndex) -> bool {
         const bool preview = interactivePreview_.load(std::memory_order_relaxed);
-        const int width = preview ? std::max(1, fullWidth / 4) : fullWidth;
-        const int height = preview ? std::max(1, fullHeight / 4) : fullHeight;
+        navDivUsed = preview ? clampNavPreviewDivider(navDivider_.load(std::memory_order_relaxed)) : 1;
+        const int width = std::max(1, fullWidth / navDivUsed);
+        const int height = std::max(1, fullHeight / navDivUsed);
         if (framebuffer_.width() != width || framebuffer_.height() != height) {
             framebuffer_.resize(width, height);
             sampleIndex = 0;
@@ -430,6 +434,7 @@ void RenderSession::threadMain() {
             opt.xpuRemainingSamples = 1;
         }
 
+        const auto pass0 = std::chrono::steady_clock::now();
         try {
             device_->renderSample(framebuffer_, sample, cancel_, midProgress, &opt);
         } catch (const std::exception& ex) {
@@ -448,6 +453,9 @@ void RenderSession::threadMain() {
 
         const int sampleStep = device_ ? device_->lastCompletedSamples() : 1;
         if (sampleStep <= 0) continue;
+        const double passMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pass0)
+                .count();
         framebuffer_.setSampleCount(sample + sampleStep);
         const float noiseT = (preview || scene->settings.samplingDebug != 0)
                                  ? 0.0f
@@ -474,7 +482,11 @@ void RenderSession::threadMain() {
 
         if (preview) {
             sample = 0;
-            while (!hardStop_.load(std::memory_order_relaxed) &&
+            const int nextDiv = adaptNavPreviewDivider(navDivUsed, passMs);
+            navDivider_.store(nextDiv, std::memory_order_relaxed);
+            // Same camera, cheaper than target: refine 16→8→4 without waiting.
+            const bool refine = nextDiv < navDivUsed;
+            while (!refine && !hardStop_.load(std::memory_order_relaxed) &&
                    !softRestart_.load(std::memory_order_relaxed) &&
                    !cancel_.load(std::memory_order_relaxed)) {
                 if (!interactivePreview_.load(std::memory_order_relaxed)) break;

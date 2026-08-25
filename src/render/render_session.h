@@ -37,8 +37,8 @@ public:
     // sample and restart accumulation on the *render* thread (no UI-thread join).
     // Call after mutating scene->camera (etc.). If idle, falls back to update+start.
     void pushInteractiveRestart();
-    // Mouse-drag orbit/pan/dolly: same scene at 1/4 film, 1 spp. Display-only —
-    // release keeps the last complete preview until full-res 1 spp lands.
+    // Mouse-drag orbit/pan/dolly: same scene, 1 spp, adaptive film (16→8→4, up
+    // to 32). Display-only fat-pixel upscale; release holds until full-res 1 spp.
     void setInteractivePreview(bool on);
     bool interactivePreview() const { return interactivePreview_.load(std::memory_order_relaxed); }
     // Bump so the worker can pick up the latest camera after the current sample.
@@ -92,6 +92,7 @@ private:
     std::atomic<bool> sceneDirty_{true};
     std::atomic<bool> interactivePreview_{false};
     std::atomic<bool> completeFramesOnly_{false};
+    std::atomic<int> navDivider_{kNavPreviewDividerStart};
     std::atomic<uint64_t> cameraEpoch_{0};
 
     mutable std::mutex progressMutex_;
