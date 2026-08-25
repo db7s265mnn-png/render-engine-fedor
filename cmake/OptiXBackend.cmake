@@ -136,10 +136,12 @@ if(WIN32)
 endif()
 
 # --use_fast_math ⇒ ftz + approx div/sqrt + fmad, and isfinite() is compiled out.
+# Step 5 skip 4: take fast-math (trig/exp, isfinite out) but override the
+# approx div/sqrt that already caused fireflies. Later flags win on nvcc.
 set(_solstice_nvcc_fp)
 if(SOLSTICE_IEEE_FP32)
-    set(_solstice_nvcc_fp --ftz=false --prec-div=true --prec-sqrt=true --fmad=true)
-    message(STATUS "OptiX PTX: precise div/sqrt, --fmad=true, no --use_fast_math (approx div caused fireflies)")
+    set(_solstice_nvcc_fp --use_fast_math --ftz=false --prec-div=true --prec-sqrt=true --fmad=true)
+    message(STATUS "OptiX PTX: --use_fast_math with precise div/sqrt override (no approx div)")
 else()
     set(_solstice_nvcc_fp --use_fast_math)
 endif()
