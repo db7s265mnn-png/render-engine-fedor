@@ -527,10 +527,35 @@ function Find-OptiXRoot([string]$GitExe) {
 }
 
 function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest) {
-    if (Test-Path -LiteralPath $Dest) { return }
+    $cm = Join-Path $Dest 'CMakeLists.txt'
+    if (Test-Path -LiteralPath $cm) { return }
+    if (Test-Path -LiteralPath $Dest) { Remove-Item -LiteralPath $Dest -Recurse -Force }
     New-Item -ItemType Directory -Force -Path (Split-Path $Dest -Parent) | Out-Null
     & $Git clone --depth 1 --branch $Branch $Url $Dest
-    if ($LASTEXITCODE -ne 0) { Fail "git clone failed: $Url" }
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $cm)) { Fail "git clone failed: $Url" }
+}
+
+function Find-OcioConfigCMake([string]$Prefix) {
+    if (-not $Prefix -or -not (Test-Path -LiteralPath $Prefix)) { return $null }
+    return Get-ChildItem -Path $Prefix -Recurse -Filter 'OpenColorIOConfig.cmake' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+}
+
+function Install-OpenColorIO {
+    $src = Join-Path $script:DepsSrc 'ocio'
+    Info 'Building OpenColorIO v2.3.2 (FULL requires it — not optional).'
+    Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/OpenColorIO.git' 'v2.3.2' $src
+    Invoke-DepCMakeInstall $src 'OpenColorIO' @(
+        '-DBUILD_SHARED_LIBS=ON', '-DOCIO_BUILD_APPS=OFF', '-DOCIO_BUILD_TESTS=OFF',
+        '-DOCIO_BUILD_GPU_TESTS=OFF', '-DOCIO_BUILD_PYTHON=OFF', '-DOCIO_BUILD_JAVA=OFF',
+        '-DOCIO_BUILD_DOCS=OFF', '-DOCIO_INSTALL_EXT_PACKAGES=ALL',
+        '-DCMAKE_CXX_STANDARD=17', '-DOCIO_WARNING_AS_ERROR=OFF'
+    )
+    $cfg = Find-OcioConfigCMake $script:DepsPrefix
+    if (-not $cfg) {
+        Fail "OpenColorIO install finished but OpenColorIOConfig.cmake is not under $($script:DepsPrefix). FULL needs that file."
+    }
+    Info ("OpenColorIO cmake: " + $cfg.FullName)
 }
 
 function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [switch]$AllowFail) {
@@ -588,8 +613,9 @@ function Ensure-NativeDeps {
         $script:DepsPrefix = Join-Path $env:LOCALAPPDATA 'grendizer-deps'
     }
     $stamp = Join-Path $script:DepsPrefix 'stamp-native-1.txt'
-    $srcRoot = Join-Path $env:LOCALAPPDATA 'grendizer-deps-src'
-    if ($env:GRENDIZER_DEPS_SRC) { $srcRoot = $env:GRENDIZER_DEPS_SRC }
+    $script:DepsSrc = Join-Path $env:LOCALAPPDATA 'grendizer-deps-src'
+    if ($env:GRENDIZER_DEPS_SRC) { $script:DepsSrc = $env:GRENDIZER_DEPS_SRC }
+    $srcRoot = $script:DepsSrc
     New-Item -ItemType Directory -Force -Path $script:DepsPrefix | Out-Null
     New-Item -ItemType Directory -Force -Path $srcRoot | Out-Null
 
@@ -632,8 +658,14 @@ function Ensure-NativeDeps {
         return
     }
 
-    if (Test-Path -LiteralPath $stamp) {
+    $ocioCfg = Find-OcioConfigCMake $script:DepsPrefix
+    if ((Test-Path -LiteralPath $stamp) -and $ocioCfg) {
         Info "Native deps already installed: $script:DepsPrefix"
+        return
+    }
+    if (Test-Path -LiteralPath $stamp) {
+        Info "Deps stamp exists but OpenColorIO is missing — building OCIO only (keeping Embree/OpenEXR/OpenVDB)."
+        Install-OpenColorIO
         return
     }
 
@@ -673,12 +705,7 @@ function Ensure-NativeDeps {
         '-DOPENVDB_USE_DELAYED_LOADING=OFF'
     )
 
-    Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/OpenColorIO.git' 'v2.3.2' (Join-Path $srcRoot 'ocio')
-    Invoke-DepCMakeInstall (Join-Path $srcRoot 'ocio') 'OpenColorIO' @(
-            '-DBUILD_SHARED_LIBS=ON', '-DOCIO_BUILD_APPS=OFF', '-DOCIO_BUILD_TESTS=OFF',
-            '-DOCIO_BUILD_GPU_TESTS=OFF', '-DOCIO_BUILD_PYTHON=OFF', '-DOCIO_BUILD_JAVA=OFF',
-            '-DOCIO_BUILD_DOCS=OFF', '-DOCIO_INSTALL_EXT_PACKAGES=ALL'
-        ) -AllowFail
+    Install-OpenColorIO
 
     Set-Content -Path $stamp -Value 'ok' -Encoding ascii
     Info "Native deps installed: $script:DepsPrefix"
@@ -941,6 +968,13 @@ if ($script:FullBuild) {
     )
 }
 
+$ocioCmake = Find-OcioConfigCMake $script:DepsPrefix
+if ($ocioCmake) {
+    $ocioDir = $ocioCmake.Directory.FullName
+    $featureFlags += "-DOpenColorIO_DIR=$ocioDir"
+    Info "OpenColorIO_DIR: $ocioDir"
+}
+
 & $CMake -S $Root -B $BuildDir -G $Generator `
     "-DCMAKE_BUILD_TYPE=Release" `
     "-DCMAKE_MAKE_PROGRAM=$Ninja" `
@@ -984,7 +1018,7 @@ if ($script:FullBuild) {
     )
     foreach ($req in $required) {
         if (-not (Select-String -Path $Cfg -Pattern $req[0] -Quiet)) {
-            Fail ($req[1] + ' did not enable (' + $req[0] + ' missing). FULL requires it — not a skip. See the cmake log.')
+            Fail ($req[1] + ' did not enable (' + $req[0] + ' missing). FULL requires it — not a skip. CMAKE_PREFIX_PATH=' + $Prefix + '. See the cmake log.')
         }
         Info ($req[1] + ' is compiled into this build.')
     }
