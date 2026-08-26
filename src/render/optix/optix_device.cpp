@@ -537,8 +537,8 @@ public:
                 warnedVolumes_ = true;
             }
             if (!scene_->procedurals.empty() && !warnedProcedurals_) {
-                logWarning("GPU (OptiX) uses basic surface shaders (image maps + Lambert/GGX/glass). "
-                           "MaterialX procedurals stay on Embree.");
+                logWarning("GPU (OptiX) glass/BSDF matches Embree (shared shading_bsdf.h). "
+                           "MaterialX procedurals stay on Embree; GPU maps are bilinear images.");
                 warnedProcedurals_ = true;
             }
             if (hostView.camera.opticalModel != 0 && !warnedOptics_) {

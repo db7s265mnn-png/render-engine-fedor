@@ -159,16 +159,17 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         if (lightIndex >= 0 && selectPdf > 0.0f &&
             sampleLight(scene, lightIndex, si.p, path.rng.nextFloat(), path.rng.nextFloat(), ls) &&
             ls.pdf > 0.0f && !isBlack(ls.radiance) &&
-            optixpt::shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) {
+            shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) {
             const Vec3 woLocal = frame.toLocal(wo);
             const Vec3 wiLocal = frame.toLocal(ls.wi);
-            const optixpt::BsdfEval be = optixpt::bsdfEvalLocal(mat, woLocal, wiLocal);
+            const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
             if (be.pdf > 0.0f && !isBlack(be.f)) {
                 const float lightPdf = ls.pdf * selectPdf;
                 const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
                 const float scale = (fabsf(wiLocal.z) / lightPdf) * mis;
                 float neeS[kMaxSpectrumSamples];
-                evalSurfaceNeeS(scene.lights[lightIndex], ls.radiance, be.f, scale, path, neeS);
+                evalSurfaceNeeSpectral(scene.lights[lightIndex], ls.radiance, mat, woLocal, wiLocal,
+                                       scale, path, mat.ior, neeS);
                 if (path.depth > 0 && !path.specularBounce)
                     specClampIndirect(neeS, path.nLambda, scene.settings.clampDirect);
                 if (scene.lights[lightIndex].shadowEnable) {
@@ -192,7 +193,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         return;
     }
     const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
-    if (!optixpt::shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) {
+    if (!shadingNormalConsistent(si.ng, si.ns, wo, wiWorld)) {
         terminatePath(pixel, path);
         return;
     }
@@ -206,19 +207,19 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     path.direction = wiWorld;
     path.bsdfPdf = bs.pdf;
     path.specularBounce = bs.specular ? 1 : 0;
-    optixpt::BsdfSample rgbBs;
+    BsdfSample rgbBs;
     rgbBs.wi = bs.wi;
     rgbBs.pdf = bs.pdf;
     rgbBs.specular = bs.specular;
     rgbBs.transmitted = bs.transmitted;
-    const optixpt::LobeWeights lw = optixpt::computeLobes(mat, frame.toLocal(wo));
+    const LobeWeights lw = computeLobes(mat, frame.toLocal(wo));
     if (shouldTerminateSecondaryGpu(rgbBs, lw, mat) && !specSecondaryTerminated(path.pdf, path.nLambda))
         specTerminateSecondary(path.pdf, path.nLambda);
     if (path.lightPath) {
-        const bool nearSpec = rgbBs.specular || lw.delta || optixpt::isNearSpecularLobe(lw);
+        const bool nearSpec = rgbBs.specular || lw.delta || isNearSpecularLobe(lw);
         if (nearSpec && materialContributesCaustics(mat)) path.specPrefix = 1;
     } else {
-        const bool causticBounce = rgbBs.specular || lw.delta || optixpt::isNearSpecularLobe(lw);
+        const bool causticBounce = rgbBs.specular || lw.delta || isNearSpecularLobe(lw);
         if (causticBounce && path.sawNonSpecular) path.causticSuffix = 1;
         if (!causticBounce) {
             path.sawNonSpecular = 1;

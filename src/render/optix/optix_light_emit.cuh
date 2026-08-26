@@ -17,15 +17,7 @@ struct GpuLightEmit {
 };
 
 __device__ inline Material gpuMaterialForCausticTransport(const SceneView& scene, int baseIndex) {
-    Material fallback;
-    fallback.baseColor = Vec3(0.7f, 0.7f, 0.7f);
-    fallback.roughness = 0.5f;
-    if (baseIndex < 0 || baseIndex >= scene.materialCount || !scene.materials) return fallback;
-    const Material& base = scene.materials[baseIndex];
-    int slot = base.raySwitch.caustics;
-    if (slot < 0) slot = base.raySwitch.specularTransmission;
-    if (slot < 0 || slot >= scene.materialCount) return base;
-    return scene.materials[slot];
+    return gpuMaterialForCausticSlot(scene, baseIndex);
 }
 
 __device__ inline float gpuLightTraceSplatClamp(const RenderSettingsData& settings) {
