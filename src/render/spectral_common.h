@@ -1,4 +1,4 @@
-// Shared spectral BSDF / medium helpers (PT / BDPT Spectral).
+// Shared spectral BSDF / medium helpers (Path Tracer / BDPT, hero-λ).
 #pragma once
 
 #include <algorithm>
@@ -228,12 +228,9 @@ inline MediumSample sampleHeterogeneousFogSpectral(const Grid& grid, const Mediu
     return out;
 }
 
-// Film colour space for spectral PT/BDPT. ACEScg working space is source of
-// truth so OptiX RGB (ACEScg) and Embree spectral cannot drift; the spectral
-// menu is honoured only in linear-sRGB working space.
+// Film colour space follows Film → Working Space (ACEScg or linear sRGB).
 inline const RGBColorSpace& pathColorSpace(const RenderSettingsData& settings) {
-    if (settings.workingSpace == kWorkingSpaceAcesCg) return colorSpaceAcesCg();
-    return colorSpaceById(settings.spectralColorSpace);
+    return settings.workingSpace == kWorkingSpaceAcesCg ? colorSpaceAcesCg() : colorSpaceSrgb();
 }
 
 // Authored reflectance (textures / albedo on hit) — pbrt RGBAlbedoSpectrum.
@@ -248,7 +245,10 @@ inline SampledSpectrum upsampleEmission(Vec3 rgb, const SampledWavelengths& w,
     return rgbToSpectrumEmission(rgb, w, cs);
 }
 
-// Light spectrum: optional blackbody CCT, else RGBIlluminantSpectrum of emittedRadiance().
+// Light spectrum: blackbody CCT stays physical. HDR env keeps Jakob × illuminant.
+// RGB-authored area / distant / point lights use the same linear lobes as PT NEE
+// (`upsampleRgb`). Jakob × D60 on those lights is a stable magenta wash in BDPT
+// once each contribution ToXYZ's with live 4λ (PT hides it: 1λ CMF averages grey).
 inline SampledSpectrum lightEmissionSpectrum(const LightData& light, const SampledWavelengths& w,
                                             const RGBColorSpace& cs = colorSpaceSrgb()) {
     const Vec3 rgb = light.emittedRadiance();
@@ -268,7 +268,8 @@ inline SampledSpectrum lightEmissionSpectrum(const LightData& light, const Sampl
         }
         return s;
     }
-    return upsampleEmission(rgb, w, cs);
+    if (light.type == kLightDome) return upsampleEmission(rgb, w, cs);
+    return upsampleRgb(rgb, w);
 }
 
 inline SampledSpectrum clampSpectrumIndirect(SampledSpectrum s, float clampValue) {
@@ -285,13 +286,57 @@ inline bool usesSpectralDielectric(const Material& mat) {
     return saturatef(mat.transmission) > 1e-4f && saturatef(mat.metallic) < 0.5f;
 }
 
+inline bool dielectricEtaVaries(const Material& mat) {
+    return usesSpectralDielectric(mat) && mat.dispersionAbbe > 1e-3f;
+}
+
 inline float spectralAbsoluteIor(float baseIor, float abbeVd, float lambdaNm) {
     return dielectricIorFromAbbe(baseIor, abbeVd, lambdaNm);
 }
 
-// pbrt-style: keep multi-λ on specular / near-specular; terminate on rough/diffuse.
+// pbrt-v4 PathIntegrator: keep multi-λ on constant-η specular; terminate after
+// rough/diffuse. DielectricMaterial::GetBxDF also kills secondaries when η(λ)
+// varies — one wavelength, one Snell direction (rainbows from many paths).
 inline bool shouldTerminateSecondaryWavelengths(const BsdfSample& bs, const LobeWeights& lw) {
     return !(bs.specular || isNearSpecularLobe(lw));
+}
+
+inline bool shouldTerminateSecondaryWavelengths(const BsdfSample& bs, const LobeWeights& lw,
+                                                const Material& mat) {
+    if (dielectricEtaVaries(mat)) return true;
+    return shouldTerminateSecondaryWavelengths(bs, lw);
+}
+
+inline void terminateSecondaryIfSpectralEta(const Material& mat, SampledWavelengths& waves) {
+    if (dielectricEtaVaries(mat) && !waves.secondaryTerminated()) waves.terminateSecondary();
+}
+
+// BDPT records a vertex on arrival, then may TerminateSecondary for the
+// continuation bounce (pbrt PathIntegrator). Light-trace splats and
+// connections at that vertex must use the arrival snapshot — not the mutated
+// walk state — or Abbe-0 SDS caustics become 1λ CMF sparkles.
+// If either subpath already terminated (an earlier non-specular bounce),
+// the complete path uses those terminated pdfs.
+inline SampledWavelengths bdptConnectWavelengths(const SampledWavelengths& eye,
+                                                 const SampledWavelengths& light) {
+    return eye.secondaryTerminated() ? eye : light;
+}
+
+// BDPT converts each strategy with the arrival snapshot (often live 4λ).
+// ToXYZ of equal-energy / linear-white is ACEScg(E), not the working white
+// point — a stable pink wash at low spp. Von Kries against this sample's
+// linear-white estimator maps grey Lambert × white RGB lights to (1,1,1).
+// After TerminateSecondary the estimator is a CMF spike; leave it so Abbe
+// rainbows stay visible. Do not use this in Path Tracer (end-of-path 1λ).
+inline Vec3 bdptSpectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
+                              const RGBColorSpace& cs = colorSpaceSrgb()) {
+    const Vec3 rgb = spectrumToRgb(s, w, cs);
+    if (w.n <= 0 || w.secondaryTerminated()) return rgb;
+    const SampledSpectrum white = rgbToSpectrumLinear(Vec3(1.0f, 1.0f, 1.0f), w);
+    const Vec3 wrgb = spectrumToRgb(white, w, cs);
+    const float eps = 1e-8f;
+    if (!(wrgb.x > eps && wrgb.y > eps && wrgb.z > eps)) return rgb;
+    return Vec3(rgb.x / wrgb.x, rgb.y / wrgb.y, rgb.z / wrgb.z);
 }
 
 struct BsdfSampleSpectral {
@@ -304,13 +349,14 @@ struct BsdfSampleSpectral {
 };
 
 // Opaque / metal / thin-film lift of an RGB BSDF weight (not for glass dielectrics).
-// Textures are filtered in RGB (evaluateTexturedMaterial); the book converts that
-// RGB to a spectrum at lookup. The BSDF is still RGB, so the weight already holds
-// the filtered colour — RGBUnboundedSpectrum is pbrt's conversion for that RGB.
+// Textures are filtered in RGB (evaluateTexturedMaterial). The BSDF is still RGB,
+// so the weight is already an MC aggregate — same linear lobes as PT NEE
+// (`upsampleRgb`). Jakob unbounded on Lambert is a magenta wash once BDPT
+// ToXYZ's live 4λ. Conductor / thin-film stay spectral.
 inline SampledSpectrum liftBsdfWeight(const Material& mat, const Frame& frame, Vec3 wo, Vec3 wi,
                                       Vec3 rgbWeight, const SampledWavelengths& w, float /*baseIor*/,
-                                      int /*heroIdx*/, const RGBColorSpace& cs = colorSpaceSrgb()) {
-    SampledSpectrum base = rgbToSpectrumUnbounded(rgbWeight, w, cs);
+                                      int /*heroIdx*/, const RGBColorSpace& /*cs*/ = colorSpaceSrgb()) {
+    SampledSpectrum base = rgbToSpectrumLinear(rgbWeight, w);
     Vec3 etaRgb = mat.conductorEta;
     Vec3 kRgb = mat.conductorK;
     const bool metallic = mat.metallic >= 0.5f;

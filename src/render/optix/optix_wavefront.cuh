@@ -63,6 +63,20 @@ __device__ inline void addRadiance(int pixel, Vec3 c) {
     }
 }
 
+// Light-trace splat onto another pixel. Does not bump accum.w (camera spp owns
+// the divisor). Concurrent wavefront slots can land on the same dest.
+__device__ inline void addSplatRadiance(int destPixel, Vec3 c) {
+    if (!isFinite(c)) return;
+    const LaunchParams& p = launchParams();
+    if (!p.accumBuffer || destPixel < 0 || p.width <= 0 || p.height <= 0) return;
+    const int n = p.width * p.height;
+    if (destPixel >= n) return;
+    Vec4& a = p.accumBuffer[destPixel];
+    atomicAdd(&a.x, c.x);
+    atomicAdd(&a.y, c.y);
+    atomicAdd(&a.z, c.z);
+}
+
 __device__ inline Vec3 offsetRay(Vec3 p, Vec3 n, Vec3 dir) {
     const float scale = 1.0f + srMax(fabsf(p.x), srMax(fabsf(p.y), fabsf(p.z)));
     const Vec3 offset = n * (kRayEpsilon * scale);
@@ -70,9 +84,10 @@ __device__ inline Vec3 offsetRay(Vec3 p, Vec3 n, Vec3 dir) {
 }
 
 __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, float tMax, Vec3 contrib,
-                                     int mediumIndex) {
+                                     int mediumIndex, int splatPixel = -1) {
     if (!isFinite(contrib) || isBlack(contrib)) {
         shadow.queue = kShadowIdle;
+        shadow.splatPixel = -1;
         return;
     }
     shadow.origin = origin;
@@ -82,6 +97,7 @@ __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, f
     shadow.occluded = 0;
     shadow.volumeTr = 1;
     shadow.mediumIndex = mediumIndex;
+    shadow.splatPixel = splatPixel;
     shadow.queue = kShadowTrace;
 }
 

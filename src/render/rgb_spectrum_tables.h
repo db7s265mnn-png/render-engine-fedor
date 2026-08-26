@@ -1,4 +1,4 @@
-// Jakob & Hanika (2019) RGB→spectrum upsampling tables for Solstice PT Spectral.
+// Jakob & Hanika (2019) RGB→spectrum upsampling tables for Solstice Path Tracer.
 // Sigmoid of a quadratic polynomial; coefficients looked up from compact 3D tables
 // (albedo for reflectance, illuminant for emission). See rgb_spectrum_tables.cpp.
 #pragma once

@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.25 LANGUAGES CXX)
+project(Solstice VERSION 0.9.32 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -615,6 +615,7 @@ set(SOLSTICE_LIB_HEADERS
     src/render/xpu_split.h
     src/render/pixel_oracle.h
     src/render/camera_sample.h
+    src/render/camera_proj.h
     src/render/render_session.h
     src/render/scene_picker.h
     src/nodes/parameter.h

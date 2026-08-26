@@ -180,7 +180,8 @@ set(_solstice_optix_base
     ${_solstice_optix_dir}/path_state.h
     ${CMAKE_SOURCE_DIR}/src/scene/types.h
     ${CMAKE_SOURCE_DIR}/src/core/math.h
-    ${CMAKE_SOURCE_DIR}/src/core/rng.h)
+    ${CMAKE_SOURCE_DIR}/src/core/rng.h
+    ${CMAKE_SOURCE_DIR}/src/render/camera_proj.h)
 
 # Never use the Windows `py` launcher: cmake -P + py.exe hangs after the script
 # prints (pipe/handle leak) and starved ninja so shade_background never started.
@@ -235,7 +236,23 @@ solstice_optix_kernel(init_from_camera
             ${_solstice_optix_dir}/optix_geom.cuh
             ${_solstice_optix_dir}/optix_volume.cuh
             ${_solstice_optix_dir}/optix_spawn.cuh
+            ${_solstice_optix_dir}/optix_light_emit.cuh
             ${CMAKE_SOURCE_DIR}/src/render/camera_sample.h
+            ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
+
+solstice_optix_kernel(init_from_light
+    ${_solstice_optix_dir}/optix_init_from_light.cu
+    solsticeOptixInitFromLightIr
+    LIGHTS
+    DEPENDS ${_solstice_optix_base}
+            ${_solstice_optix_dir}/optix_geom.cuh
+            ${_solstice_optix_dir}/optix_volume.cuh
+            ${_solstice_optix_dir}/optix_spawn.cuh
+            ${_solstice_optix_dir}/optix_light_emit.cuh
+            ${CMAKE_SOURCE_DIR}/src/render/camera_sample.h
+            ${CMAKE_SOURCE_DIR}/src/render/lights.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
@@ -260,6 +277,8 @@ solstice_optix_kernel(shade_surface
             ${_solstice_optix_dir}/optix_bsdf.cuh
             ${_solstice_optix_dir}/optix_volume.cuh
             ${_solstice_optix_dir}/optix_spawn.cuh
+            ${_solstice_optix_dir}/optix_light_emit.cuh
+            ${_solstice_optix_dir}/optix_light_trace.cuh
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
@@ -269,7 +288,8 @@ solstice_optix_kernel(shade_background
     solsticeOptixShadeBackgroundIr
     LIGHTS
     DEPENDS ${_solstice_optix_base} ${CMAKE_SOURCE_DIR}/src/render/lights.h
-            ${_solstice_optix_dir}/optix_spawn.cuh)
+            ${_solstice_optix_dir}/optix_spawn.cuh
+            ${_solstice_optix_dir}/optix_light_emit.cuh)
 
 solstice_optix_kernel(shade_shadow
     ${_solstice_optix_dir}/optix_shade_shadow.cu
@@ -277,6 +297,7 @@ solstice_optix_kernel(shade_shadow
     DEPENDS ${_solstice_optix_base}
             ${_solstice_optix_dir}/optix_volume.cuh
             ${_solstice_optix_dir}/optix_spawn.cuh
+            ${_solstice_optix_dir}/optix_light_emit.cuh
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
@@ -287,6 +308,7 @@ solstice_optix_kernel(shade_volume
     DEPENDS ${_solstice_optix_base}
             ${_solstice_optix_dir}/optix_volume.cuh
             ${_solstice_optix_dir}/optix_spawn.cuh
+            ${_solstice_optix_dir}/optix_light_emit.cuh
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h
             ${CMAKE_SOURCE_DIR}/src/render/lights.h)
@@ -309,6 +331,8 @@ solstice_optix_kernel(path_tail
             ${_solstice_optix_dir}/optix_shade_volume.cu
             ${_solstice_optix_dir}/optix_shade_background.cu
             ${_solstice_optix_dir}/optix_shade_shadow.cu
+            ${_solstice_optix_dir}/optix_light_emit.cuh
+            ${_solstice_optix_dir}/optix_light_trace.cuh
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)

@@ -1,5 +1,5 @@
 // Heterogeneous fog free-flight + residual-ratio shadow Tr (PBRT 4ed §11.2).
-// Embree / SpectralPathIntegrator uses residual-ratio (sampleHeterogeneousFogWl
+// Embree Path Tracer uses residual-ratio (sampleHeterogeneousFogWl
 // / sampleHeterogeneousFogSpectral). OptiX free-flight uses Woodcock.
 // Shared by Embree (OpenVDB) and OptiX (uploaded occupancy + the same majorant
 // bricks). Grid adapters must expose:

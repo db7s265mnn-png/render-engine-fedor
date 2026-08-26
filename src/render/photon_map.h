@@ -288,6 +288,7 @@ SR_INL bool sceneHasRoughCausticCaster(const SceneView& scene) {
 // MNEE+Photon (Auto): Photon when the scene has rough refractive casters; else MNEE.
 SR_INL bool causticsUsePhotonMap(const RenderSettingsData& s, const SceneView* scene = nullptr) {
     if (s.caustics == 0) return false;
+    if (s.causticsEngine == kCausticsEnginePbrt) return false;
     if (s.causticsEngine == kCausticsEnginePhoton) return true;
     if (s.causticsEngine == kCausticsEngineAuto && scene && sceneHasRoughCausticCaster(*scene))
         return true;
@@ -295,8 +296,10 @@ SR_INL bool causticsUsePhotonMap(const RenderSettingsData& s, const SceneView* s
 }
 
 // True when MNEE should run (explicit MNEE, or MNEE+Photon on delta-only glass).
+// pbrt (book) caustics never use MNEE.
 SR_INL bool causticsUseMnee(const RenderSettingsData& s, const SceneView* scene = nullptr) {
     if (s.caustics == 0) return false;
+    if (s.causticsEngine == kCausticsEnginePbrt) return false;
     if (s.causticsEngine == kCausticsEnginePhoton) return false;
     if (s.causticsEngine == kCausticsEngineMnee) return true;
     if (s.causticsEngine == kCausticsEngineAuto) {

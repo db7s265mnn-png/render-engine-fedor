@@ -173,4 +173,14 @@ __device__ inline bool shouldTerminateSecondaryGpu(const optixpt::BsdfSample& bs
     return !(bs.specular || optixpt::isNearSpecularLobe(lw));
 }
 
+__device__ inline bool dielectricEtaVariesGpu(const Material& mat) {
+    return usesSpectralDielectricGpu(mat) && mat.dispersionAbbe > 1e-3f;
+}
+
+__device__ inline bool shouldTerminateSecondaryGpu(const optixpt::BsdfSample& bs,
+                                                   const optixpt::LobeWeights& lw, const Material& mat) {
+    if (dielectricEtaVariesGpu(mat)) return true;
+    return shouldTerminateSecondaryGpu(bs, lw);
+}
+
 }  // namespace sol

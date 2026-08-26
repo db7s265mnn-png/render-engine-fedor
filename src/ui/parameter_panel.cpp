@@ -986,9 +986,9 @@ void ParameterPanel::rebuildMaterialX() {
 
     for (const MaterialXInputParam& input : materialX_.inputs) {
         if (input.name.isEmpty()) continue;
-        // Spectral-only conductor η/κ — hide unless PT Spectral is active.
+        // Spectral conductor η/κ — Path Tracer and BDPT (hero-λ). Hide on DL/AO/WF.
         if ((input.name == QLatin1String("conductor_eta") || input.name == QLatin1String("conductor_k")) &&
-            materialX_.activeIntegrator != 4) {
+            materialX_.activeIntegrator > 1) {
             continue;
         }
         const QString label = prettyMaterialXLabel(input.name);
@@ -1069,9 +1069,10 @@ void ParameterPanel::rebuildMaterialX() {
                     ? QStringLiteral("Arnold Scale in scene units (metres). "
                                      "Mean free path = Scale × Radius. 1 = 1 metre.")
                     : (input.name == QLatin1String("dispersion_abbe"))
-                          ? QStringLiteral("Abbe number Vd (Arnold dispersion_abbe). "
-                                           "0 = off; typical glass 20–90. Lower = stronger rainbow. "
-                                           "Range starts at 0 — negatives are invalid.")
+                          ? QStringLiteral("Abbe number Vd (pbrt-style spectral η(λ) via Cauchy). "
+                                           "Default 55 (crown / clear glass). "
+                                           "0 = off (constant IOR). Lower = stronger rainbow. "
+                                           "Typical 20–90; BK7 ≈ 64.")
                           : QString();
             const QString inputName = input.name;
             QWidget* row = makeFreeFloatSliderRow(value, lo, hi, [commit, inputType, isInt, inputName,

@@ -27,6 +27,7 @@
 
 #include "core/log.h"
 #include "render/cie_tables.h"
+#include "render/camera_proj.h"
 #include "render/color_space.h"
 #include "render/illuminant_spd.h"
 #include "render/optix/launch_params.h"
@@ -37,6 +38,8 @@
 // Emitted by the build from the wavefront OptiX modules.
 extern "C" const unsigned char solsticeOptixInitIr[];
 extern "C" const unsigned long long solsticeOptixInitIrSize;
+extern "C" const unsigned char solsticeOptixInitFromLightIr[];
+extern "C" const unsigned long long solsticeOptixInitFromLightIrSize;
 extern "C" const unsigned char solsticeOptixIntersectClosestIr[];
 extern "C" const unsigned long long solsticeOptixIntersectClosestIrSize;
 extern "C" const unsigned char solsticeOptixIntersectShadowIr[];
@@ -202,6 +205,7 @@ static_assert(sizeof(RayGenRecord) % OPTIX_SBT_RECORD_ALIGNMENT == 0,
 
 enum RaygenId : int {
     kRgInit = 0,
+    kRgInitFromLight,
     kRgIntersectClosest,
     kRgIntersectShadow,
     kRgShadeSurface,
@@ -214,6 +218,7 @@ enum RaygenId : int {
 
 enum ModuleId : int {
     kModInit = 0,
+    kModInitFromLight,
     kModIntersectClosest,
     kModIntersectShadow,
     kModShadeSurface,
@@ -654,6 +659,12 @@ public:
             launchParams.sampleIndex = sampleIndex;
             launchParams.frameSeed = unsigned(scene_->settings.seed) * 9781u + unsigned(sampleIndex) * 6271u;
             fillSpectralLaunch(launchParams);
+            launchParams.camProj = buildCameraProj(launchParams.scene);
+            if (launchParams.scene.camera.opticalModel != 0) launchParams.camProj.valid = false;
+            const bool gpuCaustics = launchParams.scene.settings.caustics != 0 &&
+                                     launchParams.scene.lightCount > 0 && launchParams.camProj.valid;
+            const int lightSlots = srMax(1, launchW * launchH);
+            launchParams.splatInvLightPaths = gpuCaustics ? 1.0f / float(lightSlots) : 0.0f;
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
             launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();
             launchParams.volumeCount = gpuVolumeCount_;
@@ -791,8 +802,9 @@ public:
 private:
     void launchKernel(int raygenIndex, unsigned width, unsigned height) {
         static const char* kNames[kRgCount] = {
-            "init_from_camera", "intersect_closest", "intersect_shadow", "shade_surface",
-            "shade_background",  "shade_shadow",     "shade_volume",     "path_tail",
+            "init_from_camera", "init_from_light", "intersect_closest", "intersect_shadow",
+            "shade_surface",    "shade_background", "shade_shadow",     "shade_volume",
+            "path_tail",
         };
         const OptixPipeline pipe = (raygenIndex == kRgPathTail) ? pipelineTail_ : pipeline_;
         const OptixResult result =
@@ -818,24 +830,33 @@ private:
         lp.workCount = 0;
         lp.workSlot = -1;
         uploadLaunch(lp);
+        auto bounceAndTail = [&]() {
+            constexpr int kWavefrontBounces = 3;
+            const int wave = std::max(1, std::min(maxDepth, kWavefrontBounces));
+            for (int iter = 0; iter < wave; ++iter) {
+                if (cancel.load(std::memory_order_relaxed)) return;
+                launchKernel(kRgIntersectClosest, launchW, launchH);
+                launchKernel(kRgShadeVolume, launchW, launchH);
+                launchKernel(kRgShadeBackground, launchW, launchH);
+                launchKernel(kRgShadeSurface, launchW, launchH);
+                launchKernel(kRgIntersectShadow, launchW, launchH);
+                launchKernel(kRgShadeShadow, launchW, launchH);
+                launches += 6;
+            }
+            if (cancel.load(std::memory_order_relaxed)) return;
+            launchKernel(kRgPathTail, launchW, launchH);
+            ++launches;
+        };
+
         launchKernel(kRgInit, launchW, launchH);
         ++launches;
-        // Iray: coherent first bounces as wavefront, remainder in the tail megakernel.
-        constexpr int kWavefrontBounces = 3;
-        const int wave = std::max(1, std::min(maxDepth, kWavefrontBounces));
-        for (int iter = 0; iter < wave; ++iter) {
-            if (cancel.load(std::memory_order_relaxed)) return;
-            launchKernel(kRgIntersectClosest, launchW, launchH);
-            launchKernel(kRgShadeVolume, launchW, launchH);
-            launchKernel(kRgShadeBackground, launchW, launchH);
-            launchKernel(kRgShadeSurface, launchW, launchH);
-            launchKernel(kRgIntersectShadow, launchW, launchH);
-            launchKernel(kRgShadeShadow, launchW, launchH);
-            launches += 6;
-        }
+        bounceAndTail();
         if (cancel.load(std::memory_order_relaxed)) return;
-        launchKernel(kRgPathTail, launchW, launchH);
-        ++launches;
+        if (lp.splatInvLightPaths > 0.0f) {
+            launchKernel(kRgInitFromLight, launchW, launchH);
+            ++launches;
+            bounceAndTail();
+        }
     }
 
     void destroyGraph() {
@@ -869,7 +890,7 @@ private:
         const RenderSettingsData& st = scene_->settings;
         const RGBColorSpace& cs = (st.workingSpace == kWorkingSpaceAcesCg)
                                       ? colorSpaceAcesCg()
-                                      : colorSpaceById(st.spectralColorSpace);
+                                      : colorSpaceSrgb();
         const bool aces = cs.whiteIlluminant == kWhiteIlluminantD60;
         GpuSpectralTables spec;
         spec.albedoScale = aces ? jakobAcesAlbedoScale_.as<float>() : jakobAlbedoScale_.as<float>();
@@ -883,7 +904,6 @@ private:
             (cs.whiteIlluminant == kWhiteIlluminantD60) ? illumD60_.as<float>() : illumD65_.as<float>();
         for (int i = 0; i < 9; ++i) spec.rgbFromXyz[i] = cs.rgbFromXyz[i];
         spec.samples = kMaxSpectrumSamples;
-        spec.wavelengthSampling = st.spectralWavelengthSampling;
         lp.spec = spec;
     }
 
@@ -1022,6 +1042,7 @@ private:
 
         const unsigned char* ir[kModCount] = {
             solsticeOptixInitIr,
+            solsticeOptixInitFromLightIr,
             solsticeOptixIntersectClosestIr,
             solsticeOptixIntersectShadowIr,
             solsticeOptixShadeSurfaceIr,
@@ -1033,6 +1054,7 @@ private:
         };
         const unsigned long long irSize[kModCount] = {
             solsticeOptixInitIrSize,
+            solsticeOptixInitFromLightIrSize,
             solsticeOptixIntersectClosestIrSize,
             solsticeOptixIntersectShadowIrSize,
             solsticeOptixShadeSurfaceIrSize,
@@ -1046,9 +1068,9 @@ private:
 
         OptixProgramGroupOptions groupOptions{};
         const char* raygenNames[kRgCount] = {
-            "__raygen__init_from_camera",     "__raygen__intersect_closest", "__raygen__intersect_shadow",
-            "__raygen__shade_surface",        "__raygen__shade_background",  "__raygen__shade_shadow",
-            "__raygen__shade_volume",         "__raygen__path_tail",
+            "__raygen__init_from_camera",     "__raygen__init_from_light",   "__raygen__intersect_closest",
+            "__raygen__intersect_shadow",     "__raygen__shade_surface",     "__raygen__shade_background",
+            "__raygen__shade_shadow",         "__raygen__shade_volume",      "__raygen__path_tail",
         };
         for (int i = 0; i < kRgCount; ++i) {
             OptixProgramGroupDesc raygenDesc{};

@@ -258,8 +258,7 @@ public:
         const uint32_t frameSeed = uint32_t(settings.seed) * 9781u + uint32_t(sampleIndex) * 6271u;
 
         const bool pathTracer = settings.integrator == kIntegratorPathTracer;
-        const bool wantBdpt = settings.integrator == kIntegratorBdpt ||
-                              settings.integrator == kIntegratorSpectralBdpt;
+        const bool wantBdpt = settings.integrator == kIntegratorBdpt;
         const bool hasVolumes = scene.volumeCount > 0 && scene.volumes != nullptr;
         // Diagnostic integrators (AO / Direct / Wireframe) must stay on the plain
         // PathIntegrator path — never Photon/MNEE/BDPT — otherwise Wireframe never
@@ -279,8 +278,7 @@ public:
         const bool causticSpecialized = usePhoton || useMnee;
         const bool useSpectralBdpt = wantBdpt && !hasVolumes && !diagnosticIntegrator;
         const bool useSpectralPt = !diagnosticIntegrator && !(pathTracer && causticSpecialized) &&
-                                   (settings.integrator == kIntegratorSpectralPath || pathTracer ||
-                                    (wantBdpt && hasVolumes));
+                                   (pathTracer || (wantBdpt && hasVolumes));
         const bool useBdpt = wantBdpt;
         const bool useBdptPath = false;
 #if SOLSTICE_HAVE_OPENPGL
@@ -314,13 +312,13 @@ public:
 
         if (sampleIndex == 0 && !clipped && !opt.navPreview) {
             if (useSpectralBdpt)
-                logInfo(std::string("Integrator: BDPT Spectral (hero λ=") +
+                logInfo(std::string("Integrator: BDPT (hero λ=") +
                         std::to_string(kMaxSpectrumSamples) + ")" +
-                        (useGuiding ? " + OpenPGL guiding" : "") +
-                        (usePhoton ? " + Photon caustics" : " + LT/MNEE caustics"));
+                        (useGuiding ? " + OpenPGL guiding" : ""));
             else if (useSpectralPt)
-                logInfo(std::string("Integrator: PT Spectral (hero λ=") +
-                        std::to_string(kMaxSpectrumSamples) + ")");
+                logInfo(std::string("Integrator: Path Tracer (hero λ=") +
+                        std::to_string(kMaxSpectrumSamples) + ")" +
+                        (useGuiding ? " + OpenPGL guiding" : ""));
             if (usePhoton)
                 logInfo(std::string("Caustics: Photon map (VCM-style gather, ") +
                         std::to_string(photonMap_.size()) + " photons, r=" +
@@ -329,16 +327,15 @@ public:
             else if (useBdpt && hasVolumes)
                 logInfo("BDPT skipped: scene has VDB volumes — using Path Tracer "
                         "(no light subpath from sky/sun; fog walk is PT-only)");
-            else if (useBdpt)
-                logInfo(std::string("Caustics: BDPT (bidirectional + light-tracing splats)") +
-                        (settings.caustics == 0 ? " [caustics flag off — specular chains suppressed]"
-                                                : "") +
-                        (useGuiding ? " + OpenPGL guiding" : ""));
             else if (useMnee)
                 logInfo(std::string("Caustics: MNEE (manifold next-event, refractive)") +
                         (settings.causticsEngine == kCausticsEngineAuto ? " [MNEE+Photon→delta]" : "") +
                         (useGuiding ? " + OpenPGL guiding" : ""));
-            else if (pathTracer)
+            else if (useBdpt && settings.caustics != 0)
+                logInfo("Caustics: BDPT light tracing (pbrt)");
+            else if (pathTracer && settings.caustics != 0 && !diagnosticIntegrator)
+                logInfo("Caustics: Path Tracer BSDF/NEE (pbrt)");
+            else if (pathTracer && settings.caustics == 0)
                 logInfo("Caustics: off (dark shadows through glass; shadow_opacity fakes)");
             else if (settings.integrator == kIntegratorWireframe)
                 logInfo(std::string("Integrator: Wireframe (thickness=") +

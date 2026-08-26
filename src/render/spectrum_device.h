@@ -1,6 +1,6 @@
 // Device-safe hero-λ helpers (no STL). Shared by OptiX kernels and CPU tests.
-// Matches Embree: visible/uniform sampling, Jakob albedo/illuminant, D60/D65
-// illuminant, pbrt ToXYZ film while secondaries live, grey s(λ) after terminate.
+// Matches Embree: visible-wavelength sampling, Jakob albedo/illuminant, D60/D65
+// illuminant, pbrt ToXYZ film (including after TerminateSecondary).
 #pragma once
 
 #include "core/math.h"
@@ -30,7 +30,6 @@ struct GpuSpectralTables {
     const float* illuminantSpd = nullptr;
     float rgbFromXyz[9]{};
     int samples = 4;
-    int wavelengthSampling = 0;  // 0 = visible, 1 = uniform
 };
 
 SR_INL SR_HD int specClampN(int n) {
@@ -123,18 +122,6 @@ SR_INL SR_HD float specSampleVisibleWavelength(float u) {
     return 538.0f - 138.888889f * (0.5f * logf((1.0f + x) / (1.0f - x)));
 }
 
-SR_INL SR_HD void specSampleUniform(int count, float uPrimary, float* lambda, float* pdf, int& n) {
-    n = specClampN(count);
-    const float span = kSpectrumLambdaMax - kSpectrumLambdaMin;
-    const float p = 1.0f / span;
-    const float offset = clampf(uPrimary, 0.0f, 0.999999f);
-    for (int i = 0; i < n; ++i) {
-        const float t = (float(i) + offset) / float(n);
-        lambda[i] = kSpectrumLambdaMin + t * span;
-        pdf[i] = p;
-    }
-}
-
 SR_INL SR_HD void specSampleVisible(int count, float uPrimary, float* lambda, float* pdf, int& n) {
     n = specClampN(count);
     for (int i = 0; i < n; ++i) {
@@ -178,32 +165,22 @@ SR_INL SR_HD Vec3 specXyzToRgb(const GpuSpectralTables& tab, float X, float Y, f
                 m[6] * X + m[7] * Y + m[8] * Z);
 }
 
-// Same film rule as spectrumToRgb: ToXYZ while ≥2 λ live; grey s(λ) after terminate.
+// Same film rule as spectrumToRgb: pbrt ToXYZ for every live λ (rainbows after terminate).
 SR_INL SR_HD Vec3 specToRgb(const GpuSpectralTables& tab, const float* s, const float* lambda,
                             const float* pdf, int n) {
     if (n <= 0) return Vec3(0.0f);
-    int active = 0;
-    for (int i = 0; i < n; ++i)
-        if (pdf[i] > 0.0f) ++active;
-
-    if (active >= 2 && !specSecondaryTerminated(pdf, n)) {
-        float X = 0.0f, Y = 0.0f, Z = 0.0f;
-        for (int i = 0; i < n; ++i) {
-            float cx, cy, cz;
-            specCieXyz(tab, lambda[i], cx, cy, cz);
-            const float invPdf = specSafeDiv(1.0f, pdf[i]);
-            X += s[i] * cx * invPdf;
-            Y += s[i] * cy * invPdf;
-            Z += s[i] * cz * invPdf;
-        }
-        const float scale = (1.0f / float(n)) / kCieYIntegral1nm;
-        return specXyzToRgb(tab, X * scale, Y * scale, Z * scale);
+    float X = 0.0f, Y = 0.0f, Z = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        if (pdf[i] <= 0.0f) continue;
+        float cx, cy, cz;
+        specCieXyz(tab, lambda[i], cx, cy, cz);
+        const float invPdf = specSafeDiv(1.0f, pdf[i]);
+        X += s[i] * cx * invPdf;
+        Y += s[i] * cy * invPdf;
+        Z += s[i] * cz * invPdf;
     }
-
-    float hero = 0.0f;
-    for (int i = 0; i < n; ++i)
-        if (pdf[i] > 0.0f) hero = s[i];
-    return Vec3(hero, hero, hero);
+    const float scale = (1.0f / float(n)) / kCieYIntegral1nm;
+    return specXyzToRgb(tab, X * scale, Y * scale, Z * scale);
 }
 
 SR_INL SR_HD void specRgbLobes(float lambdaNm, float& wr, float& wg, float& wb) {

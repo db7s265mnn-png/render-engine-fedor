@@ -304,7 +304,7 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
     setFloat("specular_IOR", material.ior);
     setFloat("transmission", material.transmission);
     setColor("transmission_color", material.transmissionColor);
-    // PT Spectral conductor η/κ (RGB ≈ 650/550/450 nm). Defaults: dielectric-ish.
+    // Spectral Path Tracer / BDPT conductor η/κ (RGB ≈ 650/550/450 nm).
     setColor("conductor_eta", material.conductorEta);
     setColor("conductor_k", material.conductorK);
     material.roughness = saturatef(material.roughness);
@@ -353,8 +353,8 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
         material.contributeCaustics = cc > 0.5f ? 1 : 0;
     }
 
-    // Chromatic dispersion (Arnold-style Abbe number; 0 = off, lower = stronger).
-    float dispersionAbbe = 0.0f;
+    // Chromatic dispersion (Abbe Vd). 0 = off; default crown-glass Vd.
+    float dispersionAbbe = kDispersionAbbeDefault;
     setFloat("dispersion_abbe", dispersionAbbe);
     material.dispersionAbbe = clampf(dispersionAbbe, 0.0f, 200.0f);
 
@@ -685,7 +685,7 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"transmission_color", "color3", "1, 1, 1"},
          {"shadow_opacity", "float", "1"},
          {"contribute_caustics", "boolean", "true"},
-         {"dispersion_abbe", "float", "0"},
+         {"dispersion_abbe", "float", "55"},
          {"thin_film_thickness", "float", "0"},
          {"thin_film_IOR", "float", "1.4"},
          {"internal_reflections", "boolean", "true"},
