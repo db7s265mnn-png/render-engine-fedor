@@ -51,7 +51,9 @@ __device__ inline void shadeVolumePixel(int pixel) {
         const Vec3 wo = -path.direction;
         if (!isBlack(med->emission) && !path.lightPath)
             addPathEmissionRgb(path, med->emission, 1.0f, 0.0f);
-        if (!path.lightPath && scene.lightCount > 0) {
+        const bool skipCameraSds =
+            !path.lightPath && params.splatInvLightPaths > 0.0f && path.causticSuffix;
+        if (!path.lightPath && !skipCameraSds && scene.lightCount > 0) {
             float selectPdf = 0.0f;
             const int lightIndex = sampleLightIndex(scene, p, path.rng.nextFloat(), selectPdf);
             LightSample ls;
@@ -79,6 +81,8 @@ __device__ inline void shadeVolumePixel(int pixel) {
         path.direction = wi;
         path.bsdfPdf = phasePdf;
         path.specularBounce = 0;
+        path.sawNonSpecular = 1;
+        path.causticSuffix = 0;
         ++path.depth;
         ++path.volumeScatters;
         if (path.depth >= srMax(1, scene.settings.maxDepth)) {

@@ -66,6 +66,8 @@ struct GpuPath {
     int lightPath = 0;    // 1 = Iray-style caustic light trace (not camera PT)
     int specPrefix = 0;   // 1 = light prefix went through contributing near-spec / delta
     int lightIndex = -1;  // SampleLe emitter for this light path
+    int sawNonSpecular = 0;  // camera PT: had a diffuse/volume bounce
+    int causticSuffix = 0;   // camera PT: spec after diffuse (SDS); skip if LT is on
     // AoS: shade kernels touch many fields of one path. Iray's SoA win was in a
     // separate logic kernel that streamed one member across 1M slots — not here.
     // Packed flags would misalign the 4λ arrays; leave ints.

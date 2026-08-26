@@ -15,6 +15,11 @@ __device__ inline void shadeBackgroundPixel(int pixel) {
         return;
     }
 
+    if (params.splatInvLightPaths > 0.0f && path.causticSuffix) {
+        terminatePath(pixel, path);
+        return;
+    }
+
     if (scene.domeLightIndex >= 0 && scene.lights) {
         const LightData& dome = scene.lights[scene.domeLightIndex];
         const bool hidePrimary = primary && (!scene.settings.envVisibleCamera || !dome.visibleCamera);

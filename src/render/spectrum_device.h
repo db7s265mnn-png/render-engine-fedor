@@ -211,6 +211,20 @@ SR_INL SR_HD void specUpsampleLinear(Vec3 rgb, const float* lambda, int n, float
     }
 }
 
+// Same von Kries as CPU bdptSpectrumToRgb: live 4λ ToXYZ of linear-white is
+// ACEScg(E), not the working white. Skip after TerminateSecondary (CMF rainbows).
+SR_INL SR_HD Vec3 specBdptToRgb(const GpuSpectralTables& tab, const float* s, const float* lambda,
+                                const float* pdf, int n) {
+    const Vec3 rgb = specToRgb(tab, s, lambda, pdf, n);
+    if (n <= 0 || specSecondaryTerminated(pdf, n)) return rgb;
+    float white[kMaxSpectrumSamples];
+    specUpsampleLinear(Vec3(1.0f, 1.0f, 1.0f), lambda, n, white);
+    const Vec3 wrgb = specToRgb(tab, white, lambda, pdf, n);
+    const float eps = 1e-8f;
+    if (!(wrgb.x > eps && wrgb.y > eps && wrgb.z > eps)) return rgb;
+    return Vec3(rgb.x / wrgb.x, rgb.y / wrgb.y, rgb.z / wrgb.z);
+}
+
 struct GpuSigmoid {
     float c0 = 0.0f;
     float c1 = 0.0f;
