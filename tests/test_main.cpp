@@ -4789,10 +4789,10 @@ void testSpectralHeroBasics() {
         checkNear(devWb.x, 1.0f, 0.02f, "device live-4λ white-balance R");
         checkNear(devWb.y, 1.0f, 0.02f, "device live-4λ white-balance G");
         checkNear(devWb.z, 1.0f, 0.02f, "device live-4λ white-balance B");
-        SampledWavelengths term = live;
-        term.terminateSecondary();
-        const Vec3 host1 = spectrumToRgb(ones, term, aces);
-        const Vec3 dev1 = specBdptToRgb(tab, ones.values, term.lambda, term.pdf, term.n);
+        SampledWavelengths termLive = live;
+        termLive.terminateSecondary();
+        const Vec3 host1 = spectrumToRgb(ones, termLive, aces);
+        const Vec3 dev1 = specBdptToRgb(tab, ones.values, termLive.lambda, termLive.pdf, termLive.n);
         check(std::fabs(host1.x - dev1.x) < 1e-4f && std::fabs(host1.y - dev1.y) < 1e-4f &&
                   std::fabs(host1.z - dev1.z) < 1e-4f,
               "device LT does not white-balance 1λ");
