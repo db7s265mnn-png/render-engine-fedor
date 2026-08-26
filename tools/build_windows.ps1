@@ -884,9 +884,19 @@ if (Test-Path -LiteralPath $cache) {
         }
     }
     if ($stale) {
-        Info "Clearing $BuildDir ($staleWhy)"
-        Remove-Item -LiteralPath $BuildDir -Recurse -Force
-        New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+        # Keep _deps (TinyUSDZ / OpenPGL). Wiping C:\gz-full used to force a
+        # GitHub re-download and abort FULL when github.com did not resolve.
+        Info "Resetting CMake cache in $BuildDir ($staleWhy). Keeping _deps."
+        foreach ($n in @(
+            'CMakeCache.txt', 'CMakeFiles', 'cmake_install.cmake',
+            'CTestTestfile.cmake', 'build.ninja', 'CMakeError.log',
+            'CMakeOutput.log', 'CMakeConfigureLog.yaml'
+        )) {
+            $p = Join-Path $BuildDir $n
+            if (Test-Path -LiteralPath $p) {
+                Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 

@@ -247,10 +247,35 @@ if(SOLSTICE_ENABLE_TIFF)
         set(tiff-install OFF CACHE BOOL "" FORCE)
         set(_solstice_saved_shared_for_tiff ${BUILD_SHARED_LIBS})
         set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-        FetchContent_Declare(libtiff
-            URL https://gitlab.com/libtiff/libtiff/-/archive/v4.6.0/libtiff-v4.6.0.tar.gz
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-        FetchContent_MakeAvailable(libtiff)
+        set(_solstice_tiff_src "${CMAKE_BINARY_DIR}/_deps/libtiff-src")
+        set(_solstice_tiff_url "")
+        if(EXISTS "${_solstice_tiff_src}/CMakeLists.txt")
+            set(_solstice_tiff_have_src TRUE)
+        else()
+            set(_solstice_tiff_tgz "${CMAKE_BINARY_DIR}/_deps/libtiff-v4.6.0.tgz")
+            file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps")
+            file(DOWNLOAD
+                "https://gitlab.com/libtiff/libtiff/-/archive/v4.6.0/libtiff-v4.6.0.tar.gz"
+                "${_solstice_tiff_tgz}"
+                STATUS _solstice_tiff_dl
+                TIMEOUT 90
+                INACTIVITY_TIMEOUT 30)
+            list(GET _solstice_tiff_dl 0 _solstice_tiff_code)
+            if(_solstice_tiff_code EQUAL 0)
+                file(TO_CMAKE_PATH "${_solstice_tiff_tgz}" _solstice_tiff_tgz_cmake)
+                set(_solstice_tiff_url "file:///${_solstice_tiff_tgz_cmake}")
+            else()
+                message(WARNING "libtiff download skipped (${_solstice_tiff_dl}) — .tx mipmap loading disabled")
+            endif()
+        endif()
+        if(_solstice_tiff_have_src)
+            add_subdirectory("${_solstice_tiff_src}" "${CMAKE_BINARY_DIR}/_deps/libtiff-build")
+        elseif(_solstice_tiff_url)
+            FetchContent_Declare(libtiff
+                URL ${_solstice_tiff_url}
+                DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+            FetchContent_MakeAvailable(libtiff)
+        endif()
         set(BUILD_SHARED_LIBS ${_solstice_saved_shared_for_tiff} CACHE BOOL "" FORCE)
         if(TARGET TIFF::TIFF)
             set(SOLSTICE_HAVE_TIFF_01 1)
@@ -410,21 +435,42 @@ if(SOLSTICE_ENABLE_OPENPGL)
         set(TBB_STRICT OFF CACHE BOOL "" FORCE)
         set(_solstice_saved_build_shared ${BUILD_SHARED_LIBS})
         set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
-        if(EXISTS "/tmp/onetbb.tgz")
+        set(_solstice_onetbb_src "${CMAKE_BINARY_DIR}/_deps/onetbb-src")
+        set(_solstice_tbb_url "")
+        if(EXISTS "${_solstice_onetbb_src}/CMakeLists.txt")
+            set(_solstice_onetbb_have_src TRUE)
+        elseif(EXISTS "/tmp/onetbb.tgz")
             set(_solstice_tbb_url "file:///tmp/onetbb.tgz")
         else()
-            set(_solstice_tbb_url
-                "https://github.com/oneapi-src/oneTBB/archive/refs/tags/v2021.12.0.tar.gz")
+            set(_solstice_tbb_tgz "${CMAKE_BINARY_DIR}/_deps/onetbb-v2021.12.0.tgz")
+            file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps")
+            file(DOWNLOAD
+                "https://github.com/oneapi-src/oneTBB/archive/refs/tags/v2021.12.0.tar.gz"
+                "${_solstice_tbb_tgz}"
+                STATUS _solstice_tbb_dl
+                TIMEOUT 90
+                INACTIVITY_TIMEOUT 30)
+            list(GET _solstice_tbb_dl 0 _solstice_tbb_code)
+            if(_solstice_tbb_code EQUAL 0)
+                file(TO_CMAKE_PATH "${_solstice_tbb_tgz}" _solstice_tbb_tgz_cmake)
+                set(_solstice_tbb_url "file:///${_solstice_tbb_tgz_cmake}")
+            else()
+                message(WARNING "oneTBB download skipped (${_solstice_tbb_dl}) — OpenPGL disabled")
+            endif()
         endif()
-        FetchContent_Declare(onetbb
-            URL ${_solstice_tbb_url}
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-        FetchContent_MakeAvailable(onetbb)
+        if(_solstice_onetbb_have_src)
+            add_subdirectory("${_solstice_onetbb_src}" "${CMAKE_BINARY_DIR}/_deps/onetbb-build")
+        elseif(_solstice_tbb_url)
+            FetchContent_Declare(onetbb
+                URL ${_solstice_tbb_url}
+                DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+            FetchContent_MakeAvailable(onetbb)
+            FetchContent_GetProperties(onetbb SOURCE_DIR _solstice_onetbb_src)
+        endif()
         set(BUILD_SHARED_LIBS ${_solstice_saved_build_shared} CACHE BOOL "" FORCE)
         # OpenPGL's FindTBB cannot parse generator expressions on in-tree TBB
         # alias targets — give it a concrete include root instead.
-        FetchContent_GetProperties(onetbb SOURCE_DIR _solstice_onetbb_src)
-        if(_solstice_onetbb_src)
+        if(_solstice_onetbb_src AND EXISTS "${_solstice_onetbb_src}/include")
             set(TBB_INCLUDE_DIR "${_solstice_onetbb_src}/include" CACHE PATH "" FORCE)
             set(OPENPGL_TBB_ROOT "${_solstice_onetbb_src}" CACHE PATH "" FORCE)
             set(TBB_ROOT "${_solstice_onetbb_src}" CACHE PATH "" FORCE)
