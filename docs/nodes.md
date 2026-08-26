@@ -119,7 +119,7 @@ parameters, and *Look Through Camera Node* goes back to the authored camera.
 | --- | --- |
 | Image | Resolution X/Y, Pixel Filter, Filter Radius, Output Path, Bit Depth, TX cache |
 | Sampling | Samples Per Pixel, Pixel Oracle (Uniform / Variance), Noise Threshold, Light Samples, Sampling Type, Bucket Size, Seed, Direct / Indirect Clamp. Camera and path use Owen-scrambled Sobol (PBRT4). Variance overlay shows `N% skip`; at 0.01 a noisy 128 spp frame is often 0%. |
-| Engine | Render Device (CPU Embree, GPU OptiX, or XPU), Integrator, spectral options, CPU Threads, AO Distance, Dispersion, Indirect Guides, Volume Similarity |
+| Engine | Render Device (CPU Embree, GPU OptiX, or XPU), Integrator, CPU Threads, AO Distance, Dispersion, Indirect Guides, Volume Similarity |
 | Depth | Max Ray Depth, Russian Roulette Depth |
 | Caustics | Caustics, Caustics Engine, Caustic Firefly Clamp, Photon Count / Radius |
 | Motion Blur | Enable Motion Blur, Motion Keys, Shutter Length |

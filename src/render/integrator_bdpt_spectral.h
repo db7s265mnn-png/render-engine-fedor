@@ -888,9 +888,7 @@ public:
     Vec3 Li(IntegratorSampleContext<Tracer>& ctx) const override {
         const int sampleCount = kMaxSpectrumSamples;
         SampledWavelengths waves =
-            (ctx.scene->settings.spectralWavelengthSampling == 1)
-                ? SampledWavelengths::sampleUniform(sampleCount, ctx.rng->nextFloat())
-                : SampledWavelengths::sampleVisible(sampleCount, ctx.rng->nextFloat());
+            SampledWavelengths::sampleVisible(sampleCount, ctx.rng->nextFloat());
         const int heroPick =
             std::clamp(int(ctx.rng->nextFloat() * float(waves.n)), 0, waves.n - 1);
         waves.promoteHero(heroPick);

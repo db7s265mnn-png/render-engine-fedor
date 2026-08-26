@@ -621,12 +621,6 @@ struct RenderSettingsData {
     // Master switch: off = render cages, skip subdiv + geometric displacement.
     int enableDisplacement = 1;
 
-    // Path Tracer / BDPT hero-λ samples. Wavelength count is pbrt-v4 NSpectrumSamples.
-    int spectralSamples = kMaxSpectrumSamples;
-    // Beauty conversion color space. Default ACEScg — same as workingSpace.
-    int spectralColorSpace = 1;   // kSpectralColorSpaceAcesCg
-    // Wavelength sampling: 0 = visible importance (pbrt), 1 = uniform stratified.
-    int spectralWavelengthSampling = 0;
     // Sampling / seed diagnostics (skip light transport; write debug RGB).
     int samplingDebug = 0;        // SamplingDebug enum
 

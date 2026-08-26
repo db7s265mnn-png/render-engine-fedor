@@ -37,10 +37,7 @@ public:
         const RGBColorSpace& filmCs = pathColorSpace(settings);
 
         const int nLambda = kMaxSpectrumSamples;
-        SampledWavelengths waves =
-            (settings.spectralWavelengthSampling == 1)
-                ? SampledWavelengths::sampleUniform(nLambda, rng.nextFloat())
-                : SampledWavelengths::sampleVisible(nLambda, rng.nextFloat());
+        SampledWavelengths waves = SampledWavelengths::sampleVisible(nLambda, rng.nextFloat());
         // Hero λ for geometric dispersion — promote to slot 0 before TerminateSecondary.
         const int heroPick = std::clamp(int(rng.nextFloat() * float(waves.n)), 0, waves.n - 1);
         waves.promoteHero(heroPick);

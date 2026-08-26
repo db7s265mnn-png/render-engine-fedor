@@ -1,5 +1,5 @@
 // Device-safe hero-λ helpers (no STL). Shared by OptiX kernels and CPU tests.
-// Matches Embree: visible/uniform sampling, Jakob albedo/illuminant, D60/D65
+// Matches Embree: visible-wavelength sampling, Jakob albedo/illuminant, D60/D65
 // illuminant, pbrt ToXYZ film (including after TerminateSecondary).
 #pragma once
 
@@ -30,7 +30,6 @@ struct GpuSpectralTables {
     const float* illuminantSpd = nullptr;
     float rgbFromXyz[9]{};
     int samples = 4;
-    int wavelengthSampling = 0;  // 0 = visible, 1 = uniform
 };
 
 SR_INL SR_HD int specClampN(int n) {
@@ -121,18 +120,6 @@ SR_INL SR_HD float specVisibleWavelengthPdf(float lambdaNm) {
 SR_INL SR_HD float specSampleVisibleWavelength(float u) {
     const float x = clampf(0.85691062f - 1.82750197f * u, -0.999999f, 0.999999f);
     return 538.0f - 138.888889f * (0.5f * logf((1.0f + x) / (1.0f - x)));
-}
-
-SR_INL SR_HD void specSampleUniform(int count, float uPrimary, float* lambda, float* pdf, int& n) {
-    n = specClampN(count);
-    const float span = kSpectrumLambdaMax - kSpectrumLambdaMin;
-    const float p = 1.0f / span;
-    const float offset = clampf(uPrimary, 0.0f, 0.999999f);
-    for (int i = 0; i < n; ++i) {
-        const float t = (float(i) + offset) / float(n);
-        lambda[i] = kSpectrumLambdaMin + t * span;
-        pdf[i] = p;
-    }
 }
 
 SR_INL SR_HD void specSampleVisible(int count, float uPrimary, float* lambda, float* pdf, int& n) {

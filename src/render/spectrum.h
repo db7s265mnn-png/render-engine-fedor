@@ -180,8 +180,4 @@ inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w,
     return cs.toRgb(spectrumToXyz(s, w));
 }
 
-inline Vec3 spectrumToRgb(const SampledSpectrum& s, const SampledWavelengths& w, int colorSpaceId) {
-    return spectrumToRgb(s, w, colorSpaceById(colorSpaceId));
-}
-
 }  // namespace sol

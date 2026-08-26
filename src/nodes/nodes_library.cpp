@@ -1175,20 +1175,6 @@ public:
         // v3: drop PT Spectral / BDPT Spectral; Wireframe index 6 → 4.
         addParameter(Parameter::makeBool("_integrator_menu_v2", "", true));
         addParameter(Parameter::makeBool("_integrator_menu_v3", "", true));
-        addParameter(Parameter::makeMenu("spectralcolorspace", "Spectral Color Space",
-                                         {"sRGB Linear", "ACEScg", "Rec.2020", "Display P3"}, 1)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1")
-                         .withTooltip("Color space for spectral → beauty RGB.\n"
-                                      "ACEScg (default) matches Film working space so sky/HDRI "
-                                      "match OptiX. Overridden to ACEScg whenever working space "
-                                      "is ACEScg."));
-        addParameter(Parameter::makeMenu("spectralwavesamp", "Wavelength Sampling",
-                                         {"Visible (importance)", "Uniform"}, 0)
-                         .withGroup("Engine")
-                         .withVisibleWhen("integrator==0||integrator==1")
-                         .withTooltip("Visible: pbrt-style PDF peaked near 538 nm (less colour noise).\n"
-                                      "Uniform: stratified across 360–830 nm."));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
@@ -1448,9 +1434,6 @@ public:
         settings.dicingPolyLimitM = std::clamp(intValue("dicingpolylimitm", 10), 1, 200);
         settings.dicingCameraMode =
             intValue("dicingcamera", 0) == 1 ? kDicingCameraCustom : kDicingCameraRender;
-        settings.spectralSamples = kMaxSpectrumSamples;
-        settings.spectralColorSpace = std::clamp(intValue("spectralcolorspace", 1), 0, 3);
-        settings.spectralWavelengthSampling = std::clamp(intValue("spectralwavesamp", 0), 0, 1);
         settings.workingSpace = std::clamp(intValue("workingspace", 1), 0, 1);
         {
             // Menu indices 0/1/2 → bit depths 8/16/32.

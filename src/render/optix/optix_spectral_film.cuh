@@ -55,10 +55,7 @@ __device__ inline void samplePathWavelengths(GpuPath& path, const GpuSpectralTab
     if (n < 2) n = 2;
     if (n > kMaxSpectrumSamples) n = kMaxSpectrumSamples;
     const float u = path.rng.nextFloat();
-    if (tab.wavelengthSampling == 1)
-        specSampleUniform(n, u, path.lambda, path.pdf, path.nLambda);
-    else
-        specSampleVisible(n, u, path.lambda, path.pdf, path.nLambda);
+    specSampleVisible(n, u, path.lambda, path.pdf, path.nLambda);
     const int hero = int(path.rng.nextFloat() * float(path.nLambda));
     specPromoteHero(path.lambda, path.pdf, path.nLambda, hero);
     specFill(path.throughputS, path.nLambda, 1.0f);

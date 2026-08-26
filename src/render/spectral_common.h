@@ -228,12 +228,9 @@ inline MediumSample sampleHeterogeneousFogSpectral(const Grid& grid, const Mediu
     return out;
 }
 
-// Film colour space for spectral PT/BDPT. ACEScg working space is source of
-// truth so OptiX RGB (ACEScg) and Embree spectral cannot drift; the spectral
-// menu is honoured only in linear-sRGB working space.
+// Film colour space follows Film → Working Space (ACEScg or linear sRGB).
 inline const RGBColorSpace& pathColorSpace(const RenderSettingsData& settings) {
-    if (settings.workingSpace == kWorkingSpaceAcesCg) return colorSpaceAcesCg();
-    return colorSpaceById(settings.spectralColorSpace);
+    return settings.workingSpace == kWorkingSpaceAcesCg ? colorSpaceAcesCg() : colorSpaceSrgb();
 }
 
 // Authored reflectance (textures / albedo on hit) — pbrt RGBAlbedoSpectrum.

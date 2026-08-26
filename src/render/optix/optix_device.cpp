@@ -869,7 +869,7 @@ private:
         const RenderSettingsData& st = scene_->settings;
         const RGBColorSpace& cs = (st.workingSpace == kWorkingSpaceAcesCg)
                                       ? colorSpaceAcesCg()
-                                      : colorSpaceById(st.spectralColorSpace);
+                                      : colorSpaceSrgb();
         const bool aces = cs.whiteIlluminant == kWhiteIlluminantD60;
         GpuSpectralTables spec;
         spec.albedoScale = aces ? jakobAcesAlbedoScale_.as<float>() : jakobAlbedoScale_.as<float>();
@@ -883,7 +883,6 @@ private:
             (cs.whiteIlluminant == kWhiteIlluminantD60) ? illumD60_.as<float>() : illumD65_.as<float>();
         for (int i = 0; i < 9; ++i) spec.rgbFromXyz[i] = cs.rgbFromXyz[i];
         spec.samples = kMaxSpectrumSamples;
-        spec.wavelengthSampling = st.spectralWavelengthSampling;
         lp.spec = spec;
     }
 

@@ -4275,14 +4275,13 @@ void testSpectralHeroBasics() {
     }
     check(spectrumAvg(gold) > 0.1f, "gold fresnel");
 
-    // Working space ACEScg is source of truth even if the spectral menu is sRGB.
+    // Film colour space follows Working Space (ACEScg or linear sRGB).
     {
         RenderSettingsData st;
         st.workingSpace = kWorkingSpaceAcesCg;
-        st.spectralColorSpace = kSpectralColorSpaceSrgb;
         check(&pathColorSpace(st) == &colorSpaceAcesCg(), "ACEScg working space drives film");
         st.workingSpace = kWorkingSpaceSrgbLinear;
-        check(&pathColorSpace(st) == &colorSpaceSrgb(), "sRGB working space honours spectral menu");
+        check(&pathColorSpace(st) == &colorSpaceSrgb(), "sRGB working space drives film");
     }
 
     auto meanToRgb = [](int nspp, bool visible,
