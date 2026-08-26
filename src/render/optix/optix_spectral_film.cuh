@@ -24,13 +24,6 @@ __device__ inline void addPathEmissionRgb(GpuPath& path, Vec3 rgb, float scale, 
     addPathRadianceS(path, s, scale, clampValue);
 }
 
-__device__ inline void addPathLinearRgb(GpuPath& path, Vec3 rgb, float scale, float clampValue) {
-    if (isBlack(rgb)) return;
-    float s[kMaxSpectrumSamples];
-    specUpsampleLinear(rgb, path.lambda, path.nLambda, s);
-    addPathRadianceS(path, s, scale, clampValue);
-}
-
 __device__ inline void flushPathFilm(int pixel) {
     const LaunchParams& p = launchParams();
     if (!p.paths || !p.shadows) return;
@@ -63,17 +56,6 @@ __device__ inline void samplePathWavelengths(GpuPath& path, const GpuSpectralTab
     path.filmOpen = 1;
 }
 
-// RGB-authored area / distant / point: linear lobes (CPU lightEmissionSpectrum).
-// HDR dome / CCT stay Jakob × illuminant.
-__device__ inline void specUpsampleLightBeta(const LightData& light, Vec3 rgb, const GpuPath& path,
-                                            float* out) {
-    if (light.colorTemperatureK > 50.0f || light.type == kLightDome) {
-        specUpsampleEmission(gpuSpec(), rgb, path.lambda, path.nLambda, out);
-        return;
-    }
-    specUpsampleLinear(rgb, path.lambda, path.nLambda, out);
-}
-
 __device__ inline void specLightEmission(const LightData& light, const GpuPath& path, float* out) {
     const GpuSpectralTables& tab = gpuSpec();
     const int n = path.nLambda;
@@ -96,7 +78,50 @@ __device__ inline void specLightEmission(const LightData& light, const GpuPath& 
         }
         return;
     }
-    specUpsampleLightBeta(light, rgb, path, out);
+    specUpsampleEmission(tab, rgb, path.lambda, n, out);
+}
+
+// Working-space RGB radiance (NEE Le, cosine-scaled area, env texel).
+__device__ inline void specAuthoredRadiance(const LightData& light, Vec3 rgbLe, const GpuPath& path,
+                                           float* out) {
+    if (light.colorTemperatureK > 50.0f) {
+        specLightEmission(light, path, out);
+        const float have = length(light.emittedRadiance());
+        const float want = length(rgbLe);
+        if (have > 1e-8f) specMulS(out, want / have, path.nLambda);
+        return;
+    }
+    specUpsampleEmission(gpuSpec(), rgbLe, path.lambda, path.nLambda, out);
+}
+
+__device__ inline void evalSurfaceNeeS(const LightData& light, Vec3 rgbLe, Vec3 rgbF, float scale,
+                                       const GpuPath& path, float* out) {
+    float Le[kMaxSpectrumSamples];
+    float fS[kMaxSpectrumSamples];
+    specAuthoredRadiance(light, rgbLe, path, Le);
+    specUpsampleReflectance(gpuSpec(), rgbF, path.lambda, path.nLambda, fS);
+    for (int i = 0; i < path.nLambda; ++i) out[i] = Le[i] * fS[i] * scale;
+}
+
+__device__ inline void enqueueShadowS(GpuShadow& shadow, Vec3 origin, Vec3 dir, float tMax,
+                                      const float* contribS, int n, int mediumIndex) {
+    if (!specIsFinite(contribS, n) || specIsBlack(contribS, n)) {
+        shadow.queue = kShadowIdle;
+        shadow.splatPixel = -1;
+        shadow.specContrib = 0;
+        return;
+    }
+    shadow.origin = origin;
+    shadow.direction = dir;
+    shadow.tMax = tMax;
+    shadow.contrib = Vec3(0.0f);
+    shadow.specContrib = 1;
+    for (int i = 0; i < n && i < kMaxSpectrumSamples; ++i) shadow.contribS[i] = contribS[i];
+    shadow.occluded = 0;
+    shadow.volumeTr = 1;
+    shadow.mediumIndex = mediumIndex;
+    shadow.splatPixel = -1;
+    shadow.queue = kShadowTrace;
 }
 
 }  // namespace sol

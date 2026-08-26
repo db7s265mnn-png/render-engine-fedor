@@ -88,12 +88,14 @@ __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, f
     if (!isFinite(contrib) || isBlack(contrib)) {
         shadow.queue = kShadowIdle;
         shadow.splatPixel = -1;
+        shadow.specContrib = 0;
         return;
     }
     shadow.origin = origin;
     shadow.direction = dir;
     shadow.tMax = tMax;
     shadow.contrib = contrib;
+    shadow.specContrib = 0;
     shadow.occluded = 0;
     shadow.volumeTr = 1;
     shadow.mediumIndex = mediumIndex;

@@ -51,7 +51,7 @@ __device__ inline void tryEnqueueCausticSplat(int pixel, GpuPath& path, GpuShado
     for (int i = 0; i < path.nLambda; ++i) tmp[i] = path.throughputS[i] * fS[i] * geom;
     specClampIndirect(tmp, path.nLambda, gpuLightTraceSplatClamp(params.scene.settings));
     if (!specIsFinite(tmp, path.nLambda) || specIsBlack(tmp, path.nLambda)) return;
-    Vec3 rgb = specBdptToRgb(params.spec, tmp, path.lambda, path.pdf, path.nLambda);
+    Vec3 rgb = specToRgb(params.spec, tmp, path.lambda, path.pdf, path.nLambda);
     rgb = rgb * params.splatInvLightPaths;
     if (!isFinite(rgb) || isBlack(rgb)) return;
 

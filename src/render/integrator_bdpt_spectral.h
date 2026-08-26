@@ -2,8 +2,8 @@
 // caustic-family partitioning are shared with the RGB BDPT implementation.
 // Each subpath keeps its own SampledWavelengths; vertices snapshot arrival λ
 // so TerminateSecondary on a continuation bounce cannot recolour SDS splats.
-// RGB lights / opaque BSDF use linear lobes + live-4λ von Kries so the film
-// is not a Jakob×D60 magenta wash; 1λ paths stay CMF (Abbe rainbows).
+// Lights are RGBIlluminantSpectrum, opaque BSDF is RGBAlbedoSpectrum, film is
+// spectrumToRgb (pbrt PathIntegrator — no per-sample von Kries).
 #pragma once
 
 #include <algorithm>
@@ -260,7 +260,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                                      rng.nextFloat());
                 if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
                 wiWorld = normalize(ssFrame.toWorld(bs.wi));
-                weight = upsampleRgb(bs.weight, waves);
+                weight = upsampleAlbedo(bs.weight, waves, cs);
                 bs.weight = Vec3(1.0f);
                 haveSample = true;
             }
@@ -410,13 +410,13 @@ inline Vec3 traceRadianceBdptSpectral(
             if (light[0].lightIndex >= 0) {
                 lightBeta[0] = lightEmissionSpectrum(scene.lights[light[0].lightIndex], lightWaves, filmCs);
                 const float rgbLum = length(light[0].beta);
-                const Vec3 sRgb = bdptSpectrumToRgb(lightBeta[0], lightWaves, filmCs);
+                const Vec3 sRgb = spectrumToRgb(lightBeta[0], lightWaves, filmCs);
                 const float sLum = length(sRgb);
                 if (sLum > 1e-8f && rgbLum > 0.0f) lightBeta[0] *= rgbLum / sLum;
             } else {
                 lightBeta[0] = upsampleEmission(light[0].beta, lightWaves, filmCs);
             }
-            light[0].beta = bdptSpectrumToRgb(lightBeta[0], lightWaves, filmCs);
+            light[0].beta = spectrumToRgb(lightBeta[0], lightWaves, filmCs);
             lightOriginDelta = lightOriginIsDelta(scene, light[0]);
             spectral_bdpt::WalkConfig cfg;
             cfg.colorSpace = &filmCs;
@@ -458,7 +458,7 @@ inline Vec3 traceRadianceBdptSpectral(
     auto addFilm = [&](const SampledSpectrum& c, const SampledWavelengths& wConn) {
         if (!spectrumIsFinite(c)) return;
         radiance += c;
-        const Vec3 rgb = bdptSpectrumToRgb(c, wConn, filmCs);
+        const Vec3 rgb = spectrumToRgb(c, wConn, filmCs);
         if (isFinite(rgb)) filmRgb += rgb;
     };
 
@@ -470,13 +470,14 @@ inline Vec3 traceRadianceBdptSpectral(
             const Vec3 gather = photons->gather(E.p, E.ns, E.wo, E.mat, photonRadius);
             if (isBlack(gather) || !isFinite(gather)) continue;
             const SampledWavelengths& wE = eyeWavePath[t - 1];
-            SampledSpectrum c = eyeBeta[t - 1] * upsampleRgb(gather, wE);
+            SampledSpectrum c = eyeBeta[t - 1] * upsampleLightRadiance(gather, wE, filmCs);
             if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
             addFilm(c, wE);
 #if SOLSTICE_HAVE_OPENPGL
             if (guiding && guiding->active() && E.guideSeg)
                 guiding->addScatteredAt(E.guideSeg,
-                                        spectrumToRgb(upsampleRgb(gather, wE), wE, filmCs));
+                                        spectrumToRgb(upsampleLightRadiance(gather, wE, filmCs), wE,
+                                                      filmCs));
 #endif
         }
     }
@@ -531,7 +532,7 @@ inline Vec3 traceRadianceBdptSpectral(
             if (s >= 2) c = clampSpectrumIndirect(c, lightTraceSplatClamp(settings));
             if (!spectrumIsFinite(c)) continue;
             // Arrival λ at this vertex — not the walk's post-bounce TerminateSecondary.
-            const Vec3 rgb = bdptSpectrumToRgb(c, wL, filmCs);
+            const Vec3 rgb = spectrumToRgb(c, wL, filmCs);
             if (isFinite(rgb)) splatFb->addSplat(int(px), int(py), rgb);
         }
     }
@@ -583,13 +584,15 @@ inline Vec3 traceRadianceBdptSpectral(
                     w = powerHeuristic(1.0f, v.pdfFwd, 1.0f, lightPdf);
                 }
                 const SampledWavelengths& wE = eyeWavePath[t - 1];
-                SampledSpectrum c = eyeBeta[t - 1] * upsampleRgb(Le, wE) * w;
+                SampledSpectrum c = eyeBeta[t - 1] * upsampleLightRadiance(Le, wE, filmCs, &l) * w;
                 if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
                 addFilm(c, wE);
 #if SOLSTICE_HAVE_OPENPGL
                 if (guiding && guiding->active())
                     guiding->recordBackground(eye[t - 2].p, dirW,
-                                              spectrumToRgb(upsampleRgb(Le, wE), wE, filmCs), w);
+                                              spectrumToRgb(upsampleLightRadiance(Le, wE, filmCs, &l),
+                                                            wE, filmCs),
+                                              w);
 #endif
             }
             break;
@@ -626,7 +629,7 @@ inline Vec3 traceRadianceBdptSpectral(
                       eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
         const SampledWavelengths& wE = eyeWavePath[t - 1];
         SampledSpectrum c =
-            eyeBeta[t - 1] * upsampleRgb(Le, wE) * misWeight(eye, t, light, 0, ov);
+            eyeBeta[t - 1] * upsampleLightRadiance(Le, wE, filmCs, &l) * misWeight(eye, t, light, 0, ov);
         if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
         if (specularToLight) {
             c = clampSpectrumIndirect(c, causticFireflyCap(settings));
@@ -634,7 +637,9 @@ inline Vec3 traceRadianceBdptSpectral(
         addFilm(c, wE);
 #if SOLSTICE_HAVE_OPENPGL
         if (guiding && guiding->active())
-            guiding->recordLightHit(v.p, v.wo, spectrumToRgb(upsampleRgb(Le, wE), wE, filmCs),
+            guiding->recordLightHit(v.p, v.wo,
+                                    spectrumToRgb(upsampleLightRadiance(Le, wE, filmCs, &l), wE,
+                                                  filmCs),
                                     misWeight(eye, t, light, 0, ov));
 #endif
         break;
@@ -661,7 +666,7 @@ inline Vec3 traceRadianceBdptSpectral(
             const float lightPdf = ls.pdf * selectPdf;
             const float cosAbs = fabsf(dot(E.ns, ls.wi));
             const SampledSpectrum unshadowed =
-                f * upsampleRgb(ls.radiance, wE) * (cosAbs / lightPdf);
+                f * upsampleLightRadiance(ls.radiance, wE, filmCs, &l) * (cosAbs / lightPdf);
             float visibility = 1.0f;
             if (scene.lights[li].shadowEnable) {
                 const Vec3 o = offsetRayOrigin(E.p, E.ng, ls.wi);
@@ -769,7 +774,7 @@ inline Vec3 traceRadianceBdptSpectral(
                 scene, tracer, E.p, E.ns, E.wo, E.mat, li, Ls.p, lightN, LeMnee,
                 pdfPosArea, selectPdf, blockerInstance, dispersion);
             if (!mr.solved || isBlack(mr.contribution)) continue;
-            SampledSpectrum local = upsampleRgb(mr.contribution, wE);
+            SampledSpectrum local = upsampleLightRadiance(mr.contribution, wE, filmCs);
             SampledSpectrum c = eyeBeta[t - 1] * local;
             if (t >= 2) c = clampSpectrumIndirect(c, settings.clampDirect);
             c = clampSpectrumIndirect(c, causticFireflyCap(settings));  // was opt-in; safety floor when 0
@@ -796,12 +801,12 @@ inline Vec3 traceRadianceBdptSpectral(
 
         SampledSpectrum local;
         if (l.type == kLightPoint) {
-            local = f * upsampleRgb(Le, wE) *
+            local = f * upsampleLightRadiance(Le, wE, filmCs, &l) *
                     (fabsf(dot(E.ns, wi)) / srMax(1e-12f, selectPdf));
         } else {
             const float G = geometryTerm(E, Ls);
             if (G <= 0.0f) continue;
-            local = f * upsampleRgb(Le, wE) * (G / srMax(1e-12f, Ls.pdfFwd));
+            local = f * upsampleLightRadiance(Le, wE, filmCs, &l) * (G / srMax(1e-12f, Ls.pdfFwd));
         }
 
         MisOverride ov;

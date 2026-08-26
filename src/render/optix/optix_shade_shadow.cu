@@ -1,5 +1,5 @@
 // Cycles analogue: integrator_shade_shadow.
-// RGB residual-ratio Tr (same as Embree NEE), then linear upsample × path throughput.
+// Residual-ratio Tr (same as Embree NEE). Camera NEE stays spectral until film.
 #include "render/optix/optix_spawn.cuh"
 
 namespace sol {
@@ -9,17 +9,29 @@ __device__ inline bool shadeShadowPixel(int pixel) {
     GpuShadow& shadow = params.shadows[pixel];
     GpuPath& path = params.paths[pixel];
     if (!shadow.occluded) {
-        Vec3 contrib = shadow.contrib;
-        if (shadow.volumeTr)
-            contrib = contrib * gpuVolumeShadowTr(params, shadow.origin, shadow.direction, shadow.tMax,
-                                                  shadow.mediumIndex, path.rng);
-        if (shadow.splatPixel >= 0)
+        if (shadow.splatPixel >= 0) {
+            Vec3 contrib = shadow.contrib;
+            if (shadow.volumeTr)
+                contrib = contrib * gpuVolumeShadowTr(params, shadow.origin, shadow.direction,
+                                                      shadow.tMax, shadow.mediumIndex, path.rng);
             addSplatRadiance(shadow.splatPixel, contrib);
-        else
-            addPathLinearRgb(path, contrib, 1.0f, 0.0f);
+        } else if (shadow.specContrib) {
+            float s[kMaxSpectrumSamples];
+            const int n = path.nLambda;
+            for (int i = 0; i < n; ++i) s[i] = shadow.contribS[i];
+            if (shadow.volumeTr) {
+                const Vec3 tr = gpuVolumeShadowTr(params, shadow.origin, shadow.direction, shadow.tMax,
+                                                  shadow.mediumIndex, path.rng);
+                float trS[kMaxSpectrumSamples];
+                specUpsampleLinear(tr, path.lambda, n, trS);
+                specMul(s, trS, n);
+            }
+            addPathRadianceS(path, s, 1.0f, 0.0f);
+        }
     }
     shadow.queue = kShadowIdle;
     shadow.splatPixel = -1;
+    shadow.specContrib = 0;
     flushPathFilm(pixel);
     return maybeRegeneratePath(pixel, path);
 }

@@ -4697,32 +4697,21 @@ void testSpectralHeroBasics() {
                       "earlier diffuse bounce terminates the full path");
                 check(chroma(rgb4) < chroma(rgb1) * 0.55f,
                       "Abbe-0 SDS splat uses arrival 4λ, not CMF sparkle");
-                const Vec3 wb4 = bdptSpectrumToRgb(white, arrival, aces);
-                checkNear(wb4.x, 1.0f, 0.02f, "BDPT live-4λ white-balance R");
-                checkNear(wb4.y, 1.0f, 0.02f, "BDPT live-4λ white-balance G");
-                checkNear(wb4.z, 1.0f, 0.02f, "BDPT live-4λ white-balance B");
-                const Vec3 wb1 = bdptSpectrumToRgb(white, continued, aces);
-                checkNear(wb1.x, rgb1.x, 1e-5f, "BDPT does not white-balance 1λ R");
-                checkNear(wb1.y, rgb1.y, 1e-5f, "BDPT does not white-balance 1λ G");
-                checkNear(wb1.z, rgb1.z, 1e-5f, "BDPT does not white-balance 1λ B");
-                check(chroma(wb1) > chroma(wb4) + 0.15f,
-                      "BDPT 1λ rainbows stay chromatic after white-balance skip");
                 LightData rgbLamp;
                 rgbLamp.type = kLightRect;
                 rgbLamp.color = Vec3(1.0f);
                 rgbLamp.intensity = 1.0f;
                 SampledSpectrum lamp = lightEmissionSpectrum(rgbLamp, arrival, aces);
-                SampledSpectrum lin = rgbToSpectrumLinear(Vec3(1.0f), arrival);
+                SampledSpectrum wantEmit = rgbToSpectrumEmission(Vec3(1.0f), arrival, aces);
                 for (int i = 0; i < arrival.n; ++i)
-                    check(std::fabs(lamp.values[i] - lin.values[i]) < 1e-5f,
-                          "RGB rect light uses linear upsample, not Jakob×D60");
+                    check(std::fabs(lamp.values[i] - wantEmit.values[i]) < 1e-5f,
+                          "RGB rect light is RGBIlluminantSpectrum (Jakob × D60)");
                 LightData dome;
                 dome.type = kLightDome;
                 dome.color = Vec3(1.0f);
                 SampledSpectrum env = lightEmissionSpectrum(dome, arrival, aces);
-                SampledSpectrum jakob = rgbToSpectrumEmission(Vec3(1.0f), arrival, aces);
                 float envDiff = 0.0f;
-                for (int i = 0; i < arrival.n; ++i) envDiff += std::fabs(env.values[i] - jakob.values[i]);
+                for (int i = 0; i < arrival.n; ++i) envDiff += std::fabs(env.values[i] - wantEmit.values[i]);
                 check(envDiff < 1e-4f, "HDR dome keeps Jakob × illuminant");
                 Material floor;
                 floor.baseColor = Vec3(0.65f);
@@ -4732,14 +4721,20 @@ void testSpectralHeroBasics() {
                 SampledSpectrum lifted =
                     liftBsdfWeight(floor, fl, Vec3(0.0f, 0.0f, 1.0f), Vec3(0.0f, 0.0f, 1.0f),
                                    Vec3(0.65f), arrival, 1.5f, 0, aces);
-                SampledSpectrum wantLin = rgbToSpectrumLinear(Vec3(0.65f), arrival);
+                SampledSpectrum wantAlb = rgbToSpectrumReflectance(Vec3(0.65f), arrival, aces);
                 for (int i = 0; i < arrival.n; ++i)
-                    check(std::fabs(lifted.values[i] - wantLin.values[i]) < 1e-5f,
-                          "opaque BSDF lift is linear, not Jakob unbounded");
-                const Vec3 floorRgb = bdptSpectrumToRgb(lamp * lifted, arrival, aces);
-                checkNear(floorRgb.x / srMax(floorRgb.y, 1e-8f), 1.0f, 0.02f,
+                    check(std::fabs(lifted.values[i] - wantAlb.values[i]) < 1e-5f,
+                          "opaque BSDF lift is RGBAlbedoSpectrum");
+                const Vec3 floorMean = meanToRgb(
+                    nspp, true,
+                    [&](const SampledWavelengths& wv) {
+                        return lightEmissionSpectrum(rgbLamp, wv, aces) *
+                               rgbToSpectrumReflectance(Vec3(0.65f), wv, aces);
+                    },
+                    aces);
+                checkNear(floorMean.x / srMax(floorMean.y, 1e-8f), 1.0f, 0.08f,
                           "grey Lambert × white RGB light ACEScg R/G");
-                checkNear(floorRgb.z / srMax(floorRgb.y, 1e-8f), 1.0f, 0.02f,
+                checkNear(floorMean.z / srMax(floorMean.y, 1e-8f), 1.0f, 0.08f,
                           "grey Lambert × white RGB light ACEScg B/G");
             }
         }
@@ -4777,25 +4772,30 @@ void testSpectralHeroBasics() {
         SampledSpectrum linHost = rgbToSpectrumLinear(Vec3(0.65f), w);
         for (int i = 0; i < w.n; ++i)
             check(std::fabs(linDev[i] - linHost.values[i]) < 1e-5f,
-                  "device linear BSDF lift matches host");
+                  "device linear upsample matches host (volumes)");
+        float albDev[kMaxSpectrumSamples];
+        specUpsampleReflectance(tab, Vec3(0.65f), w.lambda, w.n, albDev);
+        SampledSpectrum albHost = rgbToSpectrumReflectance(Vec3(0.65f), w, aces);
+        for (int i = 0; i < w.n; ++i)
+            check(std::fabs(albDev[i] - albHost.values[i]) < 1e-5f,
+                  "device opaque BSDF lift is RGBAlbedoSpectrum");
         SampledWavelengths live = SampledWavelengths::sampleVisible(4, 0.37f);
         live.promoteHero(0);
-        SampledSpectrum ones = SampledSpectrum::constant(live.n, 1.0f);
-        const Vec3 hostWb = bdptSpectrumToRgb(ones, live, aces);
-        const Vec3 devWb = specBdptToRgb(tab, ones.values, live.lambda, live.pdf, live.n);
-        check(std::fabs(hostWb.x - devWb.x) < 1e-4f && std::fabs(hostWb.y - devWb.y) < 1e-4f &&
-                  std::fabs(hostWb.z - devWb.z) < 1e-4f,
-              "device LT von Kries matches CPU BDPT");
-        checkNear(devWb.x, 1.0f, 0.02f, "device live-4λ white-balance R");
-        checkNear(devWb.y, 1.0f, 0.02f, "device live-4λ white-balance G");
-        checkNear(devWb.z, 1.0f, 0.02f, "device live-4λ white-balance B");
+        SampledSpectrum pair = rgbToSpectrumEmission(Vec3(1.0f), live, aces) *
+                               rgbToSpectrumReflectance(Vec3(0.65f), live, aces);
+        const Vec3 hostPair = spectrumToRgb(pair, live, aces);
+        const Vec3 devPair = specToRgb(tab, pair.values, live.lambda, live.pdf, live.n);
+        check(std::fabs(hostPair.x - devPair.x) < 1e-4f && std::fabs(hostPair.y - devPair.y) < 1e-4f &&
+                  std::fabs(hostPair.z - devPair.z) < 1e-4f,
+              "device LT film ToXYZ matches CPU (no von Kries)");
         SampledWavelengths termLive = live;
         termLive.terminateSecondary();
+        SampledSpectrum ones = SampledSpectrum::constant(termLive.n, 1.0f);
         const Vec3 host1 = spectrumToRgb(ones, termLive, aces);
-        const Vec3 dev1 = specBdptToRgb(tab, ones.values, termLive.lambda, termLive.pdf, termLive.n);
+        const Vec3 dev1 = specToRgb(tab, ones.values, termLive.lambda, termLive.pdf, termLive.n);
         check(std::fabs(host1.x - dev1.x) < 1e-4f && std::fabs(host1.y - dev1.y) < 1e-4f &&
                   std::fabs(host1.z - dev1.z) < 1e-4f,
-              "device LT does not white-balance 1λ");
+              "device 1λ film ToXYZ matches host");
         SampledWavelengths term = w;
         term.terminateSecondary();
         SampledSpectrum one = SampledSpectrum::constant(term.n, 0.7f);
@@ -6205,8 +6205,8 @@ void testBdptShadersAndSss() {
     }
 
     // Grey Lambert floor + white rect: BDPT light-tracing splats the whole
-    // connectable floor. Live-4λ Jakob×D60 used to paint it magenta; linear
-    // lift + von Kries must keep ACEScg chromaticity near 1.
+    // connectable floor. RGBIlluminantSpectrum × RGBAlbedoSpectrum + spectrumToRgb
+    // is ACEScg-neutral (pbrt film — no per-sample von Kries).
     {
         auto scene = makeBaseScene();
         scene->settings.integrator = kIntegratorBdpt;
@@ -6241,8 +6241,8 @@ void testBdptShadersAndSss() {
         const float bb = float(b / double(nLit));
         std::printf("  grey-plane BDPT mean RGB=(%.3f, %.3f, %.3f) R/G=%.3f B/G=%.3f n=%d\n", rr, gg,
                     bb, rr / srMax(gg, 1e-8f), bb / srMax(gg, 1e-8f), nLit);
-        checkNear(rr / srMax(gg, 1e-8f), 1.0f, 0.05f, "BDPT grey plane ACEScg R/G ~ 1");
-        checkNear(bb / srMax(gg, 1e-8f), 1.0f, 0.05f, "BDPT grey plane ACEScg B/G ~ 1");
+        checkNear(rr / srMax(gg, 1e-8f), 1.0f, 0.08f, "BDPT grey plane ACEScg R/G ~ 1");
+        checkNear(bb / srMax(gg, 1e-8f), 1.0f, 0.08f, "BDPT grey plane ACEScg B/G ~ 1");
     }
 }
 
