@@ -14,7 +14,22 @@ __device__ inline void addPathRadianceS(GpuPath& path, const float* add, float s
     for (int i = 0; i < n; ++i) tmp[i] = path.throughputS[i] * add[i] * scale;
     specClampIndirect(tmp, n, clampValue);
     if (!specIsFinite(tmp, n)) return;
-    for (int i = 0; i < n; ++i) path.radianceS[i] += tmp[i];
+    const Vec3 rgb = specToRgb(gpuSpec(), tmp, path.lambda, path.pdf, n);
+    if (isFinite(rgb)) path.filmRgb += rgb;
+}
+
+// RGB NEE baked with live pdfs — stash on the shadow ray so later
+// TerminateSecondary cannot recolour it as a 1λ CMF spike.
+__device__ inline Vec3 bakePathLinearRgb(const GpuPath& path, Vec3 rgb, float scale, float clampValue) {
+    if (isBlack(rgb)) return Vec3(0.0f);
+    const int n = path.nLambda;
+    float s[kMaxSpectrumSamples];
+    specUpsampleLinear(rgb, path.lambda, n, s);
+    float tmp[kMaxSpectrumSamples];
+    for (int i = 0; i < n; ++i) tmp[i] = path.throughputS[i] * s[i] * scale;
+    specClampIndirect(tmp, n, clampValue);
+    if (!specIsFinite(tmp, n)) return Vec3(0.0f);
+    return specToRgb(gpuSpec(), tmp, path.lambda, path.pdf, n);
 }
 
 __device__ inline void addPathEmissionRgb(GpuPath& path, Vec3 rgb, float scale, float clampValue) {
@@ -39,8 +54,9 @@ __device__ inline void flushPathFilm(int pixel) {
     if (!path.filmOpen) return;
     if (path.queue != kQueueDead) return;
     if (shadow.queue != kShadowIdle) return;
-    Vec3 rgb = specToRgb(p.spec, path.radianceS, path.lambda, path.pdf, path.nLambda);
+    Vec3 rgb = path.filmRgb;
     path.filmOpen = 0;
+    path.filmRgb = Vec3(0.0f);
     specZero(path.radianceS, path.nLambda);
     addRadiance(pixel, rgb);
 }
@@ -60,6 +76,7 @@ __device__ inline void samplePathWavelengths(GpuPath& path, const GpuSpectralTab
     specPromoteHero(path.lambda, path.pdf, path.nLambda, hero);
     specFill(path.throughputS, path.nLambda, 1.0f);
     specZero(path.radianceS, path.nLambda);
+    path.filmRgb = Vec3(0.0f);
     path.filmOpen = 1;
 }
 

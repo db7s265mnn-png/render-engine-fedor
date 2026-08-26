@@ -156,7 +156,8 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                     const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
                     float tMax = 1.0e8f;
                     if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-                    enqueueShadow(shadow, shadowOrigin, ls.wi, tMax, contrib, path.mediumIndex);
+                    enqueueShadow(shadow, shadowOrigin, ls.wi, tMax,
+                                  bakePathLinearRgb(path, contrib, 1.0f, 0.0f), path.mediumIndex);
                 } else {
                     addPathLinearRgb(path, contrib, 1.0f, 0.0f);
                 }

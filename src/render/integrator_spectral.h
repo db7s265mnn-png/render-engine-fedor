@@ -1,7 +1,9 @@
 // Path Tracer — hero-wavelength unidirectional path tracer (CPU / Embree).
 // pbrt-v4 PathIntegrator: textures filter in RGB; albedo → RGBAlbedoSpectrum,
 // lights/env → RGBIlluminantSpectrum (Jakob × D65/D60). MC weights stay linear.
-// Film is pbrt ToXYZ → working-space RGB (including after TerminateSecondary).
+// Each contribution ToXYZ's with the wavelengths live at that vertex. Converting
+// the sum after TerminateSecondary would recolour first-hit NEE as a 1λ CMF
+// spike (Abbe-0 pink / magenta).
 #pragma once
 
 #include <algorithm>
@@ -43,8 +45,13 @@ public:
         waves.promoteHero(heroPick);
         const int heroIdx = 0;
 
-        SampledSpectrum radiance = SampledSpectrum::zero(waves.n);
         SampledSpectrum throughput = SampledSpectrum::constant(waves.n, 1.0f);
+        Vec3 filmRgb(0.0f);
+        auto addFilm = [&](const SampledSpectrum& c) {
+            if (!spectrumIsFinite(c)) return;
+            const Vec3 rgb = spectrumToRgb(c, waves, filmCs);
+            if (isFinite(rgb)) filmRgb += rgb;
+        };
         float bsdfPdf = 0.0f;
         bool specularBounce = true;
         bool suppressCausticLight = false;
@@ -82,14 +89,14 @@ public:
                         if (ms.scattered) {
                     origin = origin + direction * ms.t;
                     if (!isBlack(med->emission))
-                        radiance += throughput * upsampleEmission(med->emission, waves, filmCs);
+                        addFilm(throughput * upsampleEmission(med->emission, waves, filmCs));
                     const Vec3 woVol = -direction;
                     if (scene.lightCount > 0 && depth < maxDepth) {
                         const Vec3 volDirect =
                             nextEventEstimationVolumeOnce(scene, tracer, origin, woVol, medWalk, rng);
                         SampledSpectrum contrib = throughput * upsampleRgb(volDirect, waves);
                         contrib = clampPathContribution(contrib, settings, depth, false, false);
-                        radiance += contrib;
+                        addFilm(contrib);
                     }
                     float phasePdf = 0.0f;
                     direction = sampleHenyeyGreenstein(woVol, medWalk.g, rng.nextFloat(), rng.nextFloat(),
@@ -141,7 +148,7 @@ public:
                             SampledSpectrum contrib = throughput * envS * weight;
                             contrib = clampPathContribution(contrib, settings, depth, specularBounce,
                                                             causticSuffix);
-                            radiance += contrib;
+                            addFilm(contrib);
                         }
                     }
                     }
@@ -156,7 +163,7 @@ public:
                             SampledSpectrum contrib = throughput * upsampleEmission(sunL, waves, filmCs);
                             contrib = clampPathContribution(contrib, settings, depth, specularBounce,
                                                             causticSuffix);
-                            radiance += contrib;
+                            addFilm(contrib);
                         }
                     }
                 }
@@ -199,7 +206,7 @@ public:
                         length(emitted) / srMax(1e-6f, length(light.emittedRadiance()));
                     SampledSpectrum contrib = throughput * Le * (weight * rgbScale);
                     contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
-                    radiance += contrib;
+                    addFilm(contrib);
                 }
                 break;
             }
@@ -216,9 +223,8 @@ public:
             if (mat.emissionStrength > 0.0f && !isBlack(mat.emissionColor)) {
                 const bool frontFacing = dot(si.ns, -direction) > 0.0f;
                 if (frontFacing || mat.doubleSided)
-                    radiance += throughput *
-                                upsampleEmission(mat.emissionColor * mat.emissionStrength, waves,
-                                                 filmCs);
+                    addFilm(throughput *
+                            upsampleEmission(mat.emissionColor * mat.emissionStrength, waves, filmCs));
             }
 
             if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
@@ -248,7 +254,7 @@ public:
                         SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
                         contrib = clampPathContribution(contrib, settings, depth, specularBounce,
                                                         causticSuffix);
-                        radiance += contrib;
+                        addFilm(contrib);
                     }
                 }
 
@@ -307,7 +313,7 @@ public:
                         SampledSpectrum contrib =
                             throughput * walk.pathWeight * upsampleRgb(nee, waves);
                         contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
-                        radiance += contrib;
+                        addFilm(contrib);
                     }
                 }
                 const BsdfSample ssBs =
@@ -336,7 +342,7 @@ public:
                 if (!isBlack(nee)) {
                     SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
                     contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
-                    radiance += contrib;
+                    addFilm(contrib);
                 }
             }
 
@@ -389,8 +395,7 @@ public:
             if (spectrumMaxComponent(throughput) < 1e-6f) break;
         }
 
-        Vec3 rgb = spectrumToRgb(radiance, waves, filmCs);
-        return isFinite(rgb) ? rgb : Vec3(0.0f);
+        return isFinite(filmRgb) ? filmRgb : Vec3(0.0f);
     }
 };
 

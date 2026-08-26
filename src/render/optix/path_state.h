@@ -49,6 +49,7 @@ struct GpuPath {
     Vec3 origin{0.0f};
     Vec3 direction{0.0f, 0.0f, 1.0f};
     Vec3 sampleRgb{0.0f, 0.0f, 0.0f};  // this-spp radiance for the variance oracle
+    Vec3 filmRgb{0.0f, 0.0f, 0.0f};    // ToXYZ of each contrib with live pdfs
     float lambda[kMaxSpectrumSamples]{};
     float pdf[kMaxSpectrumSamples]{};
     float throughputS[kMaxSpectrumSamples]{};
