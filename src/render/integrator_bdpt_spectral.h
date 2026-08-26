@@ -2,6 +2,8 @@
 // caustic-family partitioning are shared with the RGB BDPT implementation.
 // Each subpath keeps its own SampledWavelengths; vertices snapshot arrival λ
 // so TerminateSecondary on a continuation bounce cannot recolour SDS splats.
+// RGB lights / opaque BSDF use linear lobes + live-4λ von Kries so the film
+// is not a Jakob×D60 magenta wash; 1λ paths stay CMF (Abbe rainbows).
 #pragma once
 
 #include <algorithm>
@@ -408,13 +410,13 @@ inline Vec3 traceRadianceBdptSpectral(
             if (light[0].lightIndex >= 0) {
                 lightBeta[0] = lightEmissionSpectrum(scene.lights[light[0].lightIndex], lightWaves, filmCs);
                 const float rgbLum = length(light[0].beta);
-                const Vec3 sRgb = spectrumToRgb(lightBeta[0], lightWaves, filmCs);
+                const Vec3 sRgb = bdptSpectrumToRgb(lightBeta[0], lightWaves, filmCs);
                 const float sLum = length(sRgb);
                 if (sLum > 1e-8f && rgbLum > 0.0f) lightBeta[0] *= rgbLum / sLum;
             } else {
                 lightBeta[0] = upsampleEmission(light[0].beta, lightWaves, filmCs);
             }
-            light[0].beta = spectrumToRgb(lightBeta[0], lightWaves, filmCs);
+            light[0].beta = bdptSpectrumToRgb(lightBeta[0], lightWaves, filmCs);
             lightOriginDelta = lightOriginIsDelta(scene, light[0]);
             spectral_bdpt::WalkConfig cfg;
             cfg.colorSpace = &filmCs;
@@ -456,7 +458,7 @@ inline Vec3 traceRadianceBdptSpectral(
     auto addFilm = [&](const SampledSpectrum& c, const SampledWavelengths& wConn) {
         if (!spectrumIsFinite(c)) return;
         radiance += c;
-        const Vec3 rgb = spectrumToRgb(c, wConn, filmCs);
+        const Vec3 rgb = bdptSpectrumToRgb(c, wConn, filmCs);
         if (isFinite(rgb)) filmRgb += rgb;
     };
 
@@ -529,7 +531,7 @@ inline Vec3 traceRadianceBdptSpectral(
             if (s >= 2) c = clampSpectrumIndirect(c, lightTraceSplatClamp(settings));
             if (!spectrumIsFinite(c)) continue;
             // Arrival λ at this vertex — not the walk's post-bounce TerminateSecondary.
-            const Vec3 rgb = spectrumToRgb(c, wL, filmCs);
+            const Vec3 rgb = bdptSpectrumToRgb(c, wL, filmCs);
             if (isFinite(rgb)) splatFb->addSplat(int(px), int(py), rgb);
         }
     }
