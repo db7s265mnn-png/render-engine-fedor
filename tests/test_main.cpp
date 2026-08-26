@@ -7486,6 +7486,7 @@ int main() {
     }
     if (getenv("SOL_ONLY_FOLDERS")) {
         registerBuiltinNodes();
+        testXpuDevice();
         testRenderSettingsFolders();
         testSceneGraphFolders();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
