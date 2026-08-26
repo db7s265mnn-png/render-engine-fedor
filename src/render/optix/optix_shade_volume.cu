@@ -67,14 +67,11 @@ __device__ inline void shadeVolumePixel(int pixel) {
                 float neeS[kMaxSpectrumSamples];
                 specAuthoredRadiance(scene.lights[lightIndex], ls.radiance, path, neeS);
                 specMulS(neeS, (phase / srMax(1e-8f, lightPdf)) * mis, path.nLambda);
-                specClampIndirect(neeS, path.nLambda, scene.settings.clampDirect);
-                if (scene.lights[lightIndex].shadowEnable) {
-                    float tSh = 1.0e8f;
-                    if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
-                    enqueueShadowS(shadow, p, ls.wi, tSh, neeS, path.nLambda, path.mediumIndex);
-                } else {
-                    addPathRadianceS(path, neeS, 1.0f, 0.0f);
-                }
+                float tSh = 1.0e8f;
+                if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
+                enqueueOrAddVertexNeeS(path, shadow, p, ls.wi, tSh, neeS, path.mediumIndex,
+                                       scene.lights[lightIndex].shadowEnable,
+                                       pathContributionClamp(scene.settings, path.depth, false, false));
             }
         }
 

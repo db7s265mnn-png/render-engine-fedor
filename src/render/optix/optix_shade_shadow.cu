@@ -1,5 +1,5 @@
 // Cycles analogue: integrator_shade_shadow.
-// Residual-ratio Tr (same as Embree NEE). Camera NEE stays spectral until film.
+// Residual-ratio Tr. Camera NEE contribS is already throughput × Ld at the vertex.
 #include "render/optix/optix_spawn.cuh"
 
 namespace sol {
@@ -26,7 +26,7 @@ __device__ inline bool shadeShadowPixel(int pixel) {
                 specUpsampleLinear(tr, path.lambda, n, trS);
                 specMul(s, trS, n);
             }
-            addPathRadianceS(path, s, 1.0f, 0.0f);
+            addBakedRadianceS(path, s);
         }
     }
     shadow.queue = kShadowIdle;

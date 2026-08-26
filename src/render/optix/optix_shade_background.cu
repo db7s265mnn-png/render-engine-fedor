@@ -9,13 +9,13 @@ __device__ inline void shadeBackgroundPixel(int pixel) {
     GpuPath& path = params.paths[pixel];
     const SceneView& scene = params.scene;
     const bool primary = path.depth == 0;
+    const bool suppressCausticLight = scene.settings.caustics == 0 && path.causticSuffix;
 
     if (path.lightPath) {
         terminatePath(pixel, path);
         return;
     }
-
-    if (params.splatInvLightPaths > 0.0f && path.causticSuffix) {
+    if ((params.splatInvLightPaths > 0.0f && path.causticSuffix) || suppressCausticLight) {
         terminatePath(pixel, path);
         return;
     }
@@ -23,14 +23,15 @@ __device__ inline void shadeBackgroundPixel(int pixel) {
     if (scene.domeLightIndex >= 0 && scene.lights) {
         const LightData& dome = scene.lights[scene.domeLightIndex];
         const bool hidePrimary = primary && (!scene.settings.envVisibleCamera || !dome.visibleCamera);
-        if (!hidePrimary) {
+        if (!hidePrimary && !(path.causticSuffix && !lightContributesCaustics(dome))) {
             Vec3 envL = domeRadiance(scene, dome, path.direction, /*nearestTexel=*/path.depth > 0);
             if (!isBlack(envL)) {
                 float weight = 1.0f;
                 if (!path.specularBounce) {
-                    const float lp = lightPdfDirection(scene, scene.domeLightIndex, path.origin, path.direction,
-                                                       path.origin, path.direction) *
-                                     lightSelectionPdfIndex(scene, path.origin, scene.domeLightIndex);
+                    const float lp =
+                        lightPdfDirection(scene, scene.domeLightIndex, path.origin, path.direction,
+                                          path.origin, path.direction) *
+                        lightSelectionPdfIndex(scene, path.origin, scene.domeLightIndex);
                     weight = powerHeuristic(1.0f, path.bsdfPdf, 1.0f, lp);
                 }
                 float envS[kMaxSpectrumSamples];
@@ -43,15 +44,20 @@ __device__ inline void shadeBackgroundPixel(int pixel) {
                     specUpsampleEmission(gpuSpec(), envL, path.lambda, path.nLambda, envS);
                 }
                 addPathRadianceS(path, envS, weight,
-                                 (path.depth > 0 && !path.specularBounce) ? scene.settings.clampDirect
-                                                                          : 0.0f);
+                                 pathContributionClamp(scene.settings, path.depth,
+                                                       path.specularBounce != 0,
+                                                       path.causticSuffix != 0));
             }
         }
     }
 
-    const Vec3 sunL = cameraSunDiscRadiance(scene, path.origin, path.direction, path.bsdfPdf,
-                                           path.specularBounce != 0, primary, false);
-    if (!isBlack(sunL)) addPathEmissionRgb(path, sunL, 1.0f, 0.0f);
+    const Vec3 sunL =
+        cameraSunDiscRadiance(scene, path.origin, path.direction, path.bsdfPdf,
+                              path.specularBounce != 0, primary, path.causticSuffix != 0);
+    if (!isBlack(sunL))
+        addPathEmissionRgb(path, sunL, 1.0f,
+                           pathContributionClamp(scene.settings, path.depth, path.specularBounce != 0,
+                                                 path.causticSuffix != 0));
     terminatePath(pixel, path);
 }
 

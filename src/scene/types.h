@@ -634,6 +634,23 @@ struct RenderSettingsData {
     char ocioConfigPath[512] = "";
 };
 
+// SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
+// a safety floor of 10 still applies — otherwise clamp(..., 0) is a no-op.
+// Test-only: causticClamp < 0 disables the safety floor (unbiased energy compares).
+SR_INL SR_HD float causticFireflyCap(const RenderSettingsData& settings) {
+    if (settings.causticClamp < 0.0f) return 0.0f;
+    return settings.causticClamp > 0.0f ? settings.causticClamp : 10.0f;
+}
+
+// Eye-path contribution clamp (pbrt: primary unclamped). Specular / SDS uses the
+// caustic firefly floor; other indirect uses Direct Clamp. 0 = do not clamp.
+SR_INL SR_HD float pathContributionClamp(const RenderSettingsData& settings, int depth,
+                                         bool specularBounce, bool causticSuffix) {
+    if (depth <= 0) return 0.0f;
+    if (specularBounce || causticSuffix) return causticFireflyCap(settings);
+    return settings.clampDirect;
+}
+
 // ---------------------------------------------------------------------------
 // The flattened scene as seen by an integrator.
 // ---------------------------------------------------------------------------

@@ -2503,6 +2503,13 @@ void testRefractionSparkleClamp() {
     check(causticFireflyCap(rs) == 0.0f, "causticClamp < 0 disables safety floor");
     rs.causticClamp = 2.0f;
     check(causticFireflyCap(rs) == 2.0f, "explicit caustic clamp is used as-is");
+    RenderSettingsData clampSt;
+    check(pathContributionClamp(clampSt, 0, false, false) == 0.0f, "primary NEE/hit unclamped");
+    check(pathContributionClamp(clampSt, 1, false, false) == 10.0f, "indirect uses Direct Clamp");
+    check(pathContributionClamp(clampSt, 1, true, false) == 10.0f, "specular hit uses firefly floor");
+    check(pathContributionClamp(clampSt, 2, false, true) == 10.0f, "SDS uses firefly floor");
+    clampSt.causticClamp = 2.0f;
+    check(pathContributionClamp(clampSt, 1, true, true) == 2.0f, "SDS respects causticClamp");
 }
 
 // Film reconstruction filters: Box is 1-pixel; Gaussian spreads into neighbours.
@@ -4481,6 +4488,26 @@ void testSpectralHeroBasics() {
         aces);
     checkNear(greyOut.y, 0.8f, 0.12f, "grey 0.8 albedo under D60");
     checkNear(greyOut.x / srMax(greyOut.y, 1e-8f), 1.0f, 0.08f, "grey 0.8 ACEScg neutral");
+    // pbrt SampleLd: Illuminant(Le) × Albedo(f) × geom reconstructs grey NEE RGB.
+    {
+        const Vec3 Le(4.0f, 4.0f, 4.0f);
+        const Vec3 f(0.8f / kPi, 0.8f / kPi, 0.8f / kPi);
+        const float geom = 0.35f;
+        Vec3 book = meanToRgb(
+            nspp, true,
+            [&](const SampledWavelengths& wv) {
+                return rgbToSpectrumEmission(Le, wv, aces) * rgbToSpectrumReflectance(f, wv, aces) * geom;
+            },
+            aces);
+        const Vec3 want = Le * f * geom;
+        checkNear(book.x / srMax(want.x, 1e-8f), 1.0f, 0.15f, "book NEE R ~ Le*f*geom");
+        checkNear(book.y / srMax(want.y, 1e-8f), 1.0f, 0.15f, "book NEE G ~ Le*f*geom");
+        checkNear(book.z / srMax(want.z, 1e-8f), 1.0f, 0.15f, "book NEE B ~ Le*f*geom");
+        checkNear(book.x / srMax(book.y, 1e-8f), 1.0f, 0.08f, "book NEE ACEScg neutral");
+        // Wavefront bug: multiply NEE by the next BSDF weight (≈ albedo) after enqueue.
+        check(std::fabs(book.y * 0.8f - want.y) > 0.05f * want.y,
+              "NEE × continuation albedo is not the vertex estimator");
+    }
     Vec3 d60Rgb = meanToRgb(
         nspp, true, [&](const SampledWavelengths& wv) { return illuminantSpectrum(wv, aces); }, aces);
     checkNear(d60Rgb.x, 1.0f, 0.10f, "D60 illuminant ACEScg R");

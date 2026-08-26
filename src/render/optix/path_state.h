@@ -77,14 +77,16 @@ struct GpuPath {
 struct GpuShadow {
     Vec3 origin{0.0f};
     Vec3 direction{0.0f, 0.0f, 1.0f};
-    Vec3 contrib{0.0f};  // RGB NEE aggregate; shade_shadow upsamples like Embree
+    Vec3 contrib{0.0f};  // RGB LT splat (already includes throughput)
     float tMax = 0.0f;
     int queue = kShadowIdle;
     int occluded = 0;
     int volumeTr = 0;     // 1 = multiply by GPU volume / homogeneous transmittance
     int mediumIndex = -1;  // current path medium for homogeneous Beer–Lambert on the shadow ray
     int splatPixel = -1;  // >=0: unoccluded contrib atomicAdds RGB to that film pixel (no .w)
-    float contribS[kMaxSpectrumSamples]{};  // camera NEE: illuminant × albedo, added after shadow
+    // Camera NEE baked at the vertex: throughput × illuminant(Le) × albedo(f) × geom.
+    // shade_shadow must add this as-is — live path throughput has already stepped.
+    float contribS[kMaxSpectrumSamples]{};
     int specContrib = 0;  // 1 = shade_shadow uses contribS (not RGB contrib)
 };
 
