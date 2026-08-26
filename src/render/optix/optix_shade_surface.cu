@@ -1,6 +1,8 @@
 // Cycles analogue: integrator_shade_surface.
 // No optixTrace — NEE writes a shadow ray for intersect_shadow.
-// BSDF bounce is hero-λ (Jakob / dielectric); NEE stays RGB then linear upsample (Embree).
+// Opaque BSDF weights: linear lobes (CPU liftBsdfWeight). Dielectric stays 1/η².
+// Light-trace is SDS-only: first connectable after a spec prefix, then stop.
+// While LT is on, camera PT skips the SDS suffix so the two don't double-count.
 #include "render/lights.h"
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_light_trace.cuh"
@@ -79,6 +81,10 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             terminatePath(pixel, path);
             return;
         }
+        if (params.splatInvLightPaths > 0.0f && path.causticSuffix) {
+            terminatePath(pixel, path);
+            return;
+        }
         const LightData& light = scene.lights[si.lightIndex];
         const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
         Vec3 emitted = areaLightEmission(scene, light, path.direction, lightN);
@@ -127,7 +133,15 @@ __device__ inline void shadeSurfacePixel(int pixel) {
 
     const Vec3 wo = -path.direction;
     const Frame frame(si.ns);
-    if (path.lightPath) tryEnqueueCausticSplat(pixel, path, shadow, si, mat, frame, wo);
+    if (path.lightPath) {
+        const Vec3 woLocal = frame.toLocal(wo);
+        const bool connectable = gpuLightVertexConnectable(mat, woLocal);
+        if (connectable) {
+            tryEnqueueCausticSplat(pixel, path, shadow, si, mat, frame, wo);
+            terminatePath(pixel, path);
+            return;
+        }
+    }
 
     const int maxDepth = srMax(1, scene.settings.maxDepth);
     if (path.depth >= maxDepth) {
@@ -135,7 +149,9 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         return;
     }
 
-    if (!path.lightPath && scene.lightCount > 0) {
+    const bool skipCameraSds =
+        !path.lightPath && params.splatInvLightPaths > 0.0f && path.causticSuffix;
+    if (!path.lightPath && !skipCameraSds && scene.lightCount > 0) {
         float selectPdf = 0.0f;
         const int lightIndex = sampleLightIndex(scene, si.p, path.rng.nextFloat(), selectPdf);
         LightSample ls;
@@ -197,6 +213,13 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     if (path.lightPath) {
         const bool nearSpec = rgbBs.specular || lw.delta || optixpt::isNearSpecularLobe(lw);
         if (nearSpec && materialContributesCaustics(mat)) path.specPrefix = 1;
+    } else {
+        const bool causticBounce = rgbBs.specular || lw.delta || optixpt::isNearSpecularLobe(lw);
+        if (causticBounce && path.sawNonSpecular) path.causticSuffix = 1;
+        if (!causticBounce) {
+            path.sawNonSpecular = 1;
+            path.causticSuffix = 0;
+        }
     }
     if (bs.transmitted && volInst.mediumIndex >= 0) {
         const MediumData* med = getMedium(scene, volInst.mediumIndex);

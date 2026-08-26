@@ -4772,6 +4772,30 @@ void testSpectralHeroBasics() {
         check(std::fabs(hostRgb.x - devRgb.x) < 1e-4f && std::fabs(hostRgb.y - devRgb.y) < 1e-4f &&
                   std::fabs(hostRgb.z - devRgb.z) < 1e-4f,
               "device film ToXYZ matches host");
+        float linDev[kMaxSpectrumSamples];
+        specUpsampleLinear(Vec3(0.65f), w.lambda, w.n, linDev);
+        SampledSpectrum linHost = rgbToSpectrumLinear(Vec3(0.65f), w);
+        for (int i = 0; i < w.n; ++i)
+            check(std::fabs(linDev[i] - linHost.values[i]) < 1e-5f,
+                  "device linear BSDF lift matches host");
+        SampledWavelengths live = SampledWavelengths::sampleVisible(4, 0.37f);
+        live.promoteHero(0);
+        SampledSpectrum ones = SampledSpectrum::constant(live.n, 1.0f);
+        const Vec3 hostWb = bdptSpectrumToRgb(ones, live, aces);
+        const Vec3 devWb = specBdptToRgb(tab, ones.values, live.lambda, live.pdf, live.n);
+        check(std::fabs(hostWb.x - devWb.x) < 1e-4f && std::fabs(hostWb.y - devWb.y) < 1e-4f &&
+                  std::fabs(hostWb.z - devWb.z) < 1e-4f,
+              "device LT von Kries matches CPU BDPT");
+        checkNear(devWb.x, 1.0f, 0.02f, "device live-4λ white-balance R");
+        checkNear(devWb.y, 1.0f, 0.02f, "device live-4λ white-balance G");
+        checkNear(devWb.z, 1.0f, 0.02f, "device live-4λ white-balance B");
+        SampledWavelengths termLive = live;
+        termLive.terminateSecondary();
+        const Vec3 host1 = spectrumToRgb(ones, termLive, aces);
+        const Vec3 dev1 = specBdptToRgb(tab, ones.values, termLive.lambda, termLive.pdf, termLive.n);
+        check(std::fabs(host1.x - dev1.x) < 1e-4f && std::fabs(host1.y - dev1.y) < 1e-4f &&
+                  std::fabs(host1.z - dev1.z) < 1e-4f,
+              "device LT does not white-balance 1λ");
         SampledWavelengths term = w;
         term.terminateSecondary();
         SampledSpectrum one = SampledSpectrum::constant(term.n, 0.7f);

@@ -7,8 +7,13 @@
 
 namespace sol {
 
-// SDS family only: light → near-spec chain → connectable vertex → camera.
-// Unweighted (no Veach MIS with camera PT). PT already has NEE of non-caustics.
+__device__ inline bool gpuLightVertexConnectable(const Material& mat, Vec3 woLocal) {
+    const optixpt::LobeWeights lw = optixpt::computeLobes(mat, woLocal);
+    return !(lw.delta && lw.diffuse < 1e-4f);
+}
+
+// SDS family only: light → near-spec chain → first connectable → camera, then stop.
+// Unweighted vs camera PT: camera skips the SDS suffix while LT is running.
 __device__ inline void tryEnqueueCausticSplat(int pixel, GpuPath& path, GpuShadow& shadow, const Surf& si,
                                               const Material& mat, const Frame& frame, Vec3 wo) {
     const LaunchParams& params = launchParams();
@@ -20,8 +25,7 @@ __device__ inline void tryEnqueueCausticSplat(int pixel, GpuPath& path, GpuShado
         return;
 
     const Vec3 woLocal = frame.toLocal(wo);
-    const optixpt::LobeWeights lw = optixpt::computeLobes(mat, woLocal);
-    if (lw.delta && lw.diffuse < 1e-4f) return;
+    if (!gpuLightVertexConnectable(mat, woLocal)) return;
 
     float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
     if (!projectToPixel(params.camProj, si.p, px, py, cosTheta, dist2) || dist2 < 1e-8f) return;
@@ -47,7 +51,7 @@ __device__ inline void tryEnqueueCausticSplat(int pixel, GpuPath& path, GpuShado
     for (int i = 0; i < path.nLambda; ++i) tmp[i] = path.throughputS[i] * fS[i] * geom;
     specClampIndirect(tmp, path.nLambda, gpuLightTraceSplatClamp(params.scene.settings));
     if (!specIsFinite(tmp, path.nLambda) || specIsBlack(tmp, path.nLambda)) return;
-    Vec3 rgb = specToRgb(params.spec, tmp, path.lambda, path.pdf, path.nLambda);
+    Vec3 rgb = specBdptToRgb(params.spec, tmp, path.lambda, path.pdf, path.nLambda);
     rgb = rgb * params.splatInvLightPaths;
     if (!isFinite(rgb) || isBlack(rgb)) return;
 

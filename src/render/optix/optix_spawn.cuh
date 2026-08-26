@@ -46,6 +46,8 @@ __device__ inline void spawnCameraPath(int pixel, int x, int y, int sampleOffset
     path.lightPath = 0;
     path.specPrefix = 0;
     path.lightIndex = -1;
+    path.sawNonSpecular = 0;
+    path.causticSuffix = 0;
     if (params.volumes && params.volumeCount > 0) {
         for (int i = 0; i < params.volumeCount; ++i) {
             const GpuVolumeGrid& g = params.volumes[i];
@@ -97,6 +99,8 @@ __device__ inline bool spawnLightPath(int pixel, int x, int y, int sampleOffset)
     path.lightPath = 1;
     path.specPrefix = 0;
     path.lightIndex = -1;
+    path.sawNonSpecular = 0;
+    path.causticSuffix = 0;
     path.queue = kQueueDead;
     path.localSample = sampleOffset;
     hit = GpuHit{};
@@ -114,9 +118,13 @@ __device__ inline bool spawnLightPath(int pixel, int x, int y, int sampleOffset)
     if (!emit.ok) return false;
 
     samplePathWavelengths(path, params.spec);
-    path.filmOpen = 0;
-    specUpsampleEmission(gpuSpec(), emit.betaRgb, path.lambda, path.nLambda, path.throughputS);
     specZero(path.radianceS, path.nLambda);
+    path.filmOpen = 0;
+    if (emit.lightIndex >= 0 && emit.lightIndex < params.scene.lightCount)
+        specUpsampleLightBeta(params.scene.lights[emit.lightIndex], emit.betaRgb, path,
+                              path.throughputS);
+    else
+        specUpsampleLinear(emit.betaRgb, path.lambda, path.nLambda, path.throughputS);
     if (!specIsFinite(path.throughputS, path.nLambda) || specIsBlack(path.throughputS, path.nLambda))
         return false;
 

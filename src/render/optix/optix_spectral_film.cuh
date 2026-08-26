@@ -63,6 +63,17 @@ __device__ inline void samplePathWavelengths(GpuPath& path, const GpuSpectralTab
     path.filmOpen = 1;
 }
 
+// RGB-authored area / distant / point: linear lobes (CPU lightEmissionSpectrum).
+// HDR dome / CCT stay Jakob × illuminant.
+__device__ inline void specUpsampleLightBeta(const LightData& light, Vec3 rgb, const GpuPath& path,
+                                            float* out) {
+    if (light.colorTemperatureK > 50.0f || light.type == kLightDome) {
+        specUpsampleEmission(gpuSpec(), rgb, path.lambda, path.nLambda, out);
+        return;
+    }
+    specUpsampleLinear(rgb, path.lambda, path.nLambda, out);
+}
+
 __device__ inline void specLightEmission(const LightData& light, const GpuPath& path, float* out) {
     const GpuSpectralTables& tab = gpuSpec();
     const int n = path.nLambda;
@@ -85,7 +96,7 @@ __device__ inline void specLightEmission(const LightData& light, const GpuPath& 
         }
         return;
     }
-    specUpsampleEmission(tab, rgb, path.lambda, n, out);
+    specUpsampleLightBeta(light, rgb, path, out);
 }
 
 }  // namespace sol
