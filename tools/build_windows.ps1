@@ -833,16 +833,16 @@ function Normalize-CmakeSrc([string]$p) {
     return ($p.Trim().TrimEnd('\', '/') -replace '\\', '/').ToLowerInvariant()
 }
 
-# Leftover FetchContent stamps from a failed GitHub tarball download block
-# the next configure even after MaterialX is installed into grendizer-deps.
-$mtlxStamp = Join-Path $BuildDir '_deps\materialx-subbuild'
-if (Test-Path -LiteralPath $mtlxStamp) {
-    $mtlxSrc = Join-Path $BuildDir '_deps\materialx-src\CMakeLists.txt'
-    if (-not (Test-Path -LiteralPath $mtlxSrc)) {
-        Info "Clearing broken MaterialX FetchContent tree under $BuildDir\_deps"
-        Remove-Item -LiteralPath (Join-Path $BuildDir '_deps\materialx-subbuild') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (Join-Path $BuildDir '_deps\materialx-src') -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (Join-Path $BuildDir '_deps\materialx-build') -Recurse -Force -ErrorAction SilentlyContinue
+# Leftover FetchContent stamps from a failed tarball (file:///C:/ → /C:/)
+# abort the next configure. Keep extracted *-src trees that actually built.
+foreach ($dep in @('materialx', 'openpgl', 'tinyusdz', 'libtiff', 'onetbb')) {
+    $srcList = Join-Path $BuildDir "_deps\$dep-src\CMakeLists.txt"
+    $sub = Join-Path $BuildDir "_deps\$dep-subbuild"
+    if ((Test-Path -LiteralPath $sub) -and -not (Test-Path -LiteralPath $srcList)) {
+        Info "Clearing broken $dep FetchContent tree under $BuildDir\_deps"
+        Remove-Item -LiteralPath $sub -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $BuildDir "_deps\$dep-src") -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $BuildDir "_deps\$dep-build") -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -883,6 +883,11 @@ if (Test-Path -LiteralPath $cache) {
             $staleWhy = "source moved (`n  cache: $cachedSrc`n  now:   $currentSrc)"
         }
     }
+    # CMake 4.x FetchContent file:///C:/... became /C:/... and aborted configure.
+    if (Select-String -Path $cache -Pattern 'file:///C:|openpgl-v0\.7\.1\.tgz' -Quiet) {
+        $stale = $true
+        $staleWhy = 'broken FetchContent file:// Windows URL'
+    }
     if ($stale) {
         # Keep _deps (TinyUSDZ / OpenPGL). Wiping C:\gz-full used to force a
         # GitHub re-download and abort FULL when github.com did not resolve.
@@ -921,16 +926,33 @@ if ($script:FullBuild) {
     } else {
         Info 'MaterialX not in deps — skipping (glass / OptiX still build). Not cloning GitHub.'
     }
+    function Test-GzFullSrc([string]$Name) {
+        return Test-Path -LiteralPath (Join-Path $BuildDir "_deps\$Name-src\CMakeLists.txt")
+    }
+    $pglFlag = '-DSOLSTICE_ENABLE_OPENPGL=OFF'
+    if (Test-GzFullSrc 'openpgl') {
+        $pglFlag = '-DSOLSTICE_ENABLE_OPENPGL=ON'
+        Info 'OpenPGL: using C:\gz-full\_deps\openpgl-src'
+    } else {
+        Info 'OpenPGL not in _deps — skipping (path guiding off). Not fetching GitHub.'
+    }
+    $usdFlag = '-DSOLSTICE_ENABLE_TINYUSDZ=OFF'
+    if (Test-GzFullSrc 'tinyusdz') {
+        $usdFlag = '-DSOLSTICE_ENABLE_TINYUSDZ=ON'
+        Info 'TinyUSDZ: using C:\gz-full\_deps\tinyusdz-src'
+    } else {
+        Info 'TinyUSDZ not in _deps — skipping (binary USD off). Not fetching GitHub.'
+    }
     $featureFlags += @(
         '-DSOLSTICE_ENABLE_ALEMBIC=ON',
         '-DSOLSTICE_ENABLE_OPENEXR=ON',
         '-DSOLSTICE_ENABLE_TIFF=ON',
         $mtlxFlag,
-        '-DSOLSTICE_ENABLE_OPENPGL=ON',
+        $pglFlag,
         '-DSOLSTICE_ENABLE_OPENSUBDIV=ON',
         '-DSOLSTICE_ENABLE_OPENVDB=ON',
         '-DSOLSTICE_ENABLE_OCIO=ON',
-        '-DSOLSTICE_ENABLE_TINYUSDZ=ON',
+        $usdFlag,
         '-DSOLSTICE_BUILD_TX_TOOLS_ALPHA=ON',
         '-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON'
     )
