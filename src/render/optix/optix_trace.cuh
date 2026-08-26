@@ -20,15 +20,16 @@ __device__ inline void traceClosest(int pixel, Vec3 origin, Vec3 direction, floa
                kRayTypeRadiance, kRayTypeCount, kRayTypeRadiance);
 }
 
-__device__ inline void traceShadow(int pixel, Vec3 origin, Vec3 direction, float tMax) {
+// Closest-hit shadow (no terminate-on-first): glass can be skipped via shadowOpacity
+// the same way Embree shadowVisibility walks hits. Closest-hit writes GpuHit.
+__device__ inline void traceShadowClosest(int pixel, Vec3 origin, Vec3 direction, float tMax) {
     const LaunchParams& params = launchParams();
-    GpuShadow& shadow = params.shadows[pixel];
-    shadow.occluded = 0;
+    GpuHit& hit = params.hits[pixel];
+    hit = GpuHit{};
     if (!params.traversable) return;
     optixTrace(static_cast<OptixTraversableHandle>(params.traversable), toFloat3(origin),
                toFloat3(direction), 0.0f, tMax, 0.0f, OptixVisibilityMask(kVisShadow),
-               OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT, kRayTypeShadow,
-               kRayTypeCount, kRayTypeShadow);
+               OPTIX_RAY_FLAG_DISABLE_ANYHIT, kRayTypeShadow, kRayTypeCount, kRayTypeShadow);
 }
 
 }  // namespace sol

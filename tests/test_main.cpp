@@ -510,6 +510,43 @@ void testBsdf() {
     }
     check(tirHits > 150, "IR-off: TIR still reflects past the critical angle");
 
+    // Smooth glass refraction is Snell with η = ηt/ηi (not the inverted GPU fork),
+    // the radiance weight includes 1/η², and a wrong-hemisphere reflect is invalid
+    // (no z-flip).
+    {
+        Material g;
+        g.baseColor = Vec3(1.0f);
+        g.roughness = 0.0f;
+        g.transmission = 1.0f;
+        g.ior = 1.5f;
+        g.specular = 0.0f;
+        const float eta = 1.5f;
+        const Vec3 woN(0.0f, 0.0f, 1.0f);
+        const BsdfSample snellN = bsdfSampleLocal(g, woN, 0.99f, 0.0f, 0.0f, 0.99f);
+        check(snellN.transmitted && snellN.specular, "smooth glass at normal incidence refracts");
+        checkNear(snellN.wi.x, 0.0f, 1e-5f, "normal Snell wi.x");
+        checkNear(snellN.wi.y, 0.0f, 1e-5f, "normal Snell wi.y");
+        checkNear(snellN.wi.z, -1.0f, 1e-5f, "normal Snell wi.z");
+        checkNear(snellN.weight.x, 1.0f / (eta * eta), 1e-4f, "delta glass weight is 1/η²");
+        checkNear(snellN.weight.y, 1.0f / (eta * eta), 1e-4f, "delta glass weight G is 1/η²");
+        checkNear(snellN.weight.z, 1.0f / (eta * eta), 1e-4f, "delta glass weight B is 1/η²");
+
+        const float thetaI = radians(30.0f);
+        const Vec3 wo30(std::sin(thetaI), 0.0f, std::cos(thetaI));
+        const BsdfSample snell30 = bsdfSampleLocal(g, wo30, 0.99f, 0.0f, 0.0f, 0.99f);
+        check(snell30.transmitted, "30° air→glass refracts");
+        const float sinT = std::sin(thetaI) / eta;
+        const float cosT = std::sqrt(std::max(0.0f, 1.0f - sinT * sinT));
+        checkNear(snell30.wi.x, -sinT, 1e-4f, "Snell wi.x uses 1/η (not η)");
+        checkNear(snell30.wi.z, -cosT, 1e-4f, "Snell wi.z uses 1/η (not η)");
+
+        Vec3 woFlip(0.1f, 0.0f, 1.0f);
+        woFlip = normalize(woFlip);
+        const BsdfSample badH = bsdfSampleLocal(g, woFlip, 0.99f, 0.0f, 0.0f, 0.0f);
+        if (!badH.transmitted && badH.pdf > 0.0f)
+            check(badH.wi.z * woFlip.z > 0.0f, "dielectric reflect stays in wo hemisphere (no z-flip)");
+    }
+
     // pbrt energy lottery: spec share tracks E(mu, alpha) F, so grazing wo is more specular.
     {
         Material diel;
@@ -4665,6 +4702,19 @@ void testSpectralHeroBasics() {
             glassNd.dispersionAbbe = 0.0f;
             check(!shouldTerminateSecondaryWavelengths(bsSpec, computeLobes(glassNd), glassNd),
                   "achromatic glass keeps secondary wavelengths");
+            {
+                SampledWavelengths wv = SampledWavelengths::sampleVisible(4, 0.2f);
+                const BsdfSampleSpectral e =
+                    bsdfSampleSpectral(glassNd, Vec3(0.0f, 0.0f, 1.0f), 0.99f, 0.0f, 0.0f, 0.99f, wv,
+                                       1.5f, 0, aces);
+                check(e.valid && e.transmitted && e.specular, "spectral delta glass refracts");
+                checkNear(e.wi.z, -1.0f, 1e-5f, "spectral sample uses CPU Snell");
+                const float invEta2 = 1.0f / (1.5f * 1.5f);
+                for (int i = 0; i < wv.n; ++i) {
+                    if (wv.pdf[i] <= 0.0f) continue;
+                    checkNear(e.weight.values[i], invEta2, 0.02f, "spectral delta glass weight is 1/η²");
+                }
+            }
             BsdfSample bsDiff{};
             bsDiff.specular = false;
             Material diffuse;

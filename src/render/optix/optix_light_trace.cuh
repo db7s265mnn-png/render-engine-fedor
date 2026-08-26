@@ -8,7 +8,7 @@
 namespace sol {
 
 __device__ inline bool gpuLightVertexConnectable(const Material& mat, Vec3 woLocal) {
-    const optixpt::LobeWeights lw = optixpt::computeLobes(mat, woLocal);
+    const LobeWeights lw = computeLobes(mat, woLocal);
     return !(lw.delta && lw.diffuse < 1e-4f);
 }
 
@@ -36,7 +36,7 @@ __device__ inline void tryEnqueueCausticSplat(int pixel, GpuPath& path, GpuShado
 
     const Vec3 toCam = normalize(params.camProj.camPos - si.p);
     const Vec3 wiLocal = frame.toLocal(toCam);
-    const optixpt::BsdfEval be = optixpt::bsdfEvalLocal(mat, woLocal, wiLocal);
+    const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
     if (isBlack(be.f) || !isFinite(be.f)) return;
 
     const float pdfOmega = cameraPdfOmega(params.camProj, cosTheta);
@@ -45,7 +45,7 @@ __device__ inline void tryEnqueueCausticSplat(int pixel, GpuPath& path, GpuShado
     if (!(geom > 0.0f) || !srIsFinite(geom)) return;
 
     float fS[kMaxSpectrumSamples];
-    liftBsdfWeightGpu(be.f, path, fS);
+    evalBsdfSpectralGpu(mat, woLocal, wiLocal, path, mat.ior, fS);
     float tmp[kMaxSpectrumSamples];
     specZero(tmp, path.nLambda);
     for (int i = 0; i < path.nLambda; ++i) tmp[i] = path.throughputS[i] * fS[i] * geom;

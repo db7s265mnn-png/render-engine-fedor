@@ -15,7 +15,7 @@ __device__ inline void writeMissRadiance() {
 __device__ inline void writeMissShadow() {
     const int pixel = wavefrontPixelIndex();
     if (pixel < 0) return;
-    launchParamsMutable().shadows[pixel].occluded = 0;
+    launchParamsMutable().hits[pixel] = GpuHit{};
 }
 
 __device__ inline void writeClosestHitRadiance() {
@@ -32,9 +32,7 @@ __device__ inline void writeClosestHitRadiance() {
 }
 
 __device__ inline void writeClosestHitShadow() {
-    const int pixel = wavefrontPixelIndex();
-    if (pixel < 0) return;
-    launchParamsMutable().shadows[pixel].occluded = 1;
+    writeClosestHitRadiance();
 }
 
 }  // namespace sol
