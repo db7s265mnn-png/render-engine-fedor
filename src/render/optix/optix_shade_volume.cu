@@ -14,6 +14,7 @@ __device__ inline void shadeVolumePixel(int pixel) {
     GpuShadow& shadow = params.shadows[pixel];
     shadow.queue = kShadowIdle;
     shadow.splatPixel = -1;
+    shadow.specContrib = 0;
 
     const MediumData* med = getMedium(scene, path.mediumIndex);
     if (!med) {
@@ -63,14 +64,16 @@ __device__ inline void shadeVolumePixel(int pixel) {
                 const float phase = henyeyGreenstein(dot(wo, ls.wi), walk.g);
                 const float lightPdf = ls.pdf * selectPdf;
                 const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phase);
-                Vec3 contrib = ls.radiance * (phase / srMax(1e-8f, lightPdf)) * mis;
-                contrib = clampFirefly(contrib, scene.settings.clampDirect);
+                float neeS[kMaxSpectrumSamples];
+                specAuthoredRadiance(scene.lights[lightIndex], ls.radiance, path, neeS);
+                specMulS(neeS, (phase / srMax(1e-8f, lightPdf)) * mis, path.nLambda);
+                specClampIndirect(neeS, path.nLambda, scene.settings.clampDirect);
                 if (scene.lights[lightIndex].shadowEnable) {
                     float tSh = 1.0e8f;
                     if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
-                    enqueueShadow(shadow, p, ls.wi, tSh, contrib, path.mediumIndex);
+                    enqueueShadowS(shadow, p, ls.wi, tSh, neeS, path.nLambda, path.mediumIndex);
                 } else {
-                    addPathLinearRgb(path, contrib, 1.0f, 0.0f);
+                    addPathRadianceS(path, neeS, 1.0f, 0.0f);
                 }
             }
         }

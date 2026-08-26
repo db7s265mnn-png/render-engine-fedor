@@ -84,6 +84,8 @@ struct GpuShadow {
     int volumeTr = 0;     // 1 = multiply by GPU volume / homogeneous transmittance
     int mediumIndex = -1;  // current path medium for homogeneous Beer–Lambert on the shadow ray
     int splatPixel = -1;  // >=0: unoccluded contrib atomicAdds RGB to that film pixel (no .w)
+    float contribS[kMaxSpectrumSamples]{};  // camera NEE: illuminant × albedo, added after shadow
+    int specContrib = 0;  // 1 = shade_shadow uses contribS (not RGB contrib)
 };
 
 }  // namespace sol

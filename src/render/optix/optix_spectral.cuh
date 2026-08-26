@@ -1,4 +1,4 @@
-// Spectral BSDF lift for OptiX PT (linear RGB weights / dielectric 1/η²).
+// Spectral BSDF lift for OptiX PT (pbrt RGBAlbedoSpectrum / dielectric 1/η²).
 #pragma once
 
 #include "render/optix/optix_bsdf.cuh"
@@ -11,7 +11,7 @@ __device__ inline bool usesSpectralDielectricGpu(const Material& mat) {
 }
 
 __device__ inline void liftBsdfWeightGpu(Vec3 rgbWeight, const GpuPath& path, float* out) {
-    specUpsampleLinear(rgbWeight, path.lambda, path.nLambda, out);
+    specUpsampleReflectance(gpuSpec(), rgbWeight, path.lambda, path.nLambda, out);
 }
 
 __device__ inline void evalDielectricF(const Material& mat, Vec3 wo, Vec3 wi, const GpuPath& path,

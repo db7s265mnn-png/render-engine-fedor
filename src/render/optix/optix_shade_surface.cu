@@ -1,6 +1,6 @@
 // Cycles analogue: integrator_shade_surface.
 // No optixTrace — NEE writes a shadow ray for intersect_shadow.
-// Opaque BSDF weights: linear lobes (CPU liftBsdfWeight). Dielectric stays 1/η².
+// Opaque BSDF weights: pbrt RGBAlbedoSpectrum (CPU liftBsdfWeight). Dielectric stays 1/η².
 // Light-trace is SDS-only: first connectable after a spec prefix, then stop.
 // While LT is on, camera PT skips the SDS suffix so the two don't double-count.
 #include "render/lights.h"
@@ -21,6 +21,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     GpuShadow& shadow = params.shadows[pixel];
     shadow.queue = kShadowIdle;
     shadow.splatPixel = -1;
+    shadow.specContrib = 0;
 
     Surf si;
     if (!buildSurf(scene, hit, path.origin, path.direction, si)) {
@@ -165,16 +166,19 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             if (be.pdf > 0.0f && !isBlack(be.f)) {
                 const float lightPdf = ls.pdf * selectPdf;
                 const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
-                Vec3 contrib = ls.radiance * be.f * (fabsf(wiLocal.z) / lightPdf) * mis;
+                const float scale = (fabsf(wiLocal.z) / lightPdf) * mis;
+                float neeS[kMaxSpectrumSamples];
+                evalSurfaceNeeS(scene.lights[lightIndex], ls.radiance, be.f, scale, path, neeS);
                 if (path.depth > 0 && !path.specularBounce)
-                    contrib = clampFirefly(contrib, scene.settings.clampDirect);
+                    specClampIndirect(neeS, path.nLambda, scene.settings.clampDirect);
                 if (scene.lights[lightIndex].shadowEnable) {
                     const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
                     float tMax = 1.0e8f;
                     if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-                    enqueueShadow(shadow, shadowOrigin, ls.wi, tMax, contrib, path.mediumIndex);
+                    enqueueShadowS(shadow, shadowOrigin, ls.wi, tMax, neeS, path.nLambda,
+                                   path.mediumIndex);
                 } else {
-                    addPathLinearRgb(path, contrib, 1.0f, 0.0f);
+                    addPathRadianceS(path, neeS, 1.0f, 0.0f);
                 }
             }
         }

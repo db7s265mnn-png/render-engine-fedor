@@ -87,7 +87,7 @@ public:
                     if (scene.lightCount > 0 && depth < maxDepth) {
                         const Vec3 volDirect =
                             nextEventEstimationVolumeOnce(scene, tracer, origin, woVol, medWalk, rng);
-                        SampledSpectrum contrib = throughput * upsampleRgb(volDirect, waves);
+                        SampledSpectrum contrib = throughput * upsampleLightRadiance(volDirect, waves, filmCs);
                         contrib = clampPathContribution(contrib, settings, depth, false, false);
                         radiance += contrib;
                     }
@@ -245,7 +245,7 @@ public:
                     const Vec3 nee =
                         nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, currentMedium);
                     if (!isBlack(nee)) {
-                        SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
+                        SampledSpectrum contrib = throughput * upsampleLightRadiance(nee, waves, filmCs);
                         contrib = clampPathContribution(contrib, settings, depth, specularBounce,
                                                         causticSuffix);
                         radiance += contrib;
@@ -305,7 +305,7 @@ public:
                                                          walk.exitWo, rng, currentMedium);
                     if (!isBlack(nee)) {
                         SampledSpectrum contrib =
-                            throughput * walk.pathWeight * upsampleRgb(nee, waves);
+                            throughput * walk.pathWeight * upsampleLightRadiance(nee, waves, filmCs);
                         contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
                         radiance += contrib;
                     }
@@ -315,7 +315,7 @@ public:
                                     rng.nextFloat(), rng.nextFloat(), rng.nextFloat());
                 if (ssBs.pdf > 0.0f && !isBlack(ssBs.weight)) {
                     const Vec3 wiWorld = normalize(ssFrame.toWorld(ssBs.wi));
-                    throughput *= walk.pathWeight * upsampleRgb(ssBs.weight, waves);
+                    throughput *= walk.pathWeight * upsampleAlbedo(ssBs.weight, waves, filmCs);
                     origin = offsetRayOrigin(walk.exitP, walk.exitN, wiWorld);
                     direction = wiWorld;
                     bsdfPdf = ssBs.pdf;
@@ -330,11 +330,11 @@ public:
             }
 
             if (!(suppressCausticLight && !specularBounce)) {
-                // NEE stays RGB (glass specular contributes ~0); upsample aggregate.
+                // NEE stays RGB (glass specular contributes ~0); illuminant-upsample the aggregate.
                 const Vec3 nee =
                     nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, currentMedium);
                 if (!isBlack(nee)) {
-                    SampledSpectrum contrib = throughput * upsampleRgb(nee, waves);
+                    SampledSpectrum contrib = throughput * upsampleLightRadiance(nee, waves, filmCs);
                     contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
                     radiance += contrib;
                 }

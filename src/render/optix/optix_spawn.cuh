@@ -121,10 +121,10 @@ __device__ inline bool spawnLightPath(int pixel, int x, int y, int sampleOffset)
     specZero(path.radianceS, path.nLambda);
     path.filmOpen = 0;
     if (emit.lightIndex >= 0 && emit.lightIndex < params.scene.lightCount)
-        specUpsampleLightBeta(params.scene.lights[emit.lightIndex], emit.betaRgb, path,
-                              path.throughputS);
+        specAuthoredRadiance(params.scene.lights[emit.lightIndex], emit.betaRgb, path,
+                             path.throughputS);
     else
-        specUpsampleLinear(emit.betaRgb, path.lambda, path.nLambda, path.throughputS);
+        specUpsampleEmission(gpuSpec(), emit.betaRgb, path.lambda, path.nLambda, path.throughputS);
     if (!specIsFinite(path.throughputS, path.nLambda) || specIsBlack(path.throughputS, path.nLambda))
         return false;
 
