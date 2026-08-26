@@ -3,6 +3,7 @@
 // BSDF bounce is hero-λ (Jakob / dielectric); NEE stays RGB then linear upsample (Embree).
 #include "render/lights.h"
 #include "render/optix/optix_geom.cuh"
+#include "render/optix/optix_light_trace.cuh"
 #include "render/optix/optix_spawn.cuh"
 #include "render/optix/optix_spectral.cuh"
 #include "render/optix/optix_volume.cuh"
@@ -17,6 +18,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     const GpuHit& hit = params.hits[pixel];
     GpuShadow& shadow = params.shadows[pixel];
     shadow.queue = kShadowIdle;
+    shadow.splatPixel = -1;
 
     Surf si;
     if (!buildSurf(scene, hit, path.origin, path.direction, si)) {
@@ -62,7 +64,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         }
     }
 
-    if (si.lightIndex >= 0 && path.depth == 0) {
+    if (si.lightIndex >= 0 && path.depth == 0 && !path.lightPath) {
         const InstanceData& inst = scene.instances[si.instanceIndex];
         if (!inst.visibleCamera) {
             path.origin = offsetRay(si.p, si.ng, path.direction);
@@ -73,6 +75,10 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     }
 
     if (si.lightIndex >= 0) {
+        if (path.lightPath) {
+            terminatePath(pixel, path);
+            return;
+        }
         const LightData& light = scene.lights[si.lightIndex];
         const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
         Vec3 emitted = areaLightEmission(scene, light, path.direction, lightN);
@@ -100,12 +106,14 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         return;
     }
 
-    Material mat = optixpt::evaluateMaps(scene, scene.materials[si.materialIndex], si.uv, si.ns);
+    Material matSrc = scene.materials[si.materialIndex];
+    if (path.lightPath) matSrc = gpuMaterialForCausticTransport(scene, si.materialIndex);
+    Material mat = optixpt::evaluateMaps(scene, matSrc, si.uv, si.ns);
     if (mat.transmission <= 0.0f && mat.doubleSided && dot(si.ns, -path.direction) < 0.0f) {
         si.ns = -si.ns;
         si.ng = -si.ng;
     }
-    if (mat.emissionStrength > 0.0f && !isBlack(mat.emissionColor)) {
+    if (mat.emissionStrength > 0.0f && !isBlack(mat.emissionColor) && !path.lightPath) {
         const bool frontFacing = dot(si.ns, -path.direction) > 0.0f;
         if (frontFacing || mat.doubleSided)
             addPathEmissionRgb(path, mat.emissionColor * mat.emissionStrength, 1.0f, 0.0f);
@@ -117,16 +125,17 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         return;
     }
 
+    const Vec3 wo = -path.direction;
+    const Frame frame(si.ns);
+    if (path.lightPath) tryEnqueueCausticSplat(pixel, path, shadow, si, mat, frame, wo);
+
     const int maxDepth = srMax(1, scene.settings.maxDepth);
     if (path.depth >= maxDepth) {
         terminatePath(pixel, path);
         return;
     }
 
-    const Vec3 wo = -path.direction;
-    const Frame frame(si.ns);
-
-    if (scene.lightCount > 0) {
+    if (!path.lightPath && scene.lightCount > 0) {
         float selectPdf = 0.0f;
         const int lightIndex = sampleLightIndex(scene, si.p, path.rng.nextFloat(), selectPdf);
         LightSample ls;
@@ -183,8 +192,12 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     rgbBs.specular = bs.specular;
     rgbBs.transmitted = bs.transmitted;
     const optixpt::LobeWeights lw = optixpt::computeLobes(mat, frame.toLocal(wo));
-    if (shouldTerminateSecondaryGpu(rgbBs, lw) && !specSecondaryTerminated(path.pdf, path.nLambda))
+    if (shouldTerminateSecondaryGpu(rgbBs, lw, mat) && !specSecondaryTerminated(path.pdf, path.nLambda))
         specTerminateSecondary(path.pdf, path.nLambda);
+    if (path.lightPath) {
+        const bool nearSpec = rgbBs.specular || lw.delta || optixpt::isNearSpecularLobe(lw);
+        if (nearSpec && materialContributesCaustics(mat)) path.specPrefix = 1;
+    }
     if (bs.transmitted && volInst.mediumIndex >= 0) {
         const MediumData* med = getMedium(scene, volInst.mediumIndex);
         if (med && med->type == 1) {

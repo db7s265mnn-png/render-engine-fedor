@@ -13,6 +13,7 @@ __device__ inline void shadeVolumePixel(int pixel) {
     GpuHit& hit = params.hits[pixel];
     GpuShadow& shadow = params.shadows[pixel];
     shadow.queue = kShadowIdle;
+    shadow.splatPixel = -1;
 
     const MediumData* med = getMedium(scene, path.mediumIndex);
     if (!med) {
@@ -48,9 +49,9 @@ __device__ inline void shadeVolumePixel(int pixel) {
     if (ms.scattered) {
         const Vec3 p = path.origin + path.direction * ms.t;
         const Vec3 wo = -path.direction;
-        if (!isBlack(med->emission))
+        if (!isBlack(med->emission) && !path.lightPath)
             addPathEmissionRgb(path, med->emission, 1.0f, 0.0f);
-        if (scene.lightCount > 0) {
+        if (!path.lightPath && scene.lightCount > 0) {
             float selectPdf = 0.0f;
             const int lightIndex = sampleLightIndex(scene, p, path.rng.nextFloat(), selectPdf);
             LightSample ls;

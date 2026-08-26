@@ -63,6 +63,9 @@ struct GpuPath {
     int mediumIndex = -1;
     int volumeScatters = 0;
     int localSample = 0;  // 0 .. batchSamples-1 when regenerating into the next spp
+    int lightPath = 0;    // 1 = Iray-style caustic light trace (not camera PT)
+    int specPrefix = 0;   // 1 = light prefix went through contributing near-spec / delta
+    int lightIndex = -1;  // SampleLe emitter for this light path
     // AoS: shade kernels touch many fields of one path. Iray's SoA win was in a
     // separate logic kernel that streamed one member across 1M slots — not here.
     // Packed flags would misalign the 4λ arrays; leave ints.
@@ -78,6 +81,7 @@ struct GpuShadow {
     int occluded = 0;
     int volumeTr = 0;     // 1 = multiply by GPU volume / homogeneous transmittance
     int mediumIndex = -1;  // current path medium for homogeneous Beer–Lambert on the shadow ray
+    int splatPixel = -1;  // >=0: unoccluded contrib atomicAdds RGB to that film pixel (no .w)
 };
 
 }  // namespace sol

@@ -10,6 +10,11 @@ __device__ inline void shadeBackgroundPixel(int pixel) {
     const SceneView& scene = params.scene;
     const bool primary = path.depth == 0;
 
+    if (path.lightPath) {
+        terminatePath(pixel, path);
+        return;
+    }
+
     if (scene.domeLightIndex >= 0 && scene.lights) {
         const LightData& dome = scene.lights[scene.domeLightIndex];
         const bool hidePrimary = primary && (!scene.settings.envVisibleCamera || !dome.visibleCamera);

@@ -2,6 +2,7 @@
 // code and the device programs.
 #pragma once
 
+#include "render/camera_proj.h"
 #include "render/optix/path_state.h"
 #include "render/spectrum_device.h"
 #include "scene/types.h"
@@ -73,6 +74,11 @@ struct alignas(16) LaunchParams {
     unsigned int frameSeed = 0;
 
     GpuSpectralTables spec{};
+
+    CameraProj camProj{};
+    // 1 / (light paths this wavefront). CPU BDPT divides the splat plane by W×H.
+    // 0 disables GPU light-trace splats.
+    float splatInvLightPaths = 0.0f;
 
     unsigned long long traversable = 0;  // OptixTraversableHandle
 };

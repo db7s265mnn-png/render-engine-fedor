@@ -35,6 +35,7 @@
 #include "nodes/node_registry.h"
 #include "nodes/parameter.h"
 #include "nodes/stage.h"
+#include "render/camera_proj.h"
 #include "render/cpu/polynomial_optics.h"
 #include "render/film_tile.h"
 #include "render/framebuffer.h"
@@ -2019,6 +2020,24 @@ void testBdptDistantSunCaustics() {
     check(peakOn > peakPt * 1.15, "BDPT distant caustic is hotter than Path Tracer");
     std::printf("  bdptOn sum=%.1f peak=%.3f | bdptOff sum=%.1f peak=%.3f | ptOn sum=%.1f peak=%.3f\n",
                 sumOn, peakOn, sumOff, peakOff, sumPt, peakPt);
+}
+
+void testCameraProjShared() {
+    std::printf("camera-proj-shared\n");
+    SceneView scene;
+    scene.settings.resolutionX = 200;
+    scene.settings.resolutionY = 100;
+    scene.camera.focalLength = 50.0f;
+    scene.camera.sensorWidth = 36.0f;
+    const CameraProj proj = buildCameraProj(scene);
+    check(proj.valid, "camera proj valid");
+    float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
+    check(projectToPixel(proj, Vec3(0.0f, 0.0f, -2.0f), px, py, cosTheta, dist2),
+          "point on optical axis projects");
+    check(std::fabs(px - 100.0f) < 1.0f && std::fabs(py - 50.0f) < 1.0f, "axis maps to raster center");
+    check(cameraPdfOmega(proj, cosTheta) > 0.0f, "camera pdf omega");
+    check(!projectToPixel(proj, Vec3(0.0f, 0.0f, 2.0f), px, py, cosTheta, dist2),
+          "behind camera rejected");
 }
 
 // Camera looks straight down through a glass sphere at the floor. Light-tracing
@@ -7183,6 +7202,7 @@ int main() {
     testRender();
     testCausticsGlassSphere();
     testBdptDistantSunCaustics();
+    testCameraProjShared();
     testBdptCausticThroughRefraction();
     testPhotonCaustics();
     testRoughGlassCaustics();
