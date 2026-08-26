@@ -307,6 +307,17 @@ inline void terminateSecondaryIfSpectralEta(const Material& mat, SampledWaveleng
     if (dielectricEtaVaries(mat) && !waves.secondaryTerminated()) waves.terminateSecondary();
 }
 
+// BDPT records a vertex on arrival, then may TerminateSecondary for the
+// continuation bounce (pbrt PathIntegrator). Light-trace splats and
+// connections at that vertex must use the arrival snapshot — not the mutated
+// walk state — or Abbe-0 SDS caustics become 1λ CMF sparkles.
+// If either subpath already terminated (an earlier non-specular bounce),
+// the complete path uses those terminated pdfs.
+inline SampledWavelengths bdptConnectWavelengths(const SampledWavelengths& eye,
+                                                 const SampledWavelengths& light) {
+    return eye.secondaryTerminated() ? eye : light;
+}
+
 struct BsdfSampleSpectral {
     SampledSpectrum weight{};
     Vec3 wi{0.0f};

@@ -4669,6 +4669,33 @@ void testSpectralHeroBasics() {
             diffuse.baseColor = Vec3(0.8f);
             check(shouldTerminateSecondaryWavelengths(bsDiff, computeLobes(diffuse)),
                   "diffuse terminates secondary wavelengths");
+
+            // BDPT used to splat SDS with the walk's post-bounce TerminateSecondary
+            // pdfs (1λ CMF sparkles) even when Abbe is 0. Arrival snapshot stays 4λ.
+            {
+                auto chroma = [](Vec3 v) {
+                    const float m = (v.x + v.y + v.z) * (1.0f / 3.0f);
+                    return std::fabs(v.x - m) + std::fabs(v.y - m) + std::fabs(v.z - m);
+                };
+                SampledWavelengths arrival = SampledWavelengths::sampleVisible(4, 0.41f);
+                arrival.promoteHero(1);
+                SampledSpectrum white = SampledSpectrum::constant(arrival.n, 1.0f);
+                const Vec3 rgb4 = spectrumToRgb(white, arrival, aces);
+                SampledWavelengths continued = arrival;
+                continued.terminateSecondary();
+                const Vec3 rgb1 = spectrumToRgb(white, continued, aces);
+                check(!arrival.secondaryTerminated(),
+                      "arrival snapshot stays 4λ after copy-terminate");
+                check(continued.secondaryTerminated(), "continuation terminate is 1λ");
+                check(chroma(rgb1) > chroma(rgb4) + 0.15f,
+                      "1λ ToXYZ is more chromatic than 4λ equal-energy");
+                check(!bdptConnectWavelengths(arrival, arrival).secondaryTerminated(),
+                      "two live subpaths stay 4λ");
+                check(bdptConnectWavelengths(continued, arrival).secondaryTerminated(),
+                      "earlier diffuse bounce terminates the full path");
+                check(chroma(rgb4) < chroma(rgb1) * 0.55f,
+                      "Abbe-0 SDS splat uses arrival 4λ, not CMF sparkle");
+            }
         }
     }
 
