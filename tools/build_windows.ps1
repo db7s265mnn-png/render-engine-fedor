@@ -970,10 +970,24 @@ if (-not (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_OPTIX 1' -Quiet)) {
 }
 Info 'OptiX is compiled into this build (SOLSTICE_HAVE_OPTIX 1).'
 if ($script:FullBuild) {
-    if (-not (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_MATERIALX 1' -Quiet)) {
-        Fail 'MaterialX did not enable (SOLSTICE_HAVE_MATERIALX != 1). FULL requires Material Network. See MaterialX/git clone in the cmake log.'
+    # FULL must not ship an exe that silently dropped a feature (MaterialX
+    # was lost that way). OpenSubdiv stays off on Windows (MSVC climits).
+    $required = @(
+        @('SOLSTICE_HAVE_MATERIALX 1', 'MaterialX'),
+        @('SOLSTICE_HAVE_OPENPGL 1', 'OpenPGL'),
+        @('SOLSTICE_HAVE_TINYUSDZ 1', 'TinyUSDZ'),
+        @('SOLSTICE_HAVE_ALEMBIC 1', 'Alembic'),
+        @('SOLSTICE_HAVE_OPENEXR 1', 'OpenEXR'),
+        @('SOLSTICE_HAVE_OPENVDB 1', 'OpenVDB'),
+        @('SOLSTICE_HAVE_TIFF 1', 'libtiff'),
+        @('SOLSTICE_HAVE_OCIO 1', 'OpenColorIO')
+    )
+    foreach ($req in $required) {
+        if (-not (Select-String -Path $Cfg -Pattern $req[0] -Quiet)) {
+            Fail ($req[1] + ' did not enable (' + $req[0] + ' missing). FULL requires it — not a skip. See the cmake log.')
+        }
+        Info ($req[1] + ' is compiled into this build.')
     }
-    Info 'MaterialX is compiled into this build (SOLSTICE_HAVE_MATERIALX 1).'
 }
 
 function Find-RenderExe([string]$Dir) {
