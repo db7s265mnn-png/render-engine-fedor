@@ -1921,6 +1921,106 @@ void testCausticsGlassSphere() {
                 sumPointBdpt, pointRatio);
 }
 
+// pbrt SampleLe: BDPT must start light subpaths from distant lights so a sun
+// caustic under glass exists. Path Tracer + pbrt engine cannot find that SDS/LDS
+// family; the hot spot is the light-tracing splat.
+void testBdptDistantSunCaustics() {
+    std::printf("bdpt-distant-sun-caustics\n");
+
+    auto buildScene = [](int integrator, int caustics) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+        floor->validate();
+        const int floorMesh = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.75f);
+        floorMat.roughness = 0.9f;
+        floorMat.specular = 0.0f;
+        const int floorIdx = scene->addMaterial(floorMat);
+        InstanceData floorInst;
+        floorInst.meshIndex = floorMesh;
+        floorInst.materialIndex = floorIdx;
+        scene->instances.push_back(floorInst);
+
+        MeshPtr ball = makeSphereMesh(0.7f, 48, 24);
+        const int ballMesh = scene->addMesh(ball);
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.roughness = 0.0f;
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.specular = 1.0f;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData ballInst;
+        ballInst.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+        ballInst.meshIndex = ballMesh;
+        ballInst.materialIndex = glassIdx;
+        scene->instances.push_back(ballInst);
+
+        LightData sun;
+        sun.type = kLightDistant;
+        sun.intensity = 8.0f;
+        sun.angle = 0.53f;
+        sun.normalize = 1;
+        sun.visibleCamera = 0;
+        sun.xform = Mat4::rotateX(-90.0f);  // +Z → +Y, so NEE wi points at the sun
+        sun.xformInv = inverse(sun.xform);
+        scene->lights.push_back(sun);
+
+        scene->settings.resolutionX = 72;
+        scene->settings.resolutionY = 54;
+        scene->settings.samplesPerPixel = 48;
+        scene->settings.maxDepth = 8;
+        scene->settings.integrator = integrator;
+        scene->settings.caustics = caustics;
+        scene->settings.causticsEngine = kCausticsEnginePbrt;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto stats = [&](int integrator, int caustics, bool& finiteOut, double& peakOut) -> double {
+        RenderSession session;
+        session.setScene(buildScene(integrator, caustics));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        peakOut = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                const double yLum = double(luminance(c));
+                sum += yLum;
+                if (yLum > peakOut) peakOut = yLum;
+            }
+        return sum;
+    };
+
+    bool finOn = true, finOff = true, finPt = true;
+    double peakOn = 0.0, peakOff = 0.0, peakPt = 0.0;
+    const double sumOn = stats(kIntegratorBdpt, 1, finOn, peakOn);
+    const double sumOff = stats(kIntegratorBdpt, 0, finOff, peakOff);
+    const double sumPt = stats(kIntegratorPathTracer, 1, finPt, peakPt);
+    check(finOn && finOff && finPt, "distant-sun caustics renders are finite");
+    check(sumOn > 0.0 && sumOff > 0.0, "distant-sun renders produce light");
+    check(peakOn > peakOff * 1.25, "BDPT SampleLe distant light makes a caustic hot spot");
+    check(peakOn > peakPt * 1.15, "BDPT distant caustic is hotter than Path Tracer");
+    std::printf("  bdptOn sum=%.1f peak=%.3f | bdptOff sum=%.1f peak=%.3f | ptOn sum=%.1f peak=%.3f\n",
+                sumOn, peakOn, sumOff, peakOff, sumPt, peakPt);
+}
+
 // Camera looks straight down through a glass sphere at the floor. Light-tracing
 // splats cannot reach those pixels (floor→camera occluded by glass). BDPT must
 // upgrade s=1 to MNEE after the specular eye prefix so caustic energy under the
@@ -7082,6 +7182,7 @@ int main() {
     testAcesTextureConvert();
     testRender();
     testCausticsGlassSphere();
+    testBdptDistantSunCaustics();
     testBdptCausticThroughRefraction();
     testPhotonCaustics();
     testRoughGlassCaustics();

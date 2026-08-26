@@ -403,13 +403,14 @@ inline Vec3 traceRadianceBdptSpectral(
                 lightBeta[0] = upsampleEmission(light[0].beta, waves, filmCs);
             }
             light[0].beta = spectrumToRgb(lightBeta[0], waves, filmCs);
-            lightOriginDelta =
-                light[0].lightIndex >= 0 && scene.lights[light[0].lightIndex].type == kLightPoint;
+            lightOriginDelta = lightOriginIsDelta(scene, light[0]);
             spectral_bdpt::WalkConfig cfg;
             cfg.colorSpace = &filmCs;
-            const Vec3 o = offsetRayOrigin(light[0].p, light[0].ng, emitDir);
+            const bool inf = lightIsInfinite(scene.lights[light[0].lightIndex]);
+            const Vec3 o = inf ? light[0].p : offsetRayOrigin(light[0].p, light[0].ng, emitDir);
             nLight = spectral_bdpt::randomWalk(scene, tracer, rng, light, lightBeta, nLight, o,
                                                emitDir, pdfDirSa, maxVerts, cfg, waves, heroIdx);
+            correctInfiniteLightSubpathPdfs(scene, light, nLight, emitDir);
         }
     }
 

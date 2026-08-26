@@ -452,7 +452,8 @@ enum IntegratorMode : int {
 // Menu order: Path/BDPT (pbrt), MNEE, MNEE+Photon, Photon / VCM.
 enum CausticsEngine : int {
     // pbrt-v4: unidirectional PT + NEE (BSDF caustics) and BDPT Veach MIS with
-    // t=1 light-tracing splats. No MNEE, no photon map.
+    // t=1 light-tracing splats (finite lights and distant/env via SampleLe).
+    // No MNEE, no photon map.
     kCausticsEnginePbrt = 0,
     // Manifold next-event (PT) / BDPT LT+MNEE — best for near-delta glass.
     kCausticsEngineMnee = 1,

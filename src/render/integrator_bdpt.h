@@ -8,10 +8,11 @@
 // vertex, NEE-like — upgraded to MNEE when the eye arrived through glass and
 // the shadow hits a delta dielectric, so caustics under refractive objects
 // are visible through refraction), s >= 2 (surface↔surface connections),
-// all t >= 2. Dome / distant lights contribute via s ∈ {0,1} with the power
-// heuristic (no light subpath from them). Optional OpenPGL guiding mixes into
-// eye-path BSDF sampling; the mixture pdf is the true forward pdf so MIS stays
-// valid.
+// all t >= 2. Dome / distant lights start light subpaths via pbrt SampleLe
+// (disk on the scene bounding sphere) so t=1 can carry sun/env caustics;
+// s∈{0,1} still handles eye-path env/sun NEE. Optional OpenPGL guiding mixes
+// into eye-path BSDF sampling; the mixture pdf is the true forward pdf so MIS
+// stays valid.
 #pragma once
 
 #include "core/rng.h"
@@ -235,17 +236,114 @@ SR_INL float cameraPdfOmega(const CameraProj& proj, float cosTheta) {
 // Subpath generation
 // --------------------------------------------------------------------------
 
-// Start a light subpath: position + emission direction on a finite light.
+// pbrt InfiniteLightDensity: Σ PDF_Li(-ray.d) · PMF over infinite lights.
+SR_INL float infiniteLightDensity(const SceneView& scene, Vec3 emitDir) {
+    const float len2 = lengthSquared(emitDir);
+    if (len2 < 1e-20f) return 0.0f;
+    const Vec3 wi = emitDir * (-1.0f / sqrtf(len2));  // from the scene toward the env/sun
+    float pdf = 0.0f;
+    for (int i = 0; i < scene.lightCount; ++i) {
+        if (!lightIsInfinite(scene.lights[i])) continue;
+        const float sel = lightSelectionPdfIndex(scene, i);
+        if (sel <= 0.0f) continue;
+        pdf += lightPdfDirection(scene, i, Vec3(0.0f), wi, Vec3(0.0f), wi) * sel;
+    }
+    return pdf;
+}
+
+SR_INL bool lightOriginIsDelta(const SceneView& scene, const Vert& v0) {
+    if (v0.lightIndex < 0 || v0.lightIndex >= scene.lightCount) return false;
+    const LightData& l = scene.lights[v0.lightIndex];
+    if (l.type == kLightPoint) return true;
+    if (l.type != kLightDistant) return false;
+    return radians(srMax(0.0f, l.angle)) * 0.5f < kDistantDeltaHalfRad;
+}
+
+// pbrt GenerateLightSubpath: after the walk, infinite path[0] pdfFwd is the
+// direction density and path[1] pdfFwd is the disk area density (× |cos|).
+SR_INL void correctInfiniteLightSubpathPdfs(const SceneView& scene, Vert* light, int nLight,
+                                            Vec3 emitDir) {
+    if (nLight < 1 || light[0].type != VType::Light || light[0].lightIndex < 0) return;
+    if (!lightIsInfinite(scene.lights[light[0].lightIndex])) return;
+    const float r = sceneRadius(scene);
+    const float pdfPos = 1.0f / (kPi * r * r);
+    if (nLight >= 2) {
+        light[1].pdfFwd = pdfPos;
+        if (!light[1].mediumScatter) light[1].pdfFwd *= fabsf(dot(emitDir, light[1].ng));
+    }
+    const float dens = infiniteLightDensity(scene, emitDir);
+    if (dens > 0.0f) light[0].pdfFwd = dens;
+}
+
+// Start a light subpath (pbrt SampleLe). Finite lights emit from their surface;
+// distant / dome emit from a disk on the scene bounding sphere.
 SR_INL bool startLightPath(const SceneView& scene, Rng& rng, Vert& v0, Vec3& emitDir, float& pdfDirSa) {
     float selectPdf = 0.0f;
     const int li = sampleLightIndex(scene, rng.nextFloat(), selectPdf);
     if (li < 0 || selectPdf <= 0.0f) return false;
     const LightData& l = scene.lights[li];
-    if (!lightIsFinite(l)) return false;  // env / distant handled by s∈{0,1}
 
     v0 = Vert{};
     v0.type = VType::Light;
     v0.lightIndex = li;
+
+    if (l.type == kLightDistant || l.type == kLightDome) {
+        const float r = sceneRadius(scene);
+        const float pdfPos = 1.0f / (kPi * r * r);
+        const Vec3 center = scene.worldBounds.valid() ? scene.worldBounds.center() : Vec3(0.0f);
+        if (l.type == kLightDistant) {
+            const Vec3 axis = normalize(lightAxisZ(l));
+            if (lengthSquared(axis) < 1e-12f) return false;
+            const float halfAngle = radians(srMax(0.0f, l.angle)) * 0.5f;
+            const bool deltaDir = halfAngle < kDistantDeltaHalfRad;
+            if (deltaDir) {
+                emitDir = -axis;
+                pdfDirSa = 1.0f;
+            } else {
+                const float cosThetaMax = cosf(halfAngle);
+                const float omega = kTwoPi * (1.0f - cosThetaMax);
+                if (omega <= 1e-20f) return false;
+                const Frame frame(axis);
+                emitDir = -normalize(frame.toWorld(sampleUniformCone(rng.nextFloat(), rng.nextFloat(),
+                                                                    cosThetaMax)));
+                pdfDirSa = 1.0f / omega;
+            }
+            const Frame wFrame(axis);
+            const Vec2 cd = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
+            const Vec3 pDisk = center + wFrame.toWorld(Vec3(cd.x, cd.y, 0.0f)) * r;
+            v0.p = pDisk + axis * r;
+            v0.ng = v0.ns = -emitDir;
+            v0.pdfFwd = selectPdf * pdfPos;
+            v0.connectable = false;
+            const Vec3 Le = deltaDir ? l.emittedRadiance() : lightRadiance(l);
+            if (isBlack(Le) || v0.pdfFwd <= 0.0f || pdfDirSa <= 0.0f) return false;
+            v0.beta = Le / srMax(1e-12f, v0.pdfFwd * pdfDirSa);
+            return true;
+        }
+        float pdfDir = 0.0f;
+        Vec3 wiLocal;
+        if (l.envIndex >= 0 && l.envIndex < scene.envMapCount && scene.envMaps[l.envIndex].sampled()) {
+            wiLocal = envSample(scene.envMaps[l.envIndex], rng.nextFloat(), rng.nextFloat(), pdfDir);
+        } else {
+            wiLocal = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
+            pdfDir = kInv4Pi;
+        }
+        if (pdfDir <= 0.0f) return false;
+        const Vec3 wi = normalize(transformVector(l.xform, wiLocal));
+        emitDir = -wi;
+        pdfDirSa = pdfDir;
+        const Frame wFrame(wi);
+        const Vec2 cd = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
+        const Vec3 pDisk = center + wFrame.toWorld(Vec3(cd.x, cd.y, 0.0f)) * r;
+        v0.p = pDisk + wi * r;
+        v0.ng = v0.ns = -emitDir;
+        v0.pdfFwd = selectPdf * pdfPos;
+        v0.connectable = false;
+        const Vec3 Le = domeRadiance(scene, l, wi, /*nearestTexel=*/true);
+        if (isBlack(Le) || v0.pdfFwd <= 0.0f) return false;
+        v0.beta = Le / srMax(1e-12f, v0.pdfFwd * pdfDirSa);
+        return true;
+    }
 
     if (l.type == kLightPoint) {
         v0.p = lightOrigin(l);
@@ -699,7 +797,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
     Vert eye[kMaxVerts];
     Vert light[kMaxVerts];
 
-    // ---- Light subpath (finite lights only) ----
+    // ---- Light subpath (finite lights + pbrt SampleLe for distant/dome) ----
     int nLight = 0;
     bool lightOriginDelta = false;
     if (scene.lightCount > 0) {
@@ -707,13 +805,14 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         float pdfDirSa = 0.0f;
         if (startLightPath(scene, rng, light[0], emitDir, pdfDirSa)) {
             nLight = 1;
-            lightOriginDelta =
-                light[0].lightIndex >= 0 && scene.lights[light[0].lightIndex].type == kLightPoint;
+            lightOriginDelta = lightOriginIsDelta(scene, light[0]);
             WalkConfig cfg;
             cfg.eyePath = false;
             cfg.dispersion = dispersion;
-            const Vec3 o = offsetRayOrigin(light[0].p, light[0].ng, emitDir);
+            const bool inf = lightIsInfinite(scene.lights[light[0].lightIndex]);
+            const Vec3 o = inf ? light[0].p : offsetRayOrigin(light[0].p, light[0].ng, emitDir);
             nLight = randomWalk(scene, tracer, rng, light, nLight, o, emitDir, pdfDirSa, maxVerts, cfg);
+            correctInfiniteLightSubpathPdfs(scene, light, nLight, emitDir);
         }
     }
 
