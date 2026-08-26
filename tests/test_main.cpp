@@ -4697,11 +4697,6 @@ void testSpectralHeroBasics() {
                       "earlier diffuse bounce terminates the full path");
                 check(chroma(rgb4) < chroma(rgb1) * 0.55f,
                       "Abbe-0 SDS splat uses arrival 4λ, not CMF sparkle");
-                SampledSpectrum nee = rgbToSpectrumEmission(Vec3(1.0f), arrival, aces);
-                const Vec3 nee4 = spectrumToRgb(nee, arrival, aces);
-                const Vec3 nee1 = spectrumToRgb(nee, continued, aces);
-                check(chroma(nee1) > chroma(nee4) + 0.1f,
-                      "PT ToXYZ after TerminateSecondary pink-shifts first-hit NEE");
             }
         }
     }

@@ -17,7 +17,6 @@ __device__ inline void spawnCameraPath(int pixel, int x, int y, int sampleOffset
     GpuShadow& shadow = params.shadows[pixel];
 
     path.sampleRgb = Vec3(0.0f);
-    path.filmRgb = Vec3(0.0f);
     path.nLambda = 0;
     path.filmOpen = 0;
     specZero(path.radianceS, kMaxSpectrumSamples);
@@ -91,7 +90,6 @@ __device__ inline bool spawnLightPath(int pixel, int x, int y, int sampleOffset)
     GpuShadow& shadow = params.shadows[pixel];
 
     path.sampleRgb = Vec3(0.0f);
-    path.filmRgb = Vec3(0.0f);
     path.nLambda = 0;
     path.filmOpen = 0;
     specZero(path.radianceS, kMaxSpectrumSamples);

@@ -16,7 +16,7 @@ __device__ inline bool shadeShadowPixel(int pixel) {
         if (shadow.splatPixel >= 0)
             addSplatRadiance(shadow.splatPixel, contrib);
         else
-            path.filmRgb += contrib;
+            addPathLinearRgb(path, contrib, 1.0f, 0.0f);
     }
     shadow.queue = kShadowIdle;
     shadow.splatPixel = -1;

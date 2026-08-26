@@ -66,8 +66,7 @@ __device__ inline void shadeVolumePixel(int pixel) {
                 if (scene.lights[lightIndex].shadowEnable) {
                     float tSh = 1.0e8f;
                     if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
-                    enqueueShadow(shadow, p, ls.wi, tSh, bakePathLinearRgb(path, contrib, 1.0f, 0.0f),
-                                  path.mediumIndex);
+                    enqueueShadow(shadow, p, ls.wi, tSh, contrib, path.mediumIndex);
                 } else {
                     addPathLinearRgb(path, contrib, 1.0f, 0.0f);
                 }
