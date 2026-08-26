@@ -1,6 +1,7 @@
 // Cycles analogue: integrator_shade_surface.
 // No optixTrace — NEE writes a shadow ray for intersect_shadow.
 // Opaque BSDF weights: pbrt RGBAlbedoSpectrum (CPU liftBsdfWeight). Dielectric stays 1/η².
+// NEE bakes throughput at the vertex (pbrt SampleLd) before the BSDF/RR step.
 // Light-trace is SDS-only: first connectable after a spec prefix, then stop.
 // While LT is on, camera PT skips the SDS suffix so the two don't double-count.
 #include "render/lights.h"
@@ -82,11 +83,17 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             terminatePath(pixel, path);
             return;
         }
-        if (params.splatInvLightPaths > 0.0f && path.causticSuffix) {
+        const bool suppressCausticLight =
+            scene.settings.caustics == 0 && path.causticSuffix;
+        if ((params.splatInvLightPaths > 0.0f && path.causticSuffix) || suppressCausticLight) {
             terminatePath(pixel, path);
             return;
         }
         const LightData& light = scene.lights[si.lightIndex];
+        if (path.causticSuffix && !lightContributesCaustics(light)) {
+            terminatePath(pixel, path);
+            return;
+        }
         const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
         Vec3 emitted = areaLightEmission(scene, light, path.direction, lightN);
         if (!isBlack(emitted)) {
@@ -100,9 +107,9 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             float Le[kMaxSpectrumSamples];
             specLightEmission(light, path, Le);
             const float rgbScale = length(emitted) / srMax(1e-6f, length(light.emittedRadiance()));
-            const float clampV =
-                (path.depth > 0 && !path.specularBounce) ? scene.settings.clampDirect : 0.0f;
-            addPathRadianceS(path, Le, weight * rgbScale, clampV);
+            addPathRadianceS(path, Le, weight * rgbScale,
+                             pathContributionClamp(scene.settings, path.depth, path.specularBounce != 0,
+                                                    path.causticSuffix != 0));
         }
         terminatePath(pixel, path);
         return;
@@ -150,9 +157,12 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         return;
     }
 
+    const bool suppressCausticLight =
+        !path.lightPath && scene.settings.caustics == 0 && path.causticSuffix;
     const bool skipCameraSds =
         !path.lightPath && params.splatInvLightPaths > 0.0f && path.causticSuffix;
-    if (!path.lightPath && !skipCameraSds && scene.lightCount > 0) {
+    if (!path.lightPath && !skipCameraSds && !(suppressCausticLight && !path.specularBounce) &&
+        scene.lightCount > 0) {
         float selectPdf = 0.0f;
         const int lightIndex = sampleLightIndex(scene, si.p, path.rng.nextFloat(), selectPdf);
         LightSample ls;
@@ -170,17 +180,14 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                 float neeS[kMaxSpectrumSamples];
                 evalSurfaceNeeSpectral(scene.lights[lightIndex], ls.radiance, mat, woLocal, wiLocal,
                                        scale, path, mat.ior, neeS);
-                if (path.depth > 0 && !path.specularBounce)
-                    specClampIndirect(neeS, path.nLambda, scene.settings.clampDirect);
-                if (scene.lights[lightIndex].shadowEnable) {
-                    const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
-                    float tMax = 1.0e8f;
-                    if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-                    enqueueShadowS(shadow, shadowOrigin, ls.wi, tMax, neeS, path.nLambda,
-                                   path.mediumIndex);
-                } else {
-                    addPathRadianceS(path, neeS, 1.0f, 0.0f);
-                }
+                const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
+                float tMax = 1.0e8f;
+                if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
+                enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS,
+                                       path.mediumIndex, scene.lights[lightIndex].shadowEnable,
+                                       pathContributionClamp(scene.settings, path.depth,
+                                                             path.specularBounce != 0,
+                                                             path.causticSuffix != 0));
             }
         }
     }

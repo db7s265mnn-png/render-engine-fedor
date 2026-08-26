@@ -1,7 +1,7 @@
 // Path Tracer — hero-wavelength unidirectional path tracer (CPU / Embree).
 // pbrt-v4 PathIntegrator: textures filter in RGB; albedo → RGBAlbedoSpectrum,
-// lights/env → RGBIlluminantSpectrum (Jakob × D65/D60). MC weights stay linear.
-// Film is pbrt ToXYZ → working-space RGB (including after TerminateSecondary).
+// lights/env → RGBIlluminantSpectrum (Jakob × D65/D60). NEE is SampleLd:
+// Illuminant(Le) × Albedo(f) × geom. Film is pbrt ToXYZ → working-space RGB.
 #pragma once
 
 #include <algorithm>
@@ -18,10 +18,97 @@ namespace sol {
 // Direct Clamp. Primary hits (depth 0) stay unclamped, matching pbrt.
 inline SampledSpectrum clampPathContribution(SampledSpectrum contrib, const RenderSettingsData& settings,
                                              int depth, bool specularBounce, bool causticSuffix) {
-    if (depth <= 0) return contrib;
-    if (specularBounce || causticSuffix)
-        return clampSpectrumIndirect(contrib, causticFireflyCap(settings));
-    return clampSpectrumIndirect(contrib, settings.clampDirect);
+    return clampSpectrumIndirect(contrib, pathContributionClamp(settings, depth, specularBounce,
+                                                               causticSuffix));
+}
+
+// pbrt SampleLd: RGB light sample + MIS pdf, then Illuminant(Le) × Albedo(f) × geom
+// (not RGBIlluminantSpectrum of the RGB product). Matches OptiX evalSurfaceNeeSpectral.
+template <typename Tracer>
+inline SampledSpectrum nextEventEstimationSpectralOnce(const SceneView& scene, const Tracer& tracer,
+                                                       const SurfaceInteraction& si, const Material& mat,
+                                                       const Frame& frame, Vec3 wo, Rng& rng,
+                                                       const SampledWavelengths& waves,
+                                                       const RGBColorSpace& cs, int mediumIndex) {
+    SampledSpectrum result = SampledSpectrum::zero(waves.n);
+    if (scene.lightCount <= 0) return result;
+
+    const Vec3 woLocal = frame.toLocal(wo);
+    float selectPdf = 0.0f;
+    const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
+    if (lightIndex < 0 || selectPdf <= 0.0f) return result;
+    LightSample ls;
+    if (!sampleLight(scene, lightIndex, si.p, rng.nextFloat(), rng.nextFloat(), ls)) return result;
+    if (ls.pdf <= 0.0f || isBlack(ls.radiance)) return result;
+    if (!shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) return result;
+    const Vec3 wiLocal = frame.toLocal(ls.wi);
+    const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
+    if (be.pdf <= 0.0f || isBlack(be.f)) return result;
+
+    const float lightPdf = ls.pdf * selectPdf;
+    float visibility = 1.0f;
+    Vec3 shadowOrigin = si.p;
+    float tMax = 1.0e8f;
+    if (scene.lights[lightIndex].shadowEnable) {
+        shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
+        if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
+        visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax);
+        if (visibility <= 1e-5f) return result;
+    }
+
+    const float misWeight = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
+    const float geom = fabsf(wiLocal.z) * visibility * misWeight / lightPdf;
+    const SampledSpectrum Le =
+        upsampleLightRadiance(ls.radiance, waves, cs, &scene.lights[lightIndex]);
+    const SampledSpectrum f = bsdfEvalSpectral(mat, si.ng, si.ns, wo, ls.wi, waves, mat.ior, cs);
+    result = Le * f * geom;
+
+    if (scene.lights[lightIndex].shadowEnable)
+        result *= rgbToSpectrumLinear(shadowTransmittanceFogVolumes(scene, shadowOrigin, ls.wi, tMax, rng),
+                                      waves);
+    if (const MediumData* med = getMedium(scene, mediumIndex)) {
+        if (med->type != 2 && ls.distance < 1.0e7f)
+            result *= rgbToSpectrumLinear(mediumShadowTr(*med, ls.distance), waves);
+    }
+    return result;
+}
+
+template <typename Tracer>
+inline SampledSpectrum nextEventEstimationVolumeSpectralOnce(const SceneView& scene, const Tracer& tracer,
+                                                             Vec3 origin, Vec3 woVol, const MediumData& med,
+                                                             Rng& rng, const SampledWavelengths& waves,
+                                                             const RGBColorSpace& cs) {
+    SampledSpectrum result = SampledSpectrum::zero(waves.n);
+    if (scene.lightCount <= 0) return result;
+
+    float selectPdf = 0.0f;
+    const int li = sampleVolumeLightIndex(scene, origin, woVol, med.g, rng.nextFloat(), selectPdf);
+    if (li < 0 || selectPdf <= 0.0f) return result;
+    LightSample ls;
+    if (!sampleLight(scene, li, origin, rng.nextFloat(), rng.nextFloat(), ls) || ls.pdf <= 0.0f ||
+        isBlack(ls.radiance))
+        return result;
+    const float cosTheta = clampf(dot(woVol, ls.wi), -1.0f, 1.0f);
+    const float phasePdfL = henyeyGreenstein(cosTheta, med.g);
+    if (phasePdfL <= 0.0f) return result;
+    const float lightPdf = ls.pdf * selectPdf;
+    float vis = 1.0f;
+    float tShadow = 1.0e8f;
+    if (scene.lights[li].shadowEnable) {
+        if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
+        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
+        if (vis <= 1e-5f) return result;
+    }
+    const float misW = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phasePdfL);
+    const float geom = phasePdfL * vis * misW / lightPdf;
+    result = upsampleLightRadiance(ls.radiance, waves, cs, &scene.lights[li]) * geom;
+
+    if (scene.lights[li].shadowEnable)
+        result *= rgbToSpectrumLinear(shadowTransmittanceFogVolumes(scene, origin, ls.wi, tShadow, rng),
+                                      waves);
+    if (med.type != 2 && ls.distance < 1.0e7f)
+        result *= rgbToSpectrumLinear(mediumShadowTr(med, ls.distance), waves);
+    return result;
 }
 
 template <typename Tracer>
@@ -85,9 +172,9 @@ public:
                         radiance += throughput * upsampleEmission(med->emission, waves, filmCs);
                     const Vec3 woVol = -direction;
                     if (scene.lightCount > 0 && depth < maxDepth) {
-                        const Vec3 volDirect =
-                            nextEventEstimationVolumeOnce(scene, tracer, origin, woVol, medWalk, rng);
-                        SampledSpectrum contrib = throughput * upsampleLightRadiance(volDirect, waves, filmCs);
+                        SampledSpectrum contrib =
+                            throughput * nextEventEstimationVolumeSpectralOnce(
+                                             scene, tracer, origin, woVol, medWalk, rng, waves, filmCs);
                         contrib = clampPathContribution(contrib, settings, depth, false, false);
                         radiance += contrib;
                     }
@@ -242,14 +329,11 @@ public:
                 const float pSpec = sssEntrySpecularProb(specMat, woLocalEntry);
 
                 if (pSpec > 0.0f && !(suppressCausticLight && !specularBounce)) {
-                    const Vec3 nee =
-                        nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, currentMedium);
-                    if (!isBlack(nee)) {
-                        SampledSpectrum contrib = throughput * upsampleLightRadiance(nee, waves, filmCs);
-                        contrib = clampPathContribution(contrib, settings, depth, specularBounce,
-                                                        causticSuffix);
-                        radiance += contrib;
-                    }
+                    SampledSpectrum contrib =
+                        throughput * nextEventEstimationSpectralOnce(scene, tracer, si, specMat, frame,
+                                                                     wo, rng, waves, filmCs, currentMedium);
+                    contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
+                    radiance += contrib;
                 }
 
                 if (pSpec > 0.0f && rng.nextFloat() < pSpec) {
@@ -301,14 +385,12 @@ public:
                 ssSi.ng = walk.exitN;
                 const Frame ssFrame(walk.exitN);
                 if (!(suppressCausticLight && !specularBounce)) {
-                    const Vec3 nee = nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame,
-                                                         walk.exitWo, rng, currentMedium);
-                    if (!isBlack(nee)) {
-                        SampledSpectrum contrib =
-                            throughput * walk.pathWeight * upsampleLightRadiance(nee, waves, filmCs);
-                        contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
-                        radiance += contrib;
-                    }
+                    SampledSpectrum contrib =
+                        throughput * walk.pathWeight *
+                        nextEventEstimationSpectralOnce(scene, tracer, ssSi, lambert, ssFrame,
+                                                        walk.exitWo, rng, waves, filmCs, currentMedium);
+                    contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
+                    radiance += contrib;
                 }
                 const BsdfSample ssBs =
                     bsdfSampleLocal(lambert, ssFrame.toLocal(walk.exitWo), rng.nextFloat(),
@@ -330,14 +412,12 @@ public:
             }
 
             if (!(suppressCausticLight && !specularBounce)) {
-                // NEE stays RGB (glass specular contributes ~0); illuminant-upsample the aggregate.
-                const Vec3 nee =
-                    nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, currentMedium);
-                if (!isBlack(nee)) {
-                    SampledSpectrum contrib = throughput * upsampleLightRadiance(nee, waves, filmCs);
-                    contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
-                    radiance += contrib;
-                }
+                // pbrt SampleLd: Illuminant(Le) × Albedo(f) × geom at this vertex.
+                SampledSpectrum contrib =
+                    throughput * nextEventEstimationSpectralOnce(scene, tracer, si, mat, frame, wo, rng,
+                                                                 waves, filmCs, currentMedium);
+                contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
+                radiance += contrib;
             }
 
             const Vec3 woLocal = frame.toLocal(wo);

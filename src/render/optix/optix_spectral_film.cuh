@@ -17,6 +17,21 @@ __device__ inline void addPathRadianceS(GpuPath& path, const float* add, float s
     for (int i = 0; i < n; ++i) path.radianceS[i] += tmp[i];
 }
 
+// NEE already multiplied by vertex throughput. Do not use live path.throughputS
+// (shade_surface / shade_volume step the BSDF or RR before shade_shadow).
+__device__ inline void addBakedRadianceS(GpuPath& path, const float* add) {
+    const int n = path.nLambda;
+    if (!specIsFinite(add, n)) return;
+    for (int i = 0; i < n; ++i) path.radianceS[i] += add[i];
+}
+
+__device__ inline void bakeNeeAtVertexS(const GpuPath& path, const float* neeS, float clampValue,
+                                        float* out) {
+    const int n = path.nLambda;
+    for (int i = 0; i < n; ++i) out[i] = path.throughputS[i] * neeS[i];
+    specClampIndirect(out, n, clampValue);
+}
+
 __device__ inline void addPathEmissionRgb(GpuPath& path, Vec3 rgb, float scale, float clampValue) {
     if (isBlack(rgb)) return;
     float s[kMaxSpectrumSamples];
@@ -122,6 +137,18 @@ __device__ inline void enqueueShadowS(GpuShadow& shadow, Vec3 origin, Vec3 dir, 
     shadow.mediumIndex = mediumIndex;
     shadow.splatPixel = -1;
     shadow.queue = kShadowTrace;
+}
+
+__device__ inline void enqueueOrAddVertexNeeS(GpuPath& path, GpuShadow& shadow, Vec3 origin, Vec3 dir,
+                                              float tMax, const float* neeS, int mediumIndex,
+                                              int shadowEnable, float clampValue) {
+    float baked[kMaxSpectrumSamples];
+    bakeNeeAtVertexS(path, neeS, clampValue, baked);
+    if (shadowEnable) {
+        enqueueShadowS(shadow, origin, dir, tMax, baked, path.nLambda, mediumIndex);
+    } else {
+        addBakedRadianceS(path, baked);
+    }
 }
 
 }  // namespace sol
