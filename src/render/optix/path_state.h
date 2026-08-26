@@ -68,6 +68,13 @@ struct GpuPath {
     int lightIndex = -1;  // SampleLe emitter for this light path
     int sawNonSpecular = 0;  // camera PT: had a diffuse/volume bounce
     int causticSuffix = 0;   // camera PT: spec after diffuse (SDS); skip if LT is on
+    // MCMC / ERPT: stored SampleLe so mutations respawn without a new light pick.
+    Vec3 mcmcOrigin{0.0f};
+    Vec3 mcmcDir{0.0f, 0.0f, 1.0f};
+    Vec3 mcmcN{0.0f, 1.0f, 0.0f};
+    Vec3 mcmcBetaRgb{0.0f};
+    int mcmcInfinite = 0;
+    int mcmcRemain = 0;  // mutations left in this slot (not spp)
     // AoS: shade kernels touch many fields of one path. Iray's SoA win was in a
     // separate logic kernel that streamed one member across 1M slots — not here.
     // Packed flags would misalign the 4λ arrays; leave ints.

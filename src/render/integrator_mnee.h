@@ -42,11 +42,7 @@ constexpr int kSeedRing = 4;                    // ring seeds beside the straigh
 constexpr float kSeedRingRadius = 0.75f;        // fraction of the cone angle
 
 
-SR_INL bool isCausticCaster(const Material& m) {
-    if (!materialContributesCaustics(m)) return false;
-    const LobeWeights lw = computeLobes(m);
-    return lw.delta && lw.transmission > 0.25f && lw.diffuse < 1e-3f;
-}
+SR_INL bool isCausticCaster(const Material& m) { return isDeltaCausticCaster(m); }
 
 // Refract direction d (travel direction) through a surface with normal n.
 // Returns false on total internal reflection.
