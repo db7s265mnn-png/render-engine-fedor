@@ -526,18 +526,11 @@ function Find-OptiXRoot([string]$GitExe) {
     return $local
 }
 
-function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest, [switch]$AllowFail) {
-    if (Test-Path -LiteralPath $Dest) { return $true }
+function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest) {
+    if (Test-Path -LiteralPath $Dest) { return }
     New-Item -ItemType Directory -Force -Path (Split-Path $Dest -Parent) | Out-Null
     & $Git clone --depth 1 --branch $Branch $Url $Dest
-    if ($LASTEXITCODE -ne 0) {
-        if ($AllowFail) {
-            Write-Host "Warning: git clone failed (optional): $Url" -ForegroundColor Yellow
-            return $false
-        }
-        Fail "git clone failed: $Url"
-    }
-    return $true
+    if ($LASTEXITCODE -ne 0) { Fail "git clone failed: $Url" }
 }
 
 function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [switch]$AllowFail) {
@@ -833,19 +826,6 @@ function Normalize-CmakeSrc([string]$p) {
     return ($p.Trim().TrimEnd('\', '/') -replace '\\', '/').ToLowerInvariant()
 }
 
-# Leftover FetchContent stamps from a failed tarball (file:///C:/ → /C:/)
-# abort the next configure. Keep extracted *-src trees that actually built.
-foreach ($dep in @('materialx', 'openpgl', 'tinyusdz', 'libtiff', 'onetbb')) {
-    $srcList = Join-Path $BuildDir "_deps\$dep-src\CMakeLists.txt"
-    $sub = Join-Path $BuildDir "_deps\$dep-subbuild"
-    if ((Test-Path -LiteralPath $sub) -and -not (Test-Path -LiteralPath $srcList)) {
-        Info "Clearing broken $dep FetchContent tree under $BuildDir\_deps"
-        Remove-Item -LiteralPath $sub -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (Join-Path $BuildDir "_deps\$dep-src") -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (Join-Path $BuildDir "_deps\$dep-build") -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
-
 $cache = Join-Path $BuildDir 'CMakeCache.txt'
 if (Test-Path -LiteralPath $cache) {
     $stale = $false
@@ -883,14 +863,9 @@ if (Test-Path -LiteralPath $cache) {
             $staleWhy = "source moved (`n  cache: $cachedSrc`n  now:   $currentSrc)"
         }
     }
-    # CMake 4.x FetchContent file:///C:/... became /C:/... and aborted configure.
-    if (Select-String -Path $cache -Pattern 'file:///C:|openpgl-v0\.7\.1\.tgz' -Quiet) {
-        $stale = $true
-        $staleWhy = 'broken FetchContent file:// Windows URL'
-    }
     if ($stale) {
-        # Keep _deps (TinyUSDZ / OpenPGL). Wiping C:\gz-full used to force a
-        # GitHub re-download and abort FULL when github.com did not resolve.
+        # Keep _deps so MaterialX / TinyUSDZ / OpenPGL git clones are not wiped
+        # when a new GitHub zip extracts to a different folder name.
         Info "Resetting CMake cache in $BuildDir ($staleWhy). Keeping _deps."
         foreach ($n in @(
             'CMakeCache.txt', 'CMakeFiles', 'cmake_install.cmake',
@@ -917,42 +892,36 @@ $featureFlags = @(
     '-DSOLSTICE_BUILD_TOOLS=OFF'
 )
 if ($script:FullBuild) {
-    $mtlxCfg = Get-ChildItem -Path $script:DepsPrefix -Recurse -Filter 'MaterialXConfig.cmake' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    $mtlxFlag = '-DSOLSTICE_ENABLE_MATERIALX=OFF'
-    if ($mtlxCfg) {
-        $mtlxFlag = '-DSOLSTICE_ENABLE_MATERIALX=ON'
-        Info "MaterialX: $($mtlxCfg.Directory.FullName)"
-    } else {
-        Info 'MaterialX not in deps — skipping (glass / OptiX still build). Not cloning GitHub.'
+    function Ensure-GitDepSrc([string]$Url, [string]$Tag, [string]$Dest, [string]$Name) {
+        $cm = Join-Path $Dest 'CMakeLists.txt'
+        if (Test-Path -LiteralPath $cm) {
+            Info ($Name + ' source: ' + $Dest)
+            return
+        }
+        if (Test-Path -LiteralPath $Dest) {
+            Remove-Item -LiteralPath $Dest -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path $Dest -Parent) | Out-Null
+        Info ("Cloning " + $Name + " " + $Tag + " (git, not GitHub tarball — CMake 4.x 403)")
+        & $Git clone --depth 1 --branch $Tag $Url $Dest
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $cm)) {
+            Fail ("git clone " + $Name + " " + $Tag + " failed. FULL needs " + $Name + ". Check github.com.")
+        }
     }
-    function Test-GzFullSrc([string]$Name) {
-        return Test-Path -LiteralPath (Join-Path $BuildDir "_deps\$Name-src\CMakeLists.txt")
-    }
-    $pglFlag = '-DSOLSTICE_ENABLE_OPENPGL=OFF'
-    if (Test-GzFullSrc 'openpgl') {
-        $pglFlag = '-DSOLSTICE_ENABLE_OPENPGL=ON'
-        Info 'OpenPGL: using C:\gz-full\_deps\openpgl-src'
-    } else {
-        Info 'OpenPGL not in _deps — skipping (path guiding off). Not fetching GitHub.'
-    }
-    $usdFlag = '-DSOLSTICE_ENABLE_TINYUSDZ=OFF'
-    if (Test-GzFullSrc 'tinyusdz') {
-        $usdFlag = '-DSOLSTICE_ENABLE_TINYUSDZ=ON'
-        Info 'TinyUSDZ: using C:\gz-full\_deps\tinyusdz-src'
-    } else {
-        Info 'TinyUSDZ not in _deps — skipping (binary USD off). Not fetching GitHub.'
-    }
+    $depsSrc = Join-Path $BuildDir '_deps'
+    Ensure-GitDepSrc 'https://github.com/AcademySoftwareFoundation/MaterialX.git' 'v1.39.4' (Join-Path $depsSrc 'materialx-src') 'MaterialX'
+    Ensure-GitDepSrc 'https://github.com/RenderKit/openpgl.git' 'v0.7.1' (Join-Path $depsSrc 'openpgl-src') 'OpenPGL'
+    Ensure-GitDepSrc 'https://github.com/lighttransport/tinyusdz.git' 'v0.9.4' (Join-Path $depsSrc 'tinyusdz-src') 'TinyUSDZ'
     $featureFlags += @(
         '-DSOLSTICE_ENABLE_ALEMBIC=ON',
         '-DSOLSTICE_ENABLE_OPENEXR=ON',
         '-DSOLSTICE_ENABLE_TIFF=ON',
-        $mtlxFlag,
-        $pglFlag,
+        '-DSOLSTICE_ENABLE_MATERIALX=ON',
+        '-DSOLSTICE_ENABLE_OPENPGL=ON',
         '-DSOLSTICE_ENABLE_OPENSUBDIV=ON',
         '-DSOLSTICE_ENABLE_OPENVDB=ON',
         '-DSOLSTICE_ENABLE_OCIO=ON',
-        $usdFlag,
+        '-DSOLSTICE_ENABLE_TINYUSDZ=ON',
         '-DSOLSTICE_BUILD_TX_TOOLS_ALPHA=ON',
         '-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON'
     )
@@ -1000,6 +969,12 @@ if (-not (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_OPTIX 1' -Quiet)) {
     Fail 'OptiX did not enable (SOLSTICE_HAVE_OPTIX != 1). Check nvcc and OptiX_ROOT in the cmake log.'
 }
 Info 'OptiX is compiled into this build (SOLSTICE_HAVE_OPTIX 1).'
+if ($script:FullBuild) {
+    if (-not (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_MATERIALX 1' -Quiet)) {
+        Fail 'MaterialX did not enable (SOLSTICE_HAVE_MATERIALX != 1). FULL requires Material Network. See MaterialX/git clone in the cmake log.'
+    }
+    Info 'MaterialX is compiled into this build (SOLSTICE_HAVE_MATERIALX 1).'
+}
 
 function Find-RenderExe([string]$Dir) {
     $binRoot = Join-Path $Dir 'bin'

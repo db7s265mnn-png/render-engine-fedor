@@ -10,8 +10,7 @@ echo Close Grendizer_Render first or the linker cannot overwrite the exe (LNK116
 echo First full run builds OpenEXR/Alembic/OpenVDB/OCIO (cached after that).
 echo TinyUSDZ linking can sit with no new lines for a long time - wait.
 echo Keep C:\gz-full and %%LOCALAPPDATA%%\grendizer-deps
-echo Do not delete C:\gz-full (TinyUSDZ / OpenPGL live in _deps).
-echo Close Grendizer_Render first (LNK1168).
+echo Do not delete C:\gz-full (MaterialX / TinyUSDZ / OpenPGL live in _deps).
 echo.
 
 where powershell >nul 2>&1

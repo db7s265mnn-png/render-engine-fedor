@@ -232,8 +232,6 @@ if(SOLSTICE_ENABLE_OCIO)
 endif()
 
 # libtiff — Arnold/OIIO .tx textures with embedded mipmaps (SUBIFD / multi-dir TIFF).
-# Windows CMake 4.x FetchContent turns file:///C:/path into /C:/path and
-# FATAL_ERROR. Optional GitHub tarballs are Unix-only; WIN32 uses _deps src.
 set(SOLSTICE_HAVE_TIFF_01 0)
 if(SOLSTICE_ENABLE_TIFF)
     find_package(TIFF QUIET)
@@ -241,7 +239,7 @@ if(SOLSTICE_ENABLE_TIFF)
         set(SOLSTICE_HAVE_TIFF_01 1)
     else()
         include(FetchContent)
-        message(STATUS "libtiff not found — looking for bundled source")
+        message(STATUS "libtiff not found — fetching libtiff 4.6.0 for .tx mipmaps")
         set(tiff-tools OFF CACHE BOOL "" FORCE)
         set(tiff-tests OFF CACHE BOOL "" FORCE)
         set(tiff-docs OFF CACHE BOOL "" FORCE)
@@ -249,30 +247,10 @@ if(SOLSTICE_ENABLE_TIFF)
         set(tiff-install OFF CACHE BOOL "" FORCE)
         set(_solstice_saved_shared_for_tiff ${BUILD_SHARED_LIBS})
         set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-        set(_solstice_tiff_src "${CMAKE_BINARY_DIR}/_deps/libtiff-src")
-        if(EXISTS "${_solstice_tiff_src}/CMakeLists.txt")
-            add_subdirectory("${_solstice_tiff_src}" "${CMAKE_BINARY_DIR}/_deps/libtiff-build")
-        elseif(NOT WIN32)
-            set(_solstice_tiff_tgz "${CMAKE_BINARY_DIR}/_deps/libtiff-v4.6.0.tgz")
-            file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps")
-            file(DOWNLOAD
-                "https://gitlab.com/libtiff/libtiff/-/archive/v4.6.0/libtiff-v4.6.0.tar.gz"
-                "${_solstice_tiff_tgz}"
-                STATUS _solstice_tiff_dl
-                TIMEOUT 90
-                INACTIVITY_TIMEOUT 30)
-            list(GET _solstice_tiff_dl 0 _solstice_tiff_code)
-            if(_solstice_tiff_code EQUAL 0 AND EXISTS "${_solstice_tiff_tgz}")
-                FetchContent_Declare(libtiff
-                    URL "${_solstice_tiff_tgz}"
-                    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-                FetchContent_MakeAvailable(libtiff)
-            else()
-                message(WARNING "libtiff download skipped (${_solstice_tiff_dl}) — .tx mipmap loading disabled")
-            endif()
-        else()
-            message(WARNING "libtiff not in _deps — .tx mipmap loading disabled")
-        endif()
+        FetchContent_Declare(libtiff
+            URL https://gitlab.com/libtiff/libtiff/-/archive/v4.6.0/libtiff-v4.6.0.tar.gz
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(libtiff)
         set(BUILD_SHARED_LIBS ${_solstice_saved_shared_for_tiff} CACHE BOOL "" FORCE)
         if(TARGET TIFF::TIFF)
             set(SOLSTICE_HAVE_TIFF_01 1)
@@ -341,6 +319,8 @@ if(SOLSTICE_ENABLE_OPTIX)
 endif()
 
 # MaterialX (https://github.com/AcademySoftwareFoundation/MaterialX)
+# CMake 4.x FetchContent of the GitHub *tarball* returns 403 (no User-Agent).
+# CI and this tree use git clone v1.39.4, then add_subdirectory / MakeAvailable.
 set(SOLSTICE_HAVE_MATERIALX_01 0)
 set(SOLSTICE_MATERIALX_LIBRARIES "" CACHE PATH "Path to MaterialX libraries/ (stdlib, pbrlib, bxdf)")
 if(SOLSTICE_ENABLE_MATERIALX)
@@ -353,40 +333,47 @@ if(SOLSTICE_ENABLE_MATERIALX)
     endif()
     find_package(MaterialX CONFIG QUIET)
     if(NOT MaterialX_FOUND)
-        # Do not hit GitHub during configure. A missing tarball/git clone used to
-        # abort the whole Windows FULL build (CMake 4.x populate-download / DNS).
+        include(FetchContent)
+        set(MATERIALX_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_VIEWER OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GRAPH_EDITOR OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_JS OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_GLSL OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_OSL OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_MDL OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_GEN_MSL OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_BUILD_RENDER OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_INSTALL_PYTHON OFF CACHE BOOL "" FORCE)
+        set(MATERIALX_INSTALL_RESOURCES OFF CACHE BOOL "" FORCE)
         set(_solstice_mtlx_src "${CMAKE_BINARY_DIR}/_deps/materialx-src")
+        if(EXISTS "${_solstice_mtlx_src}" AND NOT EXISTS "${_solstice_mtlx_src}/CMakeLists.txt")
+            file(REMOVE_RECURSE "${_solstice_mtlx_src}")
+            file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps/materialx-subbuild")
+            file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps/materialx-build")
+        endif()
+        set(_solstice_saved_automoc ${CMAKE_AUTOMOC})
+        set(CMAKE_AUTOMOC OFF)
         if(EXISTS "${_solstice_mtlx_src}/CMakeLists.txt")
-            set(_solstice_saved_automoc ${CMAKE_AUTOMOC})
-            set(CMAKE_AUTOMOC OFF)
+            message(STATUS "MaterialX: ${_solstice_mtlx_src}")
             add_subdirectory("${_solstice_mtlx_src}" "${CMAKE_BINARY_DIR}/_deps/materialx-build")
-            set(CMAKE_AUTOMOC ${_solstice_saved_automoc})
             set(materialx_SOURCE_DIR "${_solstice_mtlx_src}")
         elseif(EXISTS "/tmp/mtlx.tgz")
-            include(FetchContent)
-            set(MATERIALX_BUILD_PYTHON OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_BUILD_VIEWER OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_BUILD_GRAPH_EDITOR OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_BUILD_JS OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_BUILD_GEN_GLSL OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_BUILD_GEN_OSL OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_BUILD_GEN_MDL OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_BUILD_GEN_MSL OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_BUILD_RENDER OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_INSTALL_PYTHON OFF CACHE BOOL "" FORCE)
-            set(MATERIALX_INSTALL_RESOURCES OFF CACHE BOOL "" FORCE)
             FetchContent_Declare(MaterialX
                 URL "file:///tmp/mtlx.tgz"
                 SOURCE_DIR "${_solstice_mtlx_src}"
                 DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-            set(_solstice_saved_automoc ${CMAKE_AUTOMOC})
-            set(CMAKE_AUTOMOC OFF)
             FetchContent_MakeAvailable(MaterialX)
-            set(CMAKE_AUTOMOC ${_solstice_saved_automoc})
         else()
-            message(WARNING "MaterialX not installed — Material Network disabled. Glass / OptiX still build.")
+            message(STATUS "MaterialX: git clone v1.39.4")
+            FetchContent_Declare(MaterialX
+                GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/MaterialX.git
+                GIT_TAG v1.39.4
+                GIT_SHALLOW TRUE
+                SOURCE_DIR "${_solstice_mtlx_src}")
+            FetchContent_MakeAvailable(MaterialX)
         endif()
+        set(CMAKE_AUTOMOC ${_solstice_saved_automoc})
         if(TARGET MaterialXCore OR TARGET MaterialX::MaterialXCore)
             set(MaterialX_FOUND TRUE)
         endif()
@@ -408,16 +395,21 @@ if(SOLSTICE_ENABLE_MATERIALX)
                 set(SOLSTICE_MATERIALX_LIBRARIES "${CMAKE_PREFIX_PATH}/libraries" CACHE PATH "" FORCE)
             endif()
         endif()
-        # Also expose libraries next to the runtime binary for shipped builds.
         if(SOLSTICE_MATERIALX_LIBRARIES AND EXISTS "${SOLSTICE_MATERIALX_LIBRARIES}")
             file(COPY "${SOLSTICE_MATERIALX_LIBRARIES}/"
                  DESTINATION "${CMAKE_BINARY_DIR}/bin/materialx/libraries")
-            # Multi-config generators (VS) put the exe under bin/Release.
             file(COPY "${SOLSTICE_MATERIALX_LIBRARIES}/"
                  DESTINATION "${CMAKE_BINARY_DIR}/bin/Release/materialx/libraries")
         endif()
     else()
-        message(WARNING "MaterialX not found - Material Network will be disabled")
+        if(WIN32)
+            message(FATAL_ERROR
+                "MaterialX v1.39.4 is required for Material Network. "
+                "git clone https://github.com/AcademySoftwareFoundation/MaterialX.git failed. "
+                "Fix github.com, delete ${CMAKE_BINARY_DIR}/_deps/materialx-subbuild, re-run FULL.")
+        else()
+            message(WARNING "MaterialX not found - Material Network will be disabled")
+        endif()
     endif()
 endif()
 
@@ -427,7 +419,7 @@ if(SOLSTICE_ENABLE_OPENPGL)
     include(FetchContent)
     find_package(TBB QUIET)
     if(NOT TBB_FOUND AND NOT TARGET TBB::tbb)
-        message(STATUS "TBB not found — looking for bundled oneTBB")
+        message(STATUS "TBB not found — fetching oneTBB for OpenPGL")
         set(TBB_TEST OFF CACHE BOOL "" FORCE)
         set(TBB_STRICT OFF CACHE BOOL "" FORCE)
         set(_solstice_saved_build_shared ${BUILD_SHARED_LIBS})
@@ -435,36 +427,21 @@ if(SOLSTICE_ENABLE_OPENPGL)
         set(_solstice_onetbb_src "${CMAKE_BINARY_DIR}/_deps/onetbb-src")
         if(EXISTS "${_solstice_onetbb_src}/CMakeLists.txt")
             add_subdirectory("${_solstice_onetbb_src}" "${CMAKE_BINARY_DIR}/_deps/onetbb-build")
-        elseif(NOT WIN32 AND EXISTS "/tmp/onetbb.tgz")
+        elseif(EXISTS "/tmp/onetbb.tgz")
             FetchContent_Declare(onetbb
                 URL "file:///tmp/onetbb.tgz"
                 DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
             FetchContent_MakeAvailable(onetbb)
-            FetchContent_GetProperties(onetbb SOURCE_DIR _solstice_onetbb_src)
-        elseif(NOT WIN32)
-            set(_solstice_tbb_tgz "${CMAKE_BINARY_DIR}/_deps/onetbb-v2021.12.0.tgz")
-            file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps")
-            file(DOWNLOAD
-                "https://github.com/oneapi-src/oneTBB/archive/refs/tags/v2021.12.0.tar.gz"
-                "${_solstice_tbb_tgz}"
-                STATUS _solstice_tbb_dl
-                TIMEOUT 90
-                INACTIVITY_TIMEOUT 30)
-            list(GET _solstice_tbb_dl 0 _solstice_tbb_code)
-            if(_solstice_tbb_code EQUAL 0 AND EXISTS "${_solstice_tbb_tgz}")
-                FetchContent_Declare(onetbb
-                    URL "${_solstice_tbb_tgz}"
-                    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-                FetchContent_MakeAvailable(onetbb)
-                FetchContent_GetProperties(onetbb SOURCE_DIR _solstice_onetbb_src)
-            else()
-                message(WARNING "oneTBB download skipped (${_solstice_tbb_dl}) — OpenPGL disabled")
-            endif()
+        else()
+            FetchContent_Declare(onetbb
+                GIT_REPOSITORY https://github.com/oneapi-src/oneTBB.git
+                GIT_TAG v2021.12.0
+                GIT_SHALLOW TRUE
+                SOURCE_DIR "${_solstice_onetbb_src}")
+            FetchContent_MakeAvailable(onetbb)
         endif()
         set(BUILD_SHARED_LIBS ${_solstice_saved_build_shared} CACHE BOOL "" FORCE)
-        # OpenPGL's FindTBB cannot parse generator expressions on in-tree TBB
-        # alias targets — give it a concrete include root instead.
-        if(_solstice_onetbb_src AND EXISTS "${_solstice_onetbb_src}/include")
+        if(EXISTS "${_solstice_onetbb_src}/include")
             set(TBB_INCLUDE_DIR "${_solstice_onetbb_src}/include" CACHE PATH "" FORCE)
             set(OPENPGL_TBB_ROOT "${_solstice_onetbb_src}" CACHE PATH "" FORCE)
             set(TBB_ROOT "${_solstice_onetbb_src}" CACHE PATH "" FORCE)
@@ -478,31 +455,18 @@ if(SOLSTICE_ENABLE_OPENPGL)
         if(EXISTS "${CMAKE_BINARY_DIR}/_deps/openpgl-src/CMakeLists.txt")
             add_subdirectory("${CMAKE_BINARY_DIR}/_deps/openpgl-src"
                              "${CMAKE_BINARY_DIR}/_deps/openpgl-build")
-        elseif(NOT WIN32 AND EXISTS "/tmp/openpgl.tgz")
+        elseif(EXISTS "/tmp/openpgl.tgz")
             FetchContent_Declare(openpgl
                 URL "file:///tmp/openpgl.tgz"
                 DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
             FetchContent_MakeAvailable(openpgl)
-        elseif(NOT WIN32)
-            set(_solstice_openpgl_tgz "${CMAKE_BINARY_DIR}/_deps/openpgl-v0.7.1.tgz")
-            file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps")
-            file(DOWNLOAD
-                "https://github.com/RenderKit/openpgl/archive/refs/tags/v0.7.1.tar.gz"
-                "${_solstice_openpgl_tgz}"
-                STATUS _solstice_openpgl_dl
-                TIMEOUT 90
-                INACTIVITY_TIMEOUT 30)
-            list(GET _solstice_openpgl_dl 0 _solstice_openpgl_code)
-            if(_solstice_openpgl_code EQUAL 0 AND EXISTS "${_solstice_openpgl_tgz}")
-                FetchContent_Declare(openpgl
-                    URL "${_solstice_openpgl_tgz}"
-                    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-                FetchContent_MakeAvailable(openpgl)
-            else()
-                message(WARNING "OpenPGL download skipped (${_solstice_openpgl_dl}) — path guiding disabled")
-            endif()
         else()
-            message(WARNING "OpenPGL not in _deps/openpgl-src — path guiding disabled. Not downloading GitHub.")
+            FetchContent_Declare(openpgl
+                GIT_REPOSITORY https://github.com/RenderKit/openpgl.git
+                GIT_TAG v0.7.1
+                GIT_SHALLOW TRUE
+                SOURCE_DIR "${CMAKE_BINARY_DIR}/_deps/openpgl-src")
+            FetchContent_MakeAvailable(openpgl)
         endif()
         if(TARGET openpgl)
             set(SOLSTICE_HAVE_OPENPGL_01 1)
@@ -558,6 +522,7 @@ set(SOLSTICE_HAVE_TINYUSDZ_01 0)
 option(SOLSTICE_ENABLE_TINYUSDZ "Build with TinyUSDZ for binary USD import" ON)
 if(SOLSTICE_ENABLE_TINYUSDZ)
     include(FetchContent)
+    message(STATUS "Fetching TinyUSDZ for binary USD (.usdc) support")
     set(TINYUSDZ_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(TINYUSDZ_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(TINYUSDZ_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
@@ -578,49 +543,35 @@ if(SOLSTICE_ENABLE_TINYUSDZ)
     set(TINYUSDZ_NO_WERROR ON CACHE BOOL "" FORCE)
     set(TINYUSDZ_USE_CCACHE OFF CACHE BOOL "" FORCE)
     set(_solstice_tinyusdz_src "${CMAKE_BINARY_DIR}/_deps/tinyusdz-src")
-    set(_solstice_tinyusdz_url "")
-    if(EXISTS "${_solstice_tinyusdz_src}/CMakeLists.txt")
-        set(_solstice_tinyusdz_have_src TRUE)
-    elseif(NOT WIN32 AND EXISTS "/tmp/tinyusdz.tgz")
-        set(_solstice_tinyusdz_url "file:///tmp/tinyusdz.tgz")
-    elseif(NOT WIN32)
-        set(_solstice_tinyusdz_tgz "${CMAKE_BINARY_DIR}/_deps/tinyusdz-v0.9.4.tgz")
-        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/_deps")
-        file(DOWNLOAD
-            "https://github.com/lighttransport/tinyusdz/archive/refs/tags/v0.9.4.tar.gz"
-            "${_solstice_tinyusdz_tgz}"
-            STATUS _solstice_tinyusdz_dl
-            TIMEOUT 90
-            INACTIVITY_TIMEOUT 30)
-        list(GET _solstice_tinyusdz_dl 0 _solstice_tinyusdz_code)
-        if(_solstice_tinyusdz_code EQUAL 0 AND EXISTS "${_solstice_tinyusdz_tgz}")
-            set(_solstice_tinyusdz_url "${_solstice_tinyusdz_tgz}")
-        else()
-            message(WARNING "TinyUSDZ download skipped (${_solstice_tinyusdz_dl}) — binary USD disabled")
-        endif()
-    else()
-        message(WARNING "TinyUSDZ not in _deps/tinyusdz-src — binary USD disabled. Not downloading GitHub.")
-    endif()
+    # TinyUSDZ headers must not be scanned by Qt AUTOMOC.
     set(_solstice_saved_automoc ${CMAKE_AUTOMOC})
     set(_solstice_saved_autouic ${CMAKE_AUTOUIC})
     set(_solstice_saved_autorcc ${CMAKE_AUTORCC})
     set(CMAKE_AUTOMOC OFF)
     set(CMAKE_AUTOUIC OFF)
     set(CMAKE_AUTORCC OFF)
-    if(_solstice_tinyusdz_have_src)
+    if(EXISTS "${_solstice_tinyusdz_src}/CMakeLists.txt")
         add_subdirectory("${_solstice_tinyusdz_src}" "${CMAKE_BINARY_DIR}/_deps/tinyusdz-build")
-    elseif(_solstice_tinyusdz_url)
+    elseif(EXISTS "/tmp/tinyusdz.tgz")
         FetchContent_Declare(tinyusdz
-            URL ${_solstice_tinyusdz_url}
+            URL "file:///tmp/tinyusdz.tgz"
             DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
         FetchContent_MakeAvailable(tinyusdz)
         FetchContent_GetProperties(tinyusdz SOURCE_DIR _solstice_tinyusdz_src)
+    else()
+        FetchContent_Declare(tinyusdz
+            GIT_REPOSITORY https://github.com/lighttransport/tinyusdz.git
+            GIT_TAG v0.9.4
+            GIT_SHALLOW TRUE
+            SOURCE_DIR "${_solstice_tinyusdz_src}")
+        FetchContent_MakeAvailable(tinyusdz)
     endif()
     set(CMAKE_AUTOMOC ${_solstice_saved_automoc})
     set(CMAKE_AUTOUIC ${_solstice_saved_autouic})
     set(CMAKE_AUTORCC ${_solstice_saved_autorcc})
     if(TARGET tinyusdz_static)
         set(SOLSTICE_HAVE_TINYUSDZ_01 1)
+        FetchContent_GetProperties(tinyusdz SOURCE_DIR _solstice_tinyusdz_src)
         set_target_properties(tinyusdz_static PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
         if(MSVC)
             target_compile_options(tinyusdz_static PRIVATE /W0)
