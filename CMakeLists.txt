@@ -323,6 +323,12 @@ set(SOLSTICE_HAVE_MATERIALX_01 0)
 set(SOLSTICE_MATERIALX_LIBRARIES "" CACHE PATH "Path to MaterialX libraries/ (stdlib, pbrlib, bxdf)")
 if(SOLSTICE_ENABLE_MATERIALX)
     list(APPEND CMAKE_PREFIX_PATH "/tmp/mtlx-install")
+    if(DEFINED ENV{DEPS_PREFIX} AND EXISTS "$ENV{DEPS_PREFIX}")
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{DEPS_PREFIX}")
+    endif()
+    if(WIN32 AND DEFINED ENV{LOCALAPPDATA} AND EXISTS "$ENV{LOCALAPPDATA}/grendizer-deps")
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{LOCALAPPDATA}/grendizer-deps")
+    endif()
     find_package(MaterialX CONFIG QUIET)
     if(NOT MaterialX_FOUND)
         include(FetchContent)
@@ -338,17 +344,53 @@ if(SOLSTICE_ENABLE_MATERIALX)
         set(MATERIALX_BUILD_RENDER OFF CACHE BOOL "" FORCE)
         set(MATERIALX_INSTALL_PYTHON OFF CACHE BOOL "" FORCE)
         set(MATERIALX_INSTALL_RESOURCES OFF CACHE BOOL "" FORCE)
-        if(EXISTS "/tmp/mtlx.tgz")
-            set(_solstice_mtlx_url "file:///tmp/mtlx.tgz")
-        else()
-            set(_solstice_mtlx_url
-                "https://github.com/AcademySoftwareFoundation/MaterialX/archive/refs/tags/v1.39.4.tar.gz")
+        # CMake's URL FetchContent of the GitHub tarball often fails on Windows
+        # (CMake 4.x populate-download, no User-Agent → 403). CI uses git clone.
+        set(_solstice_mtlx_src "${CMAKE_BINARY_DIR}/_deps/materialx-src")
+        if(EXISTS "${_solstice_mtlx_src}" AND NOT EXISTS "${_solstice_mtlx_src}/CMakeLists.txt")
+            file(REMOVE_RECURSE "${_solstice_mtlx_src}")
+            file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps/materialx-subbuild")
+            file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps/materialx-build")
         endif()
-        FetchContent_Declare(MaterialX
-            URL ${_solstice_mtlx_url}
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-        FetchContent_MakeAvailable(MaterialX)
-        set(MaterialX_FOUND TRUE)
+        if(NOT EXISTS "${_solstice_mtlx_src}/CMakeLists.txt")
+            find_package(Git QUIET)
+            if(GIT_FOUND)
+                message(STATUS "Cloning MaterialX v1.39.4 (git, not the GitHub tarball)")
+                execute_process(
+                    COMMAND "${GIT_EXECUTABLE}" clone --depth 1 --branch v1.39.4
+                        "https://github.com/AcademySoftwareFoundation/MaterialX.git"
+                        "${_solstice_mtlx_src}"
+                    RESULT_VARIABLE _solstice_mtlx_git_rc
+                    ERROR_VARIABLE _solstice_mtlx_git_err)
+                if(NOT _solstice_mtlx_git_rc EQUAL 0)
+                    message(WARNING "git clone MaterialX failed: ${_solstice_mtlx_git_err}")
+                endif()
+            endif()
+        endif()
+        if(NOT EXISTS "${_solstice_mtlx_src}/CMakeLists.txt" AND EXISTS "/tmp/mtlx.tgz")
+            FetchContent_Declare(MaterialX
+                URL "file:///tmp/mtlx.tgz"
+                SOURCE_DIR "${_solstice_mtlx_src}"
+                DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+            set(_solstice_saved_automoc ${CMAKE_AUTOMOC})
+            set(CMAKE_AUTOMOC OFF)
+            FetchContent_MakeAvailable(MaterialX)
+            set(CMAKE_AUTOMOC ${_solstice_saved_automoc})
+        elseif(EXISTS "${_solstice_mtlx_src}/CMakeLists.txt")
+            set(_solstice_saved_automoc ${CMAKE_AUTOMOC})
+            set(CMAKE_AUTOMOC OFF)
+            add_subdirectory("${_solstice_mtlx_src}" "${CMAKE_BINARY_DIR}/_deps/materialx-build")
+            set(CMAKE_AUTOMOC ${_solstice_saved_automoc})
+            set(materialx_SOURCE_DIR "${_solstice_mtlx_src}")
+        else()
+            message(WARNING
+                "MaterialX source missing (git clone / tarball failed). "
+                "Material Network disabled; glass / OptiX still build. "
+                "Retry after deleting ${CMAKE_BINARY_DIR}/_deps")
+        endif()
+        if(TARGET MaterialXCore OR TARGET MaterialX::MaterialXCore)
+            set(MaterialX_FOUND TRUE)
+        endif()
     endif()
     if(MaterialX_FOUND)
         set(SOLSTICE_HAVE_MATERIALX_01 1)
@@ -357,6 +399,12 @@ if(SOLSTICE_ENABLE_MATERIALX)
                 set(SOLSTICE_MATERIALX_LIBRARIES "${materialx_SOURCE_DIR}/libraries" CACHE PATH "" FORCE)
             elseif(EXISTS "/tmp/mtlx-src/libraries")
                 set(SOLSTICE_MATERIALX_LIBRARIES "/tmp/mtlx-src/libraries" CACHE PATH "" FORCE)
+            elseif(DEFINED ENV{DEPS_PREFIX} AND EXISTS "$ENV{DEPS_PREFIX}/libraries/stdlib")
+                set(SOLSTICE_MATERIALX_LIBRARIES "$ENV{DEPS_PREFIX}/libraries" CACHE PATH "" FORCE)
+            elseif(WIN32 AND DEFINED ENV{LOCALAPPDATA}
+                   AND EXISTS "$ENV{LOCALAPPDATA}/grendizer-deps/libraries/stdlib")
+                set(SOLSTICE_MATERIALX_LIBRARIES
+                    "$ENV{LOCALAPPDATA}/grendizer-deps/libraries" CACHE PATH "" FORCE)
             elseif(EXISTS "${CMAKE_PREFIX_PATH}/libraries/stdlib")
                 set(SOLSTICE_MATERIALX_LIBRARIES "${CMAKE_PREFIX_PATH}/libraries" CACHE PATH "" FORCE)
             endif()

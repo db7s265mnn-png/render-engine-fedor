@@ -11,6 +11,8 @@ echo First full run builds OpenEXR/Alembic/OpenVDB/OCIO (cached after that).
 echo TinyUSDZ linking can sit with no new lines for a long time - wait.
 echo Keep %%LOCALAPPDATA%%\grendizer-deps
 echo Deleting C:\gz-full is OK - this script creates it again.
+echo If cmake stops on materialx-populate-download: that is a GitHub tarball
+echo fetch, not the renderer. This script git-clones MaterialX into deps.
 echo.
 
 where powershell >nul 2>&1
