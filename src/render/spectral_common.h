@@ -419,49 +419,16 @@ inline SampledSpectrum bsdfEvalSpectralDielectric(const Material& mat, Vec3 wo, 
     const Vec3 woS = rotateForAnisotropy(wo, mat.specularRotation);
     const Vec3 wiS = rotateForAnisotropy(wi, mat.specularRotation);
     const SampledSpectrum tint = rgbToSpectrumReflectance(lw.transmissionTint, w, cs);
-
-    if (reflecting) {
-        Vec3 h = woS + wiS;
-        if (lengthSquared(h) <= 0.0f) return out;
-        h = normalize(h);
-        if (h.z < 0.0f) h = -h;
-        const bool allowDielectricReflect = wo.z > 0.0f || mat.internalReflections > 0.5f;
-        const float d = ggxD(h, lw.ax, lw.ay);
-        const float g = smithG2(woS, wiS, lw.ax, lw.ay);
-        for (int i = 0; i < w.n; ++i) {
-            if (w.pdf[i] <= 0.0f) continue;
-            const float etaAbs = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, w.lambda[i]);
-            const float eta = wo.z > 0.0f ? etaAbs : 1.0f / etaAbs;
-            if (!allowDielectricReflect) {
-                const float cosHI = absDot(woS, h);
-                const float sin2 = srMax(0.0f, 1.0f - cosHI * cosHI);
-                if ((sin2 / (eta * eta)) < 1.0f) continue;
-            }
-            const float fr = fresnelDielectric(dot(woS, h), eta);
-            out.values[i] = (d * g * fr / (4.0f * fabsf(wo.z) * fabsf(wi.z))) * tw;
-        }
-        return out;
-    }
+    const bool allowIR = wo.z > 0.0f || mat.internalReflections > 0.5f;
 
     for (int i = 0; i < w.n; ++i) {
         if (w.pdf[i] <= 0.0f) continue;
         const float etaAbs = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, w.lambda[i]);
-        const float eta = wo.z > 0.0f ? etaAbs : 1.0f / etaAbs;
-        Vec3 h = -(woS + wiS * eta);
-        if (lengthSquared(h) <= 0.0f) continue;
-        h = normalize(h);
-        if (h.z < 0.0f) h = -h;
-        const float dotOH = dot(woS, h);
-        const float dotIH = dot(wiS, h);
-        if (dotOH * wo.z <= 0.0f) continue;
-        const float sqrtDenom = dotOH + eta * dotIH;
-        if (fabsf(sqrtDenom) <= 1e-6f) continue;
-        const float fr = fresnelDielectric(dotOH, eta);
-        const float d = ggxD(h, lw.ax, lw.ay);
-        const float g = smithG2(woS, wiS, lw.ax, lw.ay);
-        const float factor = fabsf(dotIH * dotOH / (wo.z * wi.z));
-        const float ft = (1.0f - fr) * d * g * factor * (eta * eta) / (sqrtDenom * sqrtDenom);
-        out.values[i] = tint.values[i] * ft * tw;
+        const DielectricGgxEval mf = evalDielectricGgx(woS, wiS, lw.ax, lw.ay, etaAbs, allowIR);
+        if (reflecting)
+            out.values[i] = mf.f * tw;
+        else
+            out.values[i] = tint.values[i] * mf.f * tw;
     }
     return out;
 }
@@ -534,38 +501,23 @@ inline BsdfSampleSpectral bsdfSampleSpectral(const Material& mat, Vec3 woLocal, 
     const SampledSpectrum tint = rgbToSpectrumReflectance(lw.transmissionTint, w, cs);
     const float heroEtaAbs =
         spectralAbsoluteIor(baseIor, mat.dispersionAbbe, w.lambda[heroIdx]);
-    const float heroEta = woLocal.z > 0.0f ? heroEtaAbs : 1.0f / heroEtaAbs;
-
-    Vec3 h;
-    if (lw.delta) {
-        h = Vec3(0.0f, 0.0f, woLocal.z > 0.0f ? 1.0f : -1.0f);
-    } else if (rgb.transmitted) {
-        h = -(woLocal + rgb.wi * heroEta);
-        if (lengthSquared(h) > 0.0f) {
-            h = normalize(h);
-            if (h.z < 0.0f) h = -h;
-        } else {
-            h = Vec3(0.0f, 0.0f, woLocal.z > 0.0f ? 1.0f : -1.0f);
-        }
-    } else {
-        h = normalize(woLocal + rgb.wi);
-        if (h.z < 0.0f) h = -h;
-    }
-    const float dotOH = dot(woLocal, h);
-    const float Fhero = fresnelDielectric(dotOH, heroEta);
+    const Vec3 woS = rotateForAnisotropy(woLocal, mat.specularRotation);
     const bool allowInternalReflect = mat.internalReflections > 0.5f || woLocal.z > 0.0f;
 
     if (lw.delta) {
+        const Vec3 h(0.0f, 0.0f, 1.0f);
+        const float dotOH = dot(woS, h);
+        const float Fhero = fresnelDielectric(dotOH, heroEtaAbs);
         for (int i = 0; i < w.n; ++i) {
             if (w.pdf[i] <= 0.0f) {
                 out.weight.values[i] = 0.0f;
                 continue;
             }
             const float etaAbs = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, w.lambda[i]);
-            const float eta = woLocal.z > 0.0f ? etaAbs : 1.0f / etaAbs;
-            const float F = fresnelDielectric(dotOH, eta);
+            const float etaRel = woLocal.z > 0.0f ? etaAbs : 1.0f / etaAbs;
+            const float F = fresnelDielectric(dotOH, etaAbs);
             if (rgb.transmitted) {
-                float scale = tw / (eta * eta * srMax(1e-4f, lw.transmission));
+                float scale = tw / (etaRel * etaRel * srMax(1e-4f, lw.transmission));
                 if (!allowInternalReflect && woLocal.z < 0.0f) {
                     scale *= (1.0f - F);
                 } else {
@@ -582,7 +534,20 @@ inline BsdfSampleSpectral bsdfSampleSpectral(const Material& mat, Vec3 woLocal, 
     }
 
     SampledSpectrum f = bsdfEvalSpectralDielectric(mat, woLocal, rgb.wi, w, baseIor, cs);
-    const float invPdf = 1.0f / srMax(rgb.pdf, 1e-8f);
+    const Vec3 wiS = rotateForAnisotropy(rgb.wi, mat.specularRotation);
+    const DielectricGgxEval mf =
+        evalDielectricGgx(woS, wiS, lw.ax, lw.ay, heroEtaAbs, allowInternalReflect);
+    float pdf = lw.transmission * mf.pdf;
+    const float pCoatS = coatPickProb(mat, woLocal);
+    if (pCoatS > 0.0f && woLocal.z > 0.0f) pdf *= (1.0f - pCoatS);
+    if (pdf <= 0.0f) {
+        out.valid = false;
+        out.pdf = 0.0f;
+        out.weight = SampledSpectrum::zero(w.n);
+        return out;
+    }
+    out.pdf = pdf;
+    const float invPdf = 1.0f / pdf;
     for (int i = 0; i < w.n; ++i)
         out.weight.values[i] = f.values[i] * fabsf(rgb.wi.z) * invPdf;
     return out;

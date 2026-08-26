@@ -477,6 +477,70 @@ void testBsdf() {
     const float measuredFr = float(reflected30) / float(trials30);
     checkNear(measuredFr, expectedFr, 0.008f, "interior Fresnel split uses the glass→air eta");
 
+    // pbrt FrDielectric: signed cos + stored outside η equals side-relative +cos.
+    {
+        const float c = std::cos(radians(30.0f));
+        checkNear(fresnelDielectric(-c, 1.5f), fresnelDielectric(c, 1.0f / 1.5f), 1e-6f,
+                  "FrDielectric(-cos, η) == FrDielectric(+cos, 1/η)");
+        const float pastCrit = std::cos(std::asin(1.0f / 1.5f) + 0.2f);
+        checkNear(fresnelDielectric(-pastCrit, 1.5f), 1.0f, 1e-5f,
+                  "signed-cos outside eta reports TIR from inside");
+    }
+
+    // Rough glass from inside past the critical angle: F is TIR (not air→glass ~0.04).
+    // Spectral f and the hero-λ pdf must use that same F, or the belly goes black.
+    {
+        Material gRough = glass;
+        gRough.roughness = 0.1f;
+        gRough.specular = 0.0f;
+        const Vec3 woTir = woBeyondCritical;
+        const Vec3 wiMirror(-woTir.x, -woTir.y, woTir.z);
+        const BsdfEval eRgb = bsdfEvalLocal(gRough, woTir, wiMirror);
+        check(eRgb.pdf > 0.0f && eRgb.f.x > 0.0f, "rough inside TIR eval is non-zero");
+        const float wMirror = eRgb.f.x * fabsf(wiMirror.z) / srMax(eRgb.pdf, 1e-12f);
+        check(wMirror > 0.5f, "rough inside TIR f/pdf is O(1), not air→glass F");
+        const LobeWeights lwR = computeLobes(gRough, woTir);
+        const DielectricGgxEval mf =
+            evalDielectricGgx(woTir, wiMirror, lwR.ax, lwR.ay, 1.5f, true);
+        checkNear(eRgb.pdf, lwR.transmission * mf.pdf, std::max(1e-5f, eRgb.pdf * 0.02f),
+                  "RGB eval pdf is dielectric GGX pdf at outside eta");
+
+        SampledWavelengths wv{};
+        wv.n = 4;
+        for (int i = 0; i < 4; ++i) {
+            wv.lambda[i] = 450.0f + 60.0f * float(i);
+            wv.pdf[i] = 1.0f;
+        }
+        const SampledSpectrum fS = bsdfEvalSpectralDielectric(gRough, woTir, wiMirror, wv, 1.5f);
+        for (int i = 0; i < wv.n; ++i) {
+            checkNear(fS.values[i], eRgb.f.x, std::max(1e-4f, eRgb.f.x * 0.05f),
+                      "spectral inside TIR f matches RGB (same outside-eta F)");
+        }
+
+        int nTir = 0;
+        int nDark = 0;
+        for (int i = 0; i < 1500; ++i) {
+            const float u1 = rng.nextFloat();
+            const float u2 = rng.nextFloat();
+            const BsdfSample s = bsdfSampleLocal(gRough, woTir, 0.99f, u1, u2, 0.0f);
+            if (s.pdf <= 0.0f || s.transmitted) continue;
+            const BsdfEval ev = bsdfEvalLocal(gRough, woTir, s.wi);
+            checkNear(ev.pdf, s.pdf, std::max(1e-4f, s.pdf * 0.02f),
+                      "rough inside TIR sample/eval pdf agree");
+            const BsdfSampleSpectral ss =
+                bsdfSampleSpectral(gRough, woTir, 0.99f, u1, u2, 0.0f, wv, 1.5f, 0);
+            if (!ss.valid || ss.transmitted || ss.pdf <= 0.0f) continue;
+            ++nTir;
+            const DielectricGgxEval mfS =
+                evalDielectricGgx(woTir, ss.wi, lwR.ax, lwR.ay, 1.5f, true);
+            checkNear(ss.pdf, lwR.transmission * mfS.pdf, std::max(1e-4f, ss.pdf * 0.05f),
+                      "spectral sample pdf is hero-λ dielectric F, not RGB eval");
+            if (ss.weight.values[0] < 0.2f) ++nDark;
+        }
+        check(nTir > 200, "rough inside TIR produces reflection samples");
+        check(nDark == 0, "spectral inside TIR weight is not the 0.04 double-swap");
+    }
+
     // Arnold Advanced → Internal Reflections: from inside, disable Fresnel
     // reflections (keep TIR). Exterior behaviour unchanged.
     Material glassIR = glass;
