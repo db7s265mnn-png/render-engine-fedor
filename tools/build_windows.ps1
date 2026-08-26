@@ -526,11 +526,18 @@ function Find-OptiXRoot([string]$GitExe) {
     return $local
 }
 
-function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest) {
-    if (Test-Path -LiteralPath $Dest) { return }
+function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest, [switch]$AllowFail) {
+    if (Test-Path -LiteralPath $Dest) { return $true }
     New-Item -ItemType Directory -Force -Path (Split-Path $Dest -Parent) | Out-Null
     & $Git clone --depth 1 --branch $Branch $Url $Dest
-    if ($LASTEXITCODE -ne 0) { Fail "git clone failed: $Url" }
+    if ($LASTEXITCODE -ne 0) {
+        if ($AllowFail) {
+            Write-Host "Warning: git clone failed (optional): $Url" -ForegroundColor Yellow
+            return $false
+        }
+        Fail "git clone failed: $Url"
+    }
+    return $true
 }
 
 function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [switch]$AllowFail) {
@@ -632,35 +639,8 @@ function Ensure-NativeDeps {
         return
     }
 
-    function Install-MaterialXIfMissing {
-        $cfg = Get-ChildItem -Path $script:DepsPrefix -Recurse -Filter 'MaterialXConfig.cmake' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($cfg) {
-            Info "MaterialX already installed: $($cfg.Directory.FullName)"
-            return
-        }
-        Info 'MaterialX not in deps — git clone v1.39.4 (CMake tarball fetch often 403s on Windows).'
-        $src = Join-Path $srcRoot 'materialx'
-        Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/MaterialX.git' 'v1.39.4' $src
-        Invoke-DepCMakeInstall $src 'MaterialX' @(
-            '-DMATERIALX_BUILD_PYTHON=OFF', '-DMATERIALX_BUILD_VIEWER=OFF',
-            '-DMATERIALX_BUILD_GRAPH_EDITOR=OFF', '-DMATERIALX_BUILD_TESTS=OFF',
-            '-DMATERIALX_BUILD_JS=OFF', '-DMATERIALX_BUILD_RENDER=OFF',
-            '-DMATERIALX_BUILD_GEN_GLSL=OFF', '-DMATERIALX_BUILD_GEN_OSL=OFF',
-            '-DMATERIALX_BUILD_GEN_MDL=OFF', '-DMATERIALX_BUILD_GEN_MSL=OFF',
-            '-DMATERIALX_INSTALL_PYTHON=OFF', '-DMATERIALX_INSTALL_RESOURCES=OFF'
-        ) -AllowFail
-        $libSrc = Join-Path $src 'libraries'
-        $libDst = Join-Path $script:DepsPrefix 'libraries'
-        if (Test-Path -LiteralPath $libSrc) {
-            New-Item -ItemType Directory -Force -Path $libDst | Out-Null
-            Copy-Item -Recurse -Force (Join-Path $libSrc '*') $libDst
-        }
-    }
-
     if (Test-Path -LiteralPath $stamp) {
         Info "Native deps already installed: $script:DepsPrefix"
-        Install-MaterialXIfMissing
         return
     }
 
@@ -706,8 +686,6 @@ function Ensure-NativeDeps {
             '-DOCIO_BUILD_GPU_TESTS=OFF', '-DOCIO_BUILD_PYTHON=OFF', '-DOCIO_BUILD_JAVA=OFF',
             '-DOCIO_BUILD_DOCS=OFF', '-DOCIO_INSTALL_EXT_PACKAGES=ALL'
         ) -AllowFail
-
-    Install-MaterialXIfMissing
 
     Set-Content -Path $stamp -Value 'ok' -Encoding ascii
     Info "Native deps installed: $script:DepsPrefix"
@@ -881,11 +859,6 @@ if (Test-Path -LiteralPath $cache) {
         $stale = $true
         $staleWhy = 'CMake generator changed'
     }
-    $errLog = Join-Path $BuildDir 'CMakeFiles\CMakeError.log'
-    if (Test-Path -LiteralPath $errLog) {
-        $stale = $true
-        $staleWhy = 'previous CMakeError.log'
-    }
     $oldNvcc = Select-String -Path $cache -Pattern '^CMAKE_CUDA_COMPILER:FILEPATH=(.+)$' | Select-Object -First 1
     if ($oldNvcc) {
         $oldNvccPath = $oldNvcc.Matches[0].Groups[1].Value.Replace('/', '\')
@@ -929,11 +902,20 @@ $featureFlags = @(
     '-DSOLSTICE_BUILD_TOOLS=OFF'
 )
 if ($script:FullBuild) {
+    $mtlxCfg = Get-ChildItem -Path $script:DepsPrefix -Recurse -Filter 'MaterialXConfig.cmake' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    $mtlxFlag = '-DSOLSTICE_ENABLE_MATERIALX=OFF'
+    if ($mtlxCfg) {
+        $mtlxFlag = '-DSOLSTICE_ENABLE_MATERIALX=ON'
+        Info "MaterialX: $($mtlxCfg.Directory.FullName)"
+    } else {
+        Info 'MaterialX not in deps — skipping (glass / OptiX still build). Not cloning GitHub.'
+    }
     $featureFlags += @(
         '-DSOLSTICE_ENABLE_ALEMBIC=ON',
         '-DSOLSTICE_ENABLE_OPENEXR=ON',
         '-DSOLSTICE_ENABLE_TIFF=ON',
-        '-DSOLSTICE_ENABLE_MATERIALX=ON',
+        $mtlxFlag,
         '-DSOLSTICE_ENABLE_OPENPGL=ON',
         '-DSOLSTICE_ENABLE_OPENSUBDIV=ON',
         '-DSOLSTICE_ENABLE_OPENVDB=ON',
