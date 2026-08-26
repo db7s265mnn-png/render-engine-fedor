@@ -2949,9 +2949,6 @@ void testUdimMaterialX() {
     scene->settings.resolutionY = 32;
     scene->settings.samplesPerPixel = 8;
     scene->settings.envVisibleCamera = 0;
-    // Tiles are Rec.709 PNG. ACEScg ToXYZ of the G lobe (≈550 nm) is yellowish
-    // and fails a 2:1 G>R test; sRGB keeps the UDIM colours separable.
-    scene->settings.workingSpace = kWorkingSpaceSrgbLinear;
     scene->camera.cameraToWorld = lookAtMatrix(Vec3(0, 6, 0), Vec3(0, 0, 0), Vec3(0, 0, 1));
     scene->cameraAuthored = true;
     scene->finalize();
@@ -2961,15 +2958,14 @@ void testUdimMaterialX() {
     session.start();
     session.waitForCompletion();
     const Image rendered = session.linearImage();
-    // Camera looks down; screen X may flip world X — require both UDIM colours.
-    // 4λ film ToXYZ is not a Rec.709 primary; score excess R vs excess G.
+    // Camera looks down; screen X may flip world X — just require both UDIM colors present.
     bool sawRed = false;
     bool sawGreen = false;
     for (int y = 0; y < rendered.height(); ++y) {
         for (int x = 0; x < rendered.width(); ++x) {
             const Vec3 c = rendered.rgb(x, y);
-            if (c.x > 0.2f && c.x > c.y && c.x > c.z) sawRed = true;
-            if (c.y > 0.2f && c.y > c.x && c.y > c.z) sawGreen = true;
+            if (c.x > 0.5f && c.x > c.y * 2.0f && c.x > c.z * 2.0f) sawRed = true;
+            if (c.y > 0.5f && c.y > c.x * 2.0f && c.y > c.z * 2.0f) sawGreen = true;
         }
     }
     check(sawRed, "render shows UDIM 1001 red");
