@@ -856,7 +856,8 @@ function Install-OcioSdkDeps {
     if (-not (Test-ExpatInDeps)) {
         $eSrc = Join-Path $script:DepsSrc 'expat'
         if (Test-Path -LiteralPath $eSrc) { Remove-Item -LiteralPath $eSrc -Recurse -Force }
-        Invoke-GitClone 'https://github.com/libexpat/libexpat.git' 'R_2_5_0' $eSrc
+        # libexpat CMakeLists lives in expat/CMakeLists.txt (repo root has none).
+        Invoke-GitClone 'https://github.com/libexpat/libexpat.git' 'R_2_5_0' $eSrc 'expat\CMakeLists.txt'
         $eb = Join-Path $eSrc 'build'
         if (Test-Path -LiteralPath $eb) { Remove-Item -LiteralPath $eb -Recurse -Force }
         $eCmake = Join-Path $eSrc 'expat'
