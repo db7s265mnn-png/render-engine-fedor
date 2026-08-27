@@ -22,7 +22,6 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "core/log.h"
@@ -1378,34 +1377,36 @@ bool probeOptixRuntimeUnlocked(std::string& error) {
     return true;
 }
 
-void kickOptixProbeLocked() {
-    if (gOptixRuntimeState != OptixRuntimeState::Unknown || gOptixProbeRunning) return;
-    gOptixProbeRunning = true;
-    std::thread([] {
-        std::string err;
-        bool ok = false;
-        try {
-            ok = probeOptixRuntimeUnlocked(err);
-        } catch (const std::exception& e) {
-            err = e.what();
-        } catch (...) {
-            err = "CUDA probe crashed";
-        }
-        {
-            std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
-            setOptixRuntime(ok, err);
-            gOptixProbeRunning = false;
-        }
-        gOptixProbeCv.notify_all();
-        if (ok) logInfo("OptiX runtime probe: available");
-        else logWarning("OptiX runtime probe: not available (" + err + ")");
-    }).detach();
-}
-
+// Probe on the caller (render) thread. A detached CUDA thread plus HUD
+// ticks used to hang forever on "OptiX checking…" (zlib.dll next to the
+// exe, Intel iGPU + NVIDIA, mixed cudart).
 void waitForOptixProbe() {
-    std::unique_lock<std::mutex> lock(gOptixRuntimeMutex);
-    kickOptixProbeLocked();
-    gOptixProbeCv.wait(lock, [] { return !gOptixProbeRunning; });
+    {
+        std::unique_lock<std::mutex> lock(gOptixRuntimeMutex);
+        if (gOptixRuntimeState != OptixRuntimeState::Unknown) return;
+        if (gOptixProbeRunning) {
+            gOptixProbeCv.wait(lock, [] { return !gOptixProbeRunning; });
+            return;
+        }
+        gOptixProbeRunning = true;
+    }
+    std::string err;
+    bool ok = false;
+    try {
+        ok = probeOptixRuntimeUnlocked(err);
+    } catch (const std::exception& e) {
+        err = e.what();
+    } catch (...) {
+        err = "CUDA probe crashed";
+    }
+    {
+        std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
+        setOptixRuntime(ok, err);
+        gOptixProbeRunning = false;
+    }
+    gOptixProbeCv.notify_all();
+    if (ok) logInfo("OptiX runtime probe: available");
+    else logWarning("OptiX runtime probe: not available (" + err + ")");
 }
 
 }  // namespace
@@ -1414,13 +1415,13 @@ bool optixBackendCompiledIn() { return true; }
 
 bool optixRuntimeProbePending() {
     std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
-    kickOptixProbeLocked();
-    return gOptixRuntimeState == OptixRuntimeState::Unknown || gOptixProbeRunning;
+    // Do not kick CUDA from the HUD. The live probe runs only from
+    // createOptixDevice() on the render thread.
+    return gOptixProbeRunning;
 }
 
 bool optixRuntimeAvailable(std::string* error) {
     std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
-    kickOptixProbeLocked();
     if (error) *error = gOptixRuntimeError;
     return gOptixRuntimeState == OptixRuntimeState::Ok;
 }

@@ -811,14 +811,161 @@ function Test-PystringInDeps {
     return $false
 }
 
-function Install-ZlibShared {
-    # OpenColorIO_2_3.dll imports zlib.dll. Static-only zlib makes the exe
-    # fail at launch (Windows: "не обнаружила zlib.dll").
-    if ((Test-ZlibInDeps) -and ((Find-ZlibRuntimeDlls).Count -gt 0)) {
-        Info 'zlib.dll already in deps — skipping'
+function Remove-ZlibRuntimeDllsFromPrefix {
+    # zlib 1.3.1 still add_library(zlib SHARED) in some configs, so install
+    # writes zlib.dll into deps\bin. NVIDIA nvoptix / CUDA LoadLibrary("zlib.dll")
+    # then picks that copy next to the exe and optixInit hangs ("OptiX checking").
+    foreach ($rel in @('bin', 'lib', 'lib64')) {
+        $dir = Join-Path $script:DepsPrefix $rel
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($pat in @('zlib*.dll', 'libzlib*.dll', 'zdll*.dll', 'zlib1.dll')) {
+            Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+                Info ("Removing " + $_.Name + " from deps (OCIO uses zlibstatic; zlib.dll hijacks OptiX)")
+                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+            }
+        }
+    }
+}
+
+function Get-PeImportedDllNames([string]$DllPath) {
+    $names = New-Object System.Collections.Generic.List[string]
+    if (-not $DllPath -or -not (Test-Path -LiteralPath $DllPath)) { return $names }
+    $bytes = [IO.File]::ReadAllBytes($DllPath)
+    if ($bytes.Length -lt 64) { return $names }
+    if ([BitConverter]::ToUInt16($bytes, 0) -ne 0x5A4D) { return $names }
+    $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+    if ($pe -lt 0 -or ($pe + 24) -ge $bytes.Length) { return $names }
+    if ([BitConverter]::ToUInt32($bytes, $pe) -ne 0x00004550) { return $names }
+    $nsect = [BitConverter]::ToUInt16($bytes, $pe + 6)
+    $optSize = [BitConverter]::ToUInt16($bytes, $pe + 20)
+    $opt = $pe + 24
+    if (($opt + 2) -ge $bytes.Length) { return $names }
+    $magic = [BitConverter]::ToUInt16($bytes, $opt)
+    $ddOff = 0
+    if ($magic -eq 0x10B) { $ddOff = $opt + 96 }
+    elseif ($magic -eq 0x20B) { $ddOff = $opt + 112 }
+    else { return $names }
+    if (($ddOff + 16) -gt $bytes.Length) { return $names }
+    $importRva = [BitConverter]::ToUInt32($bytes, $ddOff + 8)
+    if ($importRva -eq 0) { return $names }
+    $sect = $opt + $optSize
+    $off = -1
+    for ($i = 0; $i -lt $nsect; $i++) {
+        $s = $sect + $i * 40
+        if (($s + 24) -gt $bytes.Length) { break }
+        $va = [BitConverter]::ToUInt32($bytes, $s + 12)
+        $raw = [BitConverter]::ToUInt32($bytes, $s + 20)
+        $vsz = [BitConverter]::ToUInt32($bytes, $s + 8)
+        $rsz = [BitConverter]::ToUInt32($bytes, $s + 16)
+        $span = $vsz
+        if ($rsz -gt $span) { $span = $rsz }
+        if ($span -eq 0) { continue }
+        if ($importRva -ge $va -and $importRva -lt ($va + $span)) {
+            $off = [int]($raw + ($importRva - $va))
+            break
+        }
+    }
+    if ($off -lt 0) { return $names }
+    while (($off + 20) -le $bytes.Length) {
+        $nameRva = [BitConverter]::ToUInt32($bytes, $off + 12)
+        $ilt = [BitConverter]::ToUInt32($bytes, $off)
+        $iat = [BitConverter]::ToUInt32($bytes, $off + 16)
+        if ($ilt -eq 0 -and $nameRva -eq 0 -and $iat -eq 0) { break }
+        $no = -1
+        for ($i = 0; $i -lt $nsect; $i++) {
+            $s = $sect + $i * 40
+            if (($s + 24) -gt $bytes.Length) { break }
+            $va = [BitConverter]::ToUInt32($bytes, $s + 12)
+            $raw = [BitConverter]::ToUInt32($bytes, $s + 20)
+            $vsz = [BitConverter]::ToUInt32($bytes, $s + 8)
+            $rsz = [BitConverter]::ToUInt32($bytes, $s + 16)
+            $span = $vsz
+            if ($rsz -gt $span) { $span = $rsz }
+            if ($span -eq 0) { continue }
+            if ($nameRva -ge $va -and $nameRva -lt ($va + $span)) {
+                $no = [int]($raw + ($nameRva - $va))
+                break
+            }
+        }
+        if ($no -ge 0 -and $no -lt $bytes.Length) {
+            $end = $no
+            while ($end -lt $bytes.Length -and $bytes[$end] -ne 0) { $end++ }
+            if ($end -gt $no) {
+                $n = [Text.Encoding]::ASCII.GetString($bytes, $no, $end - $no)
+                [void]$names.Add($n)
+            }
+        }
+        $off += 20
+    }
+    return $names
+}
+
+function Test-PeDependsOnZlib([string]$DllPath) {
+    if (-not $DllPath -or -not (Test-Path -LiteralPath $DllPath)) { return $false }
+    $names = @(Get-PeImportedDllNames $DllPath)
+    if ($names.Count -gt 0) {
+        foreach ($n in $names) {
+            if ($n -match '(?i)^(zlib|zlib1|libzlib|zdll)') { return $true }
+        }
+        return $false
+    }
+    $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
+    if (-not $dumpbin) { return $false }
+    $out = & $dumpbin.Source /DEPENDENTS $DllPath 2>&1 | Out-String
+    return [bool]($out -match '(?i)zlib.*\.dll')
+}
+
+function Assert-DllImportsReadable([string]$DllPath) {
+    $names = @(Get-PeImportedDllNames $DllPath)
+    if ($names.Count -gt 0) { return }
+    $dumpbin = Get-Command dumpbin.exe -ErrorAction SilentlyContinue
+    if ($dumpbin) { return }
+    Fail "Cannot read imports of $DllPath (PE parse empty, dumpbin.exe missing). Need to verify no zlib.dll import."
+}
+
+function Assert-NoZlibDllImport([string]$DllPath) {
+    if (-not $DllPath -or -not (Test-Path -LiteralPath $DllPath)) { return }
+    Assert-DllImportsReadable $DllPath
+    if (Test-PeDependsOnZlib $DllPath) {
+        Fail @"
+$DllPath still imports zlib.dll.
+zlib.dll next to Grendizer_Render hangs NVIDIA OptiX (HUD: OptiX checking...).
+OpenColorIO / minizip must link zlibstatic.lib - do not copy zlib.dll.
+"@
+    }
+}
+
+function Remove-InstalledMinizip {
+    # Old minizip objects compiled against zlib.dll (ZLIB_DLL) keep a zlib.dll
+    # import even after OCIO is relinked to zlibstatic.lib.
+    Info 'Removing installed minizip-ng so it rebuilds against zlibstatic.lib.'
+    foreach ($rel in @('include\minizip-ng', 'include\minizip')) {
+        $p = Join-Path $script:DepsPrefix $rel
+        if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force }
+    }
+    $mzH = Join-Path $script:DepsPrefix 'include\mz.h'
+    if (Test-Path -LiteralPath $mzH) { Remove-Item -LiteralPath $mzH -Force }
+    foreach ($libRel in @('lib', 'lib64')) {
+        $libDir = Join-Path $script:DepsPrefix $libRel
+        if (-not (Test-Path -LiteralPath $libDir)) { continue }
+        Get-ChildItem -LiteralPath $libDir -Filter '*minizip*' -ErrorAction SilentlyContinue |
+            Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+    }
+    $mzSrc = Join-Path $script:DepsSrc 'minizip-ng'
+    $mb = Join-Path $mzSrc 'build'
+    if (Test-Path -LiteralPath $mb) { Remove-Item -LiteralPath $mb -Recurse -Force }
+}
+
+function Install-ZlibStatic {
+    # Static zlib for OCIO. Do not leave zlib.dll in deps — it gets copied next
+    # to Grendizer_Render and NVIDIA OptiX hangs in optixInit.
+    $zlibSrc = Join-Path $script:DepsSrc 'zlib'
+    $haveStatic = [bool](Find-DepLibrary $script:DepsPrefix @('zlibstatic.lib'))
+    if ((Test-ZlibInDeps) -and $haveStatic) {
+        Remove-ZlibRuntimeDllsFromPrefix
+        Info 'zlibstatic.lib already in deps — skipping zlib rebuild'
         return
     }
-    $zlibSrc = Join-Path $script:DepsSrc 'zlib'
     if (-not (Test-Path -LiteralPath (Join-Path $zlibSrc 'CMakeLists.txt'))) {
         if (Test-Path -LiteralPath $zlibSrc) {
             Info 'Removing previous zlib sources (need v1.3.1 for CMake 4.x).'
@@ -828,15 +975,16 @@ function Install-ZlibShared {
     }
     $zb = Join-Path $zlibSrc 'build'
     if (Test-Path -LiteralPath $zb) { Remove-Item -LiteralPath $zb -Recurse -Force }
-    Info 'Building zlib v1.3.1 shared (zlib.dll next to the exe).'
+    Info 'Building zlib v1.3.1 (zlibstatic.lib for OpenColorIO; no zlib.dll beside the exe).'
     Invoke-DepCMakeInstall $zlibSrc 'zlib' @(
-        '-DBUILD_SHARED_LIBS=ON', '-DZLIB_BUILD_EXAMPLES=OFF'
+        '-DBUILD_SHARED_LIBS=OFF', '-DZLIB_BUILD_EXAMPLES=OFF'
     )
     if (-not (Test-ZlibInDeps)) {
         Fail "zlib install finished but zlib.h / zlib*.lib missing under $script:DepsPrefix"
     }
-    if ((Find-ZlibRuntimeDlls).Count -eq 0) {
-        Fail "zlib install finished but zlib.dll is not under $script:DepsPrefix\bin. OpenColorIO_2_3.dll will not start."
+    Remove-ZlibRuntimeDllsFromPrefix
+    if (-not (Find-DepLibrary $script:DepsPrefix @('zlibstatic.lib'))) {
+        Fail "zlib install finished but zlibstatic.lib is missing under $script:DepsPrefix\lib. OCIO must link static zlib."
     }
 }
 
@@ -845,12 +993,7 @@ function Install-OcioSdkDeps {
     # OCIO's nested VS ExternalProjects (yaml-cpp_install, minizip-ng_install, …)
     # die on CMake 4.x (cmake_minimum < 3.5) and zlib race. MISSING then finds
     # these and skips ExternalProject entirely.
-    $needZlibDll = ((Find-ZlibRuntimeDlls).Count -eq 0)
-    if (-not (Test-ZlibInDeps) -or $needZlibDll) {
-        Install-ZlibShared
-    } else {
-        Info 'zlib already in deps — skipping'
-    }
+    Install-ZlibStatic
     if (-not (Test-MinizipInDeps)) {
         $mzSrc = Join-Path $script:DepsSrc 'minizip-ng'
         if (Test-Path -LiteralPath $mzSrc) {
@@ -860,9 +1003,18 @@ function Install-OcioSdkDeps {
         Invoke-GitClone 'https://github.com/zlib-ng/minizip-ng.git' '3.0.7' $mzSrc
         $mb = Join-Path $mzSrc 'build'
         if (Test-Path -LiteralPath $mb) { Remove-Item -LiteralPath $mb -Recurse -Force }
+        $zlibLib = Find-DepLibrary $script:DepsPrefix @('zlibstatic.lib')
+        if (-not $zlibLib) {
+            Fail 'minizip-ng needs zlibstatic.lib (zlib.dll next to the exe hangs OptiX).'
+        }
+        $zlibInc = Split-Path (Find-DepHeader $script:DepsPrefix @('include\zlib.h')) -Parent
         Invoke-DepCMakeInstall $mzSrc 'minizip-ng' @(
             "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
             "-DZLIB_ROOT=$script:DepsPrefix",
+            "-DZLIB_INCLUDE_DIR=$zlibInc",
+            "-DZLIB_LIBRARY=$zlibLib",
+            "-DZLIB_LIBRARY_RELEASE=$zlibLib",
+            '-DZLIB_USE_STATIC_LIBS=ON',
             '-DBUILD_SHARED_LIBS=OFF',
             '-DMZ_OPENSSL=OFF', '-DMZ_LIBBSD=OFF', '-DMZ_BUILD_TESTS=OFF',
             '-DMZ_COMPAT=OFF', '-DMZ_BZIP2=OFF', '-DMZ_LZMA=OFF',
@@ -1025,7 +1177,10 @@ function Get-OcioPrebuiltCmakeFlags {
     }
 
     $zlibInc = Split-Path (Find-DepHeader $script:DepsPrefix @('include\zlib.h')) -Parent
-    $zlibLib = Find-DepLibrary $script:DepsPrefix @('zlibstatic.lib', 'zlib.lib', 'z.lib')
+    $zlibLib = Find-DepLibrary $script:DepsPrefix @('zlibstatic.lib')
+    if (-not $zlibLib) {
+        Fail "zlibstatic.lib missing under $script:DepsPrefix\lib. OpenColorIO must link static zlib (zlib.dll next to the exe hangs OptiX)."
+    }
     $mzHdr = Find-DepHeader $script:DepsPrefix @(
         'include\minizip-ng\mz.h', 'include\minizip\mz.h', 'include\mz.h')
     $mzInc = Split-Path $mzHdr -Parent
@@ -1070,7 +1225,9 @@ function Get-OcioPrebuiltCmakeFlags {
         '-DOCIO_INSTALL_EXT_PACKAGES=NONE',
         "-DZLIB_INCLUDE_DIR=$zlibInc",
         "-DZLIB_LIBRARY=$zlibLib",
+        "-DZLIB_LIBRARY_RELEASE=$zlibLib",
         "-DZLIB_ROOT=$script:DepsPrefix",
+        '-DZLIB_USE_STATIC_LIBS=ON',
         "-Dminizip-ng_INCLUDE_DIR=$mzInc",
         "-Dminizip-ng_LIBRARY=$mzLib",
         '-Dminizip-ng_STATIC_LIBRARY=ON',
@@ -1193,7 +1350,10 @@ Close Grendizer if a DLL is locked.
     }
     $script:OcioInstall = $hit
     Info ("OpenColorIO SDK ready: " + $cfgFile.FullName)
-    if ($hit.Dll) { Info ("OpenColorIO DLL: " + $hit.Dll) }
+    if ($hit.Dll) {
+        Info ("OpenColorIO DLL: " + $hit.Dll)
+        Assert-NoZlibDllImport $hit.Dll
+    }
 }
 
 function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [switch]$AllowFail, [string]$SourceDir = '') {
@@ -1305,7 +1465,17 @@ function Ensure-NativeDeps {
     $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
     if ((Test-Path -LiteralPath $stamp) -and $script:OcioInstall -and $script:OcioInstall.Dll) {
         Info "Native deps already installed (incl. OpenColorIO SDK): $script:DepsPrefix"
-        Install-ZlibShared
+        Install-ZlibStatic
+        if (Test-PeDependsOnZlib $script:OcioInstall.Dll) {
+            Info 'OpenColorIO.dll imports zlib.dll - rebuilding minizip+OCIO against zlibstatic.lib (zlib.dll hangs OptiX).'
+            Remove-InstalledMinizip
+            Install-OpenColorIO
+            $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
+            if (-not $script:OcioInstall -or -not $script:OcioInstall.Dll) {
+                Fail 'OpenColorIO SDK rebuild failed. FULL requires SOLSTICE_HAVE_OCIO 1.'
+            }
+            Assert-NoZlibDllImport $script:OcioInstall.Dll
+        }
         return
     }
     if (Test-Path -LiteralPath $stamp) {
@@ -1821,8 +1991,7 @@ if ($script:DepsPrefix) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
         foreach ($pat in @(
             'embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll',
-            'OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll',
-            'zlib*.dll', 'libzlib*.dll', 'zdll*.dll'
+            'OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll'
         )) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $Bin
@@ -1839,10 +2008,7 @@ if ($script:OcioInstall) {
         (Join-Path $script:OcioInstall.Prefix 'lib')
     )) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($pat in @(
-            'OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll',
-            'zlib*.dll', 'libzlib*.dll', 'zdll*.dll'
-        )) {
+        foreach ($pat in @('OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll')) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $Bin
             }
@@ -1850,27 +2016,28 @@ if ($script:OcioInstall) {
     }
 }
 
+# zlib.dll next to the exe makes optixInit hang ("OptiX checking...").
+# OCIO must have been linked to zlibstatic. Remove leftover copies; fail if locked.
+foreach ($pat in @('zlib*.dll', 'libzlib*.dll', 'zdll*.dll', 'zlib1.dll')) {
+    Get-ChildItem -LiteralPath $Bin -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+        Info ("Removing " + $_.Name + " from the exe folder (OptiX)")
+        try {
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+        } catch {
+            Fail ("Could not delete " + $_.Name + " from $Bin. Close Grendizer_Render and re-run. zlib.dll next to the exe hangs OptiX.")
+        }
+    }
+}
+$zlibLeft = @()
+foreach ($pat in @('zlib*.dll', 'libzlib*.dll', 'zdll*.dll', 'zlib1.dll')) {
+    $zlibLeft += @(Get-ChildItem -LiteralPath $Bin -Filter $pat -ErrorAction SilentlyContinue)
+}
+if ($zlibLeft.Count -gt 0) {
+    Fail ("zlib.dll still next to the exe (" + (($zlibLeft | ForEach-Object { $_.Name }) -join ', ') + "). Close Grendizer_Render so it can be deleted. That DLL hangs OptiX.")
+}
 if ($script:FullBuild) {
-    $ocioOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    $zlibOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'zlib*.dll' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if (-not $zlibOnExe) {
-        $zlibOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'zdll*.dll' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-    }
-    if ($ocioOnExe -and -not $zlibOnExe) {
-        Find-ZlibRuntimeDlls | ForEach-Object { Copy-RuntimeFile $_.FullName $Bin }
-        $zlibOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'zlib*.dll' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-    }
-    if ($ocioOnExe -and -not $zlibOnExe) {
-        Fail @"
-OpenColorIO_2_3.dll is next to the exe but zlib.dll is not.
-Windows will not start Grendizer_Render (missing zlib.dll).
-zlib.dll must be copied from %LOCALAPPDATA%\grendizer-deps\bin.
-Re-run BUILD_WINDOWS_FULL.bat; do not skip zlib.
-"@
+    Get-ChildItem -LiteralPath $Bin -Filter '*.dll' -ErrorAction SilentlyContinue | ForEach-Object {
+        Assert-NoZlibDllImport $_.FullName
     }
 }
 

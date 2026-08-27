@@ -1770,7 +1770,7 @@ void MainWindow::updateStatusBar() {
         } else if (!optixBackendCompiledIn()) {
             support = QStringLiteral("OptiX not in this build");
         } else if (optixRuntimeProbePending()) {
-            support = QStringLiteral("OptiX checking…");
+            support = QStringLiteral("OptiX starting…");
             supportColor = QColor(255, 210, 70);
         } else {
             std::string err;
@@ -1780,6 +1780,9 @@ void MainWindow::updateStatusBar() {
             } else if (!err.empty()) {
                 support = QString::fromStdString(err);
                 if (support.size() > 42) support = support.left(40) + QStringLiteral("…");
+            } else {
+                support = QStringLiteral("OptiX in this build");
+                supportColor = QColor(160, 200, 230);
             }
         }
     }
