@@ -1248,21 +1248,14 @@ public:
                                       "Per-light and per-material Contribute to Caustics can disable "
                                       "individual sources or casters.\n"
                                       "Off: glass casts dark shadows (soften with shadow_opacity)."));
-        // Same "Caustics Engine" row on every device. GPU (backend==1) swaps this
-        // menu's items in the parameter panel to the two OptiX/Iray estimators and
-        // writes causticsenginegpu — otherwise GPU hid this row and the second
-        // menu was easy to miss. XPU shows both rows.
         addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
                                          {"Path / BDPT (pbrt)", "MNEE (manifolds)", "MNEE+Photon",
                                           "Photon / VCM"},
                                          0)
                          .withGroup("Caustics")
-                         .withVisibleWhen("integrator==0&&backend==0||integrator==0&&backend==1||"
-                                          "integrator==0&&backend==2||integrator==1&&backend==0||"
-                                          "integrator==1&&backend==1||integrator==1&&backend==2")
+                         .withVisibleWhen("integrator==0&&backend==0||integrator==1&&backend==0||"
+                                          "integrator==0&&backend==2||integrator==1&&backend==2")
                          .withTooltip("CPU / Embree (and the CPU half of XPU).\n"
-                                      "When Render Device is GPU this same menu shows the two "
-                                      "OptiX engines: MNEE + Light Trace and MCMC (Iray PT+LT).\n"
                                       "Path / BDPT (pbrt, default): Path Tracer BSDF+NEE and BDPT "
                                       "Veach MIS with light-tracing splats — same as pbrt-v4. "
                                       "No MNEE, no photon map. SDS from small lights is noisy.\n"
@@ -1273,13 +1266,15 @@ public:
                                       "Photon / VCM. When Photon is active, MNEE / LT / eye-path "
                                       "BSDF caustics are turned off (no stacking).\n"
                                       "Photon / VCM: caustic-only photon map — rough glass and "
-                                      "black bases through refraction."));
+                                      "black bases through refraction.\n"
+                                      "Switch Render Device to GPU for the OptiX engines "
+                                      "(MNEE + Light Trace / MCMC)."));
         addParameter(Parameter::makeMenu("causticsenginegpu", "Caustics Engine (GPU)",
                                          {"MNEE + Light Trace", "MCMC (Iray PT+LT)"}, 0)
                          .withGroup("Caustics")
-                         .withVisibleWhen("integrator==0&&backend==2||integrator==1&&backend==2")
-                         .withTooltip("OptiX half of XPU (Render Device = GPU uses the Caustics "
-                                      "Engine menu above for these same two items).\n"
+                         .withVisibleWhen("integrator==0&&backend==1||integrator==1&&backend==1||"
+                                          "integrator==0&&backend==2||integrator==1&&backend==2")
+                         .withTooltip("OptiX (GPU, and the GPU half of XPU). Not the CPU menu.\n"
                                       "MNEE + Light Trace (default): manifold next-event from the "
                                       "eye through delta glass, plus light tracing that does not "
                                       "splat from the caster and does not kill the path after a "

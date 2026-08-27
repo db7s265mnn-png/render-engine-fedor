@@ -785,12 +785,6 @@ void ParameterPanel::rebuildLop() {
             QWidget* editor = createEditor(parameter);
             if (!editor) continue;
             if (!parameter.tooltip.isEmpty()) editor->setToolTip(parameter.tooltip);
-            if (parameter.name == QLatin1String("causticsengine") && node_ &&
-                node_->intValue(QStringLiteral("backend"), 0) == 1) {
-                if (const Parameter* gpu = node_->findParameter(QStringLiteral("causticsenginegpu"))) {
-                    if (!gpu->tooltip.isEmpty()) editor->setToolTip(gpu->tooltip);
-                }
-            }
             // Buttons carry their own label text — avoid "Render: [Render]".
             if (parameter.type == ParamType::Button)
                 folder->form->addRow(QString(), editor);
@@ -1187,8 +1181,7 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                 break;
             }
         }
-        if (affectsVisibility || name == QLatin1String("backend") || name == QLatin1String("integrator"))
-            QTimer::singleShot(0, this, [this] { refresh(); });
+        if (affectsVisibility) QTimer::singleShot(0, this, [this] { refresh(); });
     };
     auto notifyText = [this, node, name](const QString& text) {
         if (updating_ || !node) return;
@@ -1222,8 +1215,7 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                 break;
             }
         }
-        if (affectsVisibility || name == QLatin1String("backend") || name == QLatin1String("integrator"))
-            QTimer::singleShot(0, this, [this] { refresh(); });
+        if (affectsVisibility) QTimer::singleShot(0, this, [this] { refresh(); });
     };
 
     switch (parameter.type) {
@@ -1486,21 +1478,7 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             combo->setMinimumContentsLength(10);
             combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
             combo->setMaximumWidth(320);
-            QStringList items = parameter.menuItems;
-            QString valueName = name;
-            int currentIndex = parameter.toInt();
-            // GPU: keep the same "Caustics Engine" row, swap in the two Iray/OptiX
-            // estimators, and store the choice on causticsenginegpu (CPU 0..3 stays).
-            if (name == QLatin1String("causticsengine") && node &&
-                node->typeName() == QLatin1String("rendersettings") &&
-                node->intValue(QStringLiteral("backend"), 0) == 1) {
-                if (const Parameter* gpu = node->findParameter(QStringLiteral("causticsenginegpu"))) {
-                    items = gpu->menuItems;
-                    valueName = gpu->name;
-                    currentIndex = gpu->toInt();
-                }
-            }
-            for (const QString& item : items) {
+            for (const QString& item : parameter.menuItems) {
                 // Show a shorter label; keep the full id as tooltip via item data.
                 QString label = item;
                 label.replace(QLatin1String("__"), QLatin1String(" / "));
@@ -1508,17 +1486,11 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                 combo->addItem(label, item);
                 combo->setItemData(combo->count() - 1, item, Qt::ToolTipRole);
             }
-            combo->setCurrentIndex(std::clamp(currentIndex, 0, std::max(0, combo->count() - 1)));
-            connect(combo, &QComboBox::currentIndexChanged, this,
-                    [this, notify, name, valueName](int index) {
+            combo->setCurrentIndex(std::clamp(parameter.toInt(), 0, std::max(0, combo->count() - 1)));
+            connect(combo, &QComboBox::currentIndexChanged, this, [this, notify, name](int index) {
                 // Ignore teardown (-1) and empty combos — see ParameterPanel::rebuild.
                 if (index < 0) return;
-                if (valueName != name && node_) {
-                    node_->setParameterValue(valueName, index);
-                    emit parameterEdited(node_, valueName);
-                } else {
-                    notify(index);
-                }
+                notify(index);
                 // Pixel Filter → fill recommended Filter Radius (artist can still override).
                 if (name == QLatin1String("pixelfilter") && node_) {
                     const float radius = defaultFilterRadius(index);

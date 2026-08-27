@@ -980,12 +980,10 @@ void testXpuDevice() {
             settings->setParameterValue("integrator", 0);
             settings->setParameterValue("backend", 0);
             check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings), "CPU caustics engine visible on CPU");
-            check(!evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "separate GPU engine menu hidden on CPU");
+            check(!evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "GPU caustics engine hidden on CPU");
             settings->setParameterValue("backend", 1);
-            check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings),
-                  "Caustics Engine stays visible on GPU (items swap to MNEE+LT / MCMC)");
-            check(!evaluateVisibleWhen(gpuCau->visibleWhen, *settings),
-                  "separate GPU engine menu hidden on GPU-only (same row as Caustics Engine)");
+            check(!evaluateVisibleWhen(cpuCau->visibleWhen, *settings), "CPU caustics engine hidden on GPU");
+            check(evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "GPU caustics engine visible on GPU");
             settings->setParameterValue("backend", 2);
             check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings), "CPU caustics engine visible on XPU");
             check(evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "GPU caustics engine visible on XPU");
@@ -7486,7 +7484,6 @@ int main() {
     }
     if (getenv("SOL_ONLY_FOLDERS")) {
         registerBuiltinNodes();
-        testXpuDevice();
         testRenderSettingsFolders();
         testSceneGraphFolders();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
