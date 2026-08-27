@@ -720,6 +720,33 @@ function Get-VsGeneratorArgs {
     return @()
 }
 
+function Find-ZlibRuntimeDlls {
+    $hits = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    $roots = New-Object System.Collections.Generic.List[string]
+    if ($script:DepsPrefix) { [void]$roots.Add($script:DepsPrefix) }
+    if ($script:OcioInstall -and $script:OcioInstall.Prefix) {
+        [void]$roots.Add($script:OcioInstall.Prefix)
+    }
+    foreach ($root in $roots) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root)) { continue }
+        foreach ($rel in @('bin', 'lib', 'lib64')) {
+            $dir = Join-Path $root $rel
+            if (-not (Test-Path -LiteralPath $dir)) { continue }
+            foreach ($pat in @('zlib*.dll', 'libzlib*.dll', 'zdll*.dll')) {
+                Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+                    $k = $_.Name.ToLowerInvariant()
+                    if (-not $seen.ContainsKey($k)) {
+                        $seen[$k] = $true
+                        [void]$hits.Add($_)
+                    }
+                }
+            }
+        }
+    }
+    return $hits
+}
+
 function Test-ZlibInDeps {
     $hdr = Join-Path $script:DepsPrefix 'include\zlib.h'
     if (-not (Test-Path -LiteralPath $hdr)) { return $false }
@@ -784,26 +811,43 @@ function Test-PystringInDeps {
     return $false
 }
 
-function Install-OcioSdkDeps {
-    # Prebuild every OCIO ExternalProject dep with Ninja + POLICY 3.5.
-    # OCIO's nested VS ExternalProjects (yaml-cpp_install, minizip-ng_install, …)
-    # die on CMake 4.x (cmake_minimum < 3.5) and zlib race. MISSING then finds
-    # these and skips ExternalProject entirely.
-    if (-not (Test-ZlibInDeps)) {
-        $zlibSrc = Join-Path $script:DepsSrc 'zlib'
+function Install-ZlibShared {
+    # OpenColorIO_2_3.dll imports zlib.dll. Static-only zlib makes the exe
+    # fail at launch (Windows: "не обнаружила zlib.dll").
+    if ((Test-ZlibInDeps) -and ((Find-ZlibRuntimeDlls).Count -gt 0)) {
+        Info 'zlib.dll already in deps — skipping'
+        return
+    }
+    $zlibSrc = Join-Path $script:DepsSrc 'zlib'
+    if (-not (Test-Path -LiteralPath (Join-Path $zlibSrc 'CMakeLists.txt'))) {
         if (Test-Path -LiteralPath $zlibSrc) {
             Info 'Removing previous zlib sources (need v1.3.1 for CMake 4.x).'
             Remove-Item -LiteralPath $zlibSrc -Recurse -Force
         }
         Invoke-GitClone 'https://github.com/madler/zlib.git' 'v1.3.1' $zlibSrc
-        $zb = Join-Path $zlibSrc 'build'
-        if (Test-Path -LiteralPath $zb) { Remove-Item -LiteralPath $zb -Recurse -Force }
-        Invoke-DepCMakeInstall $zlibSrc 'zlib' @(
-            '-DBUILD_SHARED_LIBS=OFF', '-DZLIB_BUILD_EXAMPLES=OFF'
-        )
-        if (-not (Test-ZlibInDeps)) {
-            Fail "zlib install finished but zlib.h / zlib*.lib missing under $script:DepsPrefix"
-        }
+    }
+    $zb = Join-Path $zlibSrc 'build'
+    if (Test-Path -LiteralPath $zb) { Remove-Item -LiteralPath $zb -Recurse -Force }
+    Info 'Building zlib v1.3.1 shared (zlib.dll next to the exe).'
+    Invoke-DepCMakeInstall $zlibSrc 'zlib' @(
+        '-DBUILD_SHARED_LIBS=ON', '-DZLIB_BUILD_EXAMPLES=OFF'
+    )
+    if (-not (Test-ZlibInDeps)) {
+        Fail "zlib install finished but zlib.h / zlib*.lib missing under $script:DepsPrefix"
+    }
+    if ((Find-ZlibRuntimeDlls).Count -eq 0) {
+        Fail "zlib install finished but zlib.dll is not under $script:DepsPrefix\bin. OpenColorIO_2_3.dll will not start."
+    }
+}
+
+function Install-OcioSdkDeps {
+    # Prebuild every OCIO ExternalProject dep with Ninja + POLICY 3.5.
+    # OCIO's nested VS ExternalProjects (yaml-cpp_install, minizip-ng_install, …)
+    # die on CMake 4.x (cmake_minimum < 3.5) and zlib race. MISSING then finds
+    # these and skips ExternalProject entirely.
+    $needZlibDll = ((Find-ZlibRuntimeDlls).Count -eq 0)
+    if (-not (Test-ZlibInDeps) -or $needZlibDll) {
+        Install-ZlibShared
     } else {
         Info 'zlib already in deps — skipping'
     }
@@ -1261,6 +1305,7 @@ function Ensure-NativeDeps {
     $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
     if ((Test-Path -LiteralPath $stamp) -and $script:OcioInstall -and $script:OcioInstall.Dll) {
         Info "Native deps already installed (incl. OpenColorIO SDK): $script:DepsPrefix"
+        Install-ZlibShared
         return
     }
     if (Test-Path -LiteralPath $stamp) {
@@ -1774,7 +1819,11 @@ if ($script:DepsPrefix) {
         (Join-Path $script:DepsPrefix 'embree')
     )) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll', 'OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll')) {
+        foreach ($pat in @(
+            'embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll',
+            'OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll',
+            'zlib*.dll', 'libzlib*.dll', 'zdll*.dll'
+        )) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $Bin
             }
@@ -1790,11 +1839,38 @@ if ($script:OcioInstall) {
         (Join-Path $script:OcioInstall.Prefix 'lib')
     )) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($pat in @('OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll')) {
+        foreach ($pat in @(
+            'OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll',
+            'zlib*.dll', 'libzlib*.dll', 'zdll*.dll'
+        )) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $Bin
             }
         }
+    }
+}
+
+if ($script:FullBuild) {
+    $ocioOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    $zlibOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'zlib*.dll' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $zlibOnExe) {
+        $zlibOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'zdll*.dll' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if ($ocioOnExe -and -not $zlibOnExe) {
+        Find-ZlibRuntimeDlls | ForEach-Object { Copy-RuntimeFile $_.FullName $Bin }
+        $zlibOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'zlib*.dll' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+    }
+    if ($ocioOnExe -and -not $zlibOnExe) {
+        Fail @"
+OpenColorIO_2_3.dll is next to the exe but zlib.dll is not.
+Windows will not start Grendizer_Render (missing zlib.dll).
+zlib.dll must be copied from %LOCALAPPDATA%\grendizer-deps\bin.
+Re-run BUILD_WINDOWS_FULL.bat; do not skip zlib.
+"@
     }
 }
 

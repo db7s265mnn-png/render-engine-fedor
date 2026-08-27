@@ -11,6 +11,7 @@ echo First full run builds OpenEXR/Alembic/OpenVDB/OCIO from source (cached afte
 echo If an older FULL stamp skipped OCIO, this run builds only OCIO (other deps stay).
 echo The .ocio file is the colour config (OCIO env / Film). FULL downloads+compiles the OpenColorIO SDK.
 echo OCIO SDK: prebuild zlib/minizip/yaml-cpp/expat/pystring, then VS + EXT_PACKAGES=NONE (no expat_install).
+echo Copies zlib.dll next to the exe (OpenColorIO_2_3.dll needs it).
 echo TinyUSDZ linking can sit with no new lines for a long time - wait.
 echo Keep C:\gz-full and %%LOCALAPPDATA%%\grendizer-deps
 echo Do not delete C:\gz-full (MaterialX / TinyUSDZ / OpenPGL live in _deps).
