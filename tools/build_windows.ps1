@@ -1177,7 +1177,8 @@ if ($code -ne 0) {
     } else {
         Fail @"
 Compile/link failed (ninja exit $code). Scroll up for the first error from cl/link/nvcc.
-C4244 / C4996 above are warnings, not the failure.
+C4244 / C4996 above are warnings, not the failure (error C / LNK / nvcc error is).
+If LNK1194 OpenColorIO vftable: this zip delay-loads OCIO without importing that data.
 If the last line was Linking CXX executable: close Grendizer_Render and retry (exe locked).
 If sobol.h / undefined in device code: that nvcc bug is already fixed in this zip.
 Look in $BuildDir\bin for Grendizer_Render-0.9.3-*.exe - a false FAIL used to hide a finished link.

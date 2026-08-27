@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.63 LANGUAGES CXX)
+project(Solstice VERSION 0.9.64 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -312,6 +312,13 @@ if(WIN32 AND SOLSTICE_HAVE_OCIO_01 AND SOLSTICE_OCIO_TARGET)
     endforeach()
     list(REMOVE_DUPLICATES SOLSTICE_OCIO_DELAYLOAD_DLLS)
     message(STATUS "  OpenColorIO delay-load: ${SOLSTICE_OCIO_DELAYLOAD_DLLS}")
+    # MSVC Release delay-load of a C++ DLL fails with LNK1194 (imported vftable
+    # data). Keep ocio_util.cpp unoptimized so only function imports remain.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        set_property(SOURCE src/io/ocio_util.cpp APPEND PROPERTY COMPILE_OPTIONS
+            "$<$<CONFIG:Release,RelWithDebInfo>:/Od>"
+            "$<$<CONFIG:Release,RelWithDebInfo>:/Ob0>")
+    endif()
 endif()
 function(solstice_delayload_ocio tgt)
     if(NOT WIN32 OR NOT SOLSTICE_OCIO_DELAYLOAD_DLLS)

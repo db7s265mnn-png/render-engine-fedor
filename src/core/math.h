@@ -23,6 +23,8 @@ namespace sol {
 
 SR_INL SR_HD float srMin(float a, float b) { return a < b ? a : b; }
 SR_INL SR_HD float srMax(float a, float b) { return a > b ? a : b; }
+SR_INL SR_HD int srMin(int a, int b) { return a < b ? a : b; }
+SR_INL SR_HD int srMax(int a, int b) { return a > b ? a : b; }
 SR_INL SR_HD float clampf(float v, float lo, float hi) { return srMin(srMax(v, lo), hi); }
 SR_INL SR_HD float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 SR_INL SR_HD float saturatef(float v) { return clampf(v, 0.0f, 1.0f); }

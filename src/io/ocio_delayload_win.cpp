@@ -5,6 +5,14 @@
 
 #include "io/ocio_util.h"
 
+// AddDllDirectory / LOAD_LIBRARY_SEARCH_* need Win8+. delayimp.h on some
+// SDKs declares a writable hook; DELAYIMP_INSECURE_WRITABLE_HOOKS matches
+// both old and new MSVC headers (const vs non-const __pfnDliNotifyHook2).
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
+#  undef _WIN32_WINNT
+#  define _WIN32_WINNT 0x0A00
+#endif
+#define DELAYIMP_INSECURE_WRITABLE_HOOKS
 #include <windows.h>
 #include <delayimp.h>
 
@@ -50,7 +58,7 @@ static FARPROC WINAPI solsticeDliNotifyHook(unsigned notify, PDelayLoadInfo pdli
     return reinterpret_cast<FARPROC>(mod);
 }
 
-extern "C" const PfnDliHook __pfnDliNotifyHook2 = solsticeDliNotifyHook;
+extern "C" PfnDliHook __pfnDliNotifyHook2 = solsticeDliNotifyHook;
 
 namespace sol {
 
