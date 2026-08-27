@@ -1095,12 +1095,39 @@ if ($script:DepsPrefix) {
         (Join-Path $script:DepsPrefix 'embree')
     )) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll', 'OpenColorIO*.dll')) {
+        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll',
+                           'OpenColorIO*.dll', 'zlib1.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll')) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $Bin
             }
         }
     }
+}
+
+# OpenColorIO_2_3.dll from current deps imports zlib1.dll. NVIDIA optixInit
+# hangs on zlib.dll (different file). Copy zlib1; delete zlib.dll.
+$ocioSub = Join-Path $Bin 'ocio'
+if (Test-Path -LiteralPath $ocioSub) {
+    Get-ChildItem -LiteralPath $ocioSub -Filter 'zlib1.dll' -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-RuntimeFile $_.FullName $Bin
+    }
+}
+foreach ($name in @('zlib.dll', 'zlibd.dll')) {
+    $p = Join-Path $Bin $name
+    if (Test-Path -LiteralPath $p) {
+        try {
+            Remove-Item -LiteralPath $p -Force -ErrorAction Stop
+            Info ("Deleted $name (NVIDIA optixInit hangs on zlib.dll)")
+        } catch {
+            Write-Host ("Warning: close Grendizer_Render and delete $p") -ForegroundColor Yellow
+        }
+    }
+}
+$ocioDll = Get-ChildItem -LiteralPath $Bin -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+$zlib1 = Join-Path $Bin 'zlib1.dll'
+if ($ocioDll -and -not (Test-Path -LiteralPath $zlib1)) {
+    Fail ("OpenColorIO is next to the exe but zlib1.dll is not. OpenColorIO_2_3.dll imports zlib1.dll. Not a skip.")
 }
 
 Write-Host ''
