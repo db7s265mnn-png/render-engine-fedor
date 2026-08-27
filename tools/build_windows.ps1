@@ -904,15 +904,127 @@ install(TARGETS ${PROJECT_NAME}
     }
 }
 
+function Find-DepHeader([string]$Prefix, [string[]]$RelPaths) {
+    foreach ($rel in $RelPaths) {
+        $p = Join-Path $Prefix $rel
+        if (Test-Path -LiteralPath $p) { return $p }
+    }
+    return $null
+}
+
+function Find-DepLibrary([string]$Prefix, [string[]]$Filters) {
+    foreach ($libRel in @('lib', 'lib64')) {
+        $libDir = Join-Path $Prefix $libRel
+        if (-not (Test-Path -LiteralPath $libDir)) { continue }
+        foreach ($pat in $Filters) {
+            $hit = Get-ChildItem -LiteralPath $libDir -Filter $pat -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($hit) { return $hit.FullName }
+        }
+    }
+    return $null
+}
+
+function Find-DepCmakeConfigDir([string]$Prefix, [string]$ConfigFileName) {
+    $hit = Get-ChildItem -LiteralPath $Prefix -Recurse -Depth 6 -Filter $ConfigFileName -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($hit) { return $hit.Directory.FullName }
+    return $null
+}
+
+function Get-OcioPrebuiltCmakeFlags {
+    # OCIO Find*.cmake: setting *_ROOT skips CONFIG find and often fails to
+    # resolve Windows static lib names, then MISSING spawns broken ExternalProject
+    # (expat_install / yaml-cpp_install MSB8066). Pass explicit INCLUDE/LIBRARY
+    # and EXT_PACKAGES=NONE so no nested install projects are created.
+    $missing = @()
+    if (-not (Test-ZlibInDeps)) { $missing += 'zlib' }
+    if (-not (Test-MinizipInDeps)) { $missing += 'minizip-ng' }
+    if (-not (Test-YamlCppInDeps)) { $missing += 'yaml-cpp' }
+    if (-not (Test-ExpatInDeps)) { $missing += 'expat' }
+    if (-not (Test-PystringInDeps)) { $missing += 'pystring' }
+    if ($missing.Count -gt 0) {
+        Fail ("OpenColorIO SDK prebuild incomplete (missing: " + ($missing -join ', ') + "). Fix deps under $script:DepsPrefix — do not skip.")
+    }
+
+    $zlibInc = Split-Path (Find-DepHeader $script:DepsPrefix @('include\zlib.h')) -Parent
+    $zlibLib = Find-DepLibrary $script:DepsPrefix @('zlibstatic.lib', 'zlib.lib', 'z.lib')
+    $mzHdr = Find-DepHeader $script:DepsPrefix @(
+        'include\minizip-ng\mz.h', 'include\minizip\mz.h', 'include\mz.h')
+    $mzInc = Split-Path $mzHdr -Parent
+    $mzLib = Find-DepLibrary $script:DepsPrefix @('libminizip-ng.lib', 'minizip-ng.lib', 'libminizip.lib', 'minizip.lib')
+    $yamlIncParent = Split-Path (Find-DepHeader $script:DepsPrefix @('include\yaml-cpp\yaml.h')) -Parent
+    $yamlInc = Split-Path $yamlIncParent -Parent
+    $yamlLib = Find-DepLibrary $script:DepsPrefix @('yaml-cpp.lib', 'libyaml-cpp.lib')
+    $yamlDir = Find-DepCmakeConfigDir $script:DepsPrefix 'yaml-cpp-config.cmake'
+    $expatInc = Split-Path (Find-DepHeader $script:DepsPrefix @('include\expat.h')) -Parent
+    $expatLib = Find-DepLibrary $script:DepsPrefix @(
+        'libexpatMD.lib', 'libexpatMT.lib', 'libexpat.lib', 'expat.lib', 'libexpatdMD.lib')
+    $expatDir = Find-DepCmakeConfigDir $script:DepsPrefix 'expat-config.cmake'
+    $pyHdr = Find-DepHeader $script:DepsPrefix @('include\pystring\pystring.h', 'include\pystring.h')
+    $pyInc = Split-Path $pyHdr -Parent
+    $pyLib = Find-DepLibrary $script:DepsPrefix @('pystring.lib', 'libpystring.lib')
+
+    foreach ($pair in @(
+        @('zlib include', $zlibInc), @('zlib lib', $zlibLib),
+        @('minizip include', $mzInc), @('minizip lib', $mzLib),
+        @('yaml-cpp include', $yamlInc), @('yaml-cpp lib', $yamlLib),
+        @('expat include', $expatInc), @('expat lib', $expatLib),
+        @('pystring include', $pyInc), @('pystring lib', $pyLib)
+    )) {
+        if (-not $pair[1]) {
+            Fail ("OpenColorIO SDK prebuild path missing for " + $pair[0] + " under $script:DepsPrefix")
+        }
+        Info ("OCIO dep " + $pair[0] + ": " + $pair[1])
+    }
+
+    $flags = @(
+        "-DCMAKE_INSTALL_PREFIX=$script:DepsPrefix",
+        "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
+        '-DCMAKE_BUILD_TYPE=Release',
+        '-DBUILD_SHARED_LIBS=ON',
+        '-DOCIO_BUILD_APPS=OFF',
+        '-DOCIO_BUILD_TESTS=OFF',
+        '-DOCIO_BUILD_GPU_TESTS=OFF',
+        '-DOCIO_BUILD_PYTHON=OFF',
+        '-DOCIO_BUILD_JAVA=OFF',
+        '-DOCIO_BUILD_DOCS=OFF',
+        # NONE: never create yaml-cpp_install / expat_install ExternalProjects.
+        '-DOCIO_INSTALL_EXT_PACKAGES=NONE',
+        "-DZLIB_INCLUDE_DIR=$zlibInc",
+        "-DZLIB_LIBRARY=$zlibLib",
+        "-DZLIB_ROOT=$script:DepsPrefix",
+        "-Dminizip-ng_INCLUDE_DIR=$mzInc",
+        "-Dminizip-ng_LIBRARY=$mzLib",
+        '-Dminizip-ng_STATIC_LIBRARY=ON',
+        "-Dyaml-cpp_INCLUDE_DIR=$yamlInc",
+        "-Dyaml-cpp_LIBRARY=$yamlLib",
+        "-Dexpat_INCLUDE_DIR=$expatInc",
+        "-Dexpat_LIBRARY=$expatLib",
+        '-Dexpat_STATIC_LIBRARY=ON',
+        "-Dpystring_INCLUDE_DIR=$pyInc",
+        "-Dpystring_LIBRARY=$pyLib",
+        '-DCMAKE_POLICY_VERSION_MINIMUM=3.5'
+    )
+    if ($yamlDir) {
+        $flags += "-Dyaml-cpp_DIR=$yamlDir"
+        Info ("yaml-cpp_DIR: " + $yamlDir)
+    }
+    if ($expatDir) {
+        $flags += "-Dexpat_DIR=$expatDir"
+        Info ("expat_DIR: " + $expatDir)
+    }
+    return $flags
+}
+
 function Install-OpenColorIO {
     # FULL downloads and compiles the OpenColorIO SDK (library) into
     # %LOCALAPPDATA%\grendizer-deps. The OCIO env / Film path is only the
     # .ocio colour config — that is not this step and never replaces the SDK.
     #
-    # Do not use EXT_PACKAGES=ALL for minizip: OCIO's ExternalProject races zlib
-    # (C1083 zlib.h) and Ninja nested minizip dies on OpenSSL defaults.
-    # Prebuild zlib + minizip-ng 3.0.7, then VS + MISSING; yaml-cpp/expat/pystring
-    # still come from OCIO's VS ExternalProject.
+    # Prebuild zlib/minizip/yaml-cpp/expat/pystring, then VS + EXT_PACKAGES=NONE
+    # with explicit INCLUDE/LIBRARY paths. Never spawn nested ExternalProject
+    # (expat_install / yaml-cpp_install die on CMake 4.x).
     $src = Join-Path $script:DepsSrc 'ocio'
     $b = Join-Path $src 'build'
     Info 'OpenColorIO SDK: git clone v2.3.2 + compile into deps (FULL requires the library).'
@@ -939,7 +1051,7 @@ Install VS 2022 or VS 2026 Desktop development with C++, then re-run BUILD_WINDO
 Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
 "@
     }
-    Info 'OpenColorIO SDK deps: zlib, minizip-ng, yaml-cpp, expat, pystring (prebuilt; no nested ExternalProject).'
+    Info 'OpenColorIO SDK deps: zlib, minizip-ng, yaml-cpp, expat, pystring (prebuilt; EXT_PACKAGES=NONE).'
     Install-OcioSdkDeps
     # Fresh clone if the tree looks incomplete (failed prior attempt).
     $cm = Join-Path $src 'CMakeLists.txt'
@@ -951,33 +1063,14 @@ Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
     Info 'Downloading OpenColorIO SDK sources (AcademySoftwareFoundation/OpenColorIO v2.3.2) ...'
     Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/OpenColorIO.git' 'v2.3.2' $src
     if (Test-Path -LiteralPath $b) {
-        Info 'Removing previous OCIO build tree (wipe broken yaml-cpp/minizip ExternalProject leftovers).'
+        Info 'Removing previous OCIO build tree (wipe expat_install / yaml-cpp_install leftovers).'
         Remove-Item -LiteralPath $b -Recurse -Force
     }
-    $ocioFlags = @(
-        "-DCMAKE_INSTALL_PREFIX=$script:DepsPrefix",
-        "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
-        '-DCMAKE_BUILD_TYPE=Release',
-        '-DBUILD_SHARED_LIBS=ON',
-        '-DOCIO_BUILD_APPS=OFF',
-        '-DOCIO_BUILD_TESTS=OFF',
-        '-DOCIO_BUILD_GPU_TESTS=OFF',
-        '-DOCIO_BUILD_PYTHON=OFF',
-        '-DOCIO_BUILD_JAVA=OFF',
-        '-DOCIO_BUILD_DOCS=OFF',
-        '-DOCIO_INSTALL_EXT_PACKAGES=MISSING',
-        "-DZLIB_ROOT=$script:DepsPrefix",
-        "-Dminizip-ng_ROOT=$script:DepsPrefix",
-        '-Dminizip-ng_STATIC_LIBRARY=ON',
-        "-Dyaml-cpp_ROOT=$script:DepsPrefix",
-        "-Dexpat_ROOT=$script:DepsPrefix",
-        "-Dpystring_ROOT=$script:DepsPrefix",
-        '-DCMAKE_POLICY_VERSION_MINIMUM=3.5'
-    )
+    $ocioFlags = Get-OcioPrebuiltCmakeFlags
     $usedGen = $null
     foreach ($vsGen in $candidates) {
         if (Test-Path -LiteralPath $b) { Remove-Item -LiteralPath $b -Recurse -Force }
-        Info ('Compiling OpenColorIO SDK: ' + ($vsGen -join ' ') + ' + MISSING (all ext deps prebuilt)')
+        Info ('Compiling OpenColorIO SDK: ' + ($vsGen -join ' ') + ' + EXT_PACKAGES=NONE (no nested install)')
         $cfg = @('-S', $src, '-B', $b) + $vsGen + $ocioFlags
         & $CMake @cfg
         if ($LASTEXITCODE -eq 0) {
@@ -987,7 +1080,14 @@ Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
         Write-Host ('Warning: OpenColorIO configure rejected generator ' + ($vsGen -join ' ')) -ForegroundColor Yellow
     }
     if (-not $usedGen) {
-        Fail 'OpenColorIO SDK cmake configure failed for every Visual Studio generator. See log above.'
+        Fail 'OpenColorIO SDK cmake configure failed for every Visual Studio generator. See log above. Prebuilt deps must be found with EXT_PACKAGES=NONE.'
+    }
+    # Guard: nested ExternalProject must not exist when NONE is set.
+    foreach ($bad in @('expat_install.vcxproj', 'yaml-cpp_install.vcxproj', 'minizip-ng_install.vcxproj', 'pystring_install.vcxproj', 'ZLIB_install.vcxproj')) {
+        $p = Join-Path $b $bad
+        if (Test-Path -LiteralPath $p) {
+            Fail ("OpenColorIO still generated $bad — EXT_PACKAGES=NONE did not stick or a dep was not found. See cmake log.")
+        }
     }
     Info ('Installing OpenColorIO SDK with ' + ($usedGen -join ' ') + ' (--target install) into ' + $script:DepsPrefix)
     & $CMake --build $b --config Release --target install --parallel
@@ -995,7 +1095,7 @@ Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
         Fail @"
 OpenColorIO SDK MSBuild install failed.
 This compiles the OpenColorIO library (headers + OpenColorIO.dll), not the .ocio colour config.
-If the log still shows minizip-ng_install / zlib.h: keep %LOCALAPPDATA%\grendizer-deps and re-run.
+If the log shows expat_install / yaml-cpp_install: nested ExternalProject must not run — re-download this zip.
 Close Grendizer if a DLL is locked.
 "@
     }
