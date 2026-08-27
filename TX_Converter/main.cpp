@@ -555,6 +555,7 @@ private:
 }  // namespace
 
 int main(int argc, char** argv) {
+    sol::ocioPreloadRuntimeDll();
     QApplication app(argc, argv);
     QImageReader::setAllocationLimit(0);
     sol::applyDarkTheme(app);

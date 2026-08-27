@@ -132,8 +132,8 @@ RenderDevicePtr createOptixDevice();
 RenderDevicePtr createXpuDevice(int threadCount = 0);
 bool optixBackendCompiledIn();
 
-// Live CUDA + optixInit probe (cached). HUD must not start this — only
-// createOptixDevice() on the render thread. initialize() overwrites the result.
+// Live CUDA + optixInit probe (cached, never on the Qt UI thread).
+// createOptixDevice() overwrites this with the real initialize() result.
 bool optixRuntimeAvailable(std::string* error = nullptr);
 bool optixRuntimeProbePending();
 

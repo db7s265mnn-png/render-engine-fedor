@@ -813,8 +813,8 @@ function Test-PystringInDeps {
 
 function Install-ZlibShared {
     # OpenColorIO_2_3.dll imports zlib.dll. Keep the DLL in deps and copy it
-    # next to the exe. OptiX must not LoadLibrary that copy -- see
-    # HideExeDirFromLoadLibrary in optix_device.cpp (SetDllDirectory System32).
+    # to bin\ocio (not next to the exe). zlib.dll in the exe folder makes
+    # NVIDIA optixInit hang ("OptiX checking").
     $zlibSrc = Join-Path $script:DepsSrc 'zlib'
     if ((Test-ZlibInDeps) -and ((Find-ZlibRuntimeDlls).Count -gt 0)) {
         Info 'zlib.dll already in deps - skipping'
@@ -1816,9 +1816,7 @@ if ($script:DepsPrefix) {
     )) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
         foreach ($pat in @(
-            'embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll',
-            'OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll',
-            'zlib*.dll', 'libzlib*.dll', 'zdll*.dll'
+            'embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll'
         )) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $Bin
@@ -1826,47 +1824,71 @@ if ($script:DepsPrefix) {
         }
     }
 }
+# Yesterday OptiX worked because zlib.dll was NOT next to the exe. NVIDIA
+# optixInit LoadLibrary("zlib.dll") searches the exe folder first. Keep OCIO
+# + zlib + yaml/expat in bin\ocio and delay-load OpenColorIO from there.
+$OcioSidecar = Join-Path $Bin 'ocio'
+New-Item -ItemType Directory -Force -Path $OcioSidecar | Out-Null
+$ocioRuntimePats = @(
+    'OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll',
+    'zlib*.dll', 'libzlib*.dll', 'zdll*.dll', 'zlib1.dll'
+)
+$ocioSrcDirs = New-Object System.Collections.Generic.List[string]
+if ($script:DepsPrefix) {
+    [void]$ocioSrcDirs.Add((Join-Path $script:DepsPrefix 'bin'))
+    [void]$ocioSrcDirs.Add((Join-Path $script:DepsPrefix 'lib'))
+}
 if ($script:OcioInstall) {
     if ($script:OcioInstall.Dll) {
-        Copy-RuntimeFile $script:OcioInstall.Dll $Bin
+        Copy-RuntimeFile $script:OcioInstall.Dll $OcioSidecar
     }
-    foreach ($dir in @(
-        (Join-Path $script:OcioInstall.Prefix 'bin'),
-        (Join-Path $script:OcioInstall.Prefix 'lib')
-    )) {
-        if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($pat in @('OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll',
-            'zlib*.dll', 'libzlib*.dll', 'zdll*.dll')) {
-            Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
-                Copy-RuntimeFile $_.FullName $Bin
-            }
+    if ($script:OcioInstall.Prefix) {
+        [void]$ocioSrcDirs.Add((Join-Path $script:OcioInstall.Prefix 'bin'))
+        [void]$ocioSrcDirs.Add((Join-Path $script:OcioInstall.Prefix 'lib'))
+    }
+}
+foreach ($dir in $ocioSrcDirs) {
+    if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
+    foreach ($pat in $ocioRuntimePats) {
+        Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-RuntimeFile $_.FullName $OcioSidecar
         }
     }
 }
-
-# OpenColorIO_2_3.dll imports zlib.dll. Copy it next to the exe.
-# OptiX hides the exe directory during optixInit so it does not LoadLibrary this copy.
+foreach ($pat in $ocioRuntimePats) {
+    Get-ChildItem -LiteralPath $Bin -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+        Info ("Moving " + $_.Name + " to ocio\ (zlib.dll next to the exe hangs OptiX)")
+        try {
+            Copy-Item -LiteralPath $_.FullName -Destination $OcioSidecar -Force -ErrorAction Stop
+            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+        } catch {
+            Fail ("Could not remove " + $_.Name + " from $Bin. Close Grendizer_Render. zlib.dll next to the exe hangs OptiX.")
+        }
+    }
+}
 if ($script:FullBuild) {
-    $ocioOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
+    $ocioDll = Get-ChildItem -LiteralPath $OcioSidecar -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
         Select-Object -First 1
-    $zlibOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'zlib*.dll' -ErrorAction SilentlyContinue |
+    $zlibDll = Get-ChildItem -LiteralPath $OcioSidecar -Filter 'zlib*.dll' -ErrorAction SilentlyContinue |
         Select-Object -First 1
-    if (-not $zlibOnExe) {
-        $zlibOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'zdll*.dll' -ErrorAction SilentlyContinue |
+    if (-not $zlibDll) {
+        $zlibDll = Get-ChildItem -LiteralPath $OcioSidecar -Filter 'zdll*.dll' -ErrorAction SilentlyContinue |
             Select-Object -First 1
     }
-    if ($ocioOnExe -and -not $zlibOnExe) {
-        Find-ZlibRuntimeDlls | ForEach-Object { Copy-RuntimeFile $_.FullName $Bin }
-        $zlibOnExe = Get-ChildItem -LiteralPath $Bin -Filter 'zlib*.dll' -ErrorAction SilentlyContinue |
+    if ($ocioDll -and -not $zlibDll) {
+        Find-ZlibRuntimeDlls | ForEach-Object { Copy-RuntimeFile $_.FullName $OcioSidecar }
+        $zlibDll = Get-ChildItem -LiteralPath $OcioSidecar -Filter 'zlib*.dll' -ErrorAction SilentlyContinue |
             Select-Object -First 1
     }
-    if ($ocioOnExe -and -not $zlibOnExe) {
+    if ($ocioDll -and -not $zlibDll) {
         Fail @"
-OpenColorIO_2_3.dll is next to the exe but zlib.dll is not.
-Windows will not start Grendizer_Render (missing zlib.dll).
-zlib.dll must be copied from %LOCALAPPDATA%\grendizer-deps\bin.
-Re-run BUILD_WINDOWS_FULL.bat; do not skip zlib.
+OpenColorIO is in bin\ocio but zlib.dll is not.
+OCIO will not load. zlib.dll must come from %LOCALAPPDATA%\grendizer-deps\bin.
+Do not copy zlib.dll next to Grendizer_Render.exe - that hangs OptiX.
 "@
+    }
+    if ($ocioDll) {
+        Info ("OCIO runtime (not next to exe): " + $ocioDll.FullName)
     }
 }
 

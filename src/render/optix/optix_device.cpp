@@ -22,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core/log.h"
@@ -33,16 +34,6 @@
 #include "render/render_device.h"
 #include "render/rgb_spectrum_tables.h"
 #include "scene/volume_grid.h"
-
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
 
 // Emitted by the build from the wavefront OptiX modules.
 extern "C" const unsigned char solsticeOptixInitIr[];
@@ -94,26 +85,6 @@ void contextLog(unsigned int level, const char* tag, const char* message, void*)
         logDebug(text);
     }
 }
-
-#ifdef _WIN32
-// OpenColorIO_2_3.dll needs zlib.dll next to the exe. nvoptix LoadLibrary("zlib.dll")
-// would pick that copy (exe directory is searched first) and hang. While CUDA/OptiX
-// load, search System32 only; restore afterwards. Process imports (OCIO) already loaded.
-struct HideExeDirFromLoadLibrary {
-    HideExeDirFromLoadLibrary() {
-        wchar_t sys[MAX_PATH] = {};
-        if (GetSystemDirectoryW(sys, MAX_PATH) > 0)
-            SetDllDirectoryW(sys);
-        else
-            SetDllDirectoryW(L"");
-    }
-    ~HideExeDirFromLoadLibrary() { SetDllDirectoryW(nullptr); }
-    HideExeDirFromLoadLibrary(const HideExeDirFromLoadLibrary&) = delete;
-    HideExeDirFromLoadLibrary& operator=(const HideExeDirFromLoadLibrary&) = delete;
-};
-#else
-struct HideExeDirFromLoadLibrary {};
-#endif
 
 std::string optixFailMessage(OptixResult result, const char* call) {
     std::ostringstream oss;
@@ -275,29 +246,27 @@ public:
     bool initialize(std::string& error) {
         try {
             int deviceCount = 0;
-            cudaDeviceProp properties{};
-            {
-                const HideExeDirFromLoadLibrary hideExeDir;
-                const cudaError_t status = cudaGetDeviceCount(&deviceCount);
-                if (status != cudaSuccess || deviceCount == 0) {
-                    error = "no CUDA capable device found";
-                    return false;
-                }
-                CUDA_CHECK(cudaSetDevice(0));
-                CUDA_CHECK(cudaFree(nullptr));  // create the primary context
-                CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
-                deviceName_ = properties.name;
-
-                OPTIX_CHECK(optixInit());
-
-                OptixDeviceContextOptions options{};
-                options.logCallbackFunction = &contextLog;
-                options.logCallbackLevel = 2;
-#if OPTIX_VERSION >= 70200
-                options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
-#endif
-                OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
+            const cudaError_t status = cudaGetDeviceCount(&deviceCount);
+            if (status != cudaSuccess || deviceCount == 0) {
+                error = "no CUDA capable device found";
+                return false;
             }
+            CUDA_CHECK(cudaSetDevice(0));
+            CUDA_CHECK(cudaFree(nullptr));  // create the primary context
+
+            cudaDeviceProp properties{};
+            CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
+            deviceName_ = properties.name;
+
+            OPTIX_CHECK(optixInit());
+
+            OptixDeviceContextOptions options{};
+            options.logCallbackFunction = &contextLog;
+            options.logCallbackLevel = 2;
+#if OPTIX_VERSION >= 70200
+            options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
+#endif
+            OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
 
             CUDA_CHECK(cudaStreamCreate(&stream_));
             CUDA_CHECK(cudaEventCreate(&gpuStartEvent_));
@@ -1381,7 +1350,6 @@ void setOptixRuntime(bool ok, std::string error) {
 // plus an NVIDIA card, cudaGetDeviceCount there often returns 0 / no-device and
 // then the cached failure silently keeps OptiX off for the rest of the session.
 bool probeOptixRuntimeUnlocked(std::string& error) {
-    const HideExeDirFromLoadLibrary hideExeDir;
     int deviceCount = 0;
     const cudaError_t status = cudaGetDeviceCount(&deviceCount);
     if (status != cudaSuccess) {
@@ -1410,36 +1378,34 @@ bool probeOptixRuntimeUnlocked(std::string& error) {
     return true;
 }
 
-// Probe on the caller (render) thread. A detached CUDA thread plus HUD
-// ticks used to hang forever on "OptiX checking…" (zlib.dll next to the
-// exe, Intel iGPU + NVIDIA, mixed cudart).
-void waitForOptixProbe() {
-    {
-        std::unique_lock<std::mutex> lock(gOptixRuntimeMutex);
-        if (gOptixRuntimeState != OptixRuntimeState::Unknown) return;
-        if (gOptixProbeRunning) {
-            gOptixProbeCv.wait(lock, [] { return !gOptixProbeRunning; });
-            return;
+void kickOptixProbeLocked() {
+    if (gOptixRuntimeState != OptixRuntimeState::Unknown || gOptixProbeRunning) return;
+    gOptixProbeRunning = true;
+    std::thread([] {
+        std::string err;
+        bool ok = false;
+        try {
+            ok = probeOptixRuntimeUnlocked(err);
+        } catch (const std::exception& e) {
+            err = e.what();
+        } catch (...) {
+            err = "CUDA probe crashed";
         }
-        gOptixProbeRunning = true;
-    }
-    std::string err;
-    bool ok = false;
-    try {
-        ok = probeOptixRuntimeUnlocked(err);
-    } catch (const std::exception& e) {
-        err = e.what();
-    } catch (...) {
-        err = "CUDA probe crashed";
-    }
-    {
-        std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
-        setOptixRuntime(ok, err);
-        gOptixProbeRunning = false;
-    }
-    gOptixProbeCv.notify_all();
-    if (ok) logInfo("OptiX runtime probe: available");
-    else logWarning("OptiX runtime probe: not available (" + err + ")");
+        {
+            std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
+            setOptixRuntime(ok, err);
+            gOptixProbeRunning = false;
+        }
+        gOptixProbeCv.notify_all();
+        if (ok) logInfo("OptiX runtime probe: available");
+        else logWarning("OptiX runtime probe: not available (" + err + ")");
+    }).detach();
+}
+
+void waitForOptixProbe() {
+    std::unique_lock<std::mutex> lock(gOptixRuntimeMutex);
+    kickOptixProbeLocked();
+    gOptixProbeCv.wait(lock, [] { return !gOptixProbeRunning; });
 }
 
 }  // namespace
@@ -1448,13 +1414,13 @@ bool optixBackendCompiledIn() { return true; }
 
 bool optixRuntimeProbePending() {
     std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
-    // Do not kick CUDA from the HUD. The live probe runs only from
-    // createOptixDevice() on the render thread.
-    return gOptixProbeRunning;
+    kickOptixProbeLocked();
+    return gOptixRuntimeState == OptixRuntimeState::Unknown || gOptixProbeRunning;
 }
 
 bool optixRuntimeAvailable(std::string* error) {
     std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
+    kickOptixProbeLocked();
     if (error) *error = gOptixRuntimeError;
     return gOptixRuntimeState == OptixRuntimeState::Ok;
 }

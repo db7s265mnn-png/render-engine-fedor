@@ -41,6 +41,10 @@ Vec3 ocioApplyViewPrepared(Vec3 linearWorking);  // no lock; requires prepare
 // True when this build was linked with OpenColorIO.
 bool ocioLibraryAvailable();
 
+// Windows: load OpenColorIO + zlib from <exe>/ocio/ so zlib.dll is not next
+// to the exe (that copy makes NVIDIA optixInit hang). No-op elsewhere.
+void ocioPreloadRuntimeDll();
+
 // Convert scene-referred RGB from `inputColorSpace` into ACEScg.
 // Uses the loaded OCIO config when available; otherwise a classic ACES 1.2
 // matrix / sRGB EOTF fallback for the curated Utility / ACES names.

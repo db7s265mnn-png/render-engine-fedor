@@ -70,6 +70,7 @@ void configureParser(QCommandLineParser& parser) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    sol::ocioPreloadRuntimeDll();
     sol::registerBuiltinNodes();
 
     if (wantsHeadless(argc, argv)) {
