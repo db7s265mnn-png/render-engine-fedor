@@ -748,9 +748,15 @@ function Install-OcioZlibAndMinizip {
     # EXT_PACKAGES=ALL races: minizip compiles before zlib.h lands (C1083).
     # Prebuild both with Ninja (flat, no nested ExternalProject), then OCIO
     # MISSING finds them. Pin minizip-ng 3.0.7 — that is OCIO 2.3.2's recommended tag.
+    # zlib v1.3.1 (not 1.2.13): CMake 4.x removed compat with cmake_minimum_required < 3.5;
+    # 1.2.13 still says VERSION 2.4.4 and configure fails hard.
     if (-not (Test-ZlibInDeps)) {
         $zlibSrc = Join-Path $script:DepsSrc 'zlib'
-        Invoke-GitClone 'https://github.com/madler/zlib.git' 'v1.2.13' $zlibSrc
+        if (Test-Path -LiteralPath $zlibSrc) {
+            Info 'Removing previous zlib sources (need v1.3.1 for CMake 4.x).'
+            Remove-Item -LiteralPath $zlibSrc -Recurse -Force
+        }
+        Invoke-GitClone 'https://github.com/madler/zlib.git' 'v1.3.1' $zlibSrc
         $zb = Join-Path $zlibSrc 'build'
         if (Test-Path -LiteralPath $zb) { Remove-Item -LiteralPath $zb -Recurse -Force }
         Invoke-DepCMakeInstall $zlibSrc 'zlib' @(
@@ -827,7 +833,7 @@ Install VS 2022 or VS 2026 Desktop development with C++, then re-run BUILD_WINDO
 Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
 "@
     }
-    Info 'OpenColorIO SDK deps: zlib 1.2.13 + minizip-ng 3.0.7 (prebuilt, avoids C1083).'
+    Info 'OpenColorIO SDK deps: zlib 1.3.1 + minizip-ng 3.0.7 (prebuilt, avoids C1083 / CMake 4).'
     Install-OcioZlibAndMinizip
     # Fresh clone if the tree looks incomplete (failed prior attempt).
     $cm = Join-Path $src 'CMakeLists.txt'
@@ -856,7 +862,8 @@ Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
         '-DOCIO_INSTALL_EXT_PACKAGES=MISSING',
         "-DZLIB_ROOT=$script:DepsPrefix",
         "-Dminizip-ng_ROOT=$script:DepsPrefix",
-        '-Dminizip-ng_STATIC_LIBRARY=ON'
+        '-Dminizip-ng_STATIC_LIBRARY=ON',
+        '-DCMAKE_POLICY_VERSION_MINIMUM=3.5'
     )
     $usedGen = $null
     foreach ($vsGen in $candidates) {
@@ -913,7 +920,9 @@ function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [
         "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
         "-DCMAKE_MAKE_PROGRAM=$Ninja",
         "-DCMAKE_C_COMPILER=$Cl",
-        "-DCMAKE_CXX_COMPILER=$Cl"
+        "-DCMAKE_CXX_COMPILER=$Cl",
+        # CMake 4.x removed compat with cmake_minimum_required < 3.5 (zlib 1.2.x, etc.).
+        '-DCMAKE_POLICY_VERSION_MINIMUM=3.5'
     ) + $Extra
     & $CMake @cfg
     if ($LASTEXITCODE -ne 0) {
