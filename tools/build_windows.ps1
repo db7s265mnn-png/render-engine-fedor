@@ -793,16 +793,18 @@ function Install-OcioZlibAndMinizip {
 }
 
 function Install-OpenColorIO {
-    # FULL needs the OpenColorIO library. OCIO=.ocio is only the colour config.
+    # FULL downloads and compiles the OpenColorIO SDK (library) into
+    # %LOCALAPPDATA%\grendizer-deps. The OCIO env / Film path is only the
+    # .ocio colour config — that is not this step and never replaces the SDK.
+    #
     # Do not use EXT_PACKAGES=ALL for minizip: OCIO's ExternalProject races zlib
     # (C1083 zlib.h) and Ninja nested minizip dies on OpenSSL defaults.
-    # Prebuild zlib + minizip-ng 3.0.7, then VS generator + MISSING like the
-    # documented "provide your own minizip" path; yaml-cpp/expat/pystring still
-    # come from OCIO's VS ExternalProject.
+    # Prebuild zlib + minizip-ng 3.0.7, then VS + MISSING; yaml-cpp/expat/pystring
+    # still come from OCIO's VS ExternalProject.
     $src = Join-Path $script:DepsSrc 'ocio'
     $b = Join-Path $src 'build'
-    Info 'Building OpenColorIO v2.3.2 from source (FULL requires the library).'
-    Info 'The OCIO environment / Film path is the .ocio colour config - that is not this step.'
+    Info 'OpenColorIO SDK: git clone v2.3.2 + compile into deps (FULL requires the library).'
+    Info 'Not the .ocio config file — that stays on OCIO env / Film.'
     $candidates = New-Object System.Collections.Generic.List[object]
     $primary = Get-VsGeneratorArgs
     if ($primary.Count -ge 2) { [void]$candidates.Add($primary) }
@@ -820,12 +822,21 @@ function Install-OpenColorIO {
     }
     if ($candidates.Count -eq 0) {
         Fail @"
-OpenColorIO needs the Visual Studio CMake generator.
+OpenColorIO SDK needs the Visual Studio CMake generator.
 Install VS 2022 or VS 2026 Desktop development with C++, then re-run BUILD_WINDOWS_FULL.bat.
 Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
 "@
     }
+    Info 'OpenColorIO SDK deps: zlib 1.2.13 + minizip-ng 3.0.7 (prebuilt, avoids C1083).'
     Install-OcioZlibAndMinizip
+    # Fresh clone if the tree looks incomplete (failed prior attempt).
+    $cm = Join-Path $src 'CMakeLists.txt'
+    $hdrProbe = Join-Path $src 'include\OpenColorIO\OpenColorIO.h'
+    if ((Test-Path -LiteralPath $src) -and (-not (Test-Path -LiteralPath $cm) -or -not (Test-Path -LiteralPath $hdrProbe))) {
+        Info 'Removing incomplete OpenColorIO source tree.'
+        Remove-Item -LiteralPath $src -Recurse -Force
+    }
+    Info 'Downloading OpenColorIO SDK sources (AcademySoftwareFoundation/OpenColorIO v2.3.2) ...'
     Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/OpenColorIO.git' 'v2.3.2' $src
     if (Test-Path -LiteralPath $b) {
         Info 'Removing previous OCIO build tree (wipe broken minizip ExternalProject leftovers).'
@@ -850,7 +861,7 @@ Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
     $usedGen = $null
     foreach ($vsGen in $candidates) {
         if (Test-Path -LiteralPath $b) { Remove-Item -LiteralPath $b -Recurse -Force }
-        Info ('Trying OpenColorIO cmake: ' + ($vsGen -join ' ') + ' + MISSING (prebuilt zlib+minizip-ng 3.0.7)')
+        Info ('Compiling OpenColorIO SDK: ' + ($vsGen -join ' ') + ' + MISSING (prebuilt zlib+minizip)')
         $cfg = @('-S', $src, '-B', $b) + $vsGen + $ocioFlags
         & $CMake @cfg
         if ($LASTEXITCODE -eq 0) {
@@ -860,28 +871,36 @@ Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
         Write-Host ('Warning: OpenColorIO configure rejected generator ' + ($vsGen -join ' ')) -ForegroundColor Yellow
     }
     if (-not $usedGen) {
-        Fail 'OpenColorIO cmake configure failed for every Visual Studio generator. See log above.'
+        Fail 'OpenColorIO SDK cmake configure failed for every Visual Studio generator. See log above.'
     }
-    Info ('Building and installing OpenColorIO with ' + ($usedGen -join ' ') + ' (--target install) ...')
+    Info ('Installing OpenColorIO SDK with ' + ($usedGen -join ' ') + ' (--target install) into ' + $script:DepsPrefix)
     & $CMake --build $b --config Release --target install --parallel
     if ($LASTEXITCODE -ne 0) {
         Fail @"
-OpenColorIO MSBuild install failed.
-This is the OpenColorIO library build, not the .ocio colour config.
-If the log still shows minizip-ng_install / zlib.h: deps prebuild did not stick — keep %LOCALAPPDATA%\grendizer-deps and re-run.
+OpenColorIO SDK MSBuild install failed.
+This compiles the OpenColorIO library (headers + OpenColorIO.dll), not the .ocio colour config.
+If the log still shows minizip-ng_install / zlib.h: keep %LOCALAPPDATA%\grendizer-deps and re-run.
 Close Grendizer if a DLL is locked.
 "@
     }
     $cfgFile = Find-OcioConfigCMake $script:DepsPrefix
     if (-not $cfgFile) {
-        Fail "OpenColorIO install finished but OpenColorIOConfig.cmake is not under $($script:DepsPrefix). FULL needs that file."
+        Fail "OpenColorIO SDK install finished but OpenColorIOConfig.cmake is not under $($script:DepsPrefix)."
     }
     $hit = Test-OcioInstallPrefix $script:DepsPrefix
     if (-not $hit) {
-        Fail "OpenColorIOConfig.cmake exists but headers/import lib are missing under $($script:DepsPrefix)."
+        Fail "OpenColorIO SDK incomplete under $($script:DepsPrefix) (need headers + import lib / DLL)."
+    }
+    if (-not $hit.Dll) {
+        $dllProbe = Get-ChildItem -LiteralPath (Join-Path $script:DepsPrefix 'bin') -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if (-not $dllProbe) {
+            Fail "OpenColorIO SDK missing OpenColorIO*.dll under $($script:DepsPrefix)\bin. FULL Display/View needs that DLL."
+        }
     }
     $script:OcioInstall = $hit
-    Info ("OpenColorIO cmake: " + $cfgFile.FullName)
+    Info ("OpenColorIO SDK ready: " + $cfgFile.FullName)
+    if ($hit.Dll) { Info ("OpenColorIO DLL: " + $hit.Dll) }
 }
 
 function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [switch]$AllowFail) {
@@ -984,19 +1003,19 @@ function Ensure-NativeDeps {
         return
     }
 
-    # Compile the OpenColorIO library into deps. A .ocio file on OCIO= is the
-    # colour config at runtime, not a reason to skip this.
+    # Download + compile the OpenColorIO SDK into deps. A .ocio file on OCIO=
+    # is the colour config at runtime, never a substitute for this library.
     $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
-    if ((Test-Path -LiteralPath $stamp) -and $script:OcioInstall) {
-        Info "Native deps already installed: $script:DepsPrefix"
+    if ((Test-Path -LiteralPath $stamp) -and $script:OcioInstall -and $script:OcioInstall.Dll) {
+        Info "Native deps already installed (incl. OpenColorIO SDK): $script:DepsPrefix"
         return
     }
     if (Test-Path -LiteralPath $stamp) {
-        Info "Deps stamp exists but OpenColorIO is missing — building OCIO only (keeping Embree/OpenEXR/OpenVDB)."
+        Info "Deps stamp exists but OpenColorIO SDK is missing — downloading/compiling OCIO only (keeping Embree/OpenEXR/OpenVDB)."
         Install-OpenColorIO
         $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
         if (-not $script:OcioInstall) {
-            Fail "OpenColorIO still missing under $script:DepsPrefix after rebuild. FULL requires SOLSTICE_HAVE_OCIO 1."
+            Fail "OpenColorIO SDK still missing under $script:DepsPrefix after rebuild. FULL requires SOLSTICE_HAVE_OCIO 1."
         }
         return
     }
@@ -1040,11 +1059,14 @@ function Ensure-NativeDeps {
     Install-OpenColorIO
     $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
     if (-not $script:OcioInstall) {
-        Fail "OpenColorIO missing under $script:DepsPrefix after install. FULL requires SOLSTICE_HAVE_OCIO 1."
+        Fail "OpenColorIO SDK missing under $script:DepsPrefix after install. FULL requires SOLSTICE_HAVE_OCIO 1."
+    }
+    if (-not $script:OcioInstall.Dll) {
+        Fail "OpenColorIO SDK installed but OpenColorIO*.dll missing under $script:DepsPrefix\bin."
     }
 
     Set-Content -Path $stamp -Value 'ok' -Encoding ascii
-    Info "Native deps installed: $script:DepsPrefix"
+    Info "Native deps installed (OpenColorIO SDK included): $script:DepsPrefix"
 }
 
 function Resolve-EmbreePrefix {
