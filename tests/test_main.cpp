@@ -854,6 +854,23 @@ void testXpuDevice() {
     check(noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 8.0f, 8, 0.01f), "constant L² matches mean² → quiet");
     check(!noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 80.0f, 8, 0.01f), "high L² variance stays noisy");
     check(!noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 8.0f, 8, 0.0f), "threshold 0 disables the oracle");
+    // GPU LT: SDS in rgb, camera L² only. Implied variance is largely negative.
+    check(!noiseOraclePixelQuiet(50.0f, 50.0f, 50.0f, 8.0f * 0.2f * 0.2f, 8, 0.01f),
+          "splat-inflated mean vs camera L² stays open");
+
+    {
+        RenderSettingsData s{};
+        s.caustics = 1;
+        s.backend = kBackendGpuOptix;
+        check(gpuLightTraceSkipUnsafe(s), "GPU caustics skip is unsafe");
+        s.backend = kBackendXpu;
+        check(gpuLightTraceSkipUnsafe(s), "XPU caustics skip is unsafe");
+        s.backend = kBackendCpuEmbree;
+        check(!gpuLightTraceSkipUnsafe(s), "CPU caustics skip is safe (separate splat plane)");
+        s.caustics = 0;
+        s.backend = kBackendGpuOptix;
+        check(!gpuLightTraceSkipUnsafe(s), "GPU PT skip is safe");
+    }
 
     {
         Framebuffer film;
@@ -871,6 +888,30 @@ void testXpuDevice() {
         check(film.skipPixel(0, 0) && film.skipPixel(1, 1), "quiet constant film skips pixels");
         check(film.noiseOracleDone(), "constant 2x2 film converges");
         check(film.noiseOracleSkipCount() == 4, "constant 2x2 skip count is 4");
+    }
+
+    {
+        // GPU LT addSplatRadiance: SDS into accum.rgb, not w, not L².
+        Framebuffer film;
+        film.resize(2, 2);
+        const Vec3 cam(0.2f, 0.2f, 0.2f);
+        for (int s = 0; s < 8; ++s) {
+            for (int y = 0; y < 2; ++y) {
+                for (int x = 0; x < 2; ++x) {
+                    film.addSample(x, y, cam);
+                    film.addNoiseSample(x, y, cam);
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            film.data()[i].x += 50.0f;
+            film.data()[i].y += 50.0f;
+            film.data()[i].z += 50.0f;
+        }
+        film.refreshNoiseOracle(0.01f, 8, 64);
+        check(!film.skipPixel(0, 0) && !film.skipPixel(1, 1),
+              "GPU LT splat-inflated mean does not freeze camera w");
+        check(!film.noiseOracleDone(), "GPU LT film stays open");
     }
 
     // Uniform (threshold 0) never skips. Variance skips a constant block and
@@ -2343,6 +2384,22 @@ void testPhotonAim() {
     Vec3 sampledDir;
     check(gpuSamplePhotonAimDir(origin, coneC, 0.25f, 0.4f, sampledDir), "sample cone toward cluster");
     check(gpuAimConePdf(origin, sampledDir, &coneC, 1) > 0.0f, "sampled aim dir has positive cone pdf");
+
+    GpuPhotonCluster tiny;
+    tiny.center = Vec3(0.0f, 0.0f, 1000.0f);
+    tiny.radius = 1.0e-4f;
+    tiny.weight = 1.0f;
+    const float rawCos = gpuSphereCosThetaMax(origin, tiny.center, tiny.radius);
+    check(gpuUniformConePdf(rawCos) == 0.0f, "far tiny sphere subtends a degenerate cone in float32");
+    check(gpuAimConeCosThetaMax(origin, tiny.center, tiny.radius) < 1.0f,
+          "clamped aim cone cosMax stays below 1");
+    Vec3 farDir;
+    check(gpuSamplePhotonAimDir(origin, tiny, 0.25f, 0.4f, farDir), "sample far tiny caster");
+    const float farPdf = gpuAimConePdf(origin, farDir, &tiny, 1);
+    check(farPdf > 0.0f && srIsFinite(farPdf), "far tiny aim cone pdf is finite and > 0");
+    const float farMix = (1.0f - kGpuPhotonAimMix) * kInv4Pi + kGpuPhotonAimMix * farPdf;
+    check(farMix > 0.0f && srIsFinite(farMix), "mixture pdf of far tiny sample > 0");
+
     check(gpuPickPhotonCluster(&cluster, 1, 0.0f) == 0, "pick single cluster");
     check(gpuPickPhotonCluster(&cluster, 1, 0.99f) == 0, "pick single cluster high u");
 

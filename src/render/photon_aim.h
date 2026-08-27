@@ -55,6 +55,18 @@ SR_INL SR_HD float gpuUniformConePdf(float cosThetaMax) {
     return omega > 1e-20f ? 1.0f / omega : 0.0f;
 }
 
+// float32 1 - r²/d² collapses to 1 for a far tiny caster, so the geometric
+// cone pdf is 0 while sampling still returns the axis (nuclear β). Cap
+// 1-cosMax so the aimed sample and its mixture pdf stay finite and match.
+constexpr float kGpuAimConeMinOneMinusCos = 1.0e-6f;
+
+SR_INL SR_HD float gpuAimConeCosThetaMax(Vec3 origin, Vec3 center, float radius) {
+    const float cosMax = gpuSphereCosThetaMax(origin, center, radius);
+    if (cosMax <= -1.0f) return -1.0f;
+    const float cap = 1.0f - kGpuAimConeMinOneMinusCos;
+    return cosMax < cap ? cosMax : cap;
+}
+
 // Solid angle of a bounding sphere as seen from the camera. Larger when the
 // caster is closer / bigger — Iray uses this as a proxy for screen-space density.
 SR_INL SR_HD float gpuScreenSolidAngle(Vec3 cam, Vec3 center, float radius) {
@@ -111,7 +123,7 @@ SR_INL SR_HD float gpuAimConePdf(Vec3 origin, Vec3 dir, const GpuPhotonCluster* 
     float pdf = 0.0f;
     for (int i = 0; i < n; ++i) {
         const float rad = srMax(1e-4f, clusters[i].radius);
-        const float cosMax = gpuSphereCosThetaMax(origin, clusters[i].center, rad);
+        const float cosMax = gpuAimConeCosThetaMax(origin, clusters[i].center, rad);
         const float conePdf = gpuUniformConePdf(cosMax);
         if (conePdf <= 0.0f) continue;
         const Vec3 axis = clusters[i].center - origin;
@@ -131,12 +143,9 @@ SR_INL SR_HD bool gpuSamplePhotonAimDir(Vec3 origin, const GpuPhotonCluster& c, 
     const float d2 = lengthSquared(delta);
     const float rad = srMax(1e-4f, c.radius);
     if (d2 <= rad * rad) return false;
-    const float cosMax = gpuSphereCosThetaMax(origin, c.center, rad);
+    const float cosMax = gpuAimConeCosThetaMax(origin, c.center, rad);
+    if (cosMax >= 1.0f) return false;
     const Vec3 axis = delta * (1.0f / sqrtf(d2));
-    if (cosMax >= 0.999999f) {
-        dir = axis;
-        return true;
-    }
     const Frame f(axis);
     dir = normalize(f.toWorld(sampleUniformCone(u1, u2, cosMax)));
     return lengthSquared(dir) > 1e-12f;

@@ -649,6 +649,12 @@ struct RenderSettingsData {
     char ocioConfigPath[512] = "";
 };
 
+// GPU light tracing deposits SDS into the same accum.rgb that display divides
+// by camera `w`. Variance skip freezes `w` while LT still splats — unbounded mean.
+SR_INL SR_HD bool gpuLightTraceSkipUnsafe(const RenderSettingsData& s) {
+    return s.caustics != 0 && renderDeviceUsesGpu(s.backend);
+}
+
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
 // a safety floor of 10 still applies — otherwise clamp(..., 0) is a no-op.
 // Test-only: causticClamp < 0 disables the safety floor (unbiased energy compares).

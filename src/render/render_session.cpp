@@ -10,6 +10,7 @@
 
 #include "core/log.h"
 #include "io/ocio_util.h"
+#include "scene/types.h"
 
 namespace sol {
 
@@ -457,7 +458,8 @@ void RenderSession::threadMain() {
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pass0)
                 .count();
         framebuffer_.setSampleCount(sample + sampleStep);
-        const float noiseT = (preview || scene->settings.samplingDebug != 0)
+        const float noiseT = (preview || scene->settings.samplingDebug != 0 ||
+                              gpuLightTraceSkipUnsafe(scene->settings))
                                  ? 0.0f
                                  : scene->settings.noiseThreshold;
         if (noiseT > 0.0f) {

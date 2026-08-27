@@ -28,8 +28,12 @@ inline bool noiseOraclePixelQuiet(float meanR, float meanG, float meanB, float l
     // A non-zero mean with no L² means a backend failed to track per-sample energy.
     if (!(lumSqSum > 0.0f)) return meanL <= 1.0e-3f;
     const float invN = 1.0f / float(n);
-    const float var = std::max(0.0f, lumSqSum * invN - meanL * meanL);
-    const float stdError = std::sqrt(var * invN);
+    const float secondMoment = lumSqSum * invN;
+    const float var = secondMoment - meanL * meanL;
+    // GPU LT splats sit in accum.rgb but not in L². Then mean² ≫ E[L²] and
+    // clamping var to 0 would mark the caustic "quiet" and freeze w.
+    if (var < -1.0e-3f * std::max(meanL * meanL, 1.0e-6f)) return false;
+    const float stdError = std::sqrt(std::max(0.0f, var) * invN);
     const float rel = stdError / std::max(meanL, 1.0e-3f);
     return rel <= threshold;
 }

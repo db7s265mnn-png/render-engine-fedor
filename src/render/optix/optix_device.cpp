@@ -628,10 +628,6 @@ public:
             launchParams.accumBuffer = accumBuffer_.as<Vec4>();
             launchParams.lumSq = lumSqBuffer_.as<float>();
             launchParams.skipMask = nullptr;
-            if (scene_->settings.noiseThreshold > 0.0f && fb.skipMask().size() == pixelCount) {
-                skipMaskBuffer_.upload(fb.skipMask());
-                launchParams.skipMask = skipMaskBuffer_.as<unsigned char>();
-            }
             launchParams.paths = pathBuffer_.as<GpuPath>();
             launchParams.hits = hitBuffer_.as<GpuHit>();
             launchParams.shadows = shadowBuffer_.as<GpuShadow>();
@@ -673,6 +669,13 @@ public:
             // reused SampleLe beta on a different direction (biased filaments).
             launchParams.mcmcMutations = 0;
             launchParams.splatInvLightPaths = gpuCaustics ? 1.0f / float(lightSlots) : 0.0f;
+            // LT SDS shares accum.rgb with camera w. Skip freezes w while light
+            // paths keep atomicAdd-ing RGB → mean grows with remaining spp.
+            if (launchParams.splatInvLightPaths <= 0.0f && scene_->settings.noiseThreshold > 0.0f &&
+                fb.skipMask().size() == pixelCount) {
+                skipMaskBuffer_.upload(fb.skipMask());
+                launchParams.skipMask = skipMaskBuffer_.as<unsigned char>();
+            }
             GpuPhotonCluster hostClusters[kMaxGpuPhotonClusters];
             int nAim = 0;
             if (gpuCaustics && scene_) {

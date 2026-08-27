@@ -146,6 +146,7 @@ __device__ inline GpuLightEmit gpuSampleLe(const SceneView& scene, Rng& rng) {
             const int ci = gpuPickPhotonCluster(clusters, nAim, rng.nextFloat());
             aimed = gpuSamplePhotonAimDir(out.origin, clusters[ci], rng.nextFloat(), rng.nextFloat(),
                                           out.dir);
+            if (aimed && gpuAimConePdf(out.origin, out.dir, clusters, nAim) <= 0.0f) aimed = false;
         }
         if (!aimed) out.dir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
         const float pdfDirSa = (1.0f - mix) * kInv4Pi + mix * gpuAimConePdf(out.origin, out.dir, clusters, nAim);
@@ -184,7 +185,8 @@ __device__ inline GpuLightEmit gpuSampleLe(const SceneView& scene, Rng& rng) {
     if (mix > 0.0f && rng.nextFloat() < mix) {
         const int ci = gpuPickPhotonCluster(clusters, nAim, rng.nextFloat());
         Vec3 aimDir;
-        if (gpuSamplePhotonAimDir(out.origin, clusters[ci], rng.nextFloat(), rng.nextFloat(), aimDir)) {
+        if (gpuSamplePhotonAimDir(out.origin, clusters[ci], rng.nextFloat(), rng.nextFloat(), aimDir) &&
+            gpuAimConePdf(out.origin, aimDir, clusters, nAim) > 0.0f) {
             const float cosN = dot(out.n, aimDir);
             if (l.twoSided) {
                 if (fabsf(cosN) > 1e-4f) {

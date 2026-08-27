@@ -230,7 +230,7 @@ __device__ inline bool maybeRegeneratePath(int pixel, GpuPath& path) {
         spawnLightPath(pixel, x, y, path.localSample + 1);
         return path.queue == kQueueIntersectClosest;
     }
-    if (params.skipMask && params.skipMask[pixel]) return false;
+    if (params.skipMask && params.splatInvLightPaths <= 0.0f && params.skipMask[pixel]) return false;
     spawnCameraPath(pixel, x, y, path.localSample + 1);
     return true;
 }

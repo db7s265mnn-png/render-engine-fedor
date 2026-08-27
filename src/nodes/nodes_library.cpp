@@ -1080,6 +1080,9 @@ public:
                              "Relative stderr of luminance: at 128 spp a pixel with ~30% sample noise "
                              "is still above 0.01, so Variance will not stop it. Raise to 0.05 to see "
                              "adaptive stop, or watch the overlay skip %. Sampling Debug forces off.\n"
+                             "GPU Light Trace (MNEE+LT / MCMC) ignores Variance skip: SDS shares the "
+                             "camera film weight, so freezing camera spawn would let the caustic grow "
+                             "with remaining samples.\n"
                              "Used when Pixel Oracle is Variance. Uniform ignores this."));
         addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
                          .withGroup("Sampling")
