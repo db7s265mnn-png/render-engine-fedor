@@ -1,8 +1,17 @@
-// Eye-path MNEE for OptiX shade_surface (Hanika et al. 2015, same 2D Newton as
-// CPU integrator_mnee.h). Shade kernels otherwise never call optixTrace; MNEE
-// is the exception — each probe save/restores GpuHit because CH writes hits[pixel].
-// Distant lights use an angular residual (CPU MNEE is finite-light only).
+// Eye-path MNEE Newton (Hanika et al. 2015), kept as the GPU algorithm notes.
+// Do not include this from any OptiX .cu.
+//
+// shade_surface / path_tail must not call optixTrace: OptiXBackend.cmake splits
+// intersect vs shade so cicc never sees optixTrace+BSDF in the interactive
+// pipeline. Including this header compiles Newton probes into both kernels
+// (runtime menu MNEE vs MCMC does not strip them). nvcc, optixModuleCreate, and
+// GPU warmup then hang. CPU MNEE is integrator_mnee.h. GPU MNEE+LT is light
+// tracing that continues past the caster plus regular wavefront NEE.
 #pragma once
+
+#ifdef __CUDACC__
+#error "optix_mnee.cuh must not be included in OptiX programs (optixTrace+BSDF hangs cicc / optixModuleCreate)"
+#endif
 
 #include "render/lights.h"
 #include "render/optix/optix_bsdf.cuh"

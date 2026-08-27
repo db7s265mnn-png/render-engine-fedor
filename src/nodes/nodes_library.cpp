@@ -1280,13 +1280,14 @@ public:
                          .withVisibleWhen("integrator==0&&backend==2||integrator==1&&backend==2")
                          .withTooltip("OptiX half of XPU (Render Device = GPU uses the Caustics "
                                       "Engine menu above for these same two items).\n"
-                                      "MNEE + Light Trace (default): manifold next-event from the "
-                                      "eye through delta glass, plus light tracing that does not "
+                                      "MNEE + Light Trace (default): light tracing that does not "
                                       "splat from the caster and does not kill the path after a "
-                                      "camera connection — SDS continues to the floor.\n"
+                                      "camera connection — SDS continues to the floor. Eye-path "
+                                      "Newton MNEE stays on CPU (integrator_mnee); compiling those "
+                                      "probes into OptiX shade hangs cicc / optixModuleCreate.\n"
                                       "MCMC (Iray PT+LT): unidirectional PT + light tracing with "
                                       "K mutations per slot (ERPT-style, every path, unbiased). "
-                                      "No MNEE. Closest to Iray Photoreal PT+LT caustics.\n"
+                                      "Closest to Iray Photoreal PT+LT caustics.\n"
                                       "Photon / VCM stays CPU-only."));
         // Hidden migration: v2 Automatic/MNEE/Photon → MNEE/MNEE+Photon/Photon.
         // v3 inserts pbrt as index 0 and shifts the rest +1.

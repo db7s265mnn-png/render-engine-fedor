@@ -149,6 +149,10 @@ endif()
 # so cicc never sees optixTrace + BSDF in the interactive pipeline. path_tail is
 # slower to nvcc; give it a longer timeout.
 #
+# Never add optix_mnee.cuh / optix_trace.cuh to shade_surface. Newton probes from
+# shade inlined optixTrace into shade_surface and path_tail; nvcc and
+# optixModuleCreate hung for every GPU caustics engine (same PTX).
+#
 # Do NOT give ninja 16 separate custom commands. On Windows CI, after the
 # shade_surface embed finished, ninja never started [15/16] (shade_background)
 # and the step sat silent until the 45-minute cap. One Python process compiles

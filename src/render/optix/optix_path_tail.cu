@@ -31,7 +31,8 @@ extern "C" __global__ void __raygen__path_tail() {
     GpuShadow& shadow = params.shadows[pixel];
     const int maxDepth = params.scene.settings.maxDepth > 0 ? params.scene.settings.maxDepth : 1;
     const int batch = params.batchSamples > 1 ? params.batchSamples : 1;
-    const int cap = batch * (maxDepth + 18);
+    const int mcmcK = params.mcmcMutations > 0 ? params.mcmcMutations : 0;
+    const int cap = batch * (maxDepth + 18) * (1 + mcmcK);
     for (int i = 0; i < cap; ++i) {
         if (path.queue == kQueueDead && shadow.queue == kShadowIdle) break;
         tailAdvance(pixel);
