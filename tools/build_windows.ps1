@@ -811,13 +811,40 @@ function Test-PystringInDeps {
     return $false
 }
 
+function Ensure-ZlibWindowsDllNames {
+    # MSVC zlib CMake writes zlib.dll. Windows loader / OpenVDB / some Qt kits
+    # import zlib1.dll. OCIO imports zlib.dll. Ship both names from one binary.
+    $dlls = @(Find-ZlibRuntimeDlls)
+    if ($dlls.Count -eq 0) { return }
+    $byDir = @{}
+    foreach ($d in $dlls) {
+        $dir = $d.DirectoryName
+        if (-not $byDir.ContainsKey($dir)) {
+            $byDir[$dir] = New-Object System.Collections.Generic.List[object]
+        }
+        [void]$byDir[$dir].Add($d)
+    }
+    foreach ($dir in @($byDir.Keys)) {
+        $names = @{}
+        foreach ($d in $byDir[$dir]) { $names[$d.Name.ToLowerInvariant()] = $true }
+        $src = $byDir[$dir][0].FullName
+        if (-not $names.ContainsKey('zlib1.dll')) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $dir 'zlib1.dll') -Force
+            Info ("Wrote zlib1.dll in " + $dir)
+        }
+        if (-not $names.ContainsKey('zlib.dll')) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $dir 'zlib.dll') -Force
+            Info ("Wrote zlib.dll in " + $dir)
+        }
+    }
+}
+
 function Install-ZlibShared {
-    # OpenColorIO_2_3.dll imports zlib.dll. Keep the DLL in deps and copy it
-    # to bin\ocio (not next to the exe). zlib.dll in the exe folder makes
-    # NVIDIA optixInit hang ("OptiX checking").
+    # Compile shared zlib into deps. zlib1.dll next to the exe; zlib.dll in ocio\.
     $zlibSrc = Join-Path $script:DepsSrc 'zlib'
     if ((Test-ZlibInDeps) -and ((Find-ZlibRuntimeDlls).Count -gt 0)) {
-        Info 'zlib.dll already in deps - skipping'
+        Ensure-ZlibWindowsDllNames
+        Info 'zlib already in deps - skipping rebuild'
         return
     }
     if (-not (Test-Path -LiteralPath (Join-Path $zlibSrc 'CMakeLists.txt'))) {
@@ -829,7 +856,7 @@ function Install-ZlibShared {
     }
     $zb = Join-Path $zlibSrc 'build'
     if (Test-Path -LiteralPath $zb) { Remove-Item -LiteralPath $zb -Recurse -Force }
-    Info 'Building zlib v1.3.1 shared (zlib.dll next to the exe for OpenColorIO).'
+    Info 'Building zlib v1.3.1 shared (zlib.dll + zlib1.dll).'
     Invoke-DepCMakeInstall $zlibSrc 'zlib' @(
         '-DBUILD_SHARED_LIBS=ON', '-DZLIB_BUILD_EXAMPLES=OFF'
     )
@@ -837,7 +864,15 @@ function Install-ZlibShared {
         Fail "zlib install finished but zlib.h / zlib*.lib missing under $script:DepsPrefix"
     }
     if ((Find-ZlibRuntimeDlls).Count -eq 0) {
-        Fail "zlib install finished but zlib.dll is not under $script:DepsPrefix\bin. OpenColorIO_2_3.dll will not start."
+        Fail "zlib install finished but zlib.dll is not under $script:DepsPrefix\bin."
+    }
+    Ensure-ZlibWindowsDllNames
+    $hasZlib1 = $false
+    foreach ($d in @(Find-ZlibRuntimeDlls)) {
+        if ($d.Name -ieq 'zlib1.dll') { $hasZlib1 = $true }
+    }
+    if (-not $hasZlib1) {
+        Fail "zlib1.dll missing under $script:DepsPrefix\bin after install. The exe will not start."
     }
 }
 
@@ -1857,14 +1892,31 @@ foreach ($dir in $ocioSrcDirs) {
 }
 foreach ($pat in $ocioRuntimePats) {
     Get-ChildItem -LiteralPath $Bin -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
-        Info ("Moving " + $_.Name + " to ocio\ (zlib.dll next to the exe hangs OptiX)")
-        try {
-            Copy-Item -LiteralPath $_.FullName -Destination $OcioSidecar -Force -ErrorAction Stop
-            Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-        } catch {
-            Fail ("Could not remove " + $_.Name + " from $Bin. Close Grendizer_Render. zlib.dll next to the exe hangs OptiX.")
+        if ($_.Name -ieq 'zlib1.dll') {
+            Info 'Keeping zlib1.dll next to the exe (Windows loader / OpenVDB / Qt)'
+        } else {
+            Info ("Moving " + $_.Name + " to ocio\")
+            try {
+                Copy-Item -LiteralPath $_.FullName -Destination $OcioSidecar -Force -ErrorAction Stop
+                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+            } catch {
+                Fail ("Could not move " + $_.Name + " to ocio\. Close Grendizer_Render.")
+            }
         }
     }
+}
+Ensure-ZlibWindowsDllNames
+$zlib1Src = $null
+foreach ($d in @(Find-ZlibRuntimeDlls)) {
+    if ($d.Name -ieq 'zlib1.dll') { $zlib1Src = $d; break }
+}
+if (-not $zlib1Src) {
+    $probe = Join-Path $OcioSidecar 'zlib1.dll'
+    if (Test-Path -LiteralPath $probe) { $zlib1Src = Get-Item -LiteralPath $probe }
+}
+if ($zlib1Src) {
+    Copy-RuntimeFile $zlib1Src.FullName $Bin
+    Copy-RuntimeFile $zlib1Src.FullName $OcioSidecar
 }
 if ($script:FullBuild) {
     $ocioDll = Get-ChildItem -LiteralPath $OcioSidecar -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
@@ -1890,6 +1942,15 @@ Do not copy zlib.dll next to Grendizer_Render.exe - that hangs OptiX.
     if ($ocioDll) {
         Info ("OCIO runtime (not next to exe): " + $ocioDll.FullName)
     }
+    $z1exe = Join-Path $Bin 'zlib1.dll'
+    if (-not (Test-Path -LiteralPath $z1exe)) {
+        Fail @"
+zlib1.dll is not next to Grendizer_Render.exe.
+Windows will not start the app (OpenVDB / Qt import zlib1.dll).
+It is compiled into %LOCALAPPDATA%\grendizer-deps\bin and must be copied to $Bin.
+"@
+    }
+    Info ("zlib1.dll next to exe: " + $z1exe)
 }
 
 Write-Host ''
