@@ -697,6 +697,17 @@ function Find-SystemOpenColorIO {
 }
 
 function Get-VsGeneratorArgs {
+    # Prefer the VS year we already imported vcvars from, then cmake --help.
+    # OCIO MUST use a VS generator (CI). Ninja nested ExternalProject breaks minizip-ng.
+    if ($script:VsYear -eq '2026') {
+        return @('-G', 'Visual Studio 18 2026', '-A', 'x64')
+    }
+    if ($script:VsYear -eq '2022') {
+        return @('-G', 'Visual Studio 17 2022', '-A', 'x64')
+    }
+    if ($script:VsYear -eq '2019') {
+        return @('-G', 'Visual Studio 16 2019', '-A', 'x64')
+    }
     $help = & $CMake --help 2>&1 | Out-String
     if ($help -match 'Visual Studio 18 2026') { return @('-G', 'Visual Studio 18 2026', '-A', 'x64') }
     if ($help -match 'Visual Studio 17 2022') { return @('-G', 'Visual Studio 17 2022', '-A', 'x64') }
@@ -704,86 +715,91 @@ function Get-VsGeneratorArgs {
     return @()
 }
 
-function Install-ZlibAndMinizipNg {
-    $zlibSrc = Join-Path $script:DepsSrc 'zlib'
-    Invoke-GitClone 'https://github.com/madler/zlib.git' 'v1.3.1' $zlibSrc
-    Invoke-DepCMakeInstall $zlibSrc 'zlib' @(
-        '-DBUILD_SHARED_LIBS=OFF', '-DZLIB_BUILD_EXAMPLES=OFF'
-    )
-    $mzSrc = Join-Path $script:DepsSrc 'minizip-ng'
-    Invoke-GitClone 'https://github.com/zlib-ng/minizip-ng.git' '4.0.7' $mzSrc
-    Invoke-DepCMakeInstall $mzSrc 'minizip-ng' @(
-        "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
-        '-DBUILD_SHARED_LIBS=OFF', '-DMZ_COMPAT=OFF', '-DMZ_ZLIB=ON',
-        '-DMZ_BZIP2=OFF', '-DMZ_LZMA=OFF', '-DMZ_ZSTD=OFF', '-DMZ_OPENSSL=OFF',
-        '-DMZ_LIBCOMP=OFF', '-DMZ_PKCRYPT=OFF', '-DMZ_WZAES=OFF', '-DMZ_SIGNING=OFF',
-        '-DMZ_ICONV=OFF', '-DMZ_FETCH_LIBS=OFF', '-DMZ_FORCE_FETCH_LIBS=OFF',
-        '-DMZ_BUILD_TESTS=OFF', '-DMZ_BUILD_UNIT_TESTS=OFF'
-    )
-}
-
 function Install-OpenColorIO {
+    # Match Windows CI (.github/workflows/build.yml Build OpenColorIO):
+    #   cmake -G "Visual Studio …" -A x64 -DOCIO_INSTALL_EXT_PACKAGES=ALL
+    #   cmake --build … --config Release --target install
+    # Ninja + nested ExternalProject for minizip-ng reconfigures without MZ_*
+    # flags (OpenSSL/LZMA/ZSTD/FETCH_LIBS) and dies on minizip-ng_install-build.
+    # Do not fall back to Ninja. Do not treat OCIO=.ocio as an SDK.
     $src = Join-Path $script:DepsSrc 'ocio'
     $b = Join-Path $src 'build'
     Info 'Building OpenColorIO v2.3.2 from source (FULL requires the library).'
     Info 'The OCIO environment / Film path is the .ocio colour config - that is not this step.'
+    $candidates = New-Object System.Collections.Generic.List[object]
+    $primary = Get-VsGeneratorArgs
+    if ($primary.Count -ge 2) { [void]$candidates.Add($primary) }
+    foreach ($fallback in @(
+        @('-G', 'Visual Studio 18 2026', '-A', 'x64'),
+        @('-G', 'Visual Studio 17 2022', '-A', 'x64'),
+        @('-G', 'Visual Studio 16 2019', '-A', 'x64')
+    )) {
+        $key = $fallback -join ' '
+        $dup = $false
+        foreach ($c in $candidates) {
+            if (($c -join ' ') -eq $key) { $dup = $true; break }
+        }
+        if (-not $dup) { [void]$candidates.Add($fallback) }
+    }
+    if ($candidates.Count -eq 0) {
+        Fail @"
+OpenColorIO needs the Visual Studio CMake generator (same as Windows CI).
+Ninja nested minizip-ng fails (minizip-ng_install-build / OpenSSL).
+Install VS 2022 or VS 2026 Desktop development with C++, then re-run BUILD_WINDOWS_FULL.bat.
+Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
+"@
+    }
     Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/OpenColorIO.git' 'v2.3.2' $src
-    # A failed Ninja ExternalProject leaves minizip-ng_install-build half-configured
-    # with default MZ_OPENSSL/LZMA/FETCH_LIBS. Wipe, prebuild minizip, use VS like CI.
     if (Test-Path -LiteralPath $b) {
-        Info 'Removing previous OCIO build tree (broken Ninja/minizip-ng install).'
+        Info 'Removing previous OCIO build tree (wipe broken Ninja/minizip leftovers).'
         Remove-Item -LiteralPath $b -Recurse -Force
     }
-    Info 'Prebuilding zlib + minizip-ng 4.0.7 so OCIO does not nest minizip.'
-    Install-ZlibAndMinizipNg
     $ocioFlags = @(
         "-DCMAKE_INSTALL_PREFIX=$script:DepsPrefix",
         "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
         '-DCMAKE_BUILD_TYPE=Release',
-        '-DBUILD_SHARED_LIBS=ON', '-DOCIO_BUILD_APPS=OFF', '-DOCIO_BUILD_TESTS=OFF',
-        '-DOCIO_BUILD_GPU_TESTS=OFF', '-DOCIO_BUILD_PYTHON=OFF', '-DOCIO_BUILD_JAVA=OFF',
-        '-DOCIO_BUILD_DOCS=OFF', '-DCMAKE_CXX_STANDARD=17', '-DOCIO_WARNING_AS_ERROR=OFF',
-        '-DOCIO_INSTALL_EXT_PACKAGES=MISSING',
-        "-Dminizip-ng_ROOT=$script:DepsPrefix",
-        "-DZLIB_ROOT=$script:DepsPrefix"
+        '-DBUILD_SHARED_LIBS=ON',
+        '-DOCIO_BUILD_APPS=OFF',
+        '-DOCIO_BUILD_TESTS=OFF',
+        '-DOCIO_BUILD_GPU_TESTS=OFF',
+        '-DOCIO_BUILD_PYTHON=OFF',
+        '-DOCIO_BUILD_JAVA=OFF',
+        '-DOCIO_BUILD_DOCS=OFF',
+        '-DOCIO_INSTALL_EXT_PACKAGES=ALL'
     )
-    $vsGen = Get-VsGeneratorArgs
-    $usedVs = $false
-    if ($vsGen.Count -ge 2) {
-        Info ('OpenColorIO cmake generator: ' + ($vsGen -join ' ') + ' (CI; Ninja nested minizip-ng dies)')
+    $usedGen = $null
+    foreach ($vsGen in $candidates) {
+        if (Test-Path -LiteralPath $b) { Remove-Item -LiteralPath $b -Recurse -Force }
+        Info ('Trying OpenColorIO cmake: ' + ($vsGen -join ' ') + ' + OCIO_INSTALL_EXT_PACKAGES=ALL (CI)')
         $cfg = @('-S', $src, '-B', $b) + $vsGen + $ocioFlags
         & $CMake @cfg
         if ($LASTEXITCODE -eq 0) {
-            $usedVs = $true
-            Info 'Building OpenColorIO (MSBuild, like Windows CI) ...'
-            & $CMake --build $b --config Release --parallel
-            if ($LASTEXITCODE -ne 0) { Fail 'OpenColorIO MSBuild failed' }
-            & $CMake --install $b --config Release
-            if ($LASTEXITCODE -ne 0) { Fail 'OpenColorIO install failed' }
-        } else {
-            Write-Host 'Warning: Visual Studio generator rejected for OCIO — Ninja + prebuilt minizip-ng.' -ForegroundColor Yellow
-            if (Test-Path -LiteralPath $b) { Remove-Item -LiteralPath $b -Recurse -Force }
+            $usedGen = $vsGen
+            break
         }
+        Write-Host ('Warning: OpenColorIO configure rejected generator ' + ($vsGen -join ' ')) -ForegroundColor Yellow
     }
-    if (-not $usedVs) {
-        $cfg = @(
-            '-S', $src, '-B', $b, '-G', 'Ninja',
-            "-DCMAKE_MAKE_PROGRAM=$Ninja",
-            "-DCMAKE_C_COMPILER=$Cl",
-            "-DCMAKE_CXX_COMPILER=$Cl"
-        ) + $ocioFlags
-        & $CMake @cfg
-        if ($LASTEXITCODE -ne 0) { Fail 'OpenColorIO cmake configure failed' }
-        Info 'Building OpenColorIO ...'
-        & $CMake --build $b --parallel
-        if ($LASTEXITCODE -ne 0) { Fail 'OpenColorIO build failed' }
-        & $CMake --install $b
-        if ($LASTEXITCODE -ne 0) { Fail 'OpenColorIO install failed' }
+    if (-not $usedGen) {
+        Fail 'OpenColorIO cmake configure failed for every Visual Studio generator. See log above. Do not use Ninja for OCIO.'
+    }
+    Info ('Building and installing OpenColorIO with ' + ($usedGen -join ' ') + ' (--target install, like CI) ...')
+    & $CMake --build $b --config Release --target install --parallel
+    if ($LASTEXITCODE -ne 0) {
+        Fail @"
+OpenColorIO MSBuild install failed.
+This is the OpenColorIO library build, not the .ocio colour config.
+Keep %LOCALAPPDATA%\grendizer-deps. Close Grendizer if a DLL is locked.
+"@
     }
     $cfgFile = Find-OcioConfigCMake $script:DepsPrefix
     if (-not $cfgFile) {
         Fail "OpenColorIO install finished but OpenColorIOConfig.cmake is not under $($script:DepsPrefix). FULL needs that file."
     }
+    $hit = Test-OcioInstallPrefix $script:DepsPrefix
+    if (-not $hit) {
+        Fail "OpenColorIOConfig.cmake exists but headers/import lib are missing under $($script:DepsPrefix)."
+    }
+    $script:OcioInstall = $hit
     Info ("OpenColorIO cmake: " + $cfgFile.FullName)
 }
 
@@ -898,6 +914,9 @@ function Ensure-NativeDeps {
         Info "Deps stamp exists but OpenColorIO is missing — building OCIO only (keeping Embree/OpenEXR/OpenVDB)."
         Install-OpenColorIO
         $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
+        if (-not $script:OcioInstall) {
+            Fail "OpenColorIO still missing under $script:DepsPrefix after rebuild. FULL requires SOLSTICE_HAVE_OCIO 1."
+        }
         return
     }
 
@@ -939,6 +958,9 @@ function Ensure-NativeDeps {
 
     Install-OpenColorIO
     $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
+    if (-not $script:OcioInstall) {
+        Fail "OpenColorIO missing under $script:DepsPrefix after install. FULL requires SOLSTICE_HAVE_OCIO 1."
+    }
 
     Set-Content -Path $stamp -Value 'ok' -Encoding ascii
     Info "Native deps installed: $script:DepsPrefix"
@@ -1127,6 +1149,11 @@ if (Test-Path -LiteralPath $cache) {
             $stale = $true
             $staleWhy = "source moved (`n  cache: $cachedSrc`n  now:   $currentSrc)"
         }
+    }
+    # CMake 4.4 on Windows turned file:///C:/… into /C:/… and poisoned FetchContent.
+    if (Select-String -Path $cache -Pattern 'file:///C:|not found: /C:|openpgl-v0\.7\.1\.tgz' -Quiet) {
+        $stale = $true
+        $staleWhy = 'broken FetchContent file:///C: URL in cache'
     }
     if ($stale) {
         # Keep _deps so MaterialX / TinyUSDZ / OpenPGL git clones are not wiped
