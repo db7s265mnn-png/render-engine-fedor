@@ -1,13 +1,13 @@
-// Windows: OpenColorIO_2_3.dll imports zlib1.dll. NVIDIA optixInit does
-// LoadLibrary("zlib.dll") and hangs if that file sits next to the exe.
-// Keep OCIO + zlib in bin/ocio/ and delay-load them after the OptiX probe.
+// Windows: OpenColorIO_2_3.dll imports zlib1.dll. NVIDIA optixInit
+// LoadLibrary("zlib.dll") hangs if that file is next to the exe or on the
+// process search path. Keep OpenColorIO + zlib1.dll in bin/ocio and delay-load
+// only OpenColorIO (zlib1 comes in as its dependency from that folder).
 #if defined(_WIN32)
 
 #include "io/ocio_util.h"
 
-// AddDllDirectory / LOAD_LIBRARY_SEARCH_* need Win8+. delayimp.h on some
-// SDKs declares a writable hook; DELAYIMP_INSECURE_WRITABLE_HOOKS matches
-// both old and new MSVC headers (const vs non-const __pfnDliNotifyHook2).
+// delayimp.h on some SDKs declares a writable hook; DELAYIMP_INSECURE_WRITABLE_HOOKS
+// matches both old and new MSVC headers (const vs non-const __pfnDliNotifyHook2).
 #if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
 #  undef _WIN32_WINNT
 #  define _WIN32_WINNT 0x0A00
@@ -33,10 +33,9 @@ static std::wstring solsticeOcioDirW() { return solsticeExeDirW() + L"\\ocio"; }
 
 static bool nameIsOcioRuntimeDll(const char* name) {
     if (!name || !name[0]) return false;
-    return _stricmp(name, "zlib1.dll") == 0 || _stricmp(name, "zlib.dll") == 0 ||
-           _stricmp(name, "zlibd.dll") == 0 || _stricmp(name, "yaml-cpp.dll") == 0 ||
-           _stricmp(name, "expat.dll") == 0 || _stricmp(name, "libexpat.dll") == 0 ||
-           _stricmp(name, "libexpat-1.dll") == 0 || _strnicmp(name, "OpenColorIO", 11) == 0;
+    // Never hook zlib.dll — NVIDIA optixInit LoadLibrary("zlib.dll") must
+    // resolve to System32, not bin\ocio.
+    return _strnicmp(name, "OpenColorIO", 11) == 0;
 }
 
 static HMODULE loadFromOcioDir(const char* dllName) {
@@ -69,7 +68,8 @@ void ocioBindWindowsRuntimeDlls() {
     const std::wstring dir = solsticeOcioDirW();
     if (dir.empty()) return;
     CreateDirectoryW(dir.c_str(), nullptr);
-    AddDllDirectory(dir.c_str());
+    // Do not AddDllDirectory(ocio): that puts ocio\zlib.dll on LoadLibrary("zlib.dll")
+    // and hangs NVIDIA optixInit after the startup probe already succeeded.
 }
 
 }  // namespace sol

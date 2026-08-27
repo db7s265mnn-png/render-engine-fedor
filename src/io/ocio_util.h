@@ -47,7 +47,7 @@ bool ocioLibraryAvailable();
 Vec3 ocioConvertToAcescg(Vec3 rgb, const std::string& inputColorSpace);
 
 #if defined(_WIN32)
-// After optixInit: add bin/ocio to the DLL search path (zlib1 + OpenColorIO).
+// After optixInit: ensure bin/ocio exists (OpenColorIO + zlib1.dll).
 void ocioBindWindowsRuntimeDlls();
 #else
 inline void ocioBindWindowsRuntimeDlls() {}

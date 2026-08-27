@@ -118,6 +118,38 @@ std::string optixFailMessage(OptixResult result, const char* call) {
             throw std::runtime_error(optixFailMessage(result, #call));                       \
     } while (0)
 
+#if defined(_WIN32)
+// nvoptix.dll is in System32. LoadLibrary("zlib.dll") hangs if that file is in
+// the exe folder or on the process search path (bin\ocio via AddDllDirectory).
+void preloadWindowsNvoptix() {
+    wchar_t sys[MAX_PATH];
+    const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    const std::wstring sysDir(sys);
+    LoadLibraryExW((sysDir + L"\\zlib.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    const DWORD kNvFlags = LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR;
+    HMODULE nv = LoadLibraryExW((sysDir + L"\\nvoptix.dll").c_str(), nullptr, kNvFlags);
+    if (!nv) {
+        nv = LoadLibraryExW(L"nvoptix.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+    if (nv) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            logInfo("OptiX: nvoptix.dll loaded from the Windows system directory");
+        }
+    }
+}
+
+struct PinSystem32DllSearch {
+    PinSystem32DllSearch() {
+        wchar_t sys[MAX_PATH];
+        if (GetSystemDirectoryW(sys, MAX_PATH)) SetDllDirectoryW(sys);
+    }
+    ~PinSystem32DllSearch() { SetDllDirectoryW(nullptr); }
+};
+#endif
+
 // Small owning wrapper around a device allocation.
 class DeviceBuffer {
 public:
@@ -262,15 +294,21 @@ public:
             CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
             deviceName_ = properties.name;
 
-            OPTIX_CHECK(optixInit());
-
-            OptixDeviceContextOptions options{};
-            options.logCallbackFunction = &contextLog;
-            options.logCallbackLevel = 2;
-#if OPTIX_VERSION >= 70200
-            options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
+            {
+#if defined(_WIN32)
+                preloadWindowsNvoptix();
+                PinSystem32DllSearch pinSystem32;
 #endif
-            OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
+                OPTIX_CHECK(optixInit());
+
+                OptixDeviceContextOptions options{};
+                options.logCallbackFunction = &contextLog;
+                options.logCallbackLevel = 2;
+#if OPTIX_VERSION >= 70200
+                options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
+#endif
+                OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
+            }
 
             CUDA_CHECK(cudaStreamCreate(&stream_));
             CUDA_CHECK(cudaEventCreate(&gpuStartEvent_));
@@ -1364,36 +1402,6 @@ bool optixProbeTimedOutLocked() {
     if (!gOptixProbeRunning || gOptixRuntimeState != OptixRuntimeState::Unknown) return false;
     return (std::chrono::steady_clock::now() - gOptixProbeStarted) >= kOptixProbeTimeout;
 }
-
-#if defined(_WIN32)
-// nvoptix.dll is in System32. Its LoadLibrary("zlib.dll") still searches the
-// exe folder first; a leftover zlib.dll there hangs optixInit forever.
-// Load NVIDIA's copies from System32 before that search runs, and temporarily
-// drop the exe dir from the process DLL path (safe only before QApplication).
-void preloadWindowsNvoptix() {
-    wchar_t sys[MAX_PATH];
-    const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    const std::wstring sysDir(sys);
-    LoadLibraryExW((sysDir + L"\\zlib.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    const DWORD kNvFlags = LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR;
-    HMODULE nv = LoadLibraryExW((sysDir + L"\\nvoptix.dll").c_str(), nullptr, kNvFlags);
-    if (!nv) {
-        nv = LoadLibraryExW(L"nvoptix.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    }
-    if (nv) {
-        logInfo("OptiX: nvoptix.dll loaded from the Windows system directory");
-    }
-}
-
-struct PinSystem32DllSearch {
-    PinSystem32DllSearch() {
-        wchar_t sys[MAX_PATH];
-        if (GetSystemDirectoryW(sys, MAX_PATH)) SetDllDirectoryW(sys);
-    }
-    ~PinSystem32DllSearch() { SetDllDirectoryW(nullptr); }
-};
-#endif
 
 // CUDA + optixInit. After QApplication starts, cudaGetDeviceCount on the Qt
 // UI thread can miss the NVIDIA GPU (Intel display). The warmup in main()

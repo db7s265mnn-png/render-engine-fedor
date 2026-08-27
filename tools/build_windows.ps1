@@ -5,7 +5,7 @@
 #   QT_ROOT, CUDA_PATH, OptiX_ROOT, GRENDIZER_BUILD_DIR, GRENDIZER_DEPS
 # FULL compiles the OpenColorIO library from source. The .ocio file is the
 # colour config (OCIO env / Film). OpenColorIO + zlib1.dll go in bin\ocio.
-# zlib next to the exe hangs NVIDIA optixInit.
+# zlib.dll (exe folder or ocio) hangs NVIDIA optixInit. Never copy zlib.dll.
 # Default build dir is C:\gz-build (GitHub zip under Downloads is too long for MSVC).
 # CUDA 13.2+ is required for Visual Studio 2026 (MSVC 14.50+). CUDA 12.x is
 # enough only with VS 2022 / MSVC 14.44. If both are installed, 13.2 is used.
@@ -1226,8 +1226,8 @@ if ($script:DepsPrefix) {
     }
 }
 
-# OpenColorIO_2_3.dll needs zlib1.dll. NVIDIA optixInit hangs if zlib lives next
-# to the exe. Keep both in bin\ocio and delay-load them after the OptiX probe.
+# OpenColorIO_2_3.dll needs zlib1.dll. NVIDIA optixInit hangs on zlib.dll
+# (exe folder or bin\ocio via AddDllDirectory). Copy zlib1 only; delete zlib.dll.
 $ocioDir = Join-Path $Bin 'ocio'
 New-Item -ItemType Directory -Force -Path $ocioDir | Out-Null
 if ($script:DepsPrefix) {
@@ -1236,23 +1236,34 @@ if ($script:DepsPrefix) {
         (Join-Path $script:DepsPrefix 'lib')
     )) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($pat in @('OpenColorIO*.dll', 'zlib1.dll', 'zlib.dll', 'zlibd.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll')) {
+        foreach ($pat in @('OpenColorIO*.dll', 'zlib1.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll')) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $ocioDir
             }
         }
     }
 }
-foreach ($name in @('zlib.dll', 'zlibd.dll', 'zlib1.dll')) {
-    $p = Join-Path $Bin $name
-    if (Test-Path -LiteralPath $p) {
-        try {
-            Copy-RuntimeFile $p $ocioDir
-            Remove-Item -LiteralPath $p -Force -ErrorAction Stop
-            Info ("Moved $name from the exe folder to ocio\ (optixInit must not see it)")
-        } catch {
-            Write-Host ("Warning: close Grendizer_Render and move $p into ocio\ - zlib next to the exe hangs OptiX.") -ForegroundColor Yellow
+foreach ($name in @('zlib.dll', 'zlibd.dll')) {
+    foreach ($dir in @($Bin, $ocioDir)) {
+        $p = Join-Path $dir $name
+        if (Test-Path -LiteralPath $p) {
+            try {
+                Remove-Item -LiteralPath $p -Force -ErrorAction Stop
+                Info ("Deleted $p (NVIDIA optixInit hangs on zlib.dll)")
+            } catch {
+                Write-Host ("Warning: close Grendizer_Render and delete $p - zlib.dll hangs OptiX.") -ForegroundColor Yellow
+            }
         }
+    }
+}
+$zlib1Exe = Join-Path $Bin 'zlib1.dll'
+if (Test-Path -LiteralPath $zlib1Exe) {
+    try {
+        Copy-RuntimeFile $zlib1Exe $ocioDir
+        Remove-Item -LiteralPath $zlib1Exe -Force -ErrorAction Stop
+        Info 'Moved zlib1.dll from the exe folder to ocio\'
+    } catch {
+        Write-Host ("Warning: close Grendizer_Render and move $zlib1Exe into ocio\.") -ForegroundColor Yellow
     }
 }
 Get-ChildItem -LiteralPath $Bin -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue | ForEach-Object {

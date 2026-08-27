@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.64 LANGUAGES CXX)
+project(Solstice VERSION 0.9.65 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -306,8 +306,10 @@ if(WIN32 AND SOLSTICE_HAVE_OCIO_01 AND SOLSTICE_OCIO_TARGET)
         get_filename_component(_ocio_dll "${_ocio_loc}" NAME)
         list(APPEND SOLSTICE_OCIO_DELAYLOAD_DLLS "${_ocio_dll}")
     endif()
-    foreach(_n OpenColorIO.dll OpenColorIO_2_3.dll OpenColorIO_2_2.dll OpenColorIO_2_1.dll
-                 zlib1.dll zlib.dll zlibd.dll yaml-cpp.dll expat.dll libexpat.dll libexpat-1.dll)
+    # Only OpenColorIO itself. zlib1.dll is loaded as its dependency from bin/ocio.
+    # Do not /DELAYLOAD zlib.dll: the notify hook would LoadLibrary ocio\zlib.dll
+    # and NVIDIA optixInit hangs on that module (probe can still succeed).
+    foreach(_n OpenColorIO.dll OpenColorIO_2_3.dll OpenColorIO_2_2.dll OpenColorIO_2_1.dll)
         list(APPEND SOLSTICE_OCIO_DELAYLOAD_DLLS "${_n}")
     endforeach()
     list(REMOVE_DUPLICATES SOLSTICE_OCIO_DELAYLOAD_DLLS)
