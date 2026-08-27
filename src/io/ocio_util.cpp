@@ -13,16 +13,6 @@
 #include "io/tx_convert.h"
 #include "solstice_config.h"
 
-#if defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#endif
-
 #if SOLSTICE_HAVE_OCIO
 #  include <OpenColorIO/OpenColorIO.h>
 namespace OCIO_NS = OCIO_NAMESPACE;
@@ -249,37 +239,8 @@ OCIO_NS::ConstCPUProcessorRcPtr processorForView(int viewTransform) {
 
 }  // namespace
 
-void ocioPreloadRuntimeDll() {
-#if defined(_WIN32) && SOLSTICE_HAVE_OCIO
-    static bool tried = false;
-    if (tried) return;
-    tried = true;
-    wchar_t exe[MAX_PATH];
-    if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return;
-    std::wstring dir(exe);
-    const auto slash = dir.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) dir.resize(slash);
-    const wchar_t* names[] = {
-        L"ocio\\OpenColorIO_2_3.dll",
-        L"ocio\\OpenColorIO_2_4.dll",
-        L"ocio\\OpenColorIO_2_2.dll",
-        L"ocio\\OpenColorIO.dll",
-    };
-    for (const wchar_t* name : names) {
-        const std::wstring full = dir + L"\\" + name;
-        HMODULE module = LoadLibraryExW(full.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-        if (module) {
-            logInfo("OpenColorIO loaded from ocio\\ (zlib.dll stays out of the OptiX exe folder)");
-            return;
-        }
-    }
-    logWarning("OpenColorIO not loaded from ocio\\. Display/View may be off; OptiX still uses the NVIDIA driver.");
-#endif
-}
-
 bool ocioLibraryAvailable() {
 #if SOLSTICE_HAVE_OCIO
-    ocioPreloadRuntimeDll();
     return true;
 #else
     return false;

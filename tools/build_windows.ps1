@@ -3,8 +3,6 @@
 # without BOM and treats Cyrillic bytes as quotes / broken tokens.
 # Override paths with env vars if auto-detect is wrong:
 #   QT_ROOT, CUDA_PATH, OptiX_ROOT, GRENDIZER_BUILD_DIR, GRENDIZER_DEPS
-# FULL compiles the OpenColorIO library from source. OCIO env / Film path is
-# the .ocio colour config, not the SDK.
 # Default build dir is C:\gz-build (GitHub zip under Downloads is too long for MSVC).
 # CUDA 13.2+ is required for Visual Studio 2026 (MSVC 14.50+). CUDA 12.x is
 # enough only with VS 2022 / MSVC 14.44. If both are installed, 13.2 is used.
@@ -528,719 +526,25 @@ function Find-OptiXRoot([string]$GitExe) {
     return $local
 }
 
-function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest, [string]$MarkerRel = 'CMakeLists.txt') {
-    # MarkerRel: path under Dest that proves the clone is complete.
-    # libexpat has CMakeLists.txt only under expat/, not the repo root.
-    $marker = Join-Path $Dest $MarkerRel
-    if (Test-Path -LiteralPath $marker) { return }
-    if (Test-Path -LiteralPath $Dest) { Remove-Item -LiteralPath $Dest -Recurse -Force }
+function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest) {
+    if (Test-Path -LiteralPath $Dest) { return }
     New-Item -ItemType Directory -Force -Path (Split-Path $Dest -Parent) | Out-Null
-    # Annotated tags warn "is not a commit" with shallow clone; still check out OK.
-    & $Git -c advice.detachedHead=false clone --depth 1 --branch $Branch $Url $Dest
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $marker)) {
-        Fail ("git clone failed: $Url (branch/tag $Branch, expected $MarkerRel under $Dest)")
-    }
+    & $Git clone --depth 1 --branch $Branch $Url $Dest
+    if ($LASTEXITCODE -ne 0) { Fail "git clone failed: $Url" }
 }
 
-function Test-OcioSafeToRecurse([string]$Prefix) {
-    try { $full = [IO.Path]::GetFullPath($Prefix) } catch { return $false }
-    $norm = $full.TrimEnd('\', '/')
-    foreach ($b in @(
-        $env:SystemRoot, 'C:\Windows', 'C:\Windows\System32',
-        $env:ProgramFiles, ${env:ProgramFiles(x86)}, 'C:\'
-    )) {
-        if (-not $b) { continue }
-        try {
-            $bn = [IO.Path]::GetFullPath($b).TrimEnd('\', '/')
-            if ($norm -ieq $bn) { return $false }
-        } catch { }
-    }
-    $leaf = Split-Path $norm -Leaf
-    if ($leaf -match '(?i)ocio|opencolorio|grendizer|deps') { return $true }
-    foreach ($sub in @('include', 'lib', 'lib64', 'cmake', 'share')) {
-        if (Test-Path -LiteralPath (Join-Path $norm $sub)) { return $true }
-    }
-    return $false
-}
-
-function Find-OcioConfigCMake([string]$Prefix) {
-    if (-not $Prefix -or -not (Test-Path -LiteralPath $Prefix)) { return $null }
-    foreach ($rel in @(
-        'lib\cmake\OpenColorIO\OpenColorIOConfig.cmake',
-        'lib64\cmake\OpenColorIO\OpenColorIOConfig.cmake',
-        'cmake\OpenColorIO\OpenColorIOConfig.cmake',
-        'share\OpenColorIO\OpenColorIOConfig.cmake',
-        'share\opencolorio\OpenColorIOConfig.cmake',
-        'OpenColorIOConfig.cmake'
-    )) {
-        $p = Join-Path $Prefix $rel
-        if (Test-Path -LiteralPath $p) { return Get-Item -LiteralPath $p }
-    }
-    if (-not (Test-OcioSafeToRecurse $Prefix)) { return $null }
-    return Get-ChildItem -LiteralPath $Prefix -Recurse -Depth 6 -Filter 'OpenColorIOConfig.cmake' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-}
-
-function Test-OcioInstallPrefix([string]$root) {
-    if (-not $root) { return $null }
-    $root = $root.Trim().TrimEnd('\', '/')
-    if (-not (Test-Path -LiteralPath $root)) { return $null }
-    if (Test-Path -LiteralPath $root -PathType Leaf) {
-        $name = [IO.Path]::GetFileName($root)
-        if ($name -eq 'OpenColorIOConfig.cmake') {
-            $root = Split-Path $root
-        } else {
-            return $null
-        }
-    }
-    $cfg = Find-OcioConfigCMake $root
-    $hdr = Join-Path $root 'include\OpenColorIO\OpenColorIO.h'
-    $hasHdr = Test-Path -LiteralPath $hdr
-    if (-not $hasHdr -and $cfg) {
-        $walk = $cfg.Directory.FullName
-        for ($i = 0; $i -lt 6; $i++) {
-            $try = Join-Path $walk 'include\OpenColorIO\OpenColorIO.h'
-            if (Test-Path -LiteralPath $try) {
-                $root = $walk
-                $hasHdr = $true
-                break
-            }
-            $parent = Split-Path $walk
-            if (-not $parent -or $parent -eq $walk) { break }
-            $walk = $parent
-        }
-    }
-    $lib = $null
-    foreach ($libRel in @('lib', 'lib64')) {
-        $libDir = Join-Path $root $libRel
-        if (-not (Test-Path -LiteralPath $libDir)) { continue }
-        $lib = Get-ChildItem -LiteralPath $libDir -Filter 'OpenColorIO*.lib' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($lib) { break }
-    }
-    if (-not $lib -and $cfg) {
-        $walk = $cfg.Directory.FullName
-        for ($i = 0; $i -lt 6; $i++) {
-            foreach ($libRel in @('lib', 'lib64')) {
-                $libDir = Join-Path $walk $libRel
-                if (-not (Test-Path -LiteralPath $libDir)) { continue }
-                $lib = Get-ChildItem -LiteralPath $libDir -Filter 'OpenColorIO*.lib' -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-                if ($lib) { break }
-            }
-            if ($lib) { break }
-            $parent = Split-Path $walk
-            if (-not $parent -or $parent -eq $walk) { break }
-            $walk = $parent
-        }
-    }
-    # Need a real linkable install. A stray CMake file from a failed tree is not enough.
-    if (-not (($hasHdr -and $lib) -or ($cfg -and $hasHdr) -or ($cfg -and $lib))) { return $null }
-    $dll = $null
-    foreach ($binRel in @('bin', 'lib')) {
-        $binDir = Join-Path $root $binRel
-        if (-not (Test-Path -LiteralPath $binDir)) { continue }
-        $dll = Get-ChildItem -LiteralPath $binDir -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($dll) { break }
-    }
-    return [pscustomobject]@{
-        Prefix   = $root
-        CMakeDir = $(if ($cfg) { $cfg.Directory.FullName } else { $null })
-        Include  = $(if ($hasHdr) { Join-Path $root 'include' } else { $null })
-        Library  = $(if ($lib) { $lib.FullName } else { $null })
-        Dll      = $(if ($dll) { $dll.FullName } else { $null })
-    }
-}
-
-function Find-SystemOpenColorIO {
-    $candidates = New-Object System.Collections.Generic.List[string]
-    # Prefer an explicit SDK prefix. Do not treat OCIO=config.ocio as a library root.
-    foreach ($e in @('OpenColorIO_DIR', 'OpenColorIO_ROOT', 'OCIO_ROOT', 'OCIO_HOME')) {
-        $v = [Environment]::GetEnvironmentVariable($e)
-        if ($v) { [void]$candidates.Add($v) }
-    }
-    foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-        if (-not $pf) { continue }
-        [void]$candidates.Add((Join-Path $pf 'OpenColorIO'))
-        [void]$candidates.Add((Join-Path $pf 'Academy Software Foundation\OpenColorIO'))
-        Get-ChildItem -LiteralPath $pf -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match 'OpenColorIO|OCIO' } |
-            ForEach-Object { [void]$candidates.Add($_.FullName) }
-    }
-    if ($env:VCPKG_ROOT) {
-        [void]$candidates.Add((Join-Path $env:VCPKG_ROOT 'installed\x64-windows'))
-        [void]$candidates.Add((Join-Path $env:VCPKG_ROOT 'installed\x64-windows-release'))
-    }
-    if ($env:CONDA_PREFIX) { [void]$candidates.Add($env:CONDA_PREFIX) }
-    foreach ($extra in @('C:\ocio', 'C:\OpenColorIO', (Join-Path $env:LOCALAPPDATA 'OpenColorIO'))) {
-        [void]$candidates.Add($extra)
-    }
-    if ($env:PATH) {
-        foreach ($dir in ($env:PATH -split ';')) {
-            if (-not $dir) { continue }
-            $dll = Get-ChildItem -LiteralPath $dir -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if ($dll) {
-                [void]$candidates.Add($dir)
-                $parent = Split-Path $dir
-                if ($parent) { [void]$candidates.Add($parent) }
-            }
-        }
-    }
-    if ($script:DepsPrefix) { [void]$candidates.Add($script:DepsPrefix) }
-    $seen = @{}
-    foreach ($c in $candidates) {
-        if (-not $c) { continue }
-        $key = $c.ToLowerInvariant()
-        if ($seen.ContainsKey($key)) { continue }
-        $seen[$key] = $true
-        $hit = Test-OcioInstallPrefix $c
-        if ($hit) { return $hit }
-    }
-    return $null
-}
-
-function Get-VsGeneratorArgs {
-    # Prefer the VS year we already imported vcvars from, then cmake --help.
-    # OCIO MUST use a VS generator (CI). Ninja nested ExternalProject breaks minizip-ng.
-    if ($script:VsYear -eq '2026') {
-        return @('-G', 'Visual Studio 18 2026', '-A', 'x64')
-    }
-    if ($script:VsYear -eq '2022') {
-        return @('-G', 'Visual Studio 17 2022', '-A', 'x64')
-    }
-    if ($script:VsYear -eq '2019') {
-        return @('-G', 'Visual Studio 16 2019', '-A', 'x64')
-    }
-    $help = & $CMake --help 2>&1 | Out-String
-    if ($help -match 'Visual Studio 18 2026') { return @('-G', 'Visual Studio 18 2026', '-A', 'x64') }
-    if ($help -match 'Visual Studio 17 2022') { return @('-G', 'Visual Studio 17 2022', '-A', 'x64') }
-    if ($help -match 'Visual Studio 16 2019') { return @('-G', 'Visual Studio 16 2019', '-A', 'x64') }
-    return @()
-}
-
-function Find-ZlibRuntimeDlls {
-    $hits = New-Object System.Collections.Generic.List[object]
-    $seen = @{}
-    $roots = New-Object System.Collections.Generic.List[string]
-    if ($script:DepsPrefix) { [void]$roots.Add($script:DepsPrefix) }
-    if ($script:OcioInstall -and $script:OcioInstall.Prefix) {
-        [void]$roots.Add($script:OcioInstall.Prefix)
-    }
-    foreach ($root in $roots) {
-        if (-not $root -or -not (Test-Path -LiteralPath $root)) { continue }
-        foreach ($rel in @('bin', 'lib', 'lib64')) {
-            $dir = Join-Path $root $rel
-            if (-not (Test-Path -LiteralPath $dir)) { continue }
-            foreach ($pat in @('zlib*.dll', 'libzlib*.dll', 'zdll*.dll')) {
-                Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
-                    $k = $_.Name.ToLowerInvariant()
-                    if (-not $seen.ContainsKey($k)) {
-                        $seen[$k] = $true
-                        [void]$hits.Add($_)
-                    }
-                }
-            }
-        }
-    }
-    return $hits
-}
-
-function Test-ZlibInDeps {
-    $hdr = Join-Path $script:DepsPrefix 'include\zlib.h'
-    if (-not (Test-Path -LiteralPath $hdr)) { return $false }
-    foreach ($libRel in @('lib', 'lib64')) {
-        $libDir = Join-Path $script:DepsPrefix $libRel
-        if (-not (Test-Path -LiteralPath $libDir)) { continue }
-        $hit = Get-ChildItem -LiteralPath $libDir -Filter 'zlib*.lib' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if (-not $hit) {
-            $hit = Get-ChildItem -LiteralPath $libDir -Filter 'z.lib' -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-        }
-        if ($hit) { return $true }
-    }
-    return $false
-}
-
-function Test-MinizipInDeps {
-    foreach ($rel in @(
-        'include\minizip-ng\mz.h',
-        'include\minizip\mz.h',
-        'include\mz.h'
-    )) {
-        if (Test-Path -LiteralPath (Join-Path $script:DepsPrefix $rel)) { return $true }
-    }
-    return $false
-}
-
-function Test-YamlCppInDeps {
-    $hdr = Join-Path $script:DepsPrefix 'include\yaml-cpp\yaml.h'
-    if (-not (Test-Path -LiteralPath $hdr)) { return $false }
-    foreach ($libRel in @('lib', 'lib64')) {
-        $libDir = Join-Path $script:DepsPrefix $libRel
-        if (-not (Test-Path -LiteralPath $libDir)) { continue }
-        $hit = Get-ChildItem -LiteralPath $libDir -Filter 'yaml-cpp*.lib' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($hit) { return $true }
-    }
-    return $false
-}
-
-function Test-ExpatInDeps {
-    $hdr = Join-Path $script:DepsPrefix 'include\expat.h'
-    if (-not (Test-Path -LiteralPath $hdr)) { return $false }
-    foreach ($libRel in @('lib', 'lib64')) {
-        $libDir = Join-Path $script:DepsPrefix $libRel
-        if (-not (Test-Path -LiteralPath $libDir)) { continue }
-        $hit = Get-ChildItem -LiteralPath $libDir -Filter '*expat*.lib' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($hit) { return $true }
-    }
-    return $false
-}
-
-function Test-PystringInDeps {
-    foreach ($rel in @(
-        'include\pystring\pystring.h',
-        'include\pystring.h'
-    )) {
-        if (Test-Path -LiteralPath (Join-Path $script:DepsPrefix $rel)) { return $true }
-    }
-    return $false
-}
-
-function Ensure-ZlibWindowsDllNames {
-    # MSVC zlib CMake writes zlib.dll. Windows loader / OpenVDB / some Qt kits
-    # import zlib1.dll. OCIO imports zlib.dll. Ship both names from one binary.
-    $dlls = @(Find-ZlibRuntimeDlls)
-    if ($dlls.Count -eq 0) { return }
-    $byDir = @{}
-    foreach ($d in $dlls) {
-        $dir = $d.DirectoryName
-        if (-not $byDir.ContainsKey($dir)) {
-            $byDir[$dir] = New-Object System.Collections.Generic.List[object]
-        }
-        [void]$byDir[$dir].Add($d)
-    }
-    foreach ($dir in @($byDir.Keys)) {
-        $names = @{}
-        foreach ($d in $byDir[$dir]) { $names[$d.Name.ToLowerInvariant()] = $true }
-        $src = $byDir[$dir][0].FullName
-        if (-not $names.ContainsKey('zlib1.dll')) {
-            Copy-Item -LiteralPath $src -Destination (Join-Path $dir 'zlib1.dll') -Force
-            Info ("Wrote zlib1.dll in " + $dir)
-        }
-        if (-not $names.ContainsKey('zlib.dll')) {
-            Copy-Item -LiteralPath $src -Destination (Join-Path $dir 'zlib.dll') -Force
-            Info ("Wrote zlib.dll in " + $dir)
-        }
-    }
-}
-
-function Install-ZlibShared {
-    # Compile shared zlib into deps. zlib1.dll next to the exe; zlib.dll in ocio\.
-    $zlibSrc = Join-Path $script:DepsSrc 'zlib'
-    if ((Test-ZlibInDeps) -and ((Find-ZlibRuntimeDlls).Count -gt 0)) {
-        Ensure-ZlibWindowsDllNames
-        Info 'zlib already in deps - skipping rebuild'
-        return
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $zlibSrc 'CMakeLists.txt'))) {
-        if (Test-Path -LiteralPath $zlibSrc) {
-            Info 'Removing previous zlib sources (need v1.3.1 for CMake 4.x).'
-            Remove-Item -LiteralPath $zlibSrc -Recurse -Force
-        }
-        Invoke-GitClone 'https://github.com/madler/zlib.git' 'v1.3.1' $zlibSrc
-    }
-    $zb = Join-Path $zlibSrc 'build'
-    if (Test-Path -LiteralPath $zb) { Remove-Item -LiteralPath $zb -Recurse -Force }
-    Info 'Building zlib v1.3.1 shared (zlib.dll + zlib1.dll).'
-    Invoke-DepCMakeInstall $zlibSrc 'zlib' @(
-        '-DBUILD_SHARED_LIBS=ON', '-DZLIB_BUILD_EXAMPLES=OFF'
-    )
-    if (-not (Test-ZlibInDeps)) {
-        Fail "zlib install finished but zlib.h / zlib*.lib missing under $script:DepsPrefix"
-    }
-    if ((Find-ZlibRuntimeDlls).Count -eq 0) {
-        Fail "zlib install finished but zlib.dll is not under $script:DepsPrefix\bin."
-    }
-    Ensure-ZlibWindowsDllNames
-    $hasZlib1 = $false
-    foreach ($d in @(Find-ZlibRuntimeDlls)) {
-        if ($d.Name -ieq 'zlib1.dll') { $hasZlib1 = $true }
-    }
-    if (-not $hasZlib1) {
-        Fail "zlib1.dll missing under $script:DepsPrefix\bin after install. The exe will not start."
-    }
-}
-
-function Install-OcioSdkDeps {
-    # Prebuild every OCIO ExternalProject dep with Ninja + POLICY 3.5.
-    # OCIO's nested VS ExternalProjects (yaml-cpp_install, minizip-ng_install, …)
-    # die on CMake 4.x (cmake_minimum < 3.5) and zlib race. MISSING then finds
-    # these and skips ExternalProject entirely.
-    Install-ZlibShared
-    if (-not (Test-MinizipInDeps)) {
-        $mzSrc = Join-Path $script:DepsSrc 'minizip-ng'
-        if (Test-Path -LiteralPath $mzSrc) {
-            Info 'Removing previous minizip-ng sources (need 3.0.7 for OCIO 2.3.2).'
-            Remove-Item -LiteralPath $mzSrc -Recurse -Force
-        }
-        Invoke-GitClone 'https://github.com/zlib-ng/minizip-ng.git' '3.0.7' $mzSrc
-        $mb = Join-Path $mzSrc 'build'
-        if (Test-Path -LiteralPath $mb) { Remove-Item -LiteralPath $mb -Recurse -Force }
-        Invoke-DepCMakeInstall $mzSrc 'minizip-ng' @(
-            "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
-            "-DZLIB_ROOT=$script:DepsPrefix",
-            '-DBUILD_SHARED_LIBS=OFF',
-            '-DMZ_OPENSSL=OFF', '-DMZ_LIBBSD=OFF', '-DMZ_BUILD_TESTS=OFF',
-            '-DMZ_COMPAT=OFF', '-DMZ_BZIP2=OFF', '-DMZ_LZMA=OFF',
-            '-DMZ_LIBCOMP=OFF', '-DMZ_ZSTD=OFF', '-DMZ_PKCRYPT=OFF',
-            '-DMZ_WZAES=OFF', '-DMZ_SIGNING=OFF', '-DMZ_ZLIB=ON',
-            '-DMZ_ICONV=OFF', '-DMZ_FETCH_LIBS=OFF', '-DMZ_FORCE_FETCH_LIBS=OFF'
-        )
-        if (-not (Test-MinizipInDeps)) {
-            Fail "minizip-ng install finished but mz.h missing under $script:DepsPrefix"
-        }
-    } else {
-        Info 'minizip-ng already in deps — skipping'
-    }
-    if (-not (Test-YamlCppInDeps)) {
-        # yaml-cpp 0.7.0: cmake_minimum_required(VERSION 3.4) — CMake 4 rejects it
-        # inside OCIO's yaml-cpp_install ExternalProject. Prebuild with POLICY 3.5.
-        $ySrc = Join-Path $script:DepsSrc 'yaml-cpp'
-        if (Test-Path -LiteralPath $ySrc) { Remove-Item -LiteralPath $ySrc -Recurse -Force }
-        Invoke-GitClone 'https://github.com/jbeder/yaml-cpp.git' 'yaml-cpp-0.7.0' $ySrc
-        $yb = Join-Path $ySrc 'build'
-        if (Test-Path -LiteralPath $yb) { Remove-Item -LiteralPath $yb -Recurse -Force }
-        Invoke-DepCMakeInstall $ySrc 'yaml-cpp' @(
-            '-DBUILD_SHARED_LIBS=OFF',
-            '-DYAML_BUILD_SHARED_LIBS=OFF',
-            '-DYAML_CPP_BUILD_TESTS=OFF',
-            '-DYAML_CPP_BUILD_TOOLS=OFF',
-            '-DYAML_CPP_BUILD_CONTRIB=OFF'
-        )
-        if (-not (Test-YamlCppInDeps)) {
-            Fail "yaml-cpp install finished but yaml.h / yaml-cpp*.lib missing under $script:DepsPrefix"
-        }
-    } else {
-        Info 'yaml-cpp already in deps — skipping'
-    }
-    if (-not (Test-ExpatInDeps)) {
-        # libexpat tag R_2_5_0 is annotated ("is not a commit"); shallow
-        # --branch clone leaves an empty tree. Download the GitHub archive instead.
-        # CMakeLists.txt lives under expat/, not the repo root.
-        $eSrc = Join-Path $script:DepsSrc 'expat'
-        if (Test-Path -LiteralPath $eSrc) { Remove-Item -LiteralPath $eSrc -Recurse -Force }
-        New-Item -ItemType Directory -Force -Path (Split-Path $eSrc -Parent) | Out-Null
-        $zip = Join-Path $env:TEMP 'libexpat-R_2_5_0.zip'
-        $url = 'https://github.com/libexpat/libexpat/archive/refs/tags/R_2_5_0.zip'
-        Info "Downloading libexpat R_2_5_0 archive (annotated tag; not git clone --branch) ..."
-        $oldPref = $ProgressPreference
-        $ProgressPreference = 'SilentlyContinue'
-        try {
-            Invoke-WebRequest -Uri $url -OutFile $zip
-        } finally {
-            $ProgressPreference = $oldPref
-        }
-        if (-not (Test-Path -LiteralPath $zip)) {
-            Fail "Failed to download $url"
-        }
-        $extractRoot = Join-Path $env:TEMP ('libexpat-extract-' + [guid]::NewGuid().ToString('N'))
-        New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
-        Expand-Archive -Path $zip -DestinationPath $extractRoot -Force
-        $unpacked = Get-ChildItem -LiteralPath $extractRoot -Directory -ErrorAction SilentlyContinue |
-            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'expat\CMakeLists.txt') } |
-            Select-Object -First 1
-        if (-not $unpacked) {
-            Fail "libexpat R_2_5_0 zip extracted but expat/CMakeLists.txt not found under $extractRoot"
-        }
-        Move-Item -LiteralPath $unpacked.FullName -Destination $eSrc
-        Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
-        $eb = Join-Path $eSrc 'build'
-        if (Test-Path -LiteralPath $eb) { Remove-Item -LiteralPath $eb -Recurse -Force }
-        $eCmake = Join-Path $eSrc 'expat'
-        if (-not (Test-Path -LiteralPath (Join-Path $eCmake 'CMakeLists.txt'))) {
-            Fail "libexpat R_2_5_0 missing expat/CMakeLists.txt under $eSrc"
-        }
-        Invoke-DepCMakeInstall $eSrc 'expat' @(
-            '-DEXPAT_BUILD_DOCS=OFF', '-DEXPAT_BUILD_EXAMPLES=OFF',
-            '-DEXPAT_BUILD_TESTS=OFF', '-DEXPAT_BUILD_TOOLS=OFF',
-            '-DEXPAT_SHARED_LIBS=OFF'
-        ) -SourceDir $eCmake
-        if (-not (Test-ExpatInDeps)) {
-            Fail "expat install finished but expat.h missing under $script:DepsPrefix"
-        }
-    } else {
-        Info 'expat already in deps — skipping'
-    }
-    if (-not (Test-PystringInDeps)) {
-        # Upstream pystring has no CMakeLists — use OCIO's Buildpystring.cmake.
-        $pSrc = Join-Path $script:DepsSrc 'pystring'
-        if (Test-Path -LiteralPath $pSrc) { Remove-Item -LiteralPath $pSrc -Recurse -Force }
-        New-Item -ItemType Directory -Force -Path (Split-Path $pSrc -Parent) | Out-Null
-        & $Git clone --depth 1 --branch 'v1.1.3' 'https://github.com/imageworks/pystring.git' $pSrc
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $pSrc 'pystring.cpp'))) {
-            Fail 'git clone pystring v1.1.3 failed'
-        }
-        $pCm = Join-Path $pSrc 'CMakeLists.txt'
-        @'
-project(pystring)
-cmake_minimum_required(VERSION 3.10)
-include(GNUInstallDirs)
-set(HEADERS pystring.h)
-set(SOURCES pystring.cpp)
-add_library(${PROJECT_NAME} STATIC ${HEADERS} ${SOURCES})
-set_target_properties(${PROJECT_NAME} PROPERTIES PUBLIC_HEADER "${HEADERS}")
-install(TARGETS ${PROJECT_NAME}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pystring)
-'@ | Set-Content -Path $pCm -Encoding ascii
-        $pb = Join-Path $pSrc 'build'
-        if (Test-Path -LiteralPath $pb) { Remove-Item -LiteralPath $pb -Recurse -Force }
-        Invoke-DepCMakeInstall $pSrc 'pystring' @('-DBUILD_SHARED_LIBS=OFF')
-        if (-not (Test-PystringInDeps)) {
-            Fail "pystring install finished but pystring.h missing under $script:DepsPrefix"
-        }
-    } else {
-        Info 'pystring already in deps — skipping'
-    }
-}
-
-function Find-DepHeader([string]$Prefix, [string[]]$RelPaths) {
-    foreach ($rel in $RelPaths) {
-        $p = Join-Path $Prefix $rel
-        if (Test-Path -LiteralPath $p) { return $p }
-    }
-    return $null
-}
-
-function Find-DepLibrary([string]$Prefix, [string[]]$Filters) {
-    foreach ($libRel in @('lib', 'lib64')) {
-        $libDir = Join-Path $Prefix $libRel
-        if (-not (Test-Path -LiteralPath $libDir)) { continue }
-        foreach ($pat in $Filters) {
-            $hit = Get-ChildItem -LiteralPath $libDir -Filter $pat -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if ($hit) { return $hit.FullName }
-        }
-    }
-    return $null
-}
-
-function Find-DepCmakeConfigDir([string]$Prefix, [string]$ConfigFileName) {
-    $hit = Get-ChildItem -LiteralPath $Prefix -Recurse -Depth 6 -Filter $ConfigFileName -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($hit) { return $hit.Directory.FullName }
-    return $null
-}
-
-function Get-OcioPrebuiltCmakeFlags {
-    # OCIO Find*.cmake: setting *_ROOT skips CONFIG find and often fails to
-    # resolve Windows static lib names, then MISSING spawns broken ExternalProject
-    # (expat_install / yaml-cpp_install MSB8066). Pass explicit INCLUDE/LIBRARY
-    # and EXT_PACKAGES=NONE so no nested install projects are created.
-    $missing = @()
-    if (-not (Test-ZlibInDeps)) { $missing += 'zlib' }
-    if (-not (Test-MinizipInDeps)) { $missing += 'minizip-ng' }
-    if (-not (Test-YamlCppInDeps)) { $missing += 'yaml-cpp' }
-    if (-not (Test-ExpatInDeps)) { $missing += 'expat' }
-    if (-not (Test-PystringInDeps)) { $missing += 'pystring' }
-    if ($missing.Count -gt 0) {
-        Fail ("OpenColorIO SDK prebuild incomplete (missing: " + ($missing -join ', ') + "). Fix deps under $script:DepsPrefix — do not skip.")
-    }
-
-    $zlibInc = Split-Path (Find-DepHeader $script:DepsPrefix @('include\zlib.h')) -Parent
-    $zlibLib = Find-DepLibrary $script:DepsPrefix @('zlib.lib', 'zlibstatic.lib', 'z.lib')
-    $mzHdr = Find-DepHeader $script:DepsPrefix @(
-        'include\minizip-ng\mz.h', 'include\minizip\mz.h', 'include\mz.h')
-    $mzInc = Split-Path $mzHdr -Parent
-    $mzLib = Find-DepLibrary $script:DepsPrefix @('libminizip-ng.lib', 'minizip-ng.lib', 'libminizip.lib', 'minizip.lib')
-    $yamlIncParent = Split-Path (Find-DepHeader $script:DepsPrefix @('include\yaml-cpp\yaml.h')) -Parent
-    $yamlInc = Split-Path $yamlIncParent -Parent
-    $yamlLib = Find-DepLibrary $script:DepsPrefix @('yaml-cpp.lib', 'libyaml-cpp.lib')
-    $yamlDir = Find-DepCmakeConfigDir $script:DepsPrefix 'yaml-cpp-config.cmake'
-    $expatInc = Split-Path (Find-DepHeader $script:DepsPrefix @('include\expat.h')) -Parent
-    $expatLib = Find-DepLibrary $script:DepsPrefix @(
-        'libexpatMD.lib', 'libexpatMT.lib', 'libexpat.lib', 'expat.lib', 'libexpatdMD.lib')
-    $expatDir = Find-DepCmakeConfigDir $script:DepsPrefix 'expat-config.cmake'
-    $pyHdr = Find-DepHeader $script:DepsPrefix @('include\pystring\pystring.h', 'include\pystring.h')
-    $pyInc = Split-Path $pyHdr -Parent
-    $pyLib = Find-DepLibrary $script:DepsPrefix @('pystring.lib', 'libpystring.lib')
-
-    foreach ($pair in @(
-        @('zlib include', $zlibInc), @('zlib lib', $zlibLib),
-        @('minizip include', $mzInc), @('minizip lib', $mzLib),
-        @('yaml-cpp include', $yamlInc), @('yaml-cpp lib', $yamlLib),
-        @('expat include', $expatInc), @('expat lib', $expatLib),
-        @('pystring include', $pyInc), @('pystring lib', $pyLib)
-    )) {
-        if (-not $pair[1]) {
-            Fail ("OpenColorIO SDK prebuild path missing for " + $pair[0] + " under $script:DepsPrefix")
-        }
-        Info ("OCIO dep " + $pair[0] + ": " + $pair[1])
-    }
-
-    $flags = @(
-        "-DCMAKE_INSTALL_PREFIX=$script:DepsPrefix",
-        "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
-        '-DCMAKE_BUILD_TYPE=Release',
-        '-DBUILD_SHARED_LIBS=ON',
-        '-DOCIO_BUILD_APPS=OFF',
-        '-DOCIO_BUILD_TESTS=OFF',
-        '-DOCIO_BUILD_GPU_TESTS=OFF',
-        '-DOCIO_BUILD_PYTHON=OFF',
-        '-DOCIO_BUILD_JAVA=OFF',
-        '-DOCIO_BUILD_DOCS=OFF',
-        # NONE: never create yaml-cpp_install / expat_install ExternalProjects.
-        '-DOCIO_INSTALL_EXT_PACKAGES=NONE',
-        "-DZLIB_INCLUDE_DIR=$zlibInc",
-        "-DZLIB_LIBRARY=$zlibLib",
-        "-DZLIB_ROOT=$script:DepsPrefix",
-        "-Dminizip-ng_INCLUDE_DIR=$mzInc",
-        "-Dminizip-ng_LIBRARY=$mzLib",
-        '-Dminizip-ng_STATIC_LIBRARY=ON',
-        "-Dyaml-cpp_INCLUDE_DIR=$yamlInc",
-        "-Dyaml-cpp_LIBRARY=$yamlLib",
-        "-Dexpat_INCLUDE_DIR=$expatInc",
-        "-Dexpat_LIBRARY=$expatLib",
-        '-Dexpat_STATIC_LIBRARY=ON',
-        "-Dpystring_INCLUDE_DIR=$pyInc",
-        "-Dpystring_LIBRARY=$pyLib",
-        '-DCMAKE_POLICY_VERSION_MINIMUM=3.5'
-    )
-    if ($yamlDir) {
-        $flags += "-Dyaml-cpp_DIR=$yamlDir"
-        Info ("yaml-cpp_DIR: " + $yamlDir)
-    }
-    if ($expatDir) {
-        $flags += "-Dexpat_DIR=$expatDir"
-        Info ("expat_DIR: " + $expatDir)
-    }
-    return $flags
-}
-
-function Install-OpenColorIO {
-    # FULL downloads and compiles the OpenColorIO SDK (library) into
-    # %LOCALAPPDATA%\grendizer-deps. The OCIO env / Film path is only the
-    # .ocio colour config — that is not this step and never replaces the SDK.
-    #
-    # Prebuild zlib/minizip/yaml-cpp/expat/pystring, then VS + EXT_PACKAGES=NONE
-    # with explicit INCLUDE/LIBRARY paths. Never spawn nested ExternalProject
-    # (expat_install / yaml-cpp_install die on CMake 4.x).
-    $src = Join-Path $script:DepsSrc 'ocio'
-    $b = Join-Path $src 'build'
-    Info 'OpenColorIO SDK: git clone v2.3.2 + compile into deps (FULL requires the library).'
-    Info 'Not the .ocio config file — that stays on OCIO env / Film.'
-    $candidates = New-Object System.Collections.Generic.List[object]
-    $primary = Get-VsGeneratorArgs
-    if ($primary.Count -ge 2) { [void]$candidates.Add($primary) }
-    foreach ($fallback in @(
-        @('-G', 'Visual Studio 18 2026', '-A', 'x64'),
-        @('-G', 'Visual Studio 17 2022', '-A', 'x64'),
-        @('-G', 'Visual Studio 16 2019', '-A', 'x64')
-    )) {
-        $key = $fallback -join ' '
-        $dup = $false
-        foreach ($c in $candidates) {
-            if (($c -join ' ') -eq $key) { $dup = $true; break }
-        }
-        if (-not $dup) { [void]$candidates.Add($fallback) }
-    }
-    if ($candidates.Count -eq 0) {
-        Fail @"
-OpenColorIO SDK needs the Visual Studio CMake generator.
-Install VS 2022 or VS 2026 Desktop development with C++, then re-run BUILD_WINDOWS_FULL.bat.
-Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
-"@
-    }
-    Info 'OpenColorIO SDK deps: zlib, minizip-ng, yaml-cpp, expat, pystring (prebuilt; EXT_PACKAGES=NONE).'
-    Install-OcioSdkDeps
-    # Fresh clone if the tree looks incomplete (failed prior attempt).
-    $cm = Join-Path $src 'CMakeLists.txt'
-    $hdrProbe = Join-Path $src 'include\OpenColorIO\OpenColorIO.h'
-    if ((Test-Path -LiteralPath $src) -and (-not (Test-Path -LiteralPath $cm) -or -not (Test-Path -LiteralPath $hdrProbe))) {
-        Info 'Removing incomplete OpenColorIO source tree.'
-        Remove-Item -LiteralPath $src -Recurse -Force
-    }
-    Info 'Downloading OpenColorIO SDK sources (AcademySoftwareFoundation/OpenColorIO v2.3.2) ...'
-    Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/OpenColorIO.git' 'v2.3.2' $src
-    if (Test-Path -LiteralPath $b) {
-        Info 'Removing previous OCIO build tree (wipe expat_install / yaml-cpp_install leftovers).'
-        Remove-Item -LiteralPath $b -Recurse -Force
-    }
-    $ocioFlags = Get-OcioPrebuiltCmakeFlags
-    $usedGen = $null
-    foreach ($vsGen in $candidates) {
-        if (Test-Path -LiteralPath $b) { Remove-Item -LiteralPath $b -Recurse -Force }
-        Info ('Compiling OpenColorIO SDK: ' + ($vsGen -join ' ') + ' + EXT_PACKAGES=NONE (no nested install)')
-        $cfg = @('-S', $src, '-B', $b) + $vsGen + $ocioFlags
-        & $CMake @cfg
-        if ($LASTEXITCODE -eq 0) {
-            $usedGen = $vsGen
-            break
-        }
-        Write-Host ('Warning: OpenColorIO configure rejected generator ' + ($vsGen -join ' ')) -ForegroundColor Yellow
-    }
-    if (-not $usedGen) {
-        Fail 'OpenColorIO SDK cmake configure failed for every Visual Studio generator. See log above. Prebuilt deps must be found with EXT_PACKAGES=NONE.'
-    }
-    # Guard: nested ExternalProject must not exist when NONE is set.
-    foreach ($bad in @('expat_install.vcxproj', 'yaml-cpp_install.vcxproj', 'minizip-ng_install.vcxproj', 'pystring_install.vcxproj', 'ZLIB_install.vcxproj')) {
-        $p = Join-Path $b $bad
-        if (Test-Path -LiteralPath $p) {
-            Fail ("OpenColorIO still generated $bad — EXT_PACKAGES=NONE did not stick or a dep was not found. See cmake log.")
-        }
-    }
-    Info ('Installing OpenColorIO SDK with ' + ($usedGen -join ' ') + ' (--target install) into ' + $script:DepsPrefix)
-    & $CMake --build $b --config Release --target install --parallel
-    if ($LASTEXITCODE -ne 0) {
-        Fail @"
-OpenColorIO SDK MSBuild install failed.
-This compiles the OpenColorIO library (headers + OpenColorIO.dll), not the .ocio colour config.
-If the log shows expat_install / yaml-cpp_install: nested ExternalProject must not run — re-download this zip.
-Close Grendizer if a DLL is locked.
-"@
-    }
-    $cfgFile = Find-OcioConfigCMake $script:DepsPrefix
-    if (-not $cfgFile) {
-        Fail "OpenColorIO SDK install finished but OpenColorIOConfig.cmake is not under $($script:DepsPrefix)."
-    }
-    $hit = Test-OcioInstallPrefix $script:DepsPrefix
-    if (-not $hit) {
-        Fail "OpenColorIO SDK incomplete under $($script:DepsPrefix) (need headers + import lib / DLL)."
-    }
-    if (-not $hit.Dll) {
-        $dllProbe = Get-ChildItem -LiteralPath (Join-Path $script:DepsPrefix 'bin') -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if (-not $dllProbe) {
-            Fail "OpenColorIO SDK missing OpenColorIO*.dll under $($script:DepsPrefix)\bin. FULL Display/View needs that DLL."
-        }
-    }
-    $script:OcioInstall = $hit
-    Info ("OpenColorIO SDK ready: " + $cfgFile.FullName)
-    if ($hit.Dll) { Info ("OpenColorIO DLL: " + $hit.Dll) }
-}
-
-function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [switch]$AllowFail, [string]$SourceDir = '') {
-    $cmakeSrc = $Src
-    if ($SourceDir) { $cmakeSrc = $SourceDir }
+function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [switch]$AllowFail) {
     $b = Join-Path $Src 'build'
     Info "Building $Name ..."
     $cfg = @(
-        '-S', $cmakeSrc, '-B', $b, '-G', 'Ninja',
+        '-S', $Src, '-B', $b, '-G', 'Ninja',
         "-DCMAKE_BUILD_TYPE=Release",
         "-DCMAKE_INSTALL_PREFIX=$script:DepsPrefix",
         "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
         "-DCMAKE_MAKE_PROGRAM=$Ninja",
         "-DCMAKE_C_COMPILER=$Cl",
         "-DCMAKE_CXX_COMPILER=$Cl",
-        # CMake 4.x removed compat with cmake_minimum_required < 3.5 (zlib 1.2.x, yaml-cpp 0.7, etc.).
+        # CMake 4.x rejects zlib/yaml cmake_minimum_required < 3.5. Deps only.
         '-DCMAKE_POLICY_VERSION_MINIMUM=3.5'
     ) + $Extra
     & $CMake @cfg
@@ -1286,9 +590,8 @@ function Ensure-NativeDeps {
         $script:DepsPrefix = Join-Path $env:LOCALAPPDATA 'grendizer-deps'
     }
     $stamp = Join-Path $script:DepsPrefix 'stamp-native-1.txt'
-    $script:DepsSrc = Join-Path $env:LOCALAPPDATA 'grendizer-deps-src'
-    if ($env:GRENDIZER_DEPS_SRC) { $script:DepsSrc = $env:GRENDIZER_DEPS_SRC }
-    $srcRoot = $script:DepsSrc
+    $srcRoot = Join-Path $env:LOCALAPPDATA 'grendizer-deps-src'
+    if ($env:GRENDIZER_DEPS_SRC) { $srcRoot = $env:GRENDIZER_DEPS_SRC }
     New-Item -ItemType Directory -Force -Path $script:DepsPrefix | Out-Null
     New-Item -ItemType Directory -Force -Path $srcRoot | Out-Null
 
@@ -1331,21 +634,8 @@ function Ensure-NativeDeps {
         return
     }
 
-    # Download + compile the OpenColorIO SDK into deps. A .ocio file on OCIO=
-    # is the colour config at runtime, never a substitute for this library.
-    $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
-    if ((Test-Path -LiteralPath $stamp) -and $script:OcioInstall -and $script:OcioInstall.Dll) {
-        Info "Native deps already installed (incl. OpenColorIO SDK): $script:DepsPrefix"
-        Install-ZlibShared
-        return
-    }
     if (Test-Path -LiteralPath $stamp) {
-        Info "Deps stamp exists but OpenColorIO SDK is missing — downloading/compiling OCIO only (keeping Embree/OpenEXR/OpenVDB)."
-        Install-OpenColorIO
-        $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
-        if (-not $script:OcioInstall) {
-            Fail "OpenColorIO SDK still missing under $script:DepsPrefix after rebuild. FULL requires SOLSTICE_HAVE_OCIO 1."
-        }
+        Info "Native deps already installed: $script:DepsPrefix"
         return
     }
 
@@ -1385,17 +675,15 @@ function Ensure-NativeDeps {
         '-DOPENVDB_USE_DELAYED_LOADING=OFF'
     )
 
-    Install-OpenColorIO
-    $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
-    if (-not $script:OcioInstall) {
-        Fail "OpenColorIO SDK missing under $script:DepsPrefix after install. FULL requires SOLSTICE_HAVE_OCIO 1."
-    }
-    if (-not $script:OcioInstall.Dll) {
-        Fail "OpenColorIO SDK installed but OpenColorIO*.dll missing under $script:DepsPrefix\bin."
-    }
+    Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/OpenColorIO.git' 'v2.3.2' (Join-Path $srcRoot 'ocio')
+    Invoke-DepCMakeInstall (Join-Path $srcRoot 'ocio') 'OpenColorIO' @(
+            '-DBUILD_SHARED_LIBS=ON', '-DOCIO_BUILD_APPS=OFF', '-DOCIO_BUILD_TESTS=OFF',
+            '-DOCIO_BUILD_GPU_TESTS=OFF', '-DOCIO_BUILD_PYTHON=OFF', '-DOCIO_BUILD_JAVA=OFF',
+            '-DOCIO_BUILD_DOCS=OFF', '-DOCIO_INSTALL_EXT_PACKAGES=ALL'
+        ) -AllowFail
 
     Set-Content -Path $stamp -Value 'ok' -Encoding ascii
-    Info "Native deps installed (OpenColorIO SDK included): $script:DepsPrefix"
+    Info "Native deps installed: $script:DepsPrefix"
 }
 
 function Resolve-EmbreePrefix {
@@ -1509,7 +797,6 @@ $OptiX = Find-OptiXRoot $Git
 $Ninja = Find-Ninja
 $ninjaDir = Split-Path $Ninja -Parent
 $env:PATH = "$ninjaDir;$env:PATH"
-$script:OcioInstall = $null
 Ensure-NativeDeps
 $embreeRoot = Resolve-EmbreePrefix
 $BuildDir = Resolve-BuildDir
@@ -1519,10 +806,6 @@ if (-not (Test-Path -LiteralPath (Join-Path $BuildDir 'CMakeCache.txt'))) {
 }
 
 $Prefix = "$Qt;$script:DepsPrefix;$embreeRoot"
-if ($script:OcioInstall -and $script:OcioInstall.Prefix) {
-    $Prefix = "$($script:OcioInstall.Prefix);$Prefix"
-    Info ("OpenColorIO prefix: " + $script:OcioInstall.Prefix)
-}
 
 Info "CMake:  $CMake"
 Info "Qt:     $Qt"
@@ -1581,11 +864,6 @@ if (Test-Path -LiteralPath $cache) {
             $stale = $true
             $staleWhy = "source moved (`n  cache: $cachedSrc`n  now:   $currentSrc)"
         }
-    }
-    # CMake 4.4 on Windows turned file:///C:/… into /C:/… and poisoned FetchContent.
-    if (Select-String -Path $cache -Pattern 'file:///C:|not found: /C:|openpgl-v0\.7\.1\.tgz' -Quiet) {
-        $stale = $true
-        $staleWhy = 'broken FetchContent file:///C: URL in cache'
     }
     if ($stale) {
         # Keep _deps so MaterialX / TinyUSDZ / OpenPGL git clones are not wiped
@@ -1665,37 +943,6 @@ if ($script:FullBuild) {
     )
 }
 
-$ocioDir = $null
-if ($script:OcioInstall -and $script:OcioInstall.CMakeDir) {
-    $ocioCfgFile = Join-Path $script:OcioInstall.CMakeDir 'OpenColorIOConfig.cmake'
-    if (Test-Path -LiteralPath $ocioCfgFile) {
-        $ocioDir = $script:OcioInstall.CMakeDir
-    }
-}
-if (-not $ocioDir) {
-    $ocioCmake = $null
-    if ($script:OcioInstall -and $script:OcioInstall.Prefix) {
-        $ocioCmake = Find-OcioConfigCMake $script:OcioInstall.Prefix
-    }
-    if (-not $ocioCmake) { $ocioCmake = Find-OcioConfigCMake $script:DepsPrefix }
-    if ($ocioCmake) { $ocioDir = $ocioCmake.Directory.FullName }
-}
-if ($ocioDir) {
-    $featureFlags += "-DOpenColorIO_DIR=$ocioDir"
-    $env:OpenColorIO_DIR = $ocioDir
-    Info "OpenColorIO_DIR: $ocioDir"
-}
-if ($script:OcioInstall) {
-    $featureFlags += "-DOpenColorIO_ROOT=$($script:OcioInstall.Prefix)"
-    $env:OpenColorIO_ROOT = $script:OcioInstall.Prefix
-    if ($script:OcioInstall.Include) {
-        $featureFlags += "-DOpenColorIO_INCLUDE_DIR=$($script:OcioInstall.Include)"
-    }
-    if ($script:OcioInstall.Library) {
-        $featureFlags += "-DOpenColorIO_LIBRARY=$($script:OcioInstall.Library)"
-    }
-}
-
 & $CMake -S $Root -B $BuildDir -G $Generator `
     "-DCMAKE_BUILD_TYPE=Release" `
     "-DCMAKE_MAKE_PROGRAM=$Ninja" `
@@ -1734,14 +981,19 @@ if ($script:FullBuild) {
         @('SOLSTICE_HAVE_ALEMBIC 1', 'Alembic'),
         @('SOLSTICE_HAVE_OPENEXR 1', 'OpenEXR'),
         @('SOLSTICE_HAVE_OPENVDB 1', 'OpenVDB'),
-        @('SOLSTICE_HAVE_TIFF 1', 'libtiff'),
-        @('SOLSTICE_HAVE_OCIO 1', 'OpenColorIO')
+        @('SOLSTICE_HAVE_TIFF 1', 'libtiff')
     )
     foreach ($req in $required) {
         if (-not (Select-String -Path $Cfg -Pattern $req[0] -Quiet)) {
-            Fail ($req[1] + ' did not enable (' + $req[0] + ' missing). FULL requires it — not a skip. CMAKE_PREFIX_PATH=' + $Prefix + '. See the cmake log.')
+            Fail ($req[1] + ' did not enable (' + $req[0] + ' missing). FULL requires it — not a skip. See the cmake log.')
         }
         Info ($req[1] + ' is compiled into this build.')
+    }
+    # Same as 25 Aug: OCIO is AllowFail. Display/View if cmake found it; OptiX does not wait on it.
+    if (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_OCIO 1' -Quiet) {
+        Info 'OpenColorIO is compiled into this build.'
+    } else {
+        Write-Host 'Warning: OpenColorIO did not enable. Display/View uses Classic. OptiX is unchanged.' -ForegroundColor Yellow
     }
 }
 
@@ -1814,7 +1066,7 @@ C4244 / C4996 above are warnings, not the failure.
 If the last line was Linking CXX executable: close Grendizer_Render and retry (exe locked).
 If sobol.h / undefined in device code: that nvcc bug is already fixed in this zip.
 Look in $BuildDir\bin for Grendizer_Render-0.9.3-*.exe - a false FAIL used to hide a finished link.
-Deleting $BuildDir is OK. Keep %LOCALAPPDATA%\grendizer-deps.
+Do not delete $BuildDir or %LOCALAPPDATA%\grendizer-deps.
 "@
     }
 }
@@ -1850,107 +1102,36 @@ if ($script:DepsPrefix) {
         (Join-Path $script:DepsPrefix 'embree')
     )) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($pat in @(
-            'embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll'
-        )) {
+        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll', 'OpenColorIO*.dll')) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $Bin
             }
         }
     }
 }
-# Yesterday OptiX worked because zlib.dll was NOT next to the exe. NVIDIA
-# optixInit LoadLibrary("zlib.dll") searches the exe folder first. Keep OCIO
-# + zlib + yaml/expat in bin\ocio and delay-load OpenColorIO from there.
-$OcioSidecar = Join-Path $Bin 'ocio'
-New-Item -ItemType Directory -Force -Path $OcioSidecar | Out-Null
-$ocioRuntimePats = @(
-    'OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll',
-    'zlib*.dll', 'libzlib*.dll', 'zdll*.dll', 'zlib1.dll'
-)
-$ocioSrcDirs = New-Object System.Collections.Generic.List[string]
-if ($script:DepsPrefix) {
-    [void]$ocioSrcDirs.Add((Join-Path $script:DepsPrefix 'bin'))
-    [void]$ocioSrcDirs.Add((Join-Path $script:DepsPrefix 'lib'))
-}
-if ($script:OcioInstall) {
-    if ($script:OcioInstall.Dll) {
-        Copy-RuntimeFile $script:OcioInstall.Dll $OcioSidecar
-    }
-    if ($script:OcioInstall.Prefix) {
-        [void]$ocioSrcDirs.Add((Join-Path $script:OcioInstall.Prefix 'bin'))
-        [void]$ocioSrcDirs.Add((Join-Path $script:OcioInstall.Prefix 'lib'))
-    }
-}
-foreach ($dir in $ocioSrcDirs) {
-    if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
-    foreach ($pat in $ocioRuntimePats) {
-        Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-RuntimeFile $_.FullName $OcioSidecar
+
+# NVIDIA optixInit does LoadLibrary("zlib.dll") and searches the exe folder
+# first. Later FULL deploys left zlib.dll there and the GPU probe hung.
+# Aug 25 never copied zlib next to the exe — strip leftovers only.
+foreach ($name in @('zlib.dll', 'zlibd.dll')) {
+    $p = Join-Path $Bin $name
+    if (Test-Path -LiteralPath $p) {
+        try {
+            Remove-Item -LiteralPath $p -Force -ErrorAction Stop
+            Info ("Removed leftover $name from the exe folder (it hangs NVIDIA optixInit)")
+        } catch {
+            Write-Host ("Warning: close Grendizer_Render and delete $p - that DLL hangs OptiX.") -ForegroundColor Yellow
         }
     }
 }
-foreach ($pat in $ocioRuntimePats) {
-    Get-ChildItem -LiteralPath $Bin -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
-        if ($_.Name -ieq 'zlib1.dll') {
-            Info 'Keeping zlib1.dll next to the exe (Windows loader / OpenVDB / Qt)'
-        } else {
-            Info ("Moving " + $_.Name + " to ocio\")
-            try {
-                Copy-Item -LiteralPath $_.FullName -Destination $OcioSidecar -Force -ErrorAction Stop
-                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-            } catch {
-                Fail ("Could not move " + $_.Name + " to ocio\. Close Grendizer_Render.")
-            }
-        }
+$ocioSidecar = Join-Path $Bin 'ocio'
+if (Test-Path -LiteralPath $ocioSidecar) {
+    try {
+        Remove-Item -LiteralPath $ocioSidecar -Recurse -Force -ErrorAction Stop
+        Info 'Removed leftover bin\ocio (OpenColorIO DLLs stay next to the exe)'
+    } catch {
+        Write-Host 'Warning: close Grendizer_Render and delete bin\ocio.' -ForegroundColor Yellow
     }
-}
-Ensure-ZlibWindowsDllNames
-$zlib1Src = $null
-foreach ($d in @(Find-ZlibRuntimeDlls)) {
-    if ($d.Name -ieq 'zlib1.dll') { $zlib1Src = $d; break }
-}
-if (-not $zlib1Src) {
-    $probe = Join-Path $OcioSidecar 'zlib1.dll'
-    if (Test-Path -LiteralPath $probe) { $zlib1Src = Get-Item -LiteralPath $probe }
-}
-if ($zlib1Src) {
-    Copy-RuntimeFile $zlib1Src.FullName $Bin
-    Copy-RuntimeFile $zlib1Src.FullName $OcioSidecar
-}
-if ($script:FullBuild) {
-    $ocioDll = Get-ChildItem -LiteralPath $OcioSidecar -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    $zlibDll = Get-ChildItem -LiteralPath $OcioSidecar -Filter 'zlib*.dll' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if (-not $zlibDll) {
-        $zlibDll = Get-ChildItem -LiteralPath $OcioSidecar -Filter 'zdll*.dll' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-    }
-    if ($ocioDll -and -not $zlibDll) {
-        Find-ZlibRuntimeDlls | ForEach-Object { Copy-RuntimeFile $_.FullName $OcioSidecar }
-        $zlibDll = Get-ChildItem -LiteralPath $OcioSidecar -Filter 'zlib*.dll' -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-    }
-    if ($ocioDll -and -not $zlibDll) {
-        Fail @"
-OpenColorIO is in bin\ocio but zlib.dll is not.
-OCIO will not load. zlib.dll must come from %LOCALAPPDATA%\grendizer-deps\bin.
-Do not copy zlib.dll next to Grendizer_Render.exe - that hangs OptiX.
-"@
-    }
-    if ($ocioDll) {
-        Info ("OCIO runtime (not next to exe): " + $ocioDll.FullName)
-    }
-    $z1exe = Join-Path $Bin 'zlib1.dll'
-    if (-not (Test-Path -LiteralPath $z1exe)) {
-        Fail @"
-zlib1.dll is not next to Grendizer_Render.exe.
-Windows will not start the app (OpenVDB / Qt import zlib1.dll).
-It is compiled into %LOCALAPPDATA%\grendizer-deps\bin and must be copied to $Bin.
-"@
-    }
-    Info ("zlib1.dll next to exe: " + $z1exe)
 }
 
 Write-Host ''

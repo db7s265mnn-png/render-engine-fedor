@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.58 LANGUAGES CXX)
+project(Solstice VERSION 0.9.59 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -180,8 +180,8 @@ if(SOLSTICE_ENABLE_OPENEXR)
 endif()
 
 # OpenColorIO — Nuke-style Display/View for the viewport.
-# Windows FULL requires SOLSTICE_HAVE_OCIO 1 (build script). Linux is optional.
-# Windows CI builds/links OpenColorIO.dll; config/LUTs stay on the user machine.
+# Windows FULL enables OCIO when cmake finds the SDK (optional, same as 25 Aug).
+# Config/LUTs stay on the user machine.
 set(SOLSTICE_HAVE_OCIO_01 0)
 set(SOLSTICE_OCIO_TARGET "")
 if(SOLSTICE_ENABLE_OCIO)
@@ -762,22 +762,6 @@ if(SOLSTICE_HAVE_OCIO_01 AND SOLSTICE_OCIO_TARGET)
     target_link_libraries(solstice_lib PUBLIC ${SOLSTICE_OCIO_TARGET})
 endif()
 
-# zlib.dll next to the exe makes NVIDIA optixInit hang. OCIO+zlib live in
-# bin/ocio; the exe delay-loads OpenColorIO so the process can start.
-function(solstice_win_delayload_ocio target)
-    if(NOT WIN32)
-        return()
-    endif()
-    if(NOT SOLSTICE_HAVE_OCIO_01)
-        return()
-    endif()
-    target_link_libraries(${target} PRIVATE delayimp)
-    target_link_options(${target} PRIVATE
-        "/DELAYLOAD:OpenColorIO_2_3.dll"
-        "/DELAYLOAD:OpenColorIO.dll"
-        "/DELAYLOAD:OpenColorIO_2_4.dll"
-        "/DELAYLOAD:OpenColorIO_2_2.dll")
-endfunction()
 if(SOLSTICE_HAVE_TIFF_01)
     target_link_libraries(solstice_lib PUBLIC TIFF::TIFF)
 endif()
@@ -882,8 +866,7 @@ if(SOLSTICE_BUILD_APP)
         ${SOLSTICE_APP_HEADERS}
         ${SOLSTICE_APP_ICON_SOURCES})
     target_link_libraries(Solstice PRIVATE solstice_lib Qt6::Widgets)
-    solstice_win_delayload_ocio(Solstice)
-    set_target_properties(Solstice PROPERTIES
+    set_target_properties(Solstice PROPERTIES)
         OUTPUT_NAME "${SOLSTICE_OUTPUT_NAME}"
         MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.grendizer.render")
@@ -915,8 +898,7 @@ if(SOLSTICE_BUILD_APP)
             ${TX_TOOLS_COMMON_SOURCES})
         target_include_directories(TX_Converter_Alpha PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
         target_link_libraries(TX_Converter_Alpha PRIVATE solstice_lib Qt6::Widgets)
-        solstice_win_delayload_ocio(TX_Converter_Alpha)
-        set_target_properties(TX_Converter_Alpha PROPERTIES
+        set_target_properties(TX_Converter_Alpha PROPERTIES)
             OUTPUT_NAME "${SOLSTICE_TX_TOOLS_ALPHA_NAME}"
             MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_TX_TOOLS_ALPHA_NAME}"
             MACOSX_BUNDLE_GUI_IDENTIFIER "com.grendizer.txtools.alpha")
@@ -936,8 +918,7 @@ if(SOLSTICE_BUILD_APP)
         target_include_directories(TX_Converter_Omega PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
         target_link_libraries(TX_Converter_Omega PRIVATE solstice_lib Qt6::Widgets
             d3d12 dxgi d3dcompiler)
-        solstice_win_delayload_ocio(TX_Converter_Omega)
-        set_target_properties(TX_Converter_Omega PROPERTIES
+        set_target_properties(TX_Converter_Omega PROPERTIES)
             OUTPUT_NAME "${SOLSTICE_TX_TOOLS_OMEGA_NAME}")
         target_compile_definitions(TX_Converter_Omega PRIVATE
             SOLSTICE_TX_CONVERTER_NAME="${SOLSTICE_TX_TOOLS_OMEGA_NAME}"
@@ -952,14 +933,12 @@ endif()
 if(SOLSTICE_BUILD_TOOLS AND SOLSTICE_HAVE_ALEMBIC_01)
     add_executable(sol_make_test_abc tools/make_test_abc.cpp)
     target_link_libraries(sol_make_test_abc PRIVATE solstice_lib)
-    solstice_win_delayload_ocio(sol_make_test_abc)
 endif()
 
 if(SOLSTICE_BUILD_TESTS)
     enable_testing()
     add_executable(solstice_tests tests/test_main.cpp)
     target_link_libraries(solstice_tests PRIVATE solstice_lib)
-    solstice_win_delayload_ocio(solstice_tests)
     add_test(NAME solstice_tests COMMAND solstice_tests)
 endif()
 

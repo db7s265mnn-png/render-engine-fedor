@@ -7,11 +7,9 @@ echo Double-click this file for the FULL app (OptiX + VDB + MaterialX + Alembic 
 echo Visual Studio 2026 needs CUDA 13.2. CUDA 12.0 can stay installed.
 echo Output: C:\gz-full
 echo Close Grendizer_Render first or the linker cannot overwrite the exe (LNK1168).
-echo First full run builds OpenEXR/Alembic/OpenVDB/OCIO from source (cached after that).
-echo If an older FULL stamp skipped OCIO, this run builds only OCIO (other deps stay).
-echo The .ocio file is the colour config (OCIO env / Film). FULL downloads+compiles the OpenColorIO SDK.
-echo OCIO SDK: prebuild zlib/minizip/yaml-cpp/expat/pystring, then VS + EXT_PACKAGES=NONE.
-echo OpenColorIO + zlib.dll go in bin\ocio. zlib1.dll is copied next to the exe (OpenVDB / Qt).
+echo First full run builds OpenEXR/Alembic/OpenVDB/OCIO (cached after that).
+echo OCIO is optional (same as 25 Aug): Ninja + EXT_PACKAGES=ALL, may skip.
+echo Deploy: embree/tbb/openvdb/OpenColorIO next to the exe. No zlib.dll, no bin\ocio.
 echo TinyUSDZ linking can sit with no new lines for a long time - wait.
 echo Keep C:\gz-full and %%LOCALAPPDATA%%\grendizer-deps
 echo Do not delete C:\gz-full (MaterialX / TinyUSDZ / OpenPGL live in _deps).
