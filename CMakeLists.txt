@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.41 LANGUAGES CXX)
+project(Solstice VERSION 0.9.42 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -179,7 +179,8 @@ if(SOLSTICE_ENABLE_OPENEXR)
     endif()
 endif()
 
-# OpenColorIO — Nuke-style Display/View for the viewport (optional).
+# OpenColorIO — Nuke-style Display/View for the viewport.
+# Windows FULL requires SOLSTICE_HAVE_OCIO 1 (build script). Linux is optional.
 # Windows CI builds/links OpenColorIO.dll; config/LUTs stay on the user machine.
 set(SOLSTICE_HAVE_OCIO_01 0)
 set(SOLSTICE_OCIO_TARGET "")
@@ -224,12 +225,62 @@ if(SOLSTICE_ENABLE_OCIO)
         set(SOLSTICE_HAVE_OCIO_01 1)
         set(SOLSTICE_OCIO_TARGET PkgConfig::OCIO_PKG)
     endif()
+    # Windows SDK / vcpkg / prefix without OpenColorIOConfig.cmake: headers + import lib.
+    if(NOT SOLSTICE_HAVE_OCIO_01)
+        find_path(OpenColorIO_INCLUDE_DIR OpenColorIO/OpenColorIO.h
+            HINTS
+                "${OpenColorIO_ROOT}"
+                "${OpenColorIO_DIR}"
+                ENV OpenColorIO_ROOT
+                ENV OpenColorIO_DIR
+            PATH_SUFFIXES include ../include ../../include)
+        find_library(OpenColorIO_LIBRARY
+            NAMES OpenColorIO OpenColorIO_2_4 OpenColorIO_2_3 OpenColorIO_2_2 OpenColorIO_2_1
+                  OpenColorIO-2.4 OpenColorIO-2.3 OpenColorIO-2.2
+            HINTS
+                "${OpenColorIO_ROOT}"
+                "${OpenColorIO_DIR}"
+                ENV OpenColorIO_ROOT
+                ENV OpenColorIO_DIR
+            PATH_SUFFIXES lib lib64 ../lib ../lib64)
+        if(OpenColorIO_INCLUDE_DIR AND OpenColorIO_LIBRARY)
+            if(NOT TARGET OpenColorIO::OpenColorIO)
+                add_library(OpenColorIO::OpenColorIO SHARED IMPORTED)
+            endif()
+            set_target_properties(OpenColorIO::OpenColorIO PROPERTIES
+                INTERFACE_INCLUDE_DIRECTORIES "${OpenColorIO_INCLUDE_DIR}")
+            if(WIN32)
+                set_target_properties(OpenColorIO::OpenColorIO PROPERTIES
+                    IMPORTED_IMPLIB "${OpenColorIO_LIBRARY}")
+                get_filename_component(_sol_ocio_libdir "${OpenColorIO_LIBRARY}" DIRECTORY)
+                get_filename_component(_sol_ocio_prefix "${_sol_ocio_libdir}" DIRECTORY)
+                find_file(OpenColorIO_DLL
+                    NAMES OpenColorIO.dll OpenColorIO_2_4.dll OpenColorIO_2_3.dll
+                          OpenColorIO_2_2.dll OpenColorIO_2_1.dll
+                    HINTS "${_sol_ocio_prefix}" "${OpenColorIO_ROOT}"
+                    PATH_SUFFIXES bin lib)
+                if(OpenColorIO_DLL)
+                    set_target_properties(OpenColorIO::OpenColorIO PROPERTIES
+                        IMPORTED_LOCATION "${OpenColorIO_DLL}")
+                endif()
+            else()
+                set_target_properties(OpenColorIO::OpenColorIO PROPERTIES
+                    IMPORTED_LOCATION "${OpenColorIO_LIBRARY}")
+            endif()
+            set(SOLSTICE_HAVE_OCIO_01 1)
+            set(SOLSTICE_OCIO_TARGET OpenColorIO::OpenColorIO)
+            message(STATUS "OpenColorIO found (headers+library, no CMake config package)")
+        endif()
+    endif()
     if(SOLSTICE_HAVE_OCIO_01)
         message(STATUS "OpenColorIO found — Display/View enabled")
     else()
         message(STATUS "OpenColorIO not found — viewport Display/View falls back to passthrough")
         message(STATUS "  CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
         message(STATUS "  OpenColorIO_DIR=${OpenColorIO_DIR}")
+        message(STATUS "  OpenColorIO_ROOT=${OpenColorIO_ROOT}")
+        message(STATUS "  OpenColorIO_INCLUDE_DIR=${OpenColorIO_INCLUDE_DIR}")
+        message(STATUS "  OpenColorIO_LIBRARY=${OpenColorIO_LIBRARY}")
     endif()
 endif()
 

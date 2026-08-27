@@ -3,6 +3,9 @@
 # without BOM and treats Cyrillic bytes as quotes / broken tokens.
 # Override paths with env vars if auto-detect is wrong:
 #   QT_ROOT, CUDA_PATH, OptiX_ROOT, GRENDIZER_BUILD_DIR, GRENDIZER_DEPS
+#   OpenColorIO_ROOT / OpenColorIO_DIR: existing OCIO SDK (headers + .lib).
+#   FULL uses that copy and does not compile OCIO. OCIO=.ocio is a config file,
+#   not the SDK. A DCC OpenColorIO.dll without headers/.lib is not enough.
 # Default build dir is C:\gz-build (GitHub zip under Downloads is too long for MSVC).
 # CUDA 13.2+ is required for Visual Studio 2026 (MSVC 14.50+). CUDA 12.x is
 # enough only with VS 2022 / MSVC 14.44. If both are installed, 13.2 is used.
@@ -535,10 +538,168 @@ function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest) {
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $cm)) { Fail "git clone failed: $Url" }
 }
 
+function Test-OcioSafeToRecurse([string]$Prefix) {
+    try { $full = [IO.Path]::GetFullPath($Prefix) } catch { return $false }
+    $norm = $full.TrimEnd('\', '/')
+    foreach ($b in @(
+        $env:SystemRoot, 'C:\Windows', 'C:\Windows\System32',
+        $env:ProgramFiles, ${env:ProgramFiles(x86)}, 'C:\'
+    )) {
+        if (-not $b) { continue }
+        try {
+            $bn = [IO.Path]::GetFullPath($b).TrimEnd('\', '/')
+            if ($norm -ieq $bn) { return $false }
+        } catch { }
+    }
+    $leaf = Split-Path $norm -Leaf
+    if ($leaf -match '(?i)ocio|opencolorio|grendizer|deps') { return $true }
+    foreach ($sub in @('include', 'lib', 'lib64', 'cmake', 'share')) {
+        if (Test-Path -LiteralPath (Join-Path $norm $sub)) { return $true }
+    }
+    return $false
+}
+
 function Find-OcioConfigCMake([string]$Prefix) {
     if (-not $Prefix -or -not (Test-Path -LiteralPath $Prefix)) { return $null }
-    return Get-ChildItem -Path $Prefix -Recurse -Filter 'OpenColorIOConfig.cmake' -ErrorAction SilentlyContinue |
+    foreach ($rel in @(
+        'lib\cmake\OpenColorIO\OpenColorIOConfig.cmake',
+        'lib64\cmake\OpenColorIO\OpenColorIOConfig.cmake',
+        'cmake\OpenColorIO\OpenColorIOConfig.cmake',
+        'share\OpenColorIO\OpenColorIOConfig.cmake',
+        'share\opencolorio\OpenColorIOConfig.cmake',
+        'OpenColorIOConfig.cmake'
+    )) {
+        $p = Join-Path $Prefix $rel
+        if (Test-Path -LiteralPath $p) { return Get-Item -LiteralPath $p }
+    }
+    if (-not (Test-OcioSafeToRecurse $Prefix)) { return $null }
+    return Get-ChildItem -LiteralPath $Prefix -Recurse -Depth 6 -Filter 'OpenColorIOConfig.cmake' -ErrorAction SilentlyContinue |
         Select-Object -First 1
+}
+
+function Test-OcioInstallPrefix([string]$root) {
+    if (-not $root) { return $null }
+    $root = $root.Trim().TrimEnd('\', '/')
+    if (-not (Test-Path -LiteralPath $root)) { return $null }
+    if (Test-Path -LiteralPath $root -PathType Leaf) {
+        $name = [IO.Path]::GetFileName($root)
+        if ($name -eq 'OpenColorIOConfig.cmake') {
+            $root = Split-Path $root
+        } else {
+            return $null
+        }
+    }
+    $cfg = Find-OcioConfigCMake $root
+    $hdr = Join-Path $root 'include\OpenColorIO\OpenColorIO.h'
+    $hasHdr = Test-Path -LiteralPath $hdr
+    if (-not $hasHdr -and $cfg) {
+        $walk = $cfg.Directory.FullName
+        for ($i = 0; $i -lt 6; $i++) {
+            $try = Join-Path $walk 'include\OpenColorIO\OpenColorIO.h'
+            if (Test-Path -LiteralPath $try) {
+                $root = $walk
+                $hasHdr = $true
+                break
+            }
+            $parent = Split-Path $walk
+            if (-not $parent -or $parent -eq $walk) { break }
+            $walk = $parent
+        }
+    }
+    $lib = $null
+    foreach ($libRel in @('lib', 'lib64')) {
+        $libDir = Join-Path $root $libRel
+        if (-not (Test-Path -LiteralPath $libDir)) { continue }
+        $lib = Get-ChildItem -LiteralPath $libDir -Filter 'OpenColorIO*.lib' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($lib) { break }
+    }
+    if (-not $lib -and $cfg) {
+        $walk = $cfg.Directory.FullName
+        for ($i = 0; $i -lt 6; $i++) {
+            foreach ($libRel in @('lib', 'lib64')) {
+                $libDir = Join-Path $walk $libRel
+                if (-not (Test-Path -LiteralPath $libDir)) { continue }
+                $lib = Get-ChildItem -LiteralPath $libDir -Filter 'OpenColorIO*.lib' -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+                if ($lib) { break }
+            }
+            if ($lib) { break }
+            $parent = Split-Path $walk
+            if (-not $parent -or $parent -eq $walk) { break }
+            $walk = $parent
+        }
+    }
+    if (-not $cfg -and -not ($hasHdr -and $lib)) { return $null }
+    $dll = $null
+    foreach ($binRel in @('bin', 'lib')) {
+        $binDir = Join-Path $root $binRel
+        if (-not (Test-Path -LiteralPath $binDir)) { continue }
+        $dll = Get-ChildItem -LiteralPath $binDir -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($dll) { break }
+    }
+    return [pscustomobject]@{
+        Prefix   = $root
+        CMakeDir = $(if ($cfg) { $cfg.Directory.FullName } else { $null })
+        Include  = $(if ($hasHdr) { Join-Path $root 'include' } else { $null })
+        Library  = $(if ($lib) { $lib.FullName } else { $null })
+        Dll      = $(if ($dll) { $dll.FullName } else { $null })
+    }
+}
+
+function Find-SystemOpenColorIO {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    # Prefer an explicit SDK prefix. Do not treat OCIO=config.ocio as a library root.
+    foreach ($e in @('OpenColorIO_DIR', 'OpenColorIO_ROOT', 'OCIO_ROOT', 'OCIO_HOME')) {
+        $v = [Environment]::GetEnvironmentVariable($e)
+        if ($v) { [void]$candidates.Add($v) }
+    }
+    foreach ($pf in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not $pf) { continue }
+        [void]$candidates.Add((Join-Path $pf 'OpenColorIO'))
+        [void]$candidates.Add((Join-Path $pf 'Academy Software Foundation\OpenColorIO'))
+        Get-ChildItem -LiteralPath $pf -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match 'OpenColorIO|OCIO' } |
+            ForEach-Object { [void]$candidates.Add($_.FullName) }
+    }
+    if ($env:VCPKG_ROOT) {
+        [void]$candidates.Add((Join-Path $env:VCPKG_ROOT 'installed\x64-windows'))
+        [void]$candidates.Add((Join-Path $env:VCPKG_ROOT 'installed\x64-windows-release'))
+    }
+    if ($env:CONDA_PREFIX) { [void]$candidates.Add($env:CONDA_PREFIX) }
+    foreach ($extra in @('C:\ocio', 'C:\OpenColorIO', (Join-Path $env:LOCALAPPDATA 'OpenColorIO'))) {
+        [void]$candidates.Add($extra)
+    }
+    $dllHint = $null
+    if ($env:PATH) {
+        foreach ($dir in ($env:PATH -split ';')) {
+            if (-not $dir) { continue }
+            $dll = Get-ChildItem -LiteralPath $dir -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($dll) {
+                if (-not $dllHint) { $dllHint = $dll.FullName }
+                [void]$candidates.Add($dir)
+                $parent = Split-Path $dir
+                if ($parent) { [void]$candidates.Add($parent) }
+            }
+        }
+    }
+    # Our previous source install is last so a real system SDK wins.
+    if ($script:DepsPrefix) { [void]$candidates.Add($script:DepsPrefix) }
+    $seen = @{}
+    foreach ($c in $candidates) {
+        if (-not $c) { continue }
+        $key = $c.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $hit = Test-OcioInstallPrefix $c
+        if ($hit) { return $hit }
+    }
+    if ($dllHint) {
+        Info "OpenColorIO.dll exists ($dllHint) but this is not an SDK. Need OpenColorIO.h and OpenColorIO*.lib. Set OpenColorIO_ROOT to the install prefix. A DCC bin or OCIO=.ocio file is not enough."
+    }
+    return $null
 }
 
 function Get-VsGeneratorArgs {
@@ -732,14 +893,33 @@ function Ensure-NativeDeps {
         return
     }
 
-    $ocioCfg = Find-OcioConfigCMake $script:DepsPrefix
-    if ((Test-Path -LiteralPath $stamp) -and $ocioCfg) {
+    $script:OcioInstall = Find-SystemOpenColorIO
+    if ($script:OcioInstall) {
+        Info ("Using system OpenColorIO SDK: " + $script:OcioInstall.Prefix)
+        if ($script:OcioInstall.CMakeDir) { Info ("  cmake: " + $script:OcioInstall.CMakeDir) }
+        if ($script:OcioInstall.Include) { Info ("  include: " + $script:OcioInstall.Include) }
+        if ($script:OcioInstall.Library) { Info ("  lib: " + $script:OcioInstall.Library) }
+    } else {
+        Info 'No system OpenColorIO SDK (headers + .lib). Will build OpenColorIO from source.'
+    }
+
+    $ocioCfg = $null
+    if ($script:OcioInstall -and $script:OcioInstall.CMakeDir) {
+        $ocioCfg = Get-Item -LiteralPath (Join-Path $script:OcioInstall.CMakeDir 'OpenColorIOConfig.cmake') -ErrorAction SilentlyContinue
+    }
+    if (-not $ocioCfg) { $ocioCfg = Find-OcioConfigCMake $script:DepsPrefix }
+    if ((Test-Path -LiteralPath $stamp) -and ($ocioCfg -or $script:OcioInstall)) {
         Info "Native deps already installed: $script:DepsPrefix"
         return
     }
     if (Test-Path -LiteralPath $stamp) {
+        if ($script:OcioInstall) {
+            Info 'Deps stamp present; system OpenColorIO will be used (not building OCIO).'
+            return
+        }
         Info "Deps stamp exists but OpenColorIO is missing — building OCIO only (keeping Embree/OpenEXR/OpenVDB)."
         Install-OpenColorIO
+        $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
         return
     }
 
@@ -779,7 +959,12 @@ function Ensure-NativeDeps {
         '-DOPENVDB_USE_DELAYED_LOADING=OFF'
     )
 
-    Install-OpenColorIO
+    if ($script:OcioInstall) {
+        Info 'Skipping OpenColorIO source build — using the system SDK.'
+    } else {
+        Install-OpenColorIO
+        $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
+    }
 
     Set-Content -Path $stamp -Value 'ok' -Encoding ascii
     Info "Native deps installed: $script:DepsPrefix"
@@ -896,6 +1081,7 @@ $OptiX = Find-OptiXRoot $Git
 $Ninja = Find-Ninja
 $ninjaDir = Split-Path $Ninja -Parent
 $env:PATH = "$ninjaDir;$env:PATH"
+$script:OcioInstall = $null
 Ensure-NativeDeps
 $embreeRoot = Resolve-EmbreePrefix
 $BuildDir = Resolve-BuildDir
@@ -905,6 +1091,10 @@ if (-not (Test-Path -LiteralPath (Join-Path $BuildDir 'CMakeCache.txt'))) {
 }
 
 $Prefix = "$Qt;$script:DepsPrefix;$embreeRoot"
+if ($script:OcioInstall -and $script:OcioInstall.Prefix) {
+    $Prefix = "$($script:OcioInstall.Prefix);$Prefix"
+    Info ("OpenColorIO prefix: " + $script:OcioInstall.Prefix)
+}
 
 Info "CMake:  $CMake"
 Info "Qt:     $Qt"
@@ -1042,11 +1232,35 @@ if ($script:FullBuild) {
     )
 }
 
-$ocioCmake = Find-OcioConfigCMake $script:DepsPrefix
-if ($ocioCmake) {
-    $ocioDir = $ocioCmake.Directory.FullName
+$ocioDir = $null
+if ($script:OcioInstall -and $script:OcioInstall.CMakeDir) {
+    $ocioCfgFile = Join-Path $script:OcioInstall.CMakeDir 'OpenColorIOConfig.cmake'
+    if (Test-Path -LiteralPath $ocioCfgFile) {
+        $ocioDir = $script:OcioInstall.CMakeDir
+    }
+}
+if (-not $ocioDir) {
+    $ocioCmake = $null
+    if ($script:OcioInstall -and $script:OcioInstall.Prefix) {
+        $ocioCmake = Find-OcioConfigCMake $script:OcioInstall.Prefix
+    }
+    if (-not $ocioCmake) { $ocioCmake = Find-OcioConfigCMake $script:DepsPrefix }
+    if ($ocioCmake) { $ocioDir = $ocioCmake.Directory.FullName }
+}
+if ($ocioDir) {
     $featureFlags += "-DOpenColorIO_DIR=$ocioDir"
+    $env:OpenColorIO_DIR = $ocioDir
     Info "OpenColorIO_DIR: $ocioDir"
+}
+if ($script:OcioInstall) {
+    $featureFlags += "-DOpenColorIO_ROOT=$($script:OcioInstall.Prefix)"
+    $env:OpenColorIO_ROOT = $script:OcioInstall.Prefix
+    if ($script:OcioInstall.Include) {
+        $featureFlags += "-DOpenColorIO_INCLUDE_DIR=$($script:OcioInstall.Include)"
+    }
+    if ($script:OcioInstall.Library) {
+        $featureFlags += "-DOpenColorIO_LIBRARY=$($script:OcioInstall.Library)"
+    }
 }
 
 & $CMake -S $Root -B $BuildDir -G $Generator `
@@ -1092,7 +1306,11 @@ if ($script:FullBuild) {
     )
     foreach ($req in $required) {
         if (-not (Select-String -Path $Cfg -Pattern $req[0] -Quiet)) {
-            Fail ($req[1] + ' did not enable (' + $req[0] + ' missing). FULL requires it — not a skip. CMAKE_PREFIX_PATH=' + $Prefix + '. See the cmake log.')
+            $msg = $req[1] + ' did not enable (' + $req[0] + ' missing). FULL requires it — not a skip. CMAKE_PREFIX_PATH=' + $Prefix + '.'
+            if ($req[1] -eq 'OpenColorIO') {
+                $msg += ' Need OpenColorIOConfig.cmake or include\OpenColorIO\OpenColorIO.h + OpenColorIO*.lib (set OpenColorIO_ROOT). A .ocio file or DCC DLL is not the SDK.'
+            }
+            Fail ($msg + ' See the cmake log.')
         }
         Info ($req[1] + ' is compiled into this build.')
     }
@@ -1203,7 +1421,23 @@ if ($script:DepsPrefix) {
         (Join-Path $script:DepsPrefix 'embree')
     )) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll', 'OpenColorIO*.dll')) {
+        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll', 'OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll')) {
+            Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
+                Copy-RuntimeFile $_.FullName $Bin
+            }
+        }
+    }
+}
+if ($script:OcioInstall) {
+    if ($script:OcioInstall.Dll) {
+        Copy-RuntimeFile $script:OcioInstall.Dll $Bin
+    }
+    foreach ($dir in @(
+        (Join-Path $script:OcioInstall.Prefix 'bin'),
+        (Join-Path $script:OcioInstall.Prefix 'lib')
+    )) {
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($pat in @('OpenColorIO*.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll')) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $Bin
             }
