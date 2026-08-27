@@ -3,7 +3,8 @@
 # without BOM and treats Cyrillic bytes as quotes / broken tokens.
 # Override paths with env vars if auto-detect is wrong:
 #   QT_ROOT, CUDA_PATH, OptiX_ROOT, GRENDIZER_BUILD_DIR, GRENDIZER_DEPS
-#   OpenColorIO_ROOT / OpenColorIO_DIR: optional existing OCIO prefix.
+# FULL compiles the OpenColorIO library from source. OCIO env / Film path is
+# the .ocio colour config, not the SDK.
 # Default build dir is C:\gz-build (GitHub zip under Downloads is too long for MSVC).
 # CUDA 13.2+ is required for Visual Studio 2026 (MSVC 14.50+). CUDA 12.x is
 # enough only with VS 2022 / MSVC 14.44. If both are installed, 13.2 is used.
@@ -724,27 +725,33 @@ function Install-ZlibAndMinizipNg {
 function Install-OpenColorIO {
     $src = Join-Path $script:DepsSrc 'ocio'
     $b = Join-Path $src 'build'
-    Info 'Building OpenColorIO v2.3.2 (FULL requires it — not optional).'
+    Info 'Building OpenColorIO v2.3.2 from source (FULL requires the library).'
+    Info 'The OCIO environment / Film path is the .ocio colour config - that is not this step.'
     Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/OpenColorIO.git' 'v2.3.2' $src
     # A failed Ninja ExternalProject leaves minizip-ng_install-build half-configured
-    # with default MZ_OPENSSL/LZMA/FETCH_LIBS. Wipe and use the VS generator like CI.
+    # with default MZ_OPENSSL/LZMA/FETCH_LIBS. Wipe, prebuild minizip, use VS like CI.
     if (Test-Path -LiteralPath $b) {
         Info 'Removing previous OCIO build tree (broken Ninja/minizip-ng install).'
         Remove-Item -LiteralPath $b -Recurse -Force
     }
+    Info 'Prebuilding zlib + minizip-ng 4.0.7 so OCIO does not nest minizip.'
+    Install-ZlibAndMinizipNg
     $ocioFlags = @(
         "-DCMAKE_INSTALL_PREFIX=$script:DepsPrefix",
         "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
         '-DCMAKE_BUILD_TYPE=Release',
         '-DBUILD_SHARED_LIBS=ON', '-DOCIO_BUILD_APPS=OFF', '-DOCIO_BUILD_TESTS=OFF',
         '-DOCIO_BUILD_GPU_TESTS=OFF', '-DOCIO_BUILD_PYTHON=OFF', '-DOCIO_BUILD_JAVA=OFF',
-        '-DOCIO_BUILD_DOCS=OFF', '-DCMAKE_CXX_STANDARD=17', '-DOCIO_WARNING_AS_ERROR=OFF'
+        '-DOCIO_BUILD_DOCS=OFF', '-DCMAKE_CXX_STANDARD=17', '-DOCIO_WARNING_AS_ERROR=OFF',
+        '-DOCIO_INSTALL_EXT_PACKAGES=MISSING',
+        "-Dminizip-ng_ROOT=$script:DepsPrefix",
+        "-DZLIB_ROOT=$script:DepsPrefix"
     )
     $vsGen = Get-VsGeneratorArgs
     $usedVs = $false
     if ($vsGen.Count -ge 2) {
-        Info ('OpenColorIO cmake generator: ' + ($vsGen -join ' ') + ' (CI; Ninja breaks minizip-ng)')
-        $cfg = @('-S', $src, '-B', $b) + $vsGen + $ocioFlags + @('-DOCIO_INSTALL_EXT_PACKAGES=ALL')
+        Info ('OpenColorIO cmake generator: ' + ($vsGen -join ' ') + ' (CI; Ninja nested minizip-ng dies)')
+        $cfg = @('-S', $src, '-B', $b) + $vsGen + $ocioFlags
         & $CMake @cfg
         if ($LASTEXITCODE -eq 0) {
             $usedVs = $true
@@ -759,18 +766,12 @@ function Install-OpenColorIO {
         }
     }
     if (-not $usedVs) {
-        Info 'Prebuilding zlib + minizip-ng 4.0.7 so OCIO does not nest minizip under Ninja.'
-        Install-ZlibAndMinizipNg
         $cfg = @(
             '-S', $src, '-B', $b, '-G', 'Ninja',
             "-DCMAKE_MAKE_PROGRAM=$Ninja",
             "-DCMAKE_C_COMPILER=$Cl",
             "-DCMAKE_CXX_COMPILER=$Cl"
-        ) + $ocioFlags + @(
-            '-DOCIO_INSTALL_EXT_PACKAGES=MISSING',
-            "-Dminizip-ng_ROOT=$script:DepsPrefix",
-            "-DZLIB_ROOT=$script:DepsPrefix"
-        )
+        ) + $ocioFlags
         & $CMake @cfg
         if ($LASTEXITCODE -ne 0) { Fail 'OpenColorIO cmake configure failed' }
         Info 'Building OpenColorIO ...'
@@ -886,19 +887,11 @@ function Ensure-NativeDeps {
         return
     }
 
-    # Same as before: if deps already have OCIO, do not rebuild it.
-    $ocioCfg = Find-OcioConfigCMake $script:DepsPrefix
-    $script:OcioInstall = Find-SystemOpenColorIO
-    if ($script:OcioInstall) {
-        Info ("OpenColorIO: " + $script:OcioInstall.Prefix)
-    }
-    if ((Test-Path -LiteralPath $stamp) -and $ocioCfg) {
-        if (-not $script:OcioInstall) { $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix }
-        Info "Native deps already installed: $script:DepsPrefix"
-        return
-    }
+    # Compile the OpenColorIO library into deps. A .ocio file on OCIO= is the
+    # colour config at runtime, not a reason to skip this.
+    $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
     if ((Test-Path -LiteralPath $stamp) -and $script:OcioInstall) {
-        Info "Native deps already installed (OpenColorIO from $($script:OcioInstall.Prefix))"
+        Info "Native deps already installed: $script:DepsPrefix"
         return
     }
     if (Test-Path -LiteralPath $stamp) {
@@ -944,12 +937,8 @@ function Ensure-NativeDeps {
         '-DOPENVDB_USE_DELAYED_LOADING=OFF'
     )
 
-    if ($script:OcioInstall) {
-        Info ("Using existing OpenColorIO: " + $script:OcioInstall.Prefix)
-    } else {
-        Install-OpenColorIO
-        $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
-    }
+    Install-OpenColorIO
+    $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
 
     Set-Content -Path $stamp -Value 'ok' -Encoding ascii
     Info "Native deps installed: $script:DepsPrefix"
