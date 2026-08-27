@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.62 LANGUAGES CXX)
+project(Solstice VERSION 0.9.63 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -69,10 +69,9 @@ option(SOLSTICE_BUILD_APP "Build the Qt desktop application" ON)
 option(SOLSTICE_BUILD_TOOLS "Build helper tools (test scene generators)" ON)
 option(SOLSTICE_ENABLE_OCIO "Build with OpenColorIO display views (system lib)" ON)
 
-# OpenColorIO.dll must not pull zlib.dll into the process before NVIDIA
-# optixInit: nvoptix LoadLibrary("zlib.dll") hangs if a copy sits next to the
-# exe. FULL never deploys zlib.dll; Windows delay-loads OpenColorIO.dll after
-# the OptiX probe in main(). Do not disable OCIO to work around that.
+# OpenColorIO.dll imports zlib1.dll. NVIDIA optixInit hangs if zlib sits next
+# to the exe. FULL ships OCIO + zlib in bin/ocio/ (not the exe folder) and
+# delay-loads them after the OptiX probe. Do not disable OCIO to work around that.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -307,7 +306,8 @@ if(WIN32 AND SOLSTICE_HAVE_OCIO_01 AND SOLSTICE_OCIO_TARGET)
         get_filename_component(_ocio_dll "${_ocio_loc}" NAME)
         list(APPEND SOLSTICE_OCIO_DELAYLOAD_DLLS "${_ocio_dll}")
     endif()
-    foreach(_n OpenColorIO.dll OpenColorIO_2_3.dll OpenColorIO_2_2.dll OpenColorIO_2_1.dll)
+    foreach(_n OpenColorIO.dll OpenColorIO_2_3.dll OpenColorIO_2_2.dll OpenColorIO_2_1.dll
+                 zlib1.dll zlib.dll zlibd.dll yaml-cpp.dll expat.dll libexpat.dll libexpat-1.dll)
         list(APPEND SOLSTICE_OCIO_DELAYLOAD_DLLS "${_n}")
     endforeach()
     list(REMOVE_DUPLICATES SOLSTICE_OCIO_DELAYLOAD_DLLS)
@@ -324,6 +324,8 @@ function(solstice_delayload_ocio tgt)
     foreach(_dll IN LISTS SOLSTICE_OCIO_DELAYLOAD_DLLS)
         target_link_options(${tgt} PRIVATE "/DELAYLOAD:${_dll}")
     endforeach()
+    # /DELAYLOAD of a DLL the target does not import (LNK4199).
+    target_link_options(${tgt} PRIVATE "/IGNORE:4199")
 endfunction()
 
 # libtiff — Arnold/OIIO .tx textures with embedded mipmaps (SUBIFD / multi-dir TIFF).
@@ -726,6 +728,10 @@ set(SOLSTICE_LIB_SOURCES
     src/app/document.cpp
     src/app/headless.cpp
 )
+
+if(WIN32)
+    list(APPEND SOLSTICE_LIB_SOURCES src/io/ocio_delayload_win.cpp)
+endif()
 
 set(SOLSTICE_LIB_HEADERS
     src/core/math.h

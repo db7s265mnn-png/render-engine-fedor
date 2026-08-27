@@ -1355,9 +1355,9 @@ void setOptixRuntime(bool ok, std::string error) {
 void markOptixProbeHungLocked() {
     if (gOptixRuntimeState != OptixRuntimeState::Unknown) return;
     setOptixRuntime(false, "optixInit hung");
-    logWarning("OptiX runtime probe: optixInit did not return. A leftover zlib.dll next to "
-               "the exe makes NVIDIA LoadLibrary(\"zlib.dll\") hang. Close the app, delete "
-               "zlib.dll / zlib1.dll from the exe folder, and rebuild with BUILD_WINDOWS_FULL.bat.");
+    logWarning("OptiX runtime probe: optixInit did not return. zlib.dll next to the "
+               "exe makes NVIDIA LoadLibrary(\"zlib.dll\") hang. zlib1.dll belongs in "
+               "bin\\ocio next to OpenColorIO, not beside the exe. Rebuild FULL.");
 }
 
 bool optixProbeTimedOutLocked() {

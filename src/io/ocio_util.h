@@ -46,4 +46,11 @@ bool ocioLibraryAvailable();
 // matrix / sRGB EOTF fallback for the curated Utility / ACES names.
 Vec3 ocioConvertToAcescg(Vec3 rgb, const std::string& inputColorSpace);
 
+#if defined(_WIN32)
+// After optixInit: add bin/ocio to the DLL search path (zlib1 + OpenColorIO).
+void ocioBindWindowsRuntimeDlls();
+#else
+inline void ocioBindWindowsRuntimeDlls() {}
+#endif
+
 }  // namespace sol

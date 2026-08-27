@@ -248,6 +248,7 @@ bool ocioLibraryAvailable() {
 }
 
 OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
+    ocioBindWindowsRuntimeDlls();
     OcioStatus st;
     st.libraryAvailable = ocioLibraryAvailable();
 #if !SOLSTICE_HAVE_OCIO
