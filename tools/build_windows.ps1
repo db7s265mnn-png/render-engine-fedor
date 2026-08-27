@@ -528,13 +528,18 @@ function Find-OptiXRoot([string]$GitExe) {
     return $local
 }
 
-function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest) {
-    $cm = Join-Path $Dest 'CMakeLists.txt'
-    if (Test-Path -LiteralPath $cm) { return }
+function Invoke-GitClone([string]$Url, [string]$Branch, [string]$Dest, [string]$MarkerRel = 'CMakeLists.txt') {
+    # MarkerRel: path under Dest that proves the clone is complete.
+    # libexpat has CMakeLists.txt only under expat/, not the repo root.
+    $marker = Join-Path $Dest $MarkerRel
+    if (Test-Path -LiteralPath $marker) { return }
     if (Test-Path -LiteralPath $Dest) { Remove-Item -LiteralPath $Dest -Recurse -Force }
     New-Item -ItemType Directory -Force -Path (Split-Path $Dest -Parent) | Out-Null
-    & $Git clone --depth 1 --branch $Branch $Url $Dest
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $cm)) { Fail "git clone failed: $Url" }
+    # Annotated tags warn "is not a commit" with shallow clone; still check out OK.
+    & $Git -c advice.detachedHead=false clone --depth 1 --branch $Branch $Url $Dest
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $marker)) {
+        Fail ("git clone failed: $Url (branch/tag $Branch, expected $MarkerRel under $Dest)")
+    }
 }
 
 function Test-OcioSafeToRecurse([string]$Prefix) {
