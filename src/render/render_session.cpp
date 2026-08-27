@@ -321,16 +321,6 @@ void RenderSession::threadMain() {
     };
 
     std::string error;
-    {
-        std::lock_guard<std::mutex> lock(progressMutex_);
-        progress_.running = true;
-        progress_.message.clear();
-        if (scene->settings.backend == kBackendXpu)
-            progress_.backendName = "XPU / Embree+OptiX";
-        else if (scene->settings.backend == kBackendGpuOptix)
-            progress_.backendName = "GPU / OptiX";
-    }
-
     try {
         if (!prepareDevice(error)) {
             fail(error.empty() ? std::string("Render failed: no device") : error);

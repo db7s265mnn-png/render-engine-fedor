@@ -16,8 +16,6 @@ bool optixRuntimeAvailable(std::string* error) {
     return false;
 }
 
-void optixWarmupRuntime() {}
-
 RenderDevicePtr createOptixDevice() {
     logWarning("This build has no OptiX backend. Configure with -DSOLSTICE_ENABLE_OPTIX=ON and a CUDA toolkit "
                "plus the OptiX SDK to enable GPU rendering.");

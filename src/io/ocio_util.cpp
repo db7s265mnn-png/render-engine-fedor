@@ -1,15 +1,8 @@
-#if defined(_MSC_VER) && !defined(__clang__)
-// MSVC /O2 imports OCIO vftables as data; /DELAYLOAD then dies with LNK1194.
-#  pragma optimize("", off)
-#  pragma auto_inline(off)
-#endif
-
 #include "io/ocio_util.h"
 
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
-#include <exception>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -104,9 +97,7 @@ bool tryDisplayView(const OCIO_NS::ConstConfigRcPtr& config, const std::string& 
         OCIO_NS::ConstProcessorRcPtr proc = config->getProcessor(xf);
         out = proc->getDefaultCPUProcessor();
         return out != nullptr;
-    } catch (const std::exception& ex) {
-        // Do not catch OCIO::Exception by name: MSVC then imports the vftable
-        // as data and /DELAYLOAD OpenColorIO fails with LNK1194.
+    } catch (const OCIO_NS::Exception& ex) {
         logDebug(std::string("OCIO DisplayView failed (") + display + "/" + view + "): " + ex.what());
         return false;
     } catch (...) {
@@ -257,7 +248,6 @@ bool ocioLibraryAvailable() {
 }
 
 OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
-    ocioBindWindowsRuntimeDlls();
     OcioStatus st;
     st.libraryAvailable = ocioLibraryAvailable();
 #if !SOLSTICE_HAVE_OCIO
@@ -301,7 +291,7 @@ OcioStatus ocioEnsureConfig(bool useEnv, const std::string& settingsPath) {
         }
         try {
             g_config = OCIO_NS::Config::CreateFromFile(path.c_str());
-        } catch (const std::exception& ex) {
+        } catch (const OCIO_NS::Exception& ex) {
             st.message = std::string("OCIO: NOT FOUND — failed to load config ") + path + " — " + ex.what();
             return st;
         } catch (...) {
@@ -496,7 +486,7 @@ OCIO_NS::ConstCPUProcessorRcPtr convertProcessor(const std::string& inputColorSp
         OCIO_NS::ConstCPUProcessorRcPtr cpu = proc->getDefaultCPUProcessor();
         g_convertProcs[inputColorSpace] = cpu;
         return cpu;
-    } catch (const std::exception& ex) {
+    } catch (const OCIO_NS::Exception& ex) {
         logDebug(std::string("OCIO colorconvert failed (") + inputColorSpace + " → " + dst + "): " +
                  ex.what());
         g_convertProcs[inputColorSpace] = nullptr;

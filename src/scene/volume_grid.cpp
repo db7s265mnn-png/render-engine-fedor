@@ -98,17 +98,16 @@ void VolumeGrid::rebuildMajorantGrid() {
     constexpr int kHaloVox = 2;
     const Vec3 ext = bounds_.hi - bounds_.lo;
     const float longAxis = srMax(ext.x, srMax(ext.y, ext.z));
-    const int voxelsLong =
-        std::max(1, int(std::lround(double(longAxis / srMax(voxelSize_, 1e-8f)))));
+    const int voxelsLong = srMax(1, int(std::lround(double(longAxis / srMax(voxelSize_, 1e-8f)))));
     int sv = 8;
     if (voxelsLong < 64) sv = 4;
     if (voxelsLong < 24) sv = 2;
     // OpenVDB leaves are 8³ — keep majorants that tight (PBRT: smaller Λ is faster).
     majCell_ = srMax(voxelSize_ * float(sv), srMax(voxelSize_, 1e-6f));
     majOrigin_ = bounds_.lo;
-    majNx_ = std::max(1, int(std::ceil(double(ext.x / majCell_))));
-    majNy_ = std::max(1, int(std::ceil(double(ext.y / majCell_))));
-    majNz_ = std::max(1, int(std::ceil(double(ext.z / majCell_))));
+    majNx_ = srMax(1, int(std::ceil(double(ext.x / majCell_))));
+    majNy_ = srMax(1, int(std::ceil(double(ext.y / majCell_))));
+    majNz_ = srMax(1, int(std::ceil(double(ext.z / majCell_))));
     const int n = majNx_ * majNy_ * majNz_;
     majMin_.assign(size_t(n), 1.0e30f);
     majMax_.assign(size_t(n), 0.0f);
@@ -168,9 +167,9 @@ void VolumeGrid::rebuildMajorantGrid() {
     }
 
     const int voxelsPerCell =
-        std::max(1, int(std::lround(double(majCell_ / srMax(voxelSize_, 1e-8f)))));
+        srMax(1, int(std::lround(double(majCell_ / srMax(voxelSize_, 1e-8f)))));
     const int expected = voxelsPerCell * voxelsPerCell * voxelsPerCell;
-    const int filledThresh = std::max(1, int(float(expected) * 0.85f));
+    const int filledThresh = srMax(1, int(float(expected) * 0.85f));
     float globalMaj = 0.0f;
     for (int i = 0; i < n; ++i) {
         if (counts[size_t(i)] <= 0 || majMax_[size_t(i)] <= 0.0f) {

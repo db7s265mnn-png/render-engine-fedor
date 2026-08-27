@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.66 LANGUAGES CXX)
+project(Solstice VERSION 0.9.39 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -68,10 +68,6 @@ option(SOLSTICE_BUILD_TESTS "Build unit tests" ON)
 option(SOLSTICE_BUILD_APP "Build the Qt desktop application" ON)
 option(SOLSTICE_BUILD_TOOLS "Build helper tools (test scene generators)" ON)
 option(SOLSTICE_ENABLE_OCIO "Build with OpenColorIO display views (system lib)" ON)
-
-# OpenColorIO.dll imports zlib1.dll. NVIDIA optixInit hangs if zlib sits next
-# to the exe. FULL ships OCIO + zlib in bin/ocio/ (not the exe folder) and
-# delay-loads them after the OptiX probe. Do not disable OCIO to work around that.
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -183,8 +179,8 @@ if(SOLSTICE_ENABLE_OPENEXR)
     endif()
 endif()
 
-# OpenColorIO — Nuke-style Display/View for the viewport.
-# Windows FULL requires SOLSTICE_HAVE_OCIO 1 (build script). Linux is optional.
+# OpenColorIO — Nuke-style Display/View for the viewport (optional).
+# Windows CI builds/links OpenColorIO.dll; config/LUTs stay on the user machine.
 set(SOLSTICE_HAVE_OCIO_01 0)
 set(SOLSTICE_OCIO_TARGET "")
 if(SOLSTICE_ENABLE_OCIO)
@@ -228,115 +224,12 @@ if(SOLSTICE_ENABLE_OCIO)
         set(SOLSTICE_HAVE_OCIO_01 1)
         set(SOLSTICE_OCIO_TARGET PkgConfig::OCIO_PKG)
     endif()
-    # Windows SDK / vcpkg / prefix without OpenColorIOConfig.cmake: headers + import lib.
-    if(NOT SOLSTICE_HAVE_OCIO_01)
-        find_path(OpenColorIO_INCLUDE_DIR OpenColorIO/OpenColorIO.h
-            HINTS
-                "${OpenColorIO_ROOT}"
-                "${OpenColorIO_DIR}"
-                ENV OpenColorIO_ROOT
-                ENV OpenColorIO_DIR
-            PATH_SUFFIXES include ../include ../../include)
-        find_library(OpenColorIO_LIBRARY
-            NAMES OpenColorIO OpenColorIO_2_4 OpenColorIO_2_3 OpenColorIO_2_2 OpenColorIO_2_1
-                  OpenColorIO-2.4 OpenColorIO-2.3 OpenColorIO-2.2
-            HINTS
-                "${OpenColorIO_ROOT}"
-                "${OpenColorIO_DIR}"
-                ENV OpenColorIO_ROOT
-                ENV OpenColorIO_DIR
-            PATH_SUFFIXES lib lib64 ../lib ../lib64)
-        if(OpenColorIO_INCLUDE_DIR AND OpenColorIO_LIBRARY)
-            if(NOT TARGET OpenColorIO::OpenColorIO)
-                add_library(OpenColorIO::OpenColorIO SHARED IMPORTED)
-            endif()
-            set_target_properties(OpenColorIO::OpenColorIO PROPERTIES
-                INTERFACE_INCLUDE_DIRECTORIES "${OpenColorIO_INCLUDE_DIR}")
-            if(WIN32)
-                set_target_properties(OpenColorIO::OpenColorIO PROPERTIES
-                    IMPORTED_IMPLIB "${OpenColorIO_LIBRARY}")
-                get_filename_component(_sol_ocio_libdir "${OpenColorIO_LIBRARY}" DIRECTORY)
-                get_filename_component(_sol_ocio_prefix "${_sol_ocio_libdir}" DIRECTORY)
-                find_file(OpenColorIO_DLL
-                    NAMES OpenColorIO.dll OpenColorIO_2_4.dll OpenColorIO_2_3.dll
-                          OpenColorIO_2_2.dll OpenColorIO_2_1.dll
-                    HINTS "${_sol_ocio_prefix}" "${OpenColorIO_ROOT}"
-                    PATH_SUFFIXES bin lib)
-                if(OpenColorIO_DLL)
-                    set_target_properties(OpenColorIO::OpenColorIO PROPERTIES
-                        IMPORTED_LOCATION "${OpenColorIO_DLL}")
-                endif()
-            else()
-                set_target_properties(OpenColorIO::OpenColorIO PROPERTIES
-                    IMPORTED_LOCATION "${OpenColorIO_LIBRARY}")
-            endif()
-            set(SOLSTICE_HAVE_OCIO_01 1)
-            set(SOLSTICE_OCIO_TARGET OpenColorIO::OpenColorIO)
-            message(STATUS "OpenColorIO found (headers+library, no CMake config package)")
-        endif()
-    endif()
     if(SOLSTICE_HAVE_OCIO_01)
         message(STATUS "OpenColorIO found — Display/View enabled")
     else()
         message(STATUS "OpenColorIO not found — viewport Display/View falls back to passthrough")
-        message(STATUS "  CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
-        message(STATUS "  OpenColorIO_DIR=${OpenColorIO_DIR}")
-        message(STATUS "  OpenColorIO_ROOT=${OpenColorIO_ROOT}")
-        message(STATUS "  OpenColorIO_INCLUDE_DIR=${OpenColorIO_INCLUDE_DIR}")
-        message(STATUS "  OpenColorIO_LIBRARY=${OpenColorIO_LIBRARY}")
     endif()
 endif()
-
-# Windows: delay-load OpenColorIO.dll so nvoptix optixInit runs before zlib
-# search order can hit a leftover next to the exe.
-set(SOLSTICE_OCIO_DELAYLOAD_DLLS "")
-if(WIN32 AND SOLSTICE_HAVE_OCIO_01 AND SOLSTICE_OCIO_TARGET)
-    set(_ocio_loc "")
-    foreach(_cfg RELEASE RELWITHDEBINFO MINSIZEREL DEBUG)
-        get_target_property(_ocio_try ${SOLSTICE_OCIO_TARGET} IMPORTED_LOCATION_${_cfg})
-        if(_ocio_try)
-            set(_ocio_loc "${_ocio_try}")
-            break()
-        endif()
-    endforeach()
-    if(NOT _ocio_loc)
-        get_target_property(_ocio_loc ${SOLSTICE_OCIO_TARGET} IMPORTED_LOCATION)
-    endif()
-    if(_ocio_loc)
-        get_filename_component(_ocio_dll "${_ocio_loc}" NAME)
-        list(APPEND SOLSTICE_OCIO_DELAYLOAD_DLLS "${_ocio_dll}")
-    endif()
-    # OpenColorIO + zlib1.dll live in bin/ocio. The exe imports zlib1 (OpenVDB /
-    # OCIO); without /DELAYLOAD Windows looks next to the exe and dies at start.
-    # Never /DELAYLOAD zlib.dll — NVIDIA optixInit hangs on that filename.
-    foreach(_n OpenColorIO.dll OpenColorIO_2_3.dll OpenColorIO_2_2.dll OpenColorIO_2_1.dll
-                 zlib1.dll)
-        list(APPEND SOLSTICE_OCIO_DELAYLOAD_DLLS "${_n}")
-    endforeach()
-    list(REMOVE_DUPLICATES SOLSTICE_OCIO_DELAYLOAD_DLLS)
-    message(STATUS "  OpenColorIO delay-load: ${SOLSTICE_OCIO_DELAYLOAD_DLLS}")
-    # MSVC Release delay-load of a C++ DLL fails with LNK1194 (imported vftable
-    # data). Keep ocio_util.cpp unoptimized so only function imports remain.
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-        set_property(SOURCE src/io/ocio_util.cpp APPEND PROPERTY COMPILE_OPTIONS
-            "$<$<CONFIG:Release,RelWithDebInfo>:/Od>"
-            "$<$<CONFIG:Release,RelWithDebInfo>:/Ob0>")
-    endif()
-endif()
-function(solstice_delayload_ocio tgt)
-    if(NOT WIN32 OR NOT SOLSTICE_OCIO_DELAYLOAD_DLLS)
-        return()
-    endif()
-    if(NOT TARGET ${tgt})
-        return()
-    endif()
-    target_link_libraries(${tgt} PRIVATE delayimp)
-    foreach(_dll IN LISTS SOLSTICE_OCIO_DELAYLOAD_DLLS)
-        target_link_options(${tgt} PRIVATE "/DELAYLOAD:${_dll}")
-    endforeach()
-    # /DELAYLOAD of a DLL the target does not import (LNK4199).
-    target_link_options(${tgt} PRIVATE "/IGNORE:4199")
-endfunction()
 
 # libtiff — Arnold/OIIO .tx textures with embedded mipmaps (SUBIFD / multi-dir TIFF).
 set(SOLSTICE_HAVE_TIFF_01 0)
@@ -739,10 +632,6 @@ set(SOLSTICE_LIB_SOURCES
     src/app/headless.cpp
 )
 
-if(WIN32)
-    list(APPEND SOLSTICE_LIB_SOURCES src/io/ocio_delayload_win.cpp)
-endif()
-
 set(SOLSTICE_LIB_HEADERS
     src/core/math.h
     src/core/units.h
@@ -819,7 +708,6 @@ endif()
 if(SOLSTICE_HAVE_OCIO_01 AND SOLSTICE_OCIO_TARGET)
     target_link_libraries(solstice_lib PUBLIC ${SOLSTICE_OCIO_TARGET})
 endif()
-
 if(SOLSTICE_HAVE_TIFF_01)
     target_link_libraries(solstice_lib PUBLIC TIFF::TIFF)
 endif()
@@ -924,7 +812,6 @@ if(SOLSTICE_BUILD_APP)
         ${SOLSTICE_APP_HEADERS}
         ${SOLSTICE_APP_ICON_SOURCES})
     target_link_libraries(Solstice PRIVATE solstice_lib Qt6::Widgets)
-    solstice_delayload_ocio(Solstice)
     set_target_properties(Solstice PROPERTIES
         OUTPUT_NAME "${SOLSTICE_OUTPUT_NAME}"
         MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
@@ -957,7 +844,6 @@ if(SOLSTICE_BUILD_APP)
             ${TX_TOOLS_COMMON_SOURCES})
         target_include_directories(TX_Converter_Alpha PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
         target_link_libraries(TX_Converter_Alpha PRIVATE solstice_lib Qt6::Widgets)
-        solstice_delayload_ocio(TX_Converter_Alpha)
         set_target_properties(TX_Converter_Alpha PROPERTIES
             OUTPUT_NAME "${SOLSTICE_TX_TOOLS_ALPHA_NAME}"
             MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_TX_TOOLS_ALPHA_NAME}"
@@ -978,7 +864,6 @@ if(SOLSTICE_BUILD_APP)
         target_include_directories(TX_Converter_Omega PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
         target_link_libraries(TX_Converter_Omega PRIVATE solstice_lib Qt6::Widgets
             d3d12 dxgi d3dcompiler)
-        solstice_delayload_ocio(TX_Converter_Omega)
         set_target_properties(TX_Converter_Omega PROPERTIES
             OUTPUT_NAME "${SOLSTICE_TX_TOOLS_OMEGA_NAME}")
         target_compile_definitions(TX_Converter_Omega PRIVATE
@@ -1000,7 +885,6 @@ if(SOLSTICE_BUILD_TESTS)
     enable_testing()
     add_executable(solstice_tests tests/test_main.cpp)
     target_link_libraries(solstice_tests PRIVATE solstice_lib)
-    solstice_delayload_ocio(solstice_tests)
     add_test(NAME solstice_tests COMMAND solstice_tests)
 endif()
 

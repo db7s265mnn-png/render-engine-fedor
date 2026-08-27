@@ -35,10 +35,6 @@
 #include "render/rgb_spectrum_tables.h"
 #include "scene/volume_grid.h"
 
-#if defined(_WIN32)
-#include <windows.h>
-#endif
-
 // Emitted by the build from the wavefront OptiX modules.
 extern "C" const unsigned char solsticeOptixInitIr[];
 extern "C" const unsigned long long solsticeOptixInitIrSize;
@@ -117,38 +113,6 @@ std::string optixFailMessage(OptixResult result, const char* call) {
         if (result != OPTIX_SUCCESS)                                                         \
             throw std::runtime_error(optixFailMessage(result, #call));                       \
     } while (0)
-
-#if defined(_WIN32)
-// nvoptix.dll is in System32. LoadLibrary("zlib.dll") hangs if that file is in
-// the exe folder or on the process search path (bin\ocio via AddDllDirectory).
-void preloadWindowsNvoptix() {
-    wchar_t sys[MAX_PATH];
-    const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
-    const std::wstring sysDir(sys);
-    LoadLibraryExW((sysDir + L"\\zlib.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    const DWORD kNvFlags = LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR;
-    HMODULE nv = LoadLibraryExW((sysDir + L"\\nvoptix.dll").c_str(), nullptr, kNvFlags);
-    if (!nv) {
-        nv = LoadLibraryExW(L"nvoptix.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    }
-    if (nv) {
-        static bool logged = false;
-        if (!logged) {
-            logged = true;
-            logInfo("OptiX: nvoptix.dll loaded from the Windows system directory");
-        }
-    }
-}
-
-struct PinSystem32DllSearch {
-    PinSystem32DllSearch() {
-        wchar_t sys[MAX_PATH];
-        if (GetSystemDirectoryW(sys, MAX_PATH)) SetDllDirectoryW(sys);
-    }
-    ~PinSystem32DllSearch() { SetDllDirectoryW(nullptr); }
-};
-#endif
 
 // Small owning wrapper around a device allocation.
 class DeviceBuffer {
@@ -294,21 +258,15 @@ public:
             CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
             deviceName_ = properties.name;
 
-            {
-#if defined(_WIN32)
-                preloadWindowsNvoptix();
-                PinSystem32DllSearch pinSystem32;
-#endif
-                OPTIX_CHECK(optixInit());
+            OPTIX_CHECK(optixInit());
 
-                OptixDeviceContextOptions options{};
-                options.logCallbackFunction = &contextLog;
-                options.logCallbackLevel = 2;
+            OptixDeviceContextOptions options{};
+            options.logCallbackFunction = &contextLog;
+            options.logCallbackLevel = 2;
 #if OPTIX_VERSION >= 70200
-                options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
+            options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
 #endif
-                OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
-            }
+            OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
 
             CUDA_CHECK(cudaStreamCreate(&stream_));
             CUDA_CHECK(cudaEventCreate(&gpuStartEvent_));
@@ -1382,35 +1340,16 @@ std::condition_variable gOptixProbeCv;
 bool gOptixProbeRunning = false;
 OptixRuntimeState gOptixRuntimeState = OptixRuntimeState::Unknown;
 std::string gOptixRuntimeError;
-std::chrono::steady_clock::time_point gOptixProbeStarted{};
-constexpr auto kOptixProbeTimeout = std::chrono::seconds(20);
 
 void setOptixRuntime(bool ok, std::string error) {
     gOptixRuntimeState = ok ? OptixRuntimeState::Ok : OptixRuntimeState::Fail;
     gOptixRuntimeError = std::move(error);
 }
 
-void markOptixProbeHungLocked() {
-    if (gOptixRuntimeState != OptixRuntimeState::Unknown) return;
-    setOptixRuntime(false, "optixInit hung");
-    logWarning("OptiX runtime probe: optixInit did not return. zlib.dll next to the "
-               "exe makes NVIDIA LoadLibrary(\"zlib.dll\") hang. zlib1.dll belongs in "
-               "bin\\ocio next to OpenColorIO, not beside the exe. Rebuild FULL.");
-}
-
-bool optixProbeTimedOutLocked() {
-    if (!gOptixProbeRunning || gOptixRuntimeState != OptixRuntimeState::Unknown) return false;
-    return (std::chrono::steady_clock::now() - gOptixProbeStarted) >= kOptixProbeTimeout;
-}
-
-// CUDA + optixInit. After QApplication starts, cudaGetDeviceCount on the Qt
-// UI thread can miss the NVIDIA GPU (Intel display). The warmup in main()
-// runs this on a worker before Qt. HUD only reads the cached result.
+// CUDA + optixInit. Must not run on the Qt UI thread: with an Intel display GPU
+// plus an NVIDIA card, cudaGetDeviceCount there often returns 0 / no-device and
+// then the cached failure silently keeps OptiX off for the rest of the session.
 bool probeOptixRuntimeUnlocked(std::string& error) {
-#if defined(_WIN32)
-    preloadWindowsNvoptix();
-    PinSystem32DllSearch pinSystem32;
-#endif
     int deviceCount = 0;
     const cudaError_t status = cudaGetDeviceCount(&deviceCount);
     if (status != cudaSuccess) {
@@ -1442,7 +1381,6 @@ bool probeOptixRuntimeUnlocked(std::string& error) {
 void kickOptixProbeLocked() {
     if (gOptixRuntimeState != OptixRuntimeState::Unknown || gOptixProbeRunning) return;
     gOptixProbeRunning = true;
-    gOptixProbeStarted = std::chrono::steady_clock::now();
     std::thread([] {
         std::string err;
         bool ok = false;
@@ -1455,11 +1393,7 @@ void kickOptixProbeLocked() {
         }
         {
             std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
-            // A HUD/GPU-switch timeout may already have marked Fail while optixInit
-            // was stuck. Do not resurrect a hung probe as success.
-            if (gOptixRuntimeState == OptixRuntimeState::Unknown) {
-                setOptixRuntime(ok, err);
-            }
+            setOptixRuntime(ok, err);
             gOptixProbeRunning = false;
         }
         gOptixProbeCv.notify_all();
@@ -1471,9 +1405,7 @@ void kickOptixProbeLocked() {
 void waitForOptixProbe() {
     std::unique_lock<std::mutex> lock(gOptixRuntimeMutex);
     kickOptixProbeLocked();
-    if (!gOptixProbeCv.wait_for(lock, kOptixProbeTimeout, [] { return !gOptixProbeRunning; })) {
-        markOptixProbeHungLocked();
-    }
+    gOptixProbeCv.wait(lock, [] { return !gOptixProbeRunning; });
 }
 
 }  // namespace
@@ -1483,30 +1415,18 @@ bool optixBackendCompiledIn() { return true; }
 bool optixRuntimeProbePending() {
     std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
     kickOptixProbeLocked();
-    if (optixProbeTimedOutLocked()) {
-        markOptixProbeHungLocked();
-        return false;
-    }
     return gOptixRuntimeState == OptixRuntimeState::Unknown || gOptixProbeRunning;
 }
 
 bool optixRuntimeAvailable(std::string* error) {
     std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
     kickOptixProbeLocked();
-    if (optixProbeTimedOutLocked()) markOptixProbeHungLocked();
     if (error) *error = gOptixRuntimeError;
     return gOptixRuntimeState == OptixRuntimeState::Ok;
 }
 
 RenderDevicePtr createOptixDevice() {
     waitForOptixProbe();
-    {
-        std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
-        if (gOptixRuntimeState == OptixRuntimeState::Fail) {
-            logWarning("OptiX backend unavailable: " + gOptixRuntimeError);
-            return nullptr;
-        }
-    }
     auto device = std::make_shared<OptixPathTracer>();
     std::string error;
     if (!device->initialize(error)) {
@@ -1522,10 +1442,6 @@ RenderDevicePtr createOptixDevice() {
         setOptixRuntime(true, {});
     }
     return device;
-}
-
-void optixWarmupRuntime() {
-    waitForOptixProbe();
 }
 
 }  // namespace sol

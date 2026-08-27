@@ -132,11 +132,9 @@ RenderDevicePtr createOptixDevice();
 RenderDevicePtr createXpuDevice(int threadCount = 0);
 bool optixBackendCompiledIn();
 
-// Live CUDA + optixInit probe (cached). Kick it before QApplication so Intel
-// display GPUs cannot hide the NVIDIA device. createOptixDevice() overwrites
-// the cache with initialize().
+// Live CUDA + optixInit probe (cached, never on the Qt UI thread).
+// createOptixDevice() overwrites this with the real initialize() result.
 bool optixRuntimeAvailable(std::string* error = nullptr);
 bool optixRuntimeProbePending();
-void optixWarmupRuntime();
 
 }  // namespace sol
