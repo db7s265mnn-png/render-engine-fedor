@@ -3,9 +3,7 @@
 # without BOM and treats Cyrillic bytes as quotes / broken tokens.
 # Override paths with env vars if auto-detect is wrong:
 #   QT_ROOT, CUDA_PATH, OptiX_ROOT, GRENDIZER_BUILD_DIR, GRENDIZER_DEPS
-#   OpenColorIO_ROOT / OpenColorIO_DIR: existing OCIO SDK (headers + .lib).
-#   FULL uses that copy and does not compile OCIO. OCIO=.ocio is a config file,
-#   not the SDK. A DCC OpenColorIO.dll without headers/.lib is not enough.
+#   OpenColorIO_ROOT / OpenColorIO_DIR: optional existing OCIO prefix.
 # Default build dir is C:\gz-build (GitHub zip under Downloads is too long for MSVC).
 # CUDA 13.2+ is required for Visual Studio 2026 (MSVC 14.50+). CUDA 12.x is
 # enough only with VS 2022 / MSVC 14.44. If both are installed, 13.2 is used.
@@ -630,7 +628,8 @@ function Test-OcioInstallPrefix([string]$root) {
             $walk = $parent
         }
     }
-    if (-not $cfg -and -not ($hasHdr -and $lib)) { return $null }
+    # Need a real linkable install. A stray CMake file from a failed tree is not enough.
+    if (-not (($hasHdr -and $lib) -or ($cfg -and $hasHdr) -or ($cfg -and $lib))) { return $null }
     $dll = $null
     foreach ($binRel in @('bin', 'lib')) {
         $binDir = Join-Path $root $binRel
@@ -671,21 +670,18 @@ function Find-SystemOpenColorIO {
     foreach ($extra in @('C:\ocio', 'C:\OpenColorIO', (Join-Path $env:LOCALAPPDATA 'OpenColorIO'))) {
         [void]$candidates.Add($extra)
     }
-    $dllHint = $null
     if ($env:PATH) {
         foreach ($dir in ($env:PATH -split ';')) {
             if (-not $dir) { continue }
             $dll = Get-ChildItem -LiteralPath $dir -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
                 Select-Object -First 1
             if ($dll) {
-                if (-not $dllHint) { $dllHint = $dll.FullName }
                 [void]$candidates.Add($dir)
                 $parent = Split-Path $dir
                 if ($parent) { [void]$candidates.Add($parent) }
             }
         }
     }
-    # Our previous source install is last so a real system SDK wins.
     if ($script:DepsPrefix) { [void]$candidates.Add($script:DepsPrefix) }
     $seen = @{}
     foreach ($c in $candidates) {
@@ -695,9 +691,6 @@ function Find-SystemOpenColorIO {
         $seen[$key] = $true
         $hit = Test-OcioInstallPrefix $c
         if ($hit) { return $hit }
-    }
-    if ($dllHint) {
-        Info "OpenColorIO.dll exists ($dllHint) but this is not an SDK. Need OpenColorIO.h and OpenColorIO*.lib. Set OpenColorIO_ROOT to the install prefix. A DCC bin or OCIO=.ocio file is not enough."
     }
     return $null
 }
@@ -893,30 +886,22 @@ function Ensure-NativeDeps {
         return
     }
 
+    # Same as before: if deps already have OCIO, do not rebuild it.
+    $ocioCfg = Find-OcioConfigCMake $script:DepsPrefix
     $script:OcioInstall = Find-SystemOpenColorIO
     if ($script:OcioInstall) {
-        Info ("Using system OpenColorIO SDK: " + $script:OcioInstall.Prefix)
-        if ($script:OcioInstall.CMakeDir) { Info ("  cmake: " + $script:OcioInstall.CMakeDir) }
-        if ($script:OcioInstall.Include) { Info ("  include: " + $script:OcioInstall.Include) }
-        if ($script:OcioInstall.Library) { Info ("  lib: " + $script:OcioInstall.Library) }
-    } else {
-        Info 'No system OpenColorIO SDK (headers + .lib). Will build OpenColorIO from source.'
+        Info ("OpenColorIO: " + $script:OcioInstall.Prefix)
     }
-
-    $ocioCfg = $null
-    if ($script:OcioInstall -and $script:OcioInstall.CMakeDir) {
-        $ocioCfg = Get-Item -LiteralPath (Join-Path $script:OcioInstall.CMakeDir 'OpenColorIOConfig.cmake') -ErrorAction SilentlyContinue
-    }
-    if (-not $ocioCfg) { $ocioCfg = Find-OcioConfigCMake $script:DepsPrefix }
-    if ((Test-Path -LiteralPath $stamp) -and ($ocioCfg -or $script:OcioInstall)) {
+    if ((Test-Path -LiteralPath $stamp) -and $ocioCfg) {
+        if (-not $script:OcioInstall) { $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix }
         Info "Native deps already installed: $script:DepsPrefix"
         return
     }
+    if ((Test-Path -LiteralPath $stamp) -and $script:OcioInstall) {
+        Info "Native deps already installed (OpenColorIO from $($script:OcioInstall.Prefix))"
+        return
+    }
     if (Test-Path -LiteralPath $stamp) {
-        if ($script:OcioInstall) {
-            Info 'Deps stamp present; system OpenColorIO will be used (not building OCIO).'
-            return
-        }
         Info "Deps stamp exists but OpenColorIO is missing — building OCIO only (keeping Embree/OpenEXR/OpenVDB)."
         Install-OpenColorIO
         $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
@@ -960,7 +945,7 @@ function Ensure-NativeDeps {
     )
 
     if ($script:OcioInstall) {
-        Info 'Skipping OpenColorIO source build — using the system SDK.'
+        Info ("Using existing OpenColorIO: " + $script:OcioInstall.Prefix)
     } else {
         Install-OpenColorIO
         $script:OcioInstall = Test-OcioInstallPrefix $script:DepsPrefix
@@ -1306,11 +1291,7 @@ if ($script:FullBuild) {
     )
     foreach ($req in $required) {
         if (-not (Select-String -Path $Cfg -Pattern $req[0] -Quiet)) {
-            $msg = $req[1] + ' did not enable (' + $req[0] + ' missing). FULL requires it — not a skip. CMAKE_PREFIX_PATH=' + $Prefix + '.'
-            if ($req[1] -eq 'OpenColorIO') {
-                $msg += ' Need OpenColorIOConfig.cmake or include\OpenColorIO\OpenColorIO.h + OpenColorIO*.lib (set OpenColorIO_ROOT). A .ocio file or DCC DLL is not the SDK.'
-            }
-            Fail ($msg + ' See the cmake log.')
+            Fail ($req[1] + ' did not enable (' + $req[0] + ' missing). FULL requires it — not a skip. CMAKE_PREFIX_PATH=' + $Prefix + '. See the cmake log.')
         }
         Info ($req[1] + ' is compiled into this build.')
     }
