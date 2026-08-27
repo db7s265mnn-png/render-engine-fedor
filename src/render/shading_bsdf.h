@@ -347,6 +347,25 @@ SR_INL SR_HD bool isPhotonCausticCasterLobe(const LobeWeights& lw) {
     return lw.transmission > 0.25f;
 }
 
+// Delta transmissive caster (CPU MNEE / GPU eye-path MNEE). Rough glass is not
+// a Newton manifold — light tracing continues through it instead.
+SR_INL SR_HD bool isDeltaCausticCaster(const Material& m) {
+    if (m.contributeCaustics == 0) return false;
+    const LobeWeights lw = computeLobes(m);
+    return lw.delta && lw.transmission > 0.25f && lw.diffuse < 1e-3f;
+}
+
+// Light-trace vertex that may connect to the camera. Casters (delta, near-spec,
+// or transmissive glass including roughness 0.1) are not connectable: do not
+// splat from them and do not kill the path — continue the SDS chain.
+SR_INL SR_HD bool lightTraceConnectable(const Material& mat, Vec3 woLocal) {
+    const LobeWeights lw = computeLobes(mat, woLocal);
+    if (lw.delta && lw.diffuse < 1e-4f) return false;
+    if (isNearSpecularLobe(lw)) return false;
+    if (lw.transmission > 0.25f && lw.diffuse < 1e-3f) return false;
+    return true;
+}
+
 // Veach adjoint BSDF / pbrt: evaluate in the shading frame and spawn with ng.
 // Do not kill transport when ns and ng disagree about reflection vs transmission.
 SR_INL SR_HD bool shadingNormalConsistent(Vec3 ng, Vec3 ns, Vec3 wo, Vec3 wi) {

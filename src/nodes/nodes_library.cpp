@@ -1192,7 +1192,8 @@ public:
                          "dispersionmode", "Dispersion Mode",
                          {"Hero (default)", "Optimized", "Spectral RGB ×3", "Fake tint"}, 0)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==0&&causticsengine!=0")
+                         .withVisibleWhen("integrator==0&&causticsengine!=0&&backend==0||"
+                                          "integrator==0&&causticsengine!=0&&backend==2")
                          .withTooltip(
                              "RGB-only (MNEE / Photon). Path Tracer / BDPT use pbrt η(λ).\n"
                              "Hero: one random RGB channel per sample; masks the whole path "
@@ -1204,7 +1205,8 @@ public:
                              "Fake tint: no ray bending — chromatic transmission tint only."));
         addParameter(Parameter::makeInt("dispersionmaxiface", "Dispersion Max Interfaces", 2, 1, 16)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==0&&causticsengine!=0&&dispersionmode==1")
+                         .withVisibleWhen("integrator==0&&causticsengine!=0&&dispersionmode==1&&backend==0||"
+                                          "integrator==0&&causticsengine!=0&&dispersionmode==1&&backend==2")
                          .withTooltip("Optimized mode only: how many dispersing glass interfaces "
                                       "may change IOR (enter+exit of one pane ≈ 2)."));
         addParameter(Parameter::makeBool("pathguiding", "Indirect Guides (OpenPGL)", false)
@@ -1241,17 +1243,27 @@ public:
                          .withVisibleWhen("integrator==0||integrator==1")
                          .withTooltip("Enable caustic light transport (light focused through glass "
                                       "and off mirrors).\n"
-                                      "Engine picks the estimator (pbrt PT/BDPT, MNEE, Photon).\n"
+                                      "Engine picks the estimator: CPU has pbrt / MNEE / Photon; "
+                                      "GPU has MNEE + Light Trace / MCMC.\n"
                                       "Per-light and per-material Contribute to Caustics can disable "
                                       "individual sources or casters.\n"
                                       "Off: glass casts dark shadows (soften with shadow_opacity)."));
+        // Same "Caustics Engine" row on every device. GPU (backend==1) swaps this
+        // menu's items in the parameter panel to the two OptiX/Iray estimators and
+        // writes causticsenginegpu — otherwise GPU hid this row and the second
+        // menu was easy to miss. XPU shows both rows.
         addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
                                          {"Path / BDPT (pbrt)", "MNEE (manifolds)", "MNEE+Photon",
                                           "Photon / VCM"},
                                          0)
                          .withGroup("Caustics")
-                         .withVisibleWhen("integrator==0||integrator==1")
-                         .withTooltip("Path / BDPT (pbrt, default): Path Tracer BSDF+NEE and BDPT "
+                         .withVisibleWhen("integrator==0&&backend==0||integrator==0&&backend==1||"
+                                          "integrator==0&&backend==2||integrator==1&&backend==0||"
+                                          "integrator==1&&backend==1||integrator==1&&backend==2")
+                         .withTooltip("CPU / Embree (and the CPU half of XPU).\n"
+                                      "When Render Device is GPU this same menu shows the two "
+                                      "OptiX engines: MNEE + Light Trace and MCMC (Iray PT+LT).\n"
+                                      "Path / BDPT (pbrt, default): Path Tracer BSDF+NEE and BDPT "
                                       "Veach MIS with light-tracing splats — same as pbrt-v4. "
                                       "No MNEE, no photon map. SDS from small lights is noisy.\n"
                                       "MNEE: manifold next-event — best for near-delta glass + "
@@ -1262,6 +1274,20 @@ public:
                                       "BSDF caustics are turned off (no stacking).\n"
                                       "Photon / VCM: caustic-only photon map — rough glass and "
                                       "black bases through refraction."));
+        addParameter(Parameter::makeMenu("causticsenginegpu", "Caustics Engine (GPU)",
+                                         {"MNEE + Light Trace", "MCMC (Iray PT+LT)"}, 0)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("integrator==0&&backend==2||integrator==1&&backend==2")
+                         .withTooltip("OptiX half of XPU (Render Device = GPU uses the Caustics "
+                                      "Engine menu above for these same two items).\n"
+                                      "MNEE + Light Trace (default): manifold next-event from the "
+                                      "eye through delta glass, plus light tracing that does not "
+                                      "splat from the caster and does not kill the path after a "
+                                      "camera connection — SDS continues to the floor.\n"
+                                      "MCMC (Iray PT+LT): unidirectional PT + light tracing with "
+                                      "K mutations per slot (ERPT-style, every path, unbiased). "
+                                      "No MNEE. Closest to Iray Photoreal PT+LT caustics.\n"
+                                      "Photon / VCM stays CPU-only."));
         // Hidden migration: v2 Automatic/MNEE/Photon → MNEE/MNEE+Photon/Photon.
         // v3 inserts pbrt as index 0 and shifts the rest +1.
         addParameter(Parameter::makeBool("_caustics_engine_menu_v2", "", true));
@@ -1276,12 +1302,18 @@ public:
                                       "Raise to tighten further; the caustic on the floor is not capped."));
         addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)
                          .withGroup("Caustics")
-                         .withVisibleWhen("caustics==1&&causticsengine==2||caustics==1&&causticsengine==3")
+                         .withVisibleWhen("caustics==1&&causticsengine==2&&backend==0||"
+                                          "caustics==1&&causticsengine==3&&backend==0||"
+                                          "caustics==1&&causticsengine==2&&backend==2||"
+                                          "caustics==1&&causticsengine==3&&backend==2")
                          .withTooltip("Photons emitted per progressive pass when Caustics Engine "
                                       "is Photon / VCM or MNEE+Photon (Auto→Photon)."));
         addParameter(Parameter::makeFloat("photonradius", "Photon Radius", 0.08, 0.001, 10.0, false)
                          .withGroup("Caustics")
-                         .withVisibleWhen("caustics==1&&causticsengine==2||caustics==1&&causticsengine==3")
+                         .withVisibleWhen("caustics==1&&causticsengine==2&&backend==0||"
+                                          "caustics==1&&causticsengine==3&&backend==0||"
+                                          "caustics==1&&causticsengine==2&&backend==2||"
+                                          "caustics==1&&causticsengine==3&&backend==2")
                          .withTooltip("Initial gather radius (scene units) for the caustic photon "
                                       "map. Shrinks as samples accumulate."));
 
@@ -1419,6 +1451,7 @@ public:
         settings.volumeSimilarity = boolValue("volumesimilarity", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
         settings.causticsEngine = std::clamp(intValue("causticsengine", 0), 0, 3);
+        settings.causticsEngineGpu = std::clamp(intValue("causticsenginegpu", 0), 0, 1);
         settings.causticClamp = float(floatValue("causticclamp", 0.0));
         settings.dispersionMode = intValue("dispersionmode", 0);
         settings.dispersionMaxInterfaces = std::max(1, intValue("dispersionmaxiface", 2));

@@ -77,8 +77,9 @@ struct alignas(16) LaunchParams {
 
     CameraProj camProj{};
     // 1 / (light paths this wavefront). CPU BDPT divides the splat plane by W×H.
-    // 0 disables GPU light-trace splats.
+    // MCMC: 1 / (slots * (1+K)). 0 disables GPU light-trace splats.
     float splatInvLightPaths = 0.0f;
+    int mcmcMutations = 0;  // K extra SampleLe-like mutations per light slot (0 = off)
 
     unsigned long long traversable = 0;  // OptixTraversableHandle
 };

@@ -465,6 +465,19 @@ enum CausticsEngine : int {
     kCausticsEnginePhoton = 3,
 };
 
+// OptiX-only caustic estimators (Render Device = GPU, or the GPU half of XPU).
+// CPU Embree keeps CausticsEngine 0..3; do not overload those indices.
+enum GpuCausticsEngine : int {
+    // Eye-path MNEE through delta glass + light tracing that continues past the
+    // caster (splat only on a true connectable after a spec prefix).
+    kGpuCausticsMneeLt = 0,
+    // Iray-style PT + light tracing: independent SampleLe + K direction/origin
+    // mutations per slot (unbiased; every slot mutates, not only hits).
+    kGpuCausticsMcmc = 1,
+};
+
+constexpr int kGpuMcmcMutations = 4;
+
 // How the image is scheduled / written (Render Settings → Sampling Type).
 enum SamplingEngine : int {
     // PBRT-style FilmTile buckets: local accum + mergeFilmTile, strong (x,y,spp) seed.
@@ -591,6 +604,8 @@ struct RenderSettingsData {
     int caustics = 1;
     // Which estimator carries caustics when enabled (see CausticsEngine).
     int causticsEngine = kCausticsEnginePbrt;  // pbrt PT/BDPT (default)
+    // OptiX menu (see GpuCausticsEngine). Ignored by Embree.
+    int causticsEngineGpu = kGpuCausticsMneeLt;
     // Firefly cap for paths that look through glass/mirrors at a light (SDS) and for
     // BDPT near-specular NEE/connections. Those never converge with more samples when
     // the light is small; a safety floor of 10 is always applied when this is left at 0

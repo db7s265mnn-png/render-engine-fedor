@@ -335,6 +335,10 @@ public:
                 view.restNormals = restNormals.as<const Vec3>();
                 view.triangleCount = uint32_t(mesh->indices.size() / 3);
                 view.vertexCount = uint32_t(mesh->positions.size());
+                if (mesh->bounds.valid()) {
+                    view.boundsLo = mesh->bounds.lo;
+                    view.boundsHi = mesh->bounds.hi;
+                }
                 meshViews.push_back(view);
 
                 gasHandles_[i] = buildTriangleGas(positions, indices, view.vertexCount, view.triangleCount);
@@ -664,7 +668,12 @@ public:
             const bool gpuCaustics = launchParams.scene.settings.caustics != 0 &&
                                      launchParams.scene.lightCount > 0 && launchParams.camProj.valid;
             const int lightSlots = srMax(1, launchW * launchH);
-            launchParams.splatInvLightPaths = gpuCaustics ? 1.0f / float(lightSlots) : 0.0f;
+            const int gpuEngine = launchParams.scene.settings.causticsEngineGpu;
+            const int mcmcK =
+                (gpuCaustics && gpuEngine == kGpuCausticsMcmc) ? kGpuMcmcMutations : 0;
+            launchParams.mcmcMutations = mcmcK;
+            launchParams.splatInvLightPaths =
+                gpuCaustics ? 1.0f / float(lightSlots * (1 + mcmcK)) : 0.0f;
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
             launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();
             launchParams.volumeCount = gpuVolumeCount_;
@@ -733,6 +742,13 @@ public:
                 msg << "OptiX GPU " << lastGpuSampleMs_ << " ms  wall " << wallMs << " ms  " << deviceName_
                     << "  " << width << "x" << height << "  batch=" << batch
                     << "  wavefront=" << launches << " launches";
+                if (gpuCaustics) {
+                    msg << "  caustics=";
+                    if (gpuEngine == kGpuCausticsMcmc)
+                        msg << "MCMC(PT+LT,K=" << mcmcK << ")";
+                    else
+                        msg << "MNEE+LT";
+                }
                 logInfo(msg.str());
             }
 
