@@ -866,7 +866,7 @@ if(SOLSTICE_BUILD_APP)
         ${SOLSTICE_APP_HEADERS}
         ${SOLSTICE_APP_ICON_SOURCES})
     target_link_libraries(Solstice PRIVATE solstice_lib Qt6::Widgets)
-    set_target_properties(Solstice PROPERTIES)
+    set_target_properties(Solstice PROPERTIES
         OUTPUT_NAME "${SOLSTICE_OUTPUT_NAME}"
         MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_APP_DISPLAY_NAME}"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.grendizer.render")
@@ -898,7 +898,7 @@ if(SOLSTICE_BUILD_APP)
             ${TX_TOOLS_COMMON_SOURCES})
         target_include_directories(TX_Converter_Alpha PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
         target_link_libraries(TX_Converter_Alpha PRIVATE solstice_lib Qt6::Widgets)
-        set_target_properties(TX_Converter_Alpha PROPERTIES)
+        set_target_properties(TX_Converter_Alpha PROPERTIES
             OUTPUT_NAME "${SOLSTICE_TX_TOOLS_ALPHA_NAME}"
             MACOSX_BUNDLE_BUNDLE_NAME "${SOLSTICE_TX_TOOLS_ALPHA_NAME}"
             MACOSX_BUNDLE_GUI_IDENTIFIER "com.grendizer.txtools.alpha")
@@ -918,7 +918,7 @@ if(SOLSTICE_BUILD_APP)
         target_include_directories(TX_Converter_Omega PRIVATE ${CMAKE_SOURCE_DIR}/TX_Converter)
         target_link_libraries(TX_Converter_Omega PRIVATE solstice_lib Qt6::Widgets
             d3d12 dxgi d3dcompiler)
-        set_target_properties(TX_Converter_Omega PROPERTIES)
+        set_target_properties(TX_Converter_Omega PROPERTIES
             OUTPUT_NAME "${SOLSTICE_TX_TOOLS_OMEGA_NAME}")
         target_compile_definitions(TX_Converter_Omega PRIVATE
             SOLSTICE_TX_CONVERTER_NAME="${SOLSTICE_TX_TOOLS_OMEGA_NAME}"
