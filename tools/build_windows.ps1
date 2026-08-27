@@ -922,7 +922,7 @@ if ($script:FullBuild) {
         '-DSOLSTICE_ENABLE_OPENPGL=ON',
         '-DSOLSTICE_ENABLE_OPENSUBDIV=ON',
         '-DSOLSTICE_ENABLE_OPENVDB=ON',
-        '-DSOLSTICE_ENABLE_OCIO=ON',
+        '-DSOLSTICE_ENABLE_OCIO=OFF',
         '-DSOLSTICE_ENABLE_TINYUSDZ=ON',
         '-DSOLSTICE_BUILD_TX_TOOLS_ALPHA=ON',
         '-DSOLSTICE_BUILD_TX_TOOLS_OMEGA=ON'
@@ -989,11 +989,11 @@ if ($script:FullBuild) {
         }
         Info ($req[1] + ' is compiled into this build.')
     }
-    # Same as 25 Aug: OCIO is AllowFail. Display/View if cmake found it; OptiX does not wait on it.
+    # OCIO is not linked on Windows OptiX (zlib.dll hangs NVIDIA optixInit).
     if (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_OCIO 1' -Quiet) {
-        Info 'OpenColorIO is compiled into this build.'
+        Fail 'OpenColorIO is linked in this Windows OptiX build. That hangs GPU (optixInit / zlib.dll). Rebuild with SOLSTICE_ENABLE_OCIO=OFF.'
     } else {
-        Write-Host 'Warning: OpenColorIO did not enable. Display/View uses Classic. OptiX is unchanged.' -ForegroundColor Yellow
+        Info 'OpenColorIO is not linked (Classic Display/View). OptiX can call optixInit without zlib.dll in-process.'
     }
 }
 
@@ -1102,7 +1102,7 @@ if ($script:DepsPrefix) {
         (Join-Path $script:DepsPrefix 'embree')
     )) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll', 'OpenColorIO*.dll')) {
+        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll')) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $Bin
             }
@@ -1111,8 +1111,8 @@ if ($script:DepsPrefix) {
 }
 
 # NVIDIA optixInit does LoadLibrary("zlib.dll") and searches the exe folder
-# first. Later FULL deploys left zlib.dll there and the GPU probe hung.
-# Aug 25 never copied zlib next to the exe — strip leftovers only.
+# first. OpenColorIO.dll also pulls zlib.dll into the process if it sits next
+# to the exe. Strip both leftovers from older FULL deploys.
 foreach ($name in @('zlib.dll', 'zlibd.dll')) {
     $p = Join-Path $Bin $name
     if (Test-Path -LiteralPath $p) {
@@ -1122,6 +1122,14 @@ foreach ($name in @('zlib.dll', 'zlibd.dll')) {
         } catch {
             Write-Host ("Warning: close Grendizer_Render and delete $p - that DLL hangs OptiX.") -ForegroundColor Yellow
         }
+    }
+}
+Get-ChildItem -LiteralPath $Bin -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+        Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+        Info ("Removed leftover " + $_.Name + " (not linked; its zlib.dll hangs OptiX)")
+    } catch {
+        Write-Host ("Warning: close Grendizer_Render and delete " + $_.FullName) -ForegroundColor Yellow
     }
 }
 $ocioSidecar = Join-Path $Bin 'ocio'

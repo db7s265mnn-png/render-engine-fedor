@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.59 LANGUAGES CXX)
+project(Solstice VERSION 0.9.60 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -68,6 +68,14 @@ option(SOLSTICE_BUILD_TESTS "Build unit tests" ON)
 option(SOLSTICE_BUILD_APP "Build the Qt desktop application" ON)
 option(SOLSTICE_BUILD_TOOLS "Build helper tools (test scene generators)" ON)
 option(SOLSTICE_ENABLE_OCIO "Build with OpenColorIO display views (system lib)" ON)
+
+# OpenColorIO.dll imports zlib.dll. NVIDIA optixInit does LoadLibrary("zlib.dll")
+# and hangs if that copy is already in the process (HUD stuck on "OptiX checking").
+# Windows OptiX builds keep Display/View on Classic. Linux CI is unchanged.
+if(WIN32 AND SOLSTICE_ENABLE_OPTIX AND SOLSTICE_ENABLE_OCIO)
+    message(WARNING "Windows OptiX: OpenColorIO disabled (its zlib.dll hangs optixInit)")
+    set(SOLSTICE_ENABLE_OCIO OFF)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -180,8 +188,7 @@ if(SOLSTICE_ENABLE_OPENEXR)
 endif()
 
 # OpenColorIO — Nuke-style Display/View for the viewport.
-# Windows FULL enables OCIO when cmake finds the SDK (optional, same as 25 Aug).
-# Config/LUTs stay on the user machine.
+# Windows+OptiX leaves this off (zlib.dll vs NVIDIA optixInit). Linux is optional.
 set(SOLSTICE_HAVE_OCIO_01 0)
 set(SOLSTICE_OCIO_TARGET "")
 if(SOLSTICE_ENABLE_OCIO)

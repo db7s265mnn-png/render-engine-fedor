@@ -1340,10 +1340,24 @@ std::condition_variable gOptixProbeCv;
 bool gOptixProbeRunning = false;
 OptixRuntimeState gOptixRuntimeState = OptixRuntimeState::Unknown;
 std::string gOptixRuntimeError;
+std::chrono::steady_clock::time_point gOptixProbeStarted{};
+constexpr auto kOptixProbeTimeout = std::chrono::seconds(20);
 
 void setOptixRuntime(bool ok, std::string error) {
     gOptixRuntimeState = ok ? OptixRuntimeState::Ok : OptixRuntimeState::Fail;
     gOptixRuntimeError = std::move(error);
+}
+
+void markOptixProbeHungLocked() {
+    if (gOptixRuntimeState != OptixRuntimeState::Unknown) return;
+    setOptixRuntime(false, "optixInit hung");
+    logWarning("OptiX runtime probe: optixInit did not return. zlib.dll / OpenColorIO next to the "
+               "exe makes NVIDIA LoadLibrary(\"zlib.dll\") hang. Close the app and rebuild 0.9.60+.");
+}
+
+bool optixProbeTimedOutLocked() {
+    if (!gOptixProbeRunning || gOptixRuntimeState != OptixRuntimeState::Unknown) return false;
+    return (std::chrono::steady_clock::now() - gOptixProbeStarted) >= kOptixProbeTimeout;
 }
 
 // CUDA + optixInit. Must not run on the Qt UI thread: with an Intel display GPU
@@ -1381,6 +1395,7 @@ bool probeOptixRuntimeUnlocked(std::string& error) {
 void kickOptixProbeLocked() {
     if (gOptixRuntimeState != OptixRuntimeState::Unknown || gOptixProbeRunning) return;
     gOptixProbeRunning = true;
+    gOptixProbeStarted = std::chrono::steady_clock::now();
     std::thread([] {
         std::string err;
         bool ok = false;
@@ -1393,7 +1408,11 @@ void kickOptixProbeLocked() {
         }
         {
             std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
-            setOptixRuntime(ok, err);
+            // A HUD/GPU-switch timeout may already have marked Fail while optixInit
+            // was stuck. Do not resurrect a hung probe as success.
+            if (gOptixRuntimeState == OptixRuntimeState::Unknown) {
+                setOptixRuntime(ok, err);
+            }
             gOptixProbeRunning = false;
         }
         gOptixProbeCv.notify_all();
@@ -1405,7 +1424,9 @@ void kickOptixProbeLocked() {
 void waitForOptixProbe() {
     std::unique_lock<std::mutex> lock(gOptixRuntimeMutex);
     kickOptixProbeLocked();
-    gOptixProbeCv.wait(lock, [] { return !gOptixProbeRunning; });
+    if (!gOptixProbeCv.wait_for(lock, kOptixProbeTimeout, [] { return !gOptixProbeRunning; })) {
+        markOptixProbeHungLocked();
+    }
 }
 
 }  // namespace
@@ -1415,18 +1436,30 @@ bool optixBackendCompiledIn() { return true; }
 bool optixRuntimeProbePending() {
     std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
     kickOptixProbeLocked();
+    if (optixProbeTimedOutLocked()) {
+        markOptixProbeHungLocked();
+        return false;
+    }
     return gOptixRuntimeState == OptixRuntimeState::Unknown || gOptixProbeRunning;
 }
 
 bool optixRuntimeAvailable(std::string* error) {
     std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
     kickOptixProbeLocked();
+    if (optixProbeTimedOutLocked()) markOptixProbeHungLocked();
     if (error) *error = gOptixRuntimeError;
     return gOptixRuntimeState == OptixRuntimeState::Ok;
 }
 
 RenderDevicePtr createOptixDevice() {
     waitForOptixProbe();
+    {
+        std::lock_guard<std::mutex> lock(gOptixRuntimeMutex);
+        if (gOptixRuntimeState == OptixRuntimeState::Fail) {
+            logWarning("OptiX backend unavailable: " + gOptixRuntimeError);
+            return nullptr;
+        }
+    }
     auto device = std::make_shared<OptixPathTracer>();
     std::string error;
     if (!device->initialize(error)) {

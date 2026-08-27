@@ -3,13 +3,14 @@ title Grendizer Render - Windows FULL build
 cd /d "%~dp0"
 
 echo.
-echo Double-click this file for the FULL app (OptiX + VDB + MaterialX + Alembic + EXR + OCIO).
+echo Double-click this file for the FULL app (OptiX + VDB + MaterialX + Alembic + EXR).
 echo Visual Studio 2026 needs CUDA 13.2. CUDA 12.0 can stay installed.
 echo Output: C:\gz-full
 echo Close Grendizer_Render first or the linker cannot overwrite the exe (LNK1168).
-echo First full run builds OpenEXR/Alembic/OpenVDB/OCIO (cached after that).
-echo OCIO is optional (same as 25 Aug): Ninja + EXT_PACKAGES=ALL, may skip.
-echo Deploy: embree/tbb/openvdb/OpenColorIO next to the exe. No zlib.dll, no bin\ocio.
+echo First full run builds OpenEXR/Alembic/OpenVDB (cached after that).
+echo OpenColorIO is NOT linked on Windows OptiX: its zlib.dll hangs NVIDIA optixInit
+echo (HUD stuck on OptiX checking). Display/View uses Classic.
+echo Deploy: embree/tbb/openvdb/cudart next to the exe. No zlib.dll, no OpenColorIO.dll.
 echo TinyUSDZ linking can sit with no new lines for a long time - wait.
 echo Keep C:\gz-full and %%LOCALAPPDATA%%\grendizer-deps
 echo Do not delete C:\gz-full (MaterialX / TinyUSDZ / OpenPGL live in _deps).
