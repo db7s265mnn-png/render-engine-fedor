@@ -743,13 +743,47 @@ function Test-MinizipInDeps {
     return $false
 }
 
-function Install-OcioZlibAndMinizip {
-    # OCIO 2.3.2 Installminizip-ng.cmake has no DEPENDS on ZLIB_install, so
-    # EXT_PACKAGES=ALL races: minizip compiles before zlib.h lands (C1083).
-    # Prebuild both with Ninja (flat, no nested ExternalProject), then OCIO
-    # MISSING finds them. Pin minizip-ng 3.0.7 — that is OCIO 2.3.2's recommended tag.
-    # zlib v1.3.1 (not 1.2.13): CMake 4.x removed compat with cmake_minimum_required < 3.5;
-    # 1.2.13 still says VERSION 2.4.4 and configure fails hard.
+function Test-YamlCppInDeps {
+    $hdr = Join-Path $script:DepsPrefix 'include\yaml-cpp\yaml.h'
+    if (-not (Test-Path -LiteralPath $hdr)) { return $false }
+    foreach ($libRel in @('lib', 'lib64')) {
+        $libDir = Join-Path $script:DepsPrefix $libRel
+        if (-not (Test-Path -LiteralPath $libDir)) { continue }
+        $hit = Get-ChildItem -LiteralPath $libDir -Filter 'yaml-cpp*.lib' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($hit) { return $true }
+    }
+    return $false
+}
+
+function Test-ExpatInDeps {
+    $hdr = Join-Path $script:DepsPrefix 'include\expat.h'
+    if (-not (Test-Path -LiteralPath $hdr)) { return $false }
+    foreach ($libRel in @('lib', 'lib64')) {
+        $libDir = Join-Path $script:DepsPrefix $libRel
+        if (-not (Test-Path -LiteralPath $libDir)) { continue }
+        $hit = Get-ChildItem -LiteralPath $libDir -Filter '*expat*.lib' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($hit) { return $true }
+    }
+    return $false
+}
+
+function Test-PystringInDeps {
+    foreach ($rel in @(
+        'include\pystring\pystring.h',
+        'include\pystring.h'
+    )) {
+        if (Test-Path -LiteralPath (Join-Path $script:DepsPrefix $rel)) { return $true }
+    }
+    return $false
+}
+
+function Install-OcioSdkDeps {
+    # Prebuild every OCIO ExternalProject dep with Ninja + POLICY 3.5.
+    # OCIO's nested VS ExternalProjects (yaml-cpp_install, minizip-ng_install, …)
+    # die on CMake 4.x (cmake_minimum < 3.5) and zlib race. MISSING then finds
+    # these and skips ExternalProject entirely.
     if (-not (Test-ZlibInDeps)) {
         $zlibSrc = Join-Path $script:DepsSrc 'zlib'
         if (Test-Path -LiteralPath $zlibSrc) {
@@ -770,8 +804,6 @@ function Install-OcioZlibAndMinizip {
     }
     if (-not (Test-MinizipInDeps)) {
         $mzSrc = Join-Path $script:DepsSrc 'minizip-ng'
-        # Always re-clone: a prior FULL attempt may have left minizip-ng 4.x here.
-        # OCIO 2.3.2 recommends / pins 3.0.7.
         if (Test-Path -LiteralPath $mzSrc) {
             Info 'Removing previous minizip-ng sources (need 3.0.7 for OCIO 2.3.2).'
             Remove-Item -LiteralPath $mzSrc -Recurse -Force
@@ -779,7 +811,6 @@ function Install-OcioZlibAndMinizip {
         Invoke-GitClone 'https://github.com/zlib-ng/minizip-ng.git' '3.0.7' $mzSrc
         $mb = Join-Path $mzSrc 'build'
         if (Test-Path -LiteralPath $mb) { Remove-Item -LiteralPath $mb -Recurse -Force }
-        # Same MZ_* set as OCIO share/cmake/modules/install/Installminizip-ng.cmake
         Invoke-DepCMakeInstall $mzSrc 'minizip-ng' @(
             "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
             "-DZLIB_ROOT=$script:DepsPrefix",
@@ -795,6 +826,81 @@ function Install-OcioZlibAndMinizip {
         }
     } else {
         Info 'minizip-ng already in deps — skipping'
+    }
+    if (-not (Test-YamlCppInDeps)) {
+        # yaml-cpp 0.7.0: cmake_minimum_required(VERSION 3.4) — CMake 4 rejects it
+        # inside OCIO's yaml-cpp_install ExternalProject. Prebuild with POLICY 3.5.
+        $ySrc = Join-Path $script:DepsSrc 'yaml-cpp'
+        if (Test-Path -LiteralPath $ySrc) { Remove-Item -LiteralPath $ySrc -Recurse -Force }
+        Invoke-GitClone 'https://github.com/jbeder/yaml-cpp.git' 'yaml-cpp-0.7.0' $ySrc
+        $yb = Join-Path $ySrc 'build'
+        if (Test-Path -LiteralPath $yb) { Remove-Item -LiteralPath $yb -Recurse -Force }
+        Invoke-DepCMakeInstall $ySrc 'yaml-cpp' @(
+            '-DBUILD_SHARED_LIBS=OFF',
+            '-DYAML_BUILD_SHARED_LIBS=OFF',
+            '-DYAML_CPP_BUILD_TESTS=OFF',
+            '-DYAML_CPP_BUILD_TOOLS=OFF',
+            '-DYAML_CPP_BUILD_CONTRIB=OFF'
+        )
+        if (-not (Test-YamlCppInDeps)) {
+            Fail "yaml-cpp install finished but yaml.h / yaml-cpp*.lib missing under $script:DepsPrefix"
+        }
+    } else {
+        Info 'yaml-cpp already in deps — skipping'
+    }
+    if (-not (Test-ExpatInDeps)) {
+        $eSrc = Join-Path $script:DepsSrc 'expat'
+        if (Test-Path -LiteralPath $eSrc) { Remove-Item -LiteralPath $eSrc -Recurse -Force }
+        Invoke-GitClone 'https://github.com/libexpat/libexpat.git' 'R_2_5_0' $eSrc
+        $eb = Join-Path $eSrc 'build'
+        if (Test-Path -LiteralPath $eb) { Remove-Item -LiteralPath $eb -Recurse -Force }
+        $eCmake = Join-Path $eSrc 'expat'
+        if (-not (Test-Path -LiteralPath (Join-Path $eCmake 'CMakeLists.txt'))) {
+            Fail "libexpat R_2_5_0 missing expat/CMakeLists.txt under $eSrc"
+        }
+        Invoke-DepCMakeInstall $eSrc 'expat' @(
+            '-DEXPAT_BUILD_DOCS=OFF', '-DEXPAT_BUILD_EXAMPLES=OFF',
+            '-DEXPAT_BUILD_TESTS=OFF', '-DEXPAT_BUILD_TOOLS=OFF',
+            '-DEXPAT_SHARED_LIBS=OFF'
+        ) -SourceDir $eCmake
+        if (-not (Test-ExpatInDeps)) {
+            Fail "expat install finished but expat.h missing under $script:DepsPrefix"
+        }
+    } else {
+        Info 'expat already in deps — skipping'
+    }
+    if (-not (Test-PystringInDeps)) {
+        # Upstream pystring has no CMakeLists — use OCIO's Buildpystring.cmake.
+        $pSrc = Join-Path $script:DepsSrc 'pystring'
+        if (Test-Path -LiteralPath $pSrc) { Remove-Item -LiteralPath $pSrc -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path (Split-Path $pSrc -Parent) | Out-Null
+        & $Git clone --depth 1 --branch 'v1.1.3' 'https://github.com/imageworks/pystring.git' $pSrc
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $pSrc 'pystring.cpp'))) {
+            Fail 'git clone pystring v1.1.3 failed'
+        }
+        $pCm = Join-Path $pSrc 'CMakeLists.txt'
+        @'
+project(pystring)
+cmake_minimum_required(VERSION 3.10)
+include(GNUInstallDirs)
+set(HEADERS pystring.h)
+set(SOURCES pystring.cpp)
+add_library(${PROJECT_NAME} STATIC ${HEADERS} ${SOURCES})
+set_target_properties(${PROJECT_NAME} PROPERTIES PUBLIC_HEADER "${HEADERS}")
+install(TARGETS ${PROJECT_NAME}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/pystring)
+'@ | Set-Content -Path $pCm -Encoding ascii
+        $pb = Join-Path $pSrc 'build'
+        if (Test-Path -LiteralPath $pb) { Remove-Item -LiteralPath $pb -Recurse -Force }
+        Invoke-DepCMakeInstall $pSrc 'pystring' @('-DBUILD_SHARED_LIBS=OFF')
+        if (-not (Test-PystringInDeps)) {
+            Fail "pystring install finished but pystring.h missing under $script:DepsPrefix"
+        }
+    } else {
+        Info 'pystring already in deps — skipping'
     }
 }
 
@@ -833,8 +939,8 @@ Install VS 2022 or VS 2026 Desktop development with C++, then re-run BUILD_WINDO
 Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
 "@
     }
-    Info 'OpenColorIO SDK deps: zlib 1.3.1 + minizip-ng 3.0.7 (prebuilt, avoids C1083 / CMake 4).'
-    Install-OcioZlibAndMinizip
+    Info 'OpenColorIO SDK deps: zlib, minizip-ng, yaml-cpp, expat, pystring (prebuilt; no nested ExternalProject).'
+    Install-OcioSdkDeps
     # Fresh clone if the tree looks incomplete (failed prior attempt).
     $cm = Join-Path $src 'CMakeLists.txt'
     $hdrProbe = Join-Path $src 'include\OpenColorIO\OpenColorIO.h'
@@ -845,7 +951,7 @@ Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
     Info 'Downloading OpenColorIO SDK sources (AcademySoftwareFoundation/OpenColorIO v2.3.2) ...'
     Invoke-GitClone 'https://github.com/AcademySoftwareFoundation/OpenColorIO.git' 'v2.3.2' $src
     if (Test-Path -LiteralPath $b) {
-        Info 'Removing previous OCIO build tree (wipe broken minizip ExternalProject leftovers).'
+        Info 'Removing previous OCIO build tree (wipe broken yaml-cpp/minizip ExternalProject leftovers).'
         Remove-Item -LiteralPath $b -Recurse -Force
     }
     $ocioFlags = @(
@@ -863,12 +969,15 @@ Keep C:\gz-full and %LOCALAPPDATA%\grendizer-deps.
         "-DZLIB_ROOT=$script:DepsPrefix",
         "-Dminizip-ng_ROOT=$script:DepsPrefix",
         '-Dminizip-ng_STATIC_LIBRARY=ON',
+        "-Dyaml-cpp_ROOT=$script:DepsPrefix",
+        "-Dexpat_ROOT=$script:DepsPrefix",
+        "-Dpystring_ROOT=$script:DepsPrefix",
         '-DCMAKE_POLICY_VERSION_MINIMUM=3.5'
     )
     $usedGen = $null
     foreach ($vsGen in $candidates) {
         if (Test-Path -LiteralPath $b) { Remove-Item -LiteralPath $b -Recurse -Force }
-        Info ('Compiling OpenColorIO SDK: ' + ($vsGen -join ' ') + ' + MISSING (prebuilt zlib+minizip)')
+        Info ('Compiling OpenColorIO SDK: ' + ($vsGen -join ' ') + ' + MISSING (all ext deps prebuilt)')
         $cfg = @('-S', $src, '-B', $b) + $vsGen + $ocioFlags
         & $CMake @cfg
         if ($LASTEXITCODE -eq 0) {
@@ -910,18 +1019,20 @@ Close Grendizer if a DLL is locked.
     if ($hit.Dll) { Info ("OpenColorIO DLL: " + $hit.Dll) }
 }
 
-function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [switch]$AllowFail) {
+function Invoke-DepCMakeInstall([string]$Src, [string]$Name, [string[]]$Extra, [switch]$AllowFail, [string]$SourceDir = '') {
+    $cmakeSrc = $Src
+    if ($SourceDir) { $cmakeSrc = $SourceDir }
     $b = Join-Path $Src 'build'
     Info "Building $Name ..."
     $cfg = @(
-        '-S', $Src, '-B', $b, '-G', 'Ninja',
+        '-S', $cmakeSrc, '-B', $b, '-G', 'Ninja',
         "-DCMAKE_BUILD_TYPE=Release",
         "-DCMAKE_INSTALL_PREFIX=$script:DepsPrefix",
         "-DCMAKE_PREFIX_PATH=$script:DepsPrefix",
         "-DCMAKE_MAKE_PROGRAM=$Ninja",
         "-DCMAKE_C_COMPILER=$Cl",
         "-DCMAKE_CXX_COMPILER=$Cl",
-        # CMake 4.x removed compat with cmake_minimum_required < 3.5 (zlib 1.2.x, etc.).
+        # CMake 4.x removed compat with cmake_minimum_required < 3.5 (zlib 1.2.x, yaml-cpp 0.7, etc.).
         '-DCMAKE_POLICY_VERSION_MINIMUM=3.5'
     ) + $Extra
     & $CMake @cfg
