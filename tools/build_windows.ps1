@@ -1289,7 +1289,7 @@ if ($ocioDllPresent -and -not (Test-Path -LiteralPath $zlib1)) {
     }
 }
 if ($ocioDllPresent -and -not (Test-Path -LiteralPath $zlib1)) {
-    Fail ("OpenColorIO is in " + $ocioDir + " but zlib1.dll is not. OpenColorIO_2_3.dll imports zlib1.dll. Not a skip.")
+    Fail ("OpenColorIO is in " + $ocioDir + " but zlib1.dll is not. The exe delay-loads zlib1.dll from ocio. Not a skip.")
 }
 
 Write-Host ''

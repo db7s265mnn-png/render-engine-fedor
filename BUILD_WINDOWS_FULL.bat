@@ -9,7 +9,7 @@ echo Output: C:\gz-full
 echo Close Grendizer_Render first or the linker cannot overwrite the exe (LNK1168).
 echo First full run builds OpenEXR/Alembic/OpenVDB/OCIO from source (cached after that).
 echo If an older FULL stamp skipped OCIO, this run builds only OCIO (other deps stay).
-echo Deploy: embree/tbb/openvdb/cudart next to the exe. OpenColorIO + zlib1.dll go in bin\ocio. Never zlib.dll (exe or ocio) - NVIDIA optixInit hangs.
+echo Deploy: embree/tbb/openvdb/cudart next to the exe. OpenColorIO + zlib1.dll go in bin\ocio and are delay-loaded. Never zlib.dll (exe or ocio) - NVIDIA optixInit hangs.
 echo TinyUSDZ linking can sit with no new lines for a long time - wait.
 echo Keep C:\gz-full and %%LOCALAPPDATA%%\grendizer-deps
 echo Do not delete C:\gz-full (MaterialX / TinyUSDZ / OpenPGL live in _deps).

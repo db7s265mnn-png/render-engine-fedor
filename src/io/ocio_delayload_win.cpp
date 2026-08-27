@@ -1,7 +1,7 @@
-// Windows: OpenColorIO_2_3.dll imports zlib1.dll. NVIDIA optixInit
+// Windows: OpenColorIO_2_3.dll and the exe import zlib1.dll. NVIDIA optixInit
 // LoadLibrary("zlib.dll") hangs if that file is next to the exe or on the
-// process search path. Keep OpenColorIO + zlib1.dll in bin/ocio and delay-load
-// only OpenColorIO (zlib1 comes in as its dependency from that folder).
+// process search path. Keep OpenColorIO + zlib1.dll in bin/ocio; delay-load
+// both so the process can start. Never delay-load or hook zlib.dll.
 #if defined(_WIN32)
 
 #include "io/ocio_util.h"
@@ -33,9 +33,9 @@ static std::wstring solsticeOcioDirW() { return solsticeExeDirW() + L"\\ocio"; }
 
 static bool nameIsOcioRuntimeDll(const char* name) {
     if (!name || !name[0]) return false;
-    // Never hook zlib.dll — NVIDIA optixInit LoadLibrary("zlib.dll") must
-    // resolve to System32, not bin\ocio.
-    return _strnicmp(name, "OpenColorIO", 11) == 0;
+    // zlib1.dll is delay-loaded from bin\ocio. Never hook zlib.dll — NVIDIA
+    // optixInit LoadLibrary("zlib.dll") must resolve to System32.
+    return _stricmp(name, "zlib1.dll") == 0 || _strnicmp(name, "OpenColorIO", 11) == 0;
 }
 
 static HMODULE loadFromOcioDir(const char* dllName) {
