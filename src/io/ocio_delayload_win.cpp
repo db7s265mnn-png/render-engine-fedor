@@ -5,8 +5,8 @@
 
 #include "io/ocio_util.h"
 
-#include <delayimp.h>
 #include <windows.h>
+#include <delayimp.h>
 
 #include <cstring>
 #include <string>
