@@ -854,10 +854,37 @@ function Install-OcioSdkDeps {
         Info 'yaml-cpp already in deps — skipping'
     }
     if (-not (Test-ExpatInDeps)) {
+        # libexpat tag R_2_5_0 is annotated ("is not a commit"); shallow
+        # --branch clone leaves an empty tree. Download the GitHub archive instead.
+        # CMakeLists.txt lives under expat/, not the repo root.
         $eSrc = Join-Path $script:DepsSrc 'expat'
         if (Test-Path -LiteralPath $eSrc) { Remove-Item -LiteralPath $eSrc -Recurse -Force }
-        # libexpat CMakeLists lives in expat/CMakeLists.txt (repo root has none).
-        Invoke-GitClone 'https://github.com/libexpat/libexpat.git' 'R_2_5_0' $eSrc 'expat\CMakeLists.txt'
+        New-Item -ItemType Directory -Force -Path (Split-Path $eSrc -Parent) | Out-Null
+        $zip = Join-Path $env:TEMP 'libexpat-R_2_5_0.zip'
+        $url = 'https://github.com/libexpat/libexpat/archive/refs/tags/R_2_5_0.zip'
+        Info "Downloading libexpat R_2_5_0 archive (annotated tag; not git clone --branch) ..."
+        $oldPref = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            Invoke-WebRequest -Uri $url -OutFile $zip
+        } finally {
+            $ProgressPreference = $oldPref
+        }
+        if (-not (Test-Path -LiteralPath $zip)) {
+            Fail "Failed to download $url"
+        }
+        $extractRoot = Join-Path $env:TEMP ('libexpat-extract-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+        Expand-Archive -Path $zip -DestinationPath $extractRoot -Force
+        $unpacked = Get-ChildItem -LiteralPath $extractRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'expat\CMakeLists.txt') } |
+            Select-Object -First 1
+        if (-not $unpacked) {
+            Fail "libexpat R_2_5_0 zip extracted but expat/CMakeLists.txt not found under $extractRoot"
+        }
+        Move-Item -LiteralPath $unpacked.FullName -Destination $eSrc
+        Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
         $eb = Join-Path $eSrc 'build'
         if (Test-Path -LiteralPath $eb) { Remove-Item -LiteralPath $eb -Recurse -Force }
         $eCmake = Join-Path $eSrc 'expat'
