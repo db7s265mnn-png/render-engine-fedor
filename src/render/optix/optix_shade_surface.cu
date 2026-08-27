@@ -1,13 +1,12 @@
 // Cycles analogue: integrator_shade_surface.
-// Camera NEE still writes a shadow ray for intersect_shadow.
-// Eye-path MNEE (GPU engine 0) is the one place shade calls optixTrace: Newton
-// probes save/restore GpuHit. Opaque BSDF weights: pbrt RGBAlbedoSpectrum.
-// Light-trace: splat on connectable vertices after a spec prefix, then continue
-// (do not splat from the caster, do not kill the SDS path).
+// No optixTrace — NEE writes a shadow ray for intersect_shadow.
+// Opaque BSDF weights: pbrt RGBAlbedoSpectrum (CPU liftBsdfWeight). Dielectric stays 1/η².
+// NEE bakes throughput at the vertex (pbrt SampleLd) before the BSDF/RR step.
+// Light-trace is SDS-only: first connectable after a spec prefix, then stop.
+// While LT is on, camera PT skips the SDS suffix so the two don't double-count.
 #include "render/lights.h"
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_light_trace.cuh"
-#include "render/optix/optix_mnee.cuh"
 #include "render/optix/optix_spawn.cuh"
 #include "render/optix/optix_spectral.cuh"
 #include "render/optix/optix_volume.cuh"
@@ -144,9 +143,11 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     const Frame frame(si.ns);
     if (path.lightPath) {
         const Vec3 woLocal = frame.toLocal(wo);
-        if (gpuLightVertexConnectable(mat, woLocal)) {
+        const bool connectable = gpuLightVertexConnectable(mat, woLocal);
+        if (connectable) {
             tryEnqueueCausticSplat(pixel, path, shadow, si, mat, frame, wo);
-            path.specPrefix = 0;
+            terminatePath(pixel, path);
+            return;
         }
     }
 
@@ -169,28 +170,24 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             sampleLight(scene, lightIndex, si.p, path.rng.nextFloat(), path.rng.nextFloat(), ls) &&
             ls.pdf > 0.0f && !isBlack(ls.radiance) &&
             shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) {
-            const bool mneeHandled =
-                tryGpuMneeNee(pixel, path, shadow, si, mat, frame, wo, lightIndex, ls, selectPdf);
-            if (!mneeHandled) {
-                const Vec3 woLocal = frame.toLocal(wo);
-                const Vec3 wiLocal = frame.toLocal(ls.wi);
-                const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
-                if (be.pdf > 0.0f && !isBlack(be.f)) {
-                    const float lightPdf = ls.pdf * selectPdf;
-                    const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
-                    const float scale = (fabsf(wiLocal.z) / lightPdf) * mis;
-                    float neeS[kMaxSpectrumSamples];
-                    evalSurfaceNeeSpectral(scene.lights[lightIndex], ls.radiance, mat, woLocal, wiLocal,
-                                           scale, path, mat.ior, neeS);
-                    const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
-                    float tMax = 1.0e8f;
-                    if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-                    enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS,
-                                           path.mediumIndex, scene.lights[lightIndex].shadowEnable,
-                                           pathContributionClamp(scene.settings, path.depth,
-                                                                 path.specularBounce != 0,
-                                                                 path.causticSuffix != 0));
-                }
+            const Vec3 woLocal = frame.toLocal(wo);
+            const Vec3 wiLocal = frame.toLocal(ls.wi);
+            const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
+            if (be.pdf > 0.0f && !isBlack(be.f)) {
+                const float lightPdf = ls.pdf * selectPdf;
+                const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
+                const float scale = (fabsf(wiLocal.z) / lightPdf) * mis;
+                float neeS[kMaxSpectrumSamples];
+                evalSurfaceNeeSpectral(scene.lights[lightIndex], ls.radiance, mat, woLocal, wiLocal,
+                                       scale, path, mat.ior, neeS);
+                const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
+                float tMax = 1.0e8f;
+                if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
+                enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS,
+                                       path.mediumIndex, scene.lights[lightIndex].shadowEnable,
+                                       pathContributionClamp(scene.settings, path.depth,
+                                                             path.specularBounce != 0,
+                                                             path.causticSuffix != 0));
             }
         }
     }

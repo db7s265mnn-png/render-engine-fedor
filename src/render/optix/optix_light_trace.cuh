@@ -1,22 +1,19 @@
 // SDS-family camera splat for OptiX light paths. No optixTrace.
-// Connectable = lightTraceConnectable (not the caster). After a splat the path
-// continues; specPrefix is cleared by shade so later diffuse hits do not re-splat.
 #pragma once
 
 #include "render/camera_proj.h"
 #include "render/optix/optix_light_emit.cuh"
 #include "render/optix/optix_spectral.cuh"
-#include "render/shading_bsdf.h"
 
 namespace sol {
 
 __device__ inline bool gpuLightVertexConnectable(const Material& mat, Vec3 woLocal) {
-    return lightTraceConnectable(mat, woLocal);
+    const LobeWeights lw = computeLobes(mat, woLocal);
+    return !(lw.delta && lw.diffuse < 1e-4f);
 }
 
-// SDS family: light → near-spec chain → connectable → camera splat, then the
-// path continues (caster is not connectable, so glass does not splat-and-die).
-// Camera PT skips the SDS suffix while LT is running so the two don't double-count.
+// SDS family only: light → near-spec chain → first connectable → camera, then stop.
+// Unweighted vs camera PT: camera skips the SDS suffix while LT is running.
 __device__ inline void tryEnqueueCausticSplat(int pixel, GpuPath& path, GpuShadow& shadow, const Surf& si,
                                               const Material& mat, const Frame& frame, Vec3 wo) {
     const LaunchParams& params = launchParams();

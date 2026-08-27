@@ -420,27 +420,6 @@ void testBsdf() {
     }
     check(transmitted > 1000, "most glass samples refract at normal incidence");
 
-    {
-        Material deltaGlass;
-        deltaGlass.transmission = 1.0f;
-        deltaGlass.ior = 1.5f;
-        deltaGlass.roughness = 0.0f;
-        Material roughGlass = deltaGlass;
-        roughGlass.roughness = 0.1f;
-        Material floor;
-        floor.baseColor = Vec3(0.7f, 0.7f, 0.7f);
-        floor.roughness = 0.4f;
-        const Vec3 woN(0.0f, 0.0f, 1.0f);
-        check(isDeltaCausticCaster(deltaGlass), "smooth glass is a delta MNEE caster");
-        check(!isDeltaCausticCaster(roughGlass), "roughness 0.1 glass is not a delta MNEE caster");
-        check(!lightTraceConnectable(deltaGlass, woN), "delta glass is not an LT connectable");
-        check(!lightTraceConnectable(roughGlass, woN), "rough glass is not an LT connectable (continue, no splat)");
-        check(lightTraceConnectable(floor, woN), "Lambert floor is an LT connectable");
-        Material noCau = deltaGlass;
-        noCau.contributeCaustics = 0;
-        check(!isDeltaCausticCaster(noCau), "contribute_caustics=0 is not an MNEE caster");
-    }
-
     // Specular = 0 must disable dielectric reflections completely.
     Material matte;
     matte.baseColor = Vec3(0.7f, 0.7f, 0.7f);
@@ -968,37 +947,6 @@ void testXpuDevice() {
             settings->setParameterValue("backend", 2);
             check(evaluateVisibleWhen(sched->visibleWhen, *settings), "XPU Schedule visible on XPU");
         }
-        const Parameter* cpuCau = settings->findParameter(QLatin1String("causticsengine"));
-        const Parameter* gpuCau = settings->findParameter(QLatin1String("causticsenginegpu"));
-        check(cpuCau != nullptr, "CPU caustics engine parameter exists");
-        check(gpuCau != nullptr, "GPU caustics engine parameter exists");
-        if (cpuCau && gpuCau) {
-            check(cpuCau->menuItems.size() == 4, "CPU caustics menu has 4 engines");
-            check(gpuCau->menuItems.size() == 2, "GPU caustics menu has MNEE+LT / MCMC");
-            check(gpuCau->menuItems[0].contains(QLatin1String("MNEE")), "GPU default label is MNEE + Light Trace");
-            check(gpuCau->menuItems[1].contains(QLatin1String("MCMC")), "GPU second label is MCMC");
-            settings->setParameterValue("integrator", 0);
-            settings->setParameterValue("backend", 0);
-            check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings), "CPU caustics engine visible on CPU");
-            check(!evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "GPU caustics engine hidden on CPU");
-            settings->setParameterValue("backend", 1);
-            check(!evaluateVisibleWhen(cpuCau->visibleWhen, *settings), "CPU caustics engine hidden on GPU");
-            check(evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "GPU caustics engine visible on GPU");
-            settings->setParameterValue("backend", 2);
-            check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings), "CPU caustics engine visible on XPU");
-            check(evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "GPU caustics engine visible on XPU");
-            settings->setParameterValue("causticsenginegpu", 1);
-            CookContext cauCtx;
-            StagePtr cauStage = graph.cookDisplay(cauCtx);
-            check(cauStage != nullptr, "GPU caustics cook produces a stage");
-            ScenePtr cauScene = cauStage->toScene();
-            check(cauScene->settings.causticsEngineGpu == kGpuCausticsMcmc, "causticsenginegpu 1 cooks to MCMC");
-            settings->setParameterValue("causticsenginegpu", 0);
-            cauStage = graph.cookDisplay(cauCtx);
-            cauScene = cauStage->toScene();
-            check(cauScene->settings.causticsEngineGpu == kGpuCausticsMneeLt,
-                  "causticsenginegpu 0 cooks to MNEE+LT");
-        }
         settings->setParameterValue("backend", 2);
         settings->setParameterValue("xpuschedule", 0);
         CookContext context;
@@ -1111,7 +1059,6 @@ void testRenderSettingsFolders() {
 
     check(groupOf("caustics") == QLatin1String("Caustics"), "caustics in Caustics");
     check(groupOf("causticsengine") == QLatin1String("Caustics"), "causticsengine in Caustics");
-    check(groupOf("causticsenginegpu") == QLatin1String("Caustics"), "causticsenginegpu in Caustics");
     check(groupOf("causticclamp") == QLatin1String("Caustics"), "causticclamp in Caustics");
     check(groupOf("photoncount") == QLatin1String("Caustics"), "photoncount in Caustics");
     check(groupOf("photonradius") == QLatin1String("Caustics"), "photonradius in Caustics");
@@ -1124,8 +1071,8 @@ void testRenderSettingsFolders() {
         }
         const QStringList causticsExpected{
             QStringLiteral("caustics"), QStringLiteral("causticsengine"),
-            QStringLiteral("causticsenginegpu"), QStringLiteral("causticclamp"),
-            QStringLiteral("photoncount"), QStringLiteral("photonradius")};
+            QStringLiteral("causticclamp"), QStringLiteral("photoncount"),
+            QStringLiteral("photonradius")};
         check(causticsOrder == causticsExpected, "caustics tab parameter order");
     }
 
