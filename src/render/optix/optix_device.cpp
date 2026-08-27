@@ -34,6 +34,16 @@
 #include "render/rgb_spectrum_tables.h"
 #include "scene/volume_grid.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 // Emitted by the build from the wavefront OptiX modules.
 extern "C" const unsigned char solsticeOptixInitIr[];
 extern "C" const unsigned long long solsticeOptixInitIrSize;
@@ -84,6 +94,26 @@ void contextLog(unsigned int level, const char* tag, const char* message, void*)
         logDebug(text);
     }
 }
+
+#ifdef _WIN32
+// OpenColorIO_2_3.dll needs zlib.dll next to the exe. nvoptix LoadLibrary("zlib.dll")
+// would pick that copy (exe directory is searched first) and hang. While CUDA/OptiX
+// load, search System32 only; restore afterwards. Process imports (OCIO) already loaded.
+struct HideExeDirFromLoadLibrary {
+    HideExeDirFromLoadLibrary() {
+        wchar_t sys[MAX_PATH] = {};
+        if (GetSystemDirectoryW(sys, MAX_PATH) > 0)
+            SetDllDirectoryW(sys);
+        else
+            SetDllDirectoryW(L"");
+    }
+    ~HideExeDirFromLoadLibrary() { SetDllDirectoryW(nullptr); }
+    HideExeDirFromLoadLibrary(const HideExeDirFromLoadLibrary&) = delete;
+    HideExeDirFromLoadLibrary& operator=(const HideExeDirFromLoadLibrary&) = delete;
+};
+#else
+struct HideExeDirFromLoadLibrary {};
+#endif
 
 std::string optixFailMessage(OptixResult result, const char* call) {
     std::ostringstream oss;
@@ -245,27 +275,29 @@ public:
     bool initialize(std::string& error) {
         try {
             int deviceCount = 0;
-            const cudaError_t status = cudaGetDeviceCount(&deviceCount);
-            if (status != cudaSuccess || deviceCount == 0) {
-                error = "no CUDA capable device found";
-                return false;
-            }
-            CUDA_CHECK(cudaSetDevice(0));
-            CUDA_CHECK(cudaFree(nullptr));  // create the primary context
-
             cudaDeviceProp properties{};
-            CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
-            deviceName_ = properties.name;
+            {
+                const HideExeDirFromLoadLibrary hideExeDir;
+                const cudaError_t status = cudaGetDeviceCount(&deviceCount);
+                if (status != cudaSuccess || deviceCount == 0) {
+                    error = "no CUDA capable device found";
+                    return false;
+                }
+                CUDA_CHECK(cudaSetDevice(0));
+                CUDA_CHECK(cudaFree(nullptr));  // create the primary context
+                CUDA_CHECK(cudaGetDeviceProperties(&properties, 0));
+                deviceName_ = properties.name;
 
-            OPTIX_CHECK(optixInit());
+                OPTIX_CHECK(optixInit());
 
-            OptixDeviceContextOptions options{};
-            options.logCallbackFunction = &contextLog;
-            options.logCallbackLevel = 2;
+                OptixDeviceContextOptions options{};
+                options.logCallbackFunction = &contextLog;
+                options.logCallbackLevel = 2;
 #if OPTIX_VERSION >= 70200
-            options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
+                options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
 #endif
-            OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
+                OPTIX_CHECK(optixDeviceContextCreate(nullptr, &options, &context_));
+            }
 
             CUDA_CHECK(cudaStreamCreate(&stream_));
             CUDA_CHECK(cudaEventCreate(&gpuStartEvent_));
@@ -1349,6 +1381,7 @@ void setOptixRuntime(bool ok, std::string error) {
 // plus an NVIDIA card, cudaGetDeviceCount there often returns 0 / no-device and
 // then the cached failure silently keeps OptiX off for the rest of the session.
 bool probeOptixRuntimeUnlocked(std::string& error) {
+    const HideExeDirFromLoadLibrary hideExeDir;
     int deviceCount = 0;
     const cudaError_t status = cudaGetDeviceCount(&deviceCount);
     if (status != cudaSuccess) {
