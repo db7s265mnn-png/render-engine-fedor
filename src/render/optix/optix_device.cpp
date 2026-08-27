@@ -35,6 +35,10 @@
 #include "render/rgb_spectrum_tables.h"
 #include "scene/volume_grid.h"
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 // Emitted by the build from the wavefront OptiX modules.
 extern "C" const unsigned char solsticeOptixInitIr[];
 extern "C" const unsigned long long solsticeOptixInitIrSize;
@@ -1351,8 +1355,8 @@ void setOptixRuntime(bool ok, std::string error) {
 void markOptixProbeHungLocked() {
     if (gOptixRuntimeState != OptixRuntimeState::Unknown) return;
     setOptixRuntime(false, "optixInit hung");
-    logWarning("OptiX runtime probe: optixInit did not return. zlib.dll / OpenColorIO next to the "
-               "exe makes NVIDIA LoadLibrary(\"zlib.dll\") hang. Close the app and rebuild 0.9.60+.");
+    logWarning("OptiX runtime probe: optixInit did not return. zlib.dll next to the "
+               "exe makes NVIDIA LoadLibrary(\"zlib.dll\") hang. Close the app and use 0.9.61+.");
 }
 
 bool optixProbeTimedOutLocked() {
@@ -1360,10 +1364,44 @@ bool optixProbeTimedOutLocked() {
     return (std::chrono::steady_clock::now() - gOptixProbeStarted) >= kOptixProbeTimeout;
 }
 
-// CUDA + optixInit. Must not run on the Qt UI thread: with an Intel display GPU
-// plus an NVIDIA card, cudaGetDeviceCount there often returns 0 / no-device and
-// then the cached failure silently keeps OptiX off for the rest of the session.
+#if defined(_WIN32)
+// nvoptix.dll is in System32. Its LoadLibrary("zlib.dll") still searches the
+// exe folder first; a leftover zlib.dll there hangs optixInit forever.
+// Load NVIDIA's copies from System32 before that search runs, and temporarily
+// drop the exe dir from the process DLL path (safe only before QApplication).
+void preloadWindowsNvoptix() {
+    wchar_t sys[MAX_PATH];
+    const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return;
+    const std::wstring sysDir(sys);
+    LoadLibraryExW((sysDir + L"\\zlib.dll").c_str(), nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    const DWORD kNvFlags = LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR;
+    HMODULE nv = LoadLibraryExW((sysDir + L"\\nvoptix.dll").c_str(), nullptr, kNvFlags);
+    if (!nv) {
+        nv = LoadLibraryExW(L"nvoptix.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
+    if (nv) {
+        logInfo("OptiX: nvoptix.dll loaded from the Windows system directory");
+    }
+}
+
+struct PinSystem32DllSearch {
+    PinSystem32DllSearch() {
+        wchar_t sys[MAX_PATH];
+        if (GetSystemDirectoryW(sys, MAX_PATH)) SetDllDirectoryW(sys);
+    }
+    ~PinSystem32DllSearch() { SetDllDirectoryW(nullptr); }
+};
+#endif
+
+// CUDA + optixInit. After QApplication starts, cudaGetDeviceCount on the Qt
+// UI thread can miss the NVIDIA GPU (Intel display). The warmup in main()
+// runs this on a worker before Qt. HUD only reads the cached result.
 bool probeOptixRuntimeUnlocked(std::string& error) {
+#if defined(_WIN32)
+    preloadWindowsNvoptix();
+    PinSystem32DllSearch pinSystem32;
+#endif
     int deviceCount = 0;
     const cudaError_t status = cudaGetDeviceCount(&deviceCount);
     if (status != cudaSuccess) {
@@ -1475,6 +1513,10 @@ RenderDevicePtr createOptixDevice() {
         setOptixRuntime(true, {});
     }
     return device;
+}
+
+void optixWarmupRuntime() {
+    waitForOptixProbe();
 }
 
 }  // namespace sol

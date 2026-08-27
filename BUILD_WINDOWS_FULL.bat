@@ -10,6 +10,7 @@ echo Close Grendizer_Render first or the linker cannot overwrite the exe (LNK116
 echo First full run builds OpenEXR/Alembic/OpenVDB (cached after that).
 echo OpenColorIO is NOT linked on Windows OptiX: its zlib.dll hangs NVIDIA optixInit
 echo (HUD stuck on OptiX checking). Display/View uses Classic.
+echo GPU probe runs before the window so Intel iGPU cannot hide the NVIDIA card.
 echo Deploy: embree/tbb/openvdb/cudart next to the exe. No zlib.dll, no OpenColorIO.dll.
 echo TinyUSDZ linking can sit with no new lines for a long time - wait.
 echo Keep C:\gz-full and %%LOCALAPPDATA%%\grendizer-deps

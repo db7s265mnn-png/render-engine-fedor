@@ -11,6 +11,7 @@
 #include "core/log.h"
 #include "io/ocio_util.h"
 #include "nodes/node_registry.h"
+#include "render/render_device.h"
 #include "solstice_config.h"
 #include "ui/main_window.h"
 #include "ui/theme.h"
@@ -71,6 +72,9 @@ void configureParser(QCommandLineParser& parser) {
 
 int main(int argc, char** argv) {
     sol::registerBuiltinNodes();
+    // Before Qt: no Intel GL context yet, so CUDA sees the NVIDIA GPU.
+    // nvoptix.dll is pinned to System32 so exe-dir zlib.dll cannot hang optixInit.
+    sol::optixWarmupRuntime();
 
     if (wantsHeadless(argc, argv)) {
         attachParentConsole();
