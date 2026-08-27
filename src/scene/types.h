@@ -471,8 +471,8 @@ enum GpuCausticsEngine : int {
     // Eye-path MNEE through delta glass + light tracing that continues past the
     // caster (splat only on a true connectable after a spec prefix).
     kGpuCausticsMneeLt = 0,
-    // Iray-style PT + light tracing: independent SampleLe + K direction/origin
-    // mutations per slot (unbiased; every slot mutates, not only hits).
+    // Same GPU transport as MNEE+LT (Iray PT+LT with photon aiming). The menu
+    // label stays "MCMC" for the existing UI / tests; cone mutations are off.
     kGpuCausticsMcmc = 1,
 };
 

@@ -185,7 +185,8 @@ set(_solstice_optix_base
     ${CMAKE_SOURCE_DIR}/src/scene/types.h
     ${CMAKE_SOURCE_DIR}/src/core/math.h
     ${CMAKE_SOURCE_DIR}/src/core/rng.h
-    ${CMAKE_SOURCE_DIR}/src/render/camera_proj.h)
+    ${CMAKE_SOURCE_DIR}/src/render/camera_proj.h
+    ${CMAKE_SOURCE_DIR}/src/render/photon_aim.h)
 
 # Never use the Windows `py` launcher: cmake -P + py.exe hangs after the script
 # prints (pipe/handle leak) and starved ninja so shade_background never started.

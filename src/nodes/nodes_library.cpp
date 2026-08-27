@@ -1262,7 +1262,8 @@ public:
                                           "integrator==1&&backend==1||integrator==1&&backend==2")
                          .withTooltip("CPU / Embree (and the CPU half of XPU).\n"
                                       "When Render Device is GPU this same menu shows the two "
-                                      "OptiX engines: MNEE + Light Trace and MCMC (Iray PT+LT).\n"
+                                      "OptiX engines: MNEE + Light Trace and MCMC (Iray PT+LT "
+                                      "photon aiming).\n"
                                       "Path / BDPT (pbrt, default): Path Tracer BSDF+NEE and BDPT "
                                       "Veach MIS with light-tracing splats — same as pbrt-v4. "
                                       "No MNEE, no photon map. SDS from small lights is noisy.\n"
@@ -1280,14 +1281,17 @@ public:
                          .withVisibleWhen("integrator==0&&backend==2||integrator==1&&backend==2")
                          .withTooltip("OptiX half of XPU (Render Device = GPU uses the Caustics "
                                       "Engine menu above for these same two items).\n"
-                                      "MNEE + Light Trace (default): light tracing that does not "
-                                      "splat from the caster and does not kill the path after a "
-                                      "camera connection — SDS continues to the floor. Eye-path "
-                                      "Newton MNEE stays on CPU (integrator_mnee); compiling those "
-                                      "probes into OptiX shade hangs cicc / optixModuleCreate.\n"
-                                      "MCMC (Iray PT+LT): unidirectional PT + light tracing with "
-                                      "K mutations per slot (ERPT-style, every path, unbiased). "
-                                      "Closest to Iray Photoreal PT+LT caustics.\n"
+                                      "Both items: Iray Photoreal PT+LT with photon aiming "
+                                      "(caster AABBs, mixture pdf, same number of camera and "
+                                      "light paths).\n"
+                                      "MNEE + Light Trace (default): Iray photon aiming + light "
+                                      "tracing SDS (splat on connectable vertices after a spec "
+                                      "prefix). Eye-path Newton MNEE stays on CPU "
+                                      "(integrator_mnee); compiling those probes into OptiX shade "
+                                      "hangs cicc / optixModuleCreate.\n"
+                                      "MCMC (Iray PT+LT): the same aiming transport (Keller 2017 "
+                                      "mixture pdf at caster bounds). Sequential Metropolis / the "
+                                      "old 11° cone that reused Le/pdf is off.\n"
                                       "Photon / VCM stays CPU-only."));
         // Hidden migration: v2 Automatic/MNEE/Photon → MNEE/MNEE+Photon/Photon.
         // v3 inserts pbrt as index 0 and shifts the rest +1.

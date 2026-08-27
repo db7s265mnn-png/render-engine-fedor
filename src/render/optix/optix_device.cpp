@@ -669,11 +669,26 @@ public:
                                      launchParams.scene.lightCount > 0 && launchParams.camProj.valid;
             const int lightSlots = srMax(1, launchW * launchH);
             const int gpuEngine = launchParams.scene.settings.causticsEngineGpu;
-            const int mcmcK =
-                (gpuCaustics && gpuEngine == kGpuCausticsMcmc) ? kGpuMcmcMutations : 0;
-            launchParams.mcmcMutations = mcmcK;
-            launchParams.splatInvLightPaths =
-                gpuCaustics ? 1.0f / float(lightSlots * (1 + mcmcK)) : 0.0f;
+            // Iray 2017: one camera path and one light path per slot. Cone MCMC
+            // reused SampleLe beta on a different direction (biased filaments).
+            launchParams.mcmcMutations = 0;
+            launchParams.splatInvLightPaths = gpuCaustics ? 1.0f / float(lightSlots) : 0.0f;
+            GpuPhotonCluster hostClusters[kMaxGpuPhotonClusters];
+            int nAim = 0;
+            if (gpuCaustics && scene_) {
+                const SceneView hostView = scene_->view();
+                nAim = fillPhotonAimClusters(hostView, hostClusters, kMaxGpuPhotonClusters);
+            }
+            if (nAim > 0) {
+                photonClusterBuffer_.upload(hostClusters, size_t(nAim));
+                launchParams.photonClusters = photonClusterBuffer_.as<const GpuPhotonCluster>();
+                launchParams.photonClusterCount = nAim;
+                launchParams.photonAimMix = kGpuPhotonAimMix;
+            } else {
+                launchParams.photonClusters = nullptr;
+                launchParams.photonClusterCount = 0;
+                launchParams.photonAimMix = 0.0f;
+            }
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
             launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();
             launchParams.volumeCount = gpuVolumeCount_;
@@ -743,11 +758,11 @@ public:
                     << "  " << width << "x" << height << "  batch=" << batch
                     << "  wavefront=" << launches << " launches";
                 if (gpuCaustics) {
-                    msg << "  caustics=";
+                    msg << "  caustics=Iray LT aim n=" << nAim << " mix=" << launchParams.photonAimMix;
                     if (gpuEngine == kGpuCausticsMcmc)
-                        msg << "MCMC(PT+LT,K=" << mcmcK << ")";
+                        msg << "  menu=MCMC";
                     else
-                        msg << "MNEE+LT";
+                        msg << "  menu=MNEE+LT";
                 }
                 logInfo(msg.str());
             }
@@ -1207,6 +1222,7 @@ private:
         volumeViewBuffer_.free();
         volumeDensityBuffers_.clear();
         gpuVolumeCount_ = 0;
+        photonClusterBuffer_.free();
         iasHandle_ = 0;
         destroyGraph();
         deviceScene_ = SceneView();
@@ -1319,6 +1335,7 @@ private:
     DeviceBuffer volumeViewBuffer_;
     DeviceBuffer lightBvhBuffer_;
     DeviceBuffer infiniteLightIndexBuffer_;
+    DeviceBuffer photonClusterBuffer_;
     std::vector<DeviceBuffer> volumeDensityBuffers_;
     int gpuVolumeCount_ = 0;
     DeviceBuffer instanceDescBuffer_;

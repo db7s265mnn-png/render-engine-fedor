@@ -43,6 +43,7 @@
 #include "render/pixel_filter.h"
 #include "render/metal_spectra.h"
 #include "render/photon_map.h"
+#include "render/photon_aim.h"
 #include "render/physical_sky.h"
 #include "render/render_session.h"
 #include "render/shading.h"
@@ -2302,6 +2303,102 @@ void testBdptCausticThroughRefraction() {
     // Both must still beat caustics-off by a wide margin (checks above).
     check(ratio > 0.4 && ratio < 2.0, "BDPT and PT through-glass caustic energy agree");
     std::printf("  bdptOn=%.1f bdptOff=%.1f ptOn=%.1f ratio=%.3f\n", sumBdptOn, sumBdptOff, sumPtOn, ratio);
+}
+
+// Iray photon aiming: mixture pdf, screen solid angle, caster clusters.
+void testPhotonAim() {
+    std::printf("photon-aim\n");
+
+    const Vec3 center(0.0f, 0.0f, 10.0f);
+    const float radius = 1.0f;
+    const float farOmega = gpuScreenSolidAngle(Vec3(0.0f, 0.0f, 0.0f), center, radius);
+    const float nearOmega = gpuScreenSolidAngle(Vec3(0.0f, 0.0f, 4.0f), center, radius);
+    check(nearOmega > farOmega * 1.5f, "closer camera → larger caster solid angle");
+    check(farOmega > 0.0f, "far solid angle positive");
+
+    GpuPhotonCluster cluster;
+    cluster.center = Vec3(0.0f, 0.0f, 0.0f);
+    cluster.radius = 1.0f;
+    cluster.weight = 1.0f;
+    const Vec3 planeC(0.0f, 0.0f, 0.0f);
+    const Vec3 planeN(0.0f, 1.0f, 0.0f);
+    const float sceneR = 10.0f;
+    const Vec3 aimedP = gpuClusterDiskPoint(cluster, planeC, planeN, Vec2(0.0f, 0.0f));
+    const float mixPdf = gpuPhotonAimMixtureDiskPdf(aimedP, planeC, planeN, sceneR, kGpuPhotonAimMix,
+                                                    &cluster, 1);
+    const float uniPdf = 1.0f / (kPi * sceneR * sceneR);
+    check(mixPdf > uniPdf * 10.0f, "aimed disk mixture pdf >> uniform scene-disk pdf");
+    check(gpuAimDiskPdf(aimedP, planeC, planeN, &cluster, 1) > 0.0f, "aimed point in cluster disk");
+
+    const Vec3 origin(0.0f, 0.0f, 0.0f);
+    GpuPhotonCluster coneC;
+    coneC.center = Vec3(0.0f, 0.0f, 8.0f);
+    coneC.radius = 1.0f;
+    coneC.weight = 1.0f;
+    const Vec3 aimDir = normalize(coneC.center - origin);
+    const float conePdf = gpuAimConePdf(origin, aimDir, &coneC, 1);
+    check(conePdf > 0.0f, "aimed cone pdf of aimed dir > 0");
+    const float missPdf = gpuAimConePdf(origin, Vec3(1.0f, 0.0f, 0.0f), &coneC, 1);
+    check(missPdf == 0.0f, "direction outside caster cone has aim pdf 0");
+    Vec3 sampledDir;
+    check(gpuSamplePhotonAimDir(origin, coneC, 0.25f, 0.4f, sampledDir), "sample cone toward cluster");
+    check(gpuAimConePdf(origin, sampledDir, &coneC, 1) > 0.0f, "sampled aim dir has positive cone pdf");
+    check(gpuPickPhotonCluster(&cluster, 1, 0.0f) == 0, "pick single cluster");
+    check(gpuPickPhotonCluster(&cluster, 1, 0.99f) == 0, "pick single cluster high u");
+
+    auto scene = std::make_shared<Scene>();
+    MeshPtr floor = std::make_shared<Mesh>();
+    floor->positions = {Vec3(-8, 0, -8), Vec3(8, 0, -8), Vec3(8, 0, 8), Vec3(-8, 0, 8)};
+    floor->indices = {0, 2, 1, 0, 3, 2};
+    floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+    floor->validate();
+    const int floorMesh = scene->addMesh(floor);
+    Material floorMat;
+    floorMat.baseColor = Vec3(0.75f);
+    floorMat.roughness = 0.9f;
+    floorMat.specular = 0.0f;
+    const int floorIdx = scene->addMaterial(floorMat);
+    InstanceData floorInst;
+    floorInst.meshIndex = floorMesh;
+    floorInst.materialIndex = floorIdx;
+    scene->instances.push_back(floorInst);
+
+    MeshPtr ball = makeSphereMesh(0.7f, 24, 16);
+    const int ballMesh = scene->addMesh(ball);
+    Material glass;
+    glass.baseColor = Vec3(1.0f);
+    glass.roughness = 0.0f;
+    glass.transmission = 1.0f;
+    glass.ior = 1.5f;
+    glass.specular = 1.0f;
+    const int glassIdx = scene->addMaterial(glass);
+    InstanceData ballInst;
+    ballInst.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+    ballInst.meshIndex = ballMesh;
+    ballInst.materialIndex = glassIdx;
+    scene->instances.push_back(ballInst);
+
+    scene->camera.cameraToWorld =
+        lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+    scene->cameraAuthored = true;
+    scene->finalize();
+
+    GpuPhotonCluster clusters[kMaxGpuPhotonClusters];
+    const int n = fillPhotonAimClusters(scene->view(), clusters, kMaxGpuPhotonClusters);
+    check(n == 1, "glass sphere is the only photon-aim cluster");
+    if (n == 1) {
+        check(clusters[0].radius < 2.0f, "cluster radius is the Buddha-sized sphere, not the ground");
+        check(std::fabs(clusters[0].weight - 1.0f) < 1e-4f, "single cluster weight is 1");
+        check(clusters[0].center.y > 0.3f, "cluster centered on the glass, not y=0 ground");
+    }
+
+    scene->materials[glassIdx].contributeCaustics = 0;
+    GpuPhotonCluster offClusters[kMaxGpuPhotonClusters];
+    const int nOff = fillPhotonAimClusters(scene->view(), offClusters, kMaxGpuPhotonClusters);
+    check(nOff == 0, "Contribute to Caustics off → no aim clusters");
+
+    std::printf("  solidAngle near/far=%.3f mixPdf/uni=%.1f clusters=%d\n", nearOmega / farOmega,
+                mixPdf / uniPdf, n);
 }
 
 // Photon / VCM caustic engine: must deliver more energy under glass than caustics
@@ -7545,6 +7642,7 @@ int main() {
     testBdptDistantSunCaustics();
     testCameraProjShared();
     testBdptCausticThroughRefraction();
+    testPhotonAim();
     testPhotonCaustics();
     testRoughGlassCaustics();
     testRefractionSparkleClamp();

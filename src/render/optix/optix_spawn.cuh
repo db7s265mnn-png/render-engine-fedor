@@ -146,14 +146,15 @@ __device__ inline bool spawnLightPath(int pixel, int x, int y, int sampleOffset)
     path.mcmcN = emit.n;
     path.mcmcBetaRgb = emit.betaRgb;
     path.mcmcInfinite = emit.infinite;
-    path.mcmcRemain = params.mcmcMutations > 0 ? params.mcmcMutations : 0;
+    path.mcmcRemain = 0;
     applySpawnMedium(params, path);
     path.queue = kQueueIntersectClosest;
     return true;
 }
 
-// ERPT-style mutation of the stored SampleLe. Same wavelengths and pdf family;
-// does not bump localSample / accum.w. Every slot mutates K times (unbiased).
+// ERPT-style mutation of the stored SampleLe. Unused: Iray photon aiming
+// replaced the 11° cone that reused Le/pdf (that piled energy on filaments).
+// Kept so mcmcRemain==0 is a no-op rather than a missing symbol.
 __device__ inline bool spawnLightPathMutation(int pixel) {
     const LaunchParams& params = launchParams();
     GpuPath& path = params.paths[pixel];
