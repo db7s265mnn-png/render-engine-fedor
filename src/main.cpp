@@ -73,7 +73,7 @@ void configureParser(QCommandLineParser& parser) {
 int main(int argc, char** argv) {
     sol::registerBuiltinNodes();
     // Before Qt: no Intel GL context yet, so CUDA sees the NVIDIA GPU.
-    // nvoptix.dll is pinned to System32 so exe-dir zlib.dll cannot hang optixInit.
+    // nvoptix.dll is pinned to System32; OpenColorIO.dll is delay-loaded after this.
     sol::optixWarmupRuntime();
 
     if (wantsHeadless(argc, argv)) {
