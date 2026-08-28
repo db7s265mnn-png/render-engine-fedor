@@ -26,6 +26,20 @@ inline bool spectrumIsFinite(const SampledSpectrum& s) {
     return true;
 }
 
+// Same RR as spectral Path Tracer. Vertex already on the subpath stays.
+inline bool bdptRussianRouletteSpectral(SampledSpectrum& beta, Rng& rng, int bounceDepth,
+                                        int rrStartDepth, float* qOut = nullptr) {
+    if (bounceDepth < srMax(1, rrStartDepth)) {
+        if (qOut) *qOut = 1.0f;
+        return true;
+    }
+    const float q = clampf(spectrumMaxComponent(beta), 0.05f, 1.0f);
+    if (qOut) *qOut = q;
+    if (rng.nextFloat() > q) return false;
+    beta *= (1.0f / q);
+    return true;
+}
+
 inline SampledSpectrum vertBsdfFSpectral(const bdpt::Vert& v, Vec3 woW, Vec3 wiW,
                                          const SampledWavelengths& w, const RGBColorSpace& cs) {
     if (v.mediumScatter) {
@@ -107,6 +121,14 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 dir = wi;
                 pdfSaFwd = phasePdf;
                 if (cfg.eyePath) rayKind = RayShadeKind::Volume;
+                float qRr = 1.0f;
+                if (!bdptRussianRouletteSpectral(beta, rng, count - 1, scene.settings.rrStartDepth,
+                                                 &qRr))
+                    break;
+#if SOLSTICE_HAVE_OPENPGL
+                if (cfg.eyePath && cfg.guiding && cfg.guiding->active())
+                    cfg.guiding->setRussianRoulette(qRr);
+#endif
                 continue;
             }
         }
@@ -346,6 +368,15 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
 
         beta *= weight;
         if (!spectrumIsFinite(beta) || spectrumNearBlack(beta)) break;
+        {
+            float qRr = 1.0f;
+            if (!bdptRussianRouletteSpectral(beta, rng, count - 1, scene.settings.rrStartDepth, &qRr))
+                break;
+#if SOLSTICE_HAVE_OPENPGL
+            if (cfg.eyePath && cfg.guiding && cfg.guiding->active())
+                cfg.guiding->setRussianRoulette(qRr);
+#endif
+        }
         {
             const LobeWeights lwTerm = computeLobes(cur.mat, woLocal);
             if (shouldTerminateSecondaryWavelengths(bs, lwTerm, cur.mat) &&

@@ -6630,6 +6630,33 @@ void testTxMipmaps() {
 void testBdptShadersAndSss() {
     std::printf("bdpt-shaders-sss\n");
     check(bdpt::kMaxVerts == 1000, "BDPT vertex cap is 1000");
+    {
+        Vec3 beta(0.25f, 0.25f, 0.25f);
+        Rng rngBefore(1u, 2u);
+        check(bdpt::bdptRussianRoulette(beta, rngBefore, 1, 3),
+              "BDPT RR does not run before rrStartDepth");
+        checkNear(beta.x, 0.25f, 1e-6f, "BDPT RR leaves beta unchanged before rrStart");
+
+        Vec3 glassBeta(1.0f, 1.0f, 1.0f);
+        Rng rngGlass(7u, 13u);
+        check(bdpt::bdptRussianRoulette(glassBeta, rngGlass, 30, 3),
+              "BDPT RR never kills throughput 1 (glass)");
+        checkNear(glassBeta.x, 1.0f, 1e-6f, "BDPT RR does not boost throughput 1");
+
+        double acc = 0.0;
+        int lives = 0;
+        const int nTrials = 20000;
+        for (int i = 0; i < nTrials; ++i) {
+            Vec3 t(0.25f, 0.25f, 0.25f);
+            Rng r(uint64_t(1000 + i), 7u);
+            if (bdpt::bdptRussianRoulette(t, r, 3, 3)) {
+                acc += double(t.x);
+                ++lives;
+            }
+        }
+        checkNear(float(acc / double(nTrials)), 0.25f, 0.02f, "BDPT RR is unbiased");
+        check(lives > nTrials / 6 && lives < nTrials / 3, "BDPT RR survival tracks q=0.25");
+    }
 
     auto makeBaseScene = []() {
         auto scene = std::make_shared<Scene>();

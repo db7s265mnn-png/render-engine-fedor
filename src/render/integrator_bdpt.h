@@ -72,6 +72,24 @@ struct Vert {
 
 SR_INL float remap0(float f) { return f > 0.0f ? f : 1.0f; }
 
+// Path Tracer Russian roulette on a BDPT subpath. The vertex already on the
+// path stays connectable; failure only stops growing. bounceDepth is scatter
+// events from the subpath origin (camera or light), same counting as PT depth.
+// Surface: max RGB, floor 0.05. Volume: luminance (volumeRussianRouletteQ).
+SR_INL bool bdptRussianRoulette(Vec3& beta, Rng& rng, int bounceDepth, int rrStartDepth,
+                                float* qOut = nullptr, bool volume = false) {
+    if (bounceDepth < srMax(1, rrStartDepth)) {
+        if (qOut) *qOut = 1.0f;
+        return true;
+    }
+    const float q =
+        volume ? volumeRussianRouletteQ(beta) : clampf(maxComponent(beta), 0.05f, 1.0f);
+    if (qOut) *qOut = q;
+    if (rng.nextFloat() > q) return false;
+    beta *= 1.0f / q;
+    return true;
+}
+
 SR_INL float toAreaPdf(float pdfSa, Vec3 from, Vec3 to, Vec3 nTo) {
     Vec3 d = to - from;
     const float dist2 = lengthSquared(d);
@@ -356,7 +374,8 @@ struct WalkConfig {
 #endif
 };
 
-// Extend a subpath by BSDF sampling.
+// Extend a subpath by BSDF sampling. Russian roulette matches Path Tracer
+// (rrStartDepth, same q): vertices already walked stay; only continuation dies.
 template <typename Tracer>
 SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Vert* path, int count,
                       Vec3 origin, Vec3 dir, float pdfDirSa, int maxVerts, const WalkConfig& cfg) {
@@ -410,6 +429,14 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
                 dir = wi;
                 pdfSaFwd = phasePdf;
                 if (cfg.eyePath) rayKind = RayShadeKind::Volume;
+                float qRr = 1.0f;
+                if (!bdptRussianRoulette(beta, rng, count - 1, scene.settings.rrStartDepth, &qRr,
+                                         true))
+                    break;
+#if SOLSTICE_HAVE_OPENPGL
+                if (cfg.eyePath && cfg.guiding && cfg.guiding->active())
+                    cfg.guiding->setRussianRoulette(qRr);
+#endif
                 continue;
             }
         }
@@ -625,6 +652,15 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         beta = beta * bs.weight;
         if (bs.transmitted) beta = applyFakeDispersionThroughput(beta, cur.mat, cfg.dispersion);
         if (!isFinite(beta) || isBlack(beta)) break;
+        {
+            float qRr = 1.0f;
+            if (!bdptRussianRoulette(beta, rng, count - 1, scene.settings.rrStartDepth, &qRr))
+                break;
+#if SOLSTICE_HAVE_OPENPGL
+            if (cfg.eyePath && cfg.guiding && cfg.guiding->active())
+                cfg.guiding->setRussianRoulette(qRr);
+#endif
+        }
         // Delta segments carry pdf 0 → remap0() treats them as unit ratios in MIS
         // and the delta flags keep those strategies out of the sums (PBRT convention).
         pdfSaFwd = bs.specular ? 0.0f : bs.pdf;

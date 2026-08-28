@@ -1250,6 +1250,9 @@ public:
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 4096)
                          .withGroup("Depth")
                          .withTooltip("Start Russian roulette after this depth.\n"
+                                      "Path Tracer and BDPT use the same test.\n"
+                                      "BDPT only stops growing the subpath; vertices already "
+                                      "walked still connect.\n"
                                       "For deep volume multiple scattering, set near Max Ray Depth."));
 
         // --- Caustics -----------------------------------------------------------------
