@@ -1247,12 +1247,12 @@ public:
                          .withTooltip("Enable caustic light transport (light focused through glass "
                                       "and off mirrors).\n"
                                       "Engine picks the estimator: CPU has pbrt / MNEE / Photon; "
-                                      "GPU has Aimed LT / Aimed LT + MNEE.\n"
+                                      "GPU has Aimed LT / Aimed LT + MNEE / Aimed LT + SDS.\n"
                                       "Per-light and per-material Contribute to Caustics can disable "
                                       "individual sources or casters.\n"
                                       "Off: glass casts dark shadows (soften with shadow_opacity)."));
         // Same "Caustics Engine" row on every device. GPU (backend==1) swaps this
-        // menu's items in the parameter panel to the two OptiX estimators and
+        // menu's items in the parameter panel to the OptiX estimators and
         // writes causticsenginegpu — otherwise GPU hid this row and the second
         // menu was easy to miss. XPU shows both rows.
         addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
@@ -1264,8 +1264,8 @@ public:
                                           "integrator==0&&backend==2||integrator==1&&backend==0||"
                                           "integrator==1&&backend==1||integrator==1&&backend==2")
                          .withTooltip("CPU / Embree (and the CPU half of XPU).\n"
-                                      "When Render Device is GPU this same menu shows the two "
-                                      "OptiX engines: Aimed LT and Aimed LT + MNEE.\n"
+                                      "When Render Device is GPU this same menu shows the three "
+                                      "OptiX engines: Aimed LT, Aimed LT + MNEE, Aimed LT + SDS.\n"
                                       "Path / BDPT (pbrt, default): Path Tracer BSDF+NEE and BDPT "
                                       "Veach MIS with light-tracing splats — same as pbrt-v4. "
                                       "No MNEE, no photon map. SDS from small lights is noisy.\n"
@@ -1278,12 +1278,12 @@ public:
                                       "Photon / VCM: caustic-only photon map — rough glass and "
                                       "black bases through refraction."));
         addParameter(Parameter::makeMenu("causticsenginegpu", "Caustics Engine (GPU)",
-                                         {"Aimed LT", "Aimed LT + MNEE"}, 0)
+                                         {"Aimed LT", "Aimed LT + MNEE", "Aimed LT + SDS"}, 0)
                          .withGroup("Caustics")
                          .withVisibleWhen("integrator==0&&backend==2||integrator==1&&backend==2")
                          .withTooltip("OptiX half of XPU (Render Device = GPU uses the Caustics "
-                                      "Engine menu above for these same two items).\n"
-                                      "Both items: aimed-only light tracing at caster AABBs "
+                                      "Engine menu above for these same three items).\n"
+                                      "All items: aimed-only light tracing at caster AABBs "
                                       "(same number of camera and light paths, no uniform "
                                       "SampleLe mix).\n"
                                       "Aimed LT (default): SDS on directly visible receivers. "
@@ -1300,6 +1300,13 @@ public:
                                       "mesh rarely converges, and opaque NEE made the interior "
                                       "blacker). Not a copy of floor pixels and not fake mesh "
                                       "emission.\n"
+                                      "Aimed LT + SDS: match CPU BDPT (pbrt). Same aimed floor "
+                                      "caustic (LT). Camera SDS after a diffuse bounce is dropped "
+                                      "(BDPT hands LDS to t=1 and drops s=0 SDS under glass). "
+                                      "Finite-light NEE is opaque through contributing glass; "
+                                      "dome/distant still Fresnel-continue after a bounce. No "
+                                      "MNEE wavefront — the eye path continues in path_tail. "
+                                      "Not a copy of floor pixels and not fake mesh emission.\n"
                                       "Photon / VCM stays CPU-only."));
         // Hidden migration: v2 Automatic/MNEE/Photon → MNEE/MNEE+Photon/Photon.
         // v3 inserts pbrt as index 0 and shifts the rest +1.
@@ -1464,7 +1471,8 @@ public:
         settings.volumeSimilarity = boolValue("volumesimilarity", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
         settings.causticsEngine = std::clamp(intValue("causticsengine", 0), 0, 3);
-        settings.causticsEngineGpu = std::clamp(intValue("causticsenginegpu", 0), 0, 1);
+        settings.causticsEngineGpu =
+            std::clamp(intValue("causticsenginegpu", 0), 0, int(kGpuCausticsAimedLtSds));
         settings.causticClamp = float(floatValue("causticclamp", 0.0));
         settings.dispersionMode = intValue("dispersionmode", 0);
         settings.dispersionMaxInterfaces = std::max(1, intValue("dispersionmaxiface", 2));

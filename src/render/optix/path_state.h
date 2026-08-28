@@ -72,6 +72,7 @@ struct GpuPath {
     int causticSuffix = 0;   // camera PT: spec after diffuse (SDS); skip if LT is on
     // 1 = this camera path already refracted through a delta caustic caster.
     // Aimed LT + MNEE: those pixels are the glass, not the floor — keep BSDF.
+    // Aimed LT + SDS: still skip camera SDS here (BDPT s=0 under glass).
     int throughGlass = 0;
     // MCMC / ERPT: stored SampleLe so mutations respawn without a new light pick.
     Vec3 mcmcOrigin{0.0f};

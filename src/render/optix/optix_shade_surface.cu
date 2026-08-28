@@ -204,8 +204,11 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                                                        connectable, lightNee.type));
                 // Aimed LT / Aimed LT + MNEE: depth>0 NEE Fresnel-continues
                 // (CPU Path Tracer glass). MNEE peeks only when the interface
-                // still fully blocks (TIR). Mode 2 also keeps BSDF on throughGlass.
-                // Do not arm on the glass itself (first-hit glass→light).
+                // still fully blocks (TIR). Aimed LT + MNEE also keeps BSDF
+                // on throughGlass. Aimed LT + SDS: finite NEE stays opaque
+                // (CPU BDPT peek); this arming block is skipped because
+                // gpuEyePathMneeEnabled is off. Do not arm on the glass itself
+                // (first-hit glass→light).
                 const bool envLike =
                     lightNee.type == kLightDome || lightNee.type == kLightDistant;
                 const bool wantMnee = gpuRefractionMneeEnabled(scene.settings)

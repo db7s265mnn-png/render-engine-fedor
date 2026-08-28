@@ -773,6 +773,8 @@ public:
                         << (launchParams.photonAimMix >= 1.0f - 1e-5f ? " aimed-only" : "");
                     if (gpuEngine == kGpuCausticsAimedLtMnee)
                         msg << "  menu=Aimed LT+MNEE";
+                    else if (gpuEngine == kGpuCausticsAimedLtSds)
+                        msg << "  menu=Aimed LT+SDS";
                     else
                         msg << "  menu=Aimed LT";
                 }
