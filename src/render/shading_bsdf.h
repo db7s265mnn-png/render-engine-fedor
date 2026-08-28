@@ -381,13 +381,34 @@ SR_INL SR_HD bool isDeltaCausticCaster(const Material& m) {
     return lw.delta && lw.transmission > 0.25f && lw.diffuse < 1e-3f;
 }
 
+// SDS / through-glass bookkeeping: delta and near-spec transmissive casters
+// (roughness 0 and 0.1) share one family. Newton MNEE still uses only
+// isDeltaCausticCaster — roughness 0.1 is not a manifold.
+SR_INL SR_HD bool isTransmissiveCausticCaster(const Material& m) {
+    if (m.contributeCaustics == 0) return false;
+    const LobeWeights lw = computeLobes(m);
+    if (lw.diffuse >= 1e-3f || lw.transmission <= 0.25f) return false;
+    return lw.delta || isNearSpecularLobe(lw);
+}
+
+// Eye-path NEE / BDPT s=1 / vertex connections. Delta and near-specular lobes
+// (α ≤ kCausticAlpha, roughness ≲ 0.22, including glass 0.1) are not connectable:
+// evaluating GGX toward a light is the camera-port glow. BSDF sampling still
+// runs so the slightly-rough look remains. Frosted glass (α > kCausticAlpha)
+// stays connectable.
+SR_INL SR_HD bool eyePathNeeConnectable(const Material& mat, Vec3 woLocal) {
+    const LobeWeights lw = computeLobes(mat, woLocal);
+    if (lw.delta && lw.diffuse < 1e-4f) return false;
+    if (isNearSpecularLobe(lw)) return false;
+    return true;
+}
+
 // Light-trace vertex that may connect to the camera. Casters (delta, near-spec,
 // or transmissive glass including roughness 0.1) are not connectable: do not
 // splat from them and do not kill the path — continue the SDS chain.
 SR_INL SR_HD bool lightTraceConnectable(const Material& mat, Vec3 woLocal) {
+    if (!eyePathNeeConnectable(mat, woLocal)) return false;
     const LobeWeights lw = computeLobes(mat, woLocal);
-    if (lw.delta && lw.diffuse < 1e-4f) return false;
-    if (isNearSpecularLobe(lw)) return false;
     if (lw.transmission > 0.25f && lw.diffuse < 1e-3f) return false;
     return true;
 }

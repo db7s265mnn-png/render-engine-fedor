@@ -171,8 +171,11 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         params.mneeJobs[pixel].armed = 0;
         params.mneeJobs[pixel].pending = 0;
     }
+    // Skip NEE on delta / near-spec glass (roughness 0.1): GGX-toward-light is
+    // the camera-port glow. BSDF sampling below still runs the 0.1 look.
+    const Vec3 woLocalNee = frame.toLocal(wo);
     if (!path.lightPath && !skipCameraSds && !(suppressCausticLight && !path.specularBounce) &&
-        scene.lightCount > 0) {
+        scene.lightCount > 0 && eyePathNeeConnectable(mat, woLocalNee)) {
         float selectPdf = 0.0f;
         const int lightIndex = sampleLightIndex(scene, si.p, path.rng.nextFloat(), selectPdf);
         LightSample ls;
@@ -180,7 +183,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             sampleLight(scene, lightIndex, si.p, path.rng.nextFloat(), path.rng.nextFloat(), ls) &&
             ls.pdf > 0.0f && !isBlack(ls.radiance) &&
             shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) {
-            const Vec3 woLocal = frame.toLocal(wo);
+            const Vec3 woLocal = woLocalNee;
             const Vec3 wiLocal = frame.toLocal(ls.wi);
             const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
             if (be.pdf > 0.0f && !isBlack(be.f)) {
@@ -194,7 +197,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                 float tMax = 1.0e8f;
                 if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
                 const LightData& lightNee = scene.lights[lightIndex];
-                const int connectable = isDeltaCausticCaster(mat) ? 0 : 1;
+                const int connectable = 1;
                 enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS,
                                        path.mediumIndex, lightNee.shadowEnable,
                                        pathContributionClamp(scene.settings, path.depth,
@@ -299,7 +302,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             path.sawNonSpecular = 1;
             path.causticSuffix = 0;
         }
-        if (bs.transmitted && isDeltaCausticCaster(mat)) path.throughGlass = 1;
+        if (bs.transmitted && isTransmissiveCausticCaster(mat)) path.throughGlass = 1;
         path.rayKind = int(nextRayShadeKind(rgbBs, lw));
     }
     if (bs.transmitted && volInst.mediumIndex >= 0) {

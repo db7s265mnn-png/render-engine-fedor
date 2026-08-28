@@ -53,7 +53,7 @@ struct Vert {
     int lightIndex = -1;
     VType type = VType::Surface;
     bool delta = false;       // delta BSDF vertex (or delta light origin)
-    bool connectable = true;  // has a non-delta lobe to connect through
+    bool connectable = true;  // eyePathNeeConnectable: NEE / s=1 / vertex links
     // Specular or near-specular (low-roughness glass / mirror). Drives the caustic
     // family partition: `delta` alone would drop rough glass back onto the s=0
     // strategy, which cannot find a small light through the chain.
@@ -483,7 +483,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         {
             const LobeWeights lw = computeLobes(mat, Frame(si.ns).toLocal(-dir));
             v.delta = lw.delta && lw.diffuse < 1e-4f;
-            v.connectable = !v.delta;
+            v.connectable = eyePathNeeConnectable(mat, Frame(si.ns).toLocal(-dir));
             // Include rough refractive casters so Photon/LT family partition matches
             // the photon map (not only α ≤ kCausticAlpha).
             v.nearSpec = v.delta || isNearSpecularLobe(lw) || isPhotonCausticCasterLobe(lw);
@@ -520,7 +520,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
                 beta = beta * (1.0f / pSpec);
                 cur.mat = specMat;
                 cur.delta = specLw.delta && specLw.diffuse < 1e-4f;
-                cur.connectable = !cur.delta;
+                cur.connectable = eyePathNeeConnectable(specMat, woLocal);
                 cur.nearSpec = cur.delta || isNearSpecularLobe(specLw) || isPhotonCausticCasterLobe(specLw);
                 cur.beta = beta;
                 const float uSpec = specLw.diffuse + specLw.specular * rng.nextFloat();

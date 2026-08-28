@@ -185,7 +185,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
             matHero.ior = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, heroLambda);
             const LobeWeights lw = computeLobes(matHero, Frame(si.ns).toLocal(-dir));
             v.delta = lw.delta && lw.diffuse < 1e-4f;
-            v.connectable = !v.delta;
+            v.connectable = eyePathNeeConnectable(matHero, Frame(si.ns).toLocal(-dir));
             v.nearSpec = v.delta || isNearSpecularLobe(lw) || isPhotonCausticCasterLobe(lw);
         }
         path[count] = v;
@@ -218,7 +218,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 beta *= 1.0f / pSpec;
                 cur.mat = specMat;
                 cur.delta = specLw.delta && specLw.diffuse < 1e-4f;
-                cur.connectable = !cur.delta;
+                cur.connectable = eyePathNeeConnectable(specMat, woLocal);
                 cur.nearSpec = cur.delta || isNearSpecularLobe(specLw) || isPhotonCausticCasterLobe(specLw);
                 cur.beta = spectrumToRgb(beta, waves, cs);
                 betaPath[count - 1] = beta;

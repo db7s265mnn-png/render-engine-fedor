@@ -834,7 +834,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 #endif
 
         // --- NEE with lazy MNEE upgrade -------------------------------------
-        const bool connectable = lw.diffuse > 1e-4f || !lw.delta;
+        // Same connectable test as Path Tracer / BDPT s=1: skip near-spec glass
+        // (roughness 0.1) so GGX-toward-light does not light the surface up.
+        const bool connectable = eyePathNeeConnectable(mat, woLocal);
         if (connectable) {
             if (photonCaustics) {
                 Vec3 g = photons->gather(si.p, si.ns, wo, mat, photonRadius);

@@ -436,9 +436,22 @@ void testBsdf() {
         const Vec3 woN(0.0f, 0.0f, 1.0f);
         check(isDeltaCausticCaster(deltaGlass), "smooth glass is a delta MNEE caster");
         check(!isDeltaCausticCaster(roughGlass), "roughness 0.1 glass is not a delta MNEE caster");
+        check(isTransmissiveCausticCaster(deltaGlass), "delta glass is a transmissive SDS caster");
+        check(isTransmissiveCausticCaster(roughGlass),
+              "roughness 0.1 glass shares SDS throughGlass with delta");
         check(!lightTraceConnectable(deltaGlass, woN), "delta glass is not an LT connectable");
         check(!lightTraceConnectable(roughGlass, woN), "rough glass is not an LT connectable (continue, no splat)");
         check(lightTraceConnectable(floor, woN), "Lambert floor is an LT connectable");
+        check(!eyePathNeeConnectable(deltaGlass, woN), "delta glass is not NEE-connectable");
+        check(!eyePathNeeConnectable(roughGlass, woN),
+              "roughness 0.1 glass is not NEE-connectable (no GGX glow)");
+        check(eyePathNeeConnectable(floor, woN), "Lambert is NEE-connectable");
+        Material frosted = deltaGlass;
+        frosted.roughness = 0.5f;
+        check(eyePathNeeConnectable(frosted, woN), "roughness 0.5 glass stays NEE-connectable");
+        check(!lightTraceConnectable(frosted, woN), "frosted glass is still not an LT splat vertex");
+        check(!isTransmissiveCausticCaster(frosted),
+              "roughness 0.5 glass is not a near-spec SDS caster");
         Material noCau = deltaGlass;
         noCau.contributeCaustics = 0;
         check(!isDeltaCausticCaster(noCau), "contribute_caustics=0 is not an MNEE caster");

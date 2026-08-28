@@ -35,6 +35,7 @@ inline SampledSpectrum nextEventEstimationSpectralOnce(const SceneView& scene, c
     if (scene.lightCount <= 0) return result;
 
     const Vec3 woLocal = frame.toLocal(wo);
+    if (!eyePathNeeConnectable(mat, woLocal)) return result;
     float selectPdf = 0.0f;
     const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
     if (lightIndex < 0 || selectPdf <= 0.0f) return result;
