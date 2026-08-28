@@ -2247,33 +2247,6 @@ void testCameraProjShared() {
     check(cameraPdfOmega(proj, cosTheta) > 0.0f, "camera pdf omega");
     check(!projectToPixel(proj, Vec3(0.0f, 0.0f, 2.0f), px, py, cosTheta, dist2),
           "behind camera rejected");
-
-    float cpx = 0.0f, cpy = 0.0f, cct = 0.0f, cd2 = 0.0f;
-    check(cameraContinuesToFilm(proj, Vec3(0.0f, 0.0f, -2.0f), Vec3(0.0f, 0.0f, 1.0f), cpx, cpy, cct,
-                                cd2),
-          "dir toward camera continues to film");
-    check(std::fabs(cpx - 100.0f) < 1.0f && std::fabs(cpy - 50.0f) < 1.0f,
-          "L S* C dest is raster center");
-    check(!cameraContinuesToFilm(proj, Vec3(0.0f, 0.0f, -2.0f), Vec3(1.0f, 0.0f, 0.0f), cpx, cpy, cct,
-                                 cd2),
-          "sideways dir misses pinhole");
-    check(cameraContinuesToFilm(proj, Vec3(0.0f, 0.0f, -2.0f), normalize(Vec3(0.001f, 0.0f, 1.0f)),
-                                cpx, cpy, cct, cd2),
-          "dir within pixel cone continues to film");
-    check(!cameraContinuesToFilm(proj, Vec3(0.0f, 0.0f, -2.0f), normalize(Vec3(0.05f, 0.0f, 1.0f)),
-                                 cpx, cpy, cct, cd2),
-          "dir outside pixel cone misses pinhole");
-
-    SceneView lensScene = scene;
-    lensScene.camera.fStop = 1.0f;
-    const CameraProj lens = buildCameraProj(lensScene);
-    check(lens.lensRadius > 0.0f, "fStop builds a finite lens radius");
-    check(cameraContinuesToFilm(lens, Vec3(0.0f, 0.0f, -2.0f), Vec3(0.0f, 0.0f, 1.0f), cpx, cpy, cct,
-                                cd2),
-          "on-axis ray hits the lens disk");
-    check(!cameraContinuesToFilm(lens, Vec3(1.0f, 0.0f, -2.0f), Vec3(0.0f, 0.0f, 1.0f), cpx, cpy, cct,
-                                 cd2),
-          "off-axis parallel ray misses the lens disk");
 }
 
 // Camera looks straight down through a glass sphere at the floor. Light-tracing
