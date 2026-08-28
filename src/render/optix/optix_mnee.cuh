@@ -453,11 +453,11 @@ __device__ inline void gpuAddMneeContribution(GpuPath& path, const float* throug
     specAuthoredRadiance(light, LeRgb, path, Le);
     evalBsdfSpectralGpu(shadeMat, woLocal, wiLocal, path, shadeMat.ior, fS);
     specUpsampleLinear(chain.throughput, path.lambda, path.nLambda, tS);
-    const int n = path.nLambda;
-    for (int i = 0; i < n; ++i) neeS[i] = Le[i] * fS[i] * tS[i] * scale;
+    const int nLambda = path.nLambda;
+    for (int i = 0; i < nLambda; ++i) neeS[i] = Le[i] * fS[i] * tS[i] * scale;
     float baked[kMaxSpectrumSamples];
-    for (int i = 0; i < n; ++i) baked[i] = throughputS[i] * neeS[i];
-    specClampIndirect(baked, n, clampValue);
+    for (int i = 0; i < nLambda; ++i) baked[i] = throughputS[i] * neeS[i];
+    specClampIndirect(baked, nLambda, clampValue);
     addBakedRadianceS(path, baked);
 }
 
