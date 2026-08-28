@@ -15,6 +15,8 @@
 // stays valid.
 #pragma once
 
+#include <vector>
+
 #include "core/rng.h"
 #include "render/camera_proj.h"
 #include "render/framebuffer.h"
@@ -33,7 +35,9 @@
 namespace sol {
 namespace bdpt {
 
-constexpr int kMaxVerts = 16;
+// Hard cap on eye and light subpath vertices (camera + bounces). Stack arrays
+// at this size would blow the Windows 1 MB default; allocate on the heap.
+constexpr int kMaxVerts = 1000;
 
 enum class VType : uint8_t { Camera, Light, Surface };
 
@@ -745,8 +749,10 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
     const bool doSplats = splatFb != nullptr && camProj.valid;
     if (doSplats) splatFb->addSplatPath();
 
-    Vert eye[kMaxVerts];
-    Vert light[kMaxVerts];
+    std::vector<Vert> eyeStorage(static_cast<size_t>(maxVerts));
+    std::vector<Vert> lightStorage(static_cast<size_t>(maxVerts));
+    Vert* eye = eyeStorage.data();
+    Vert* light = lightStorage.data();
 
     // ---- Light subpath (finite lights + pbrt SampleLe for distant/dome) ----
     int nLight = 0;

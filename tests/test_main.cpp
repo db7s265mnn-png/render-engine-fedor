@@ -40,6 +40,7 @@
 #include "render/film_tile.h"
 #include "render/framebuffer.h"
 #include "render/integrator.h"
+#include "render/integrator_bdpt.h"
 #include "render/pixel_filter.h"
 #include "render/metal_spectra.h"
 #include "render/optix/path_state.h"
@@ -6615,6 +6616,7 @@ void testTxMipmaps() {
 
 void testBdptShadersAndSss() {
     std::printf("bdpt-shaders-sss\n");
+    check(bdpt::kMaxVerts == 1000, "BDPT vertex cap is 1000");
 
     auto makeBaseScene = []() {
         auto scene = std::make_shared<Scene>();

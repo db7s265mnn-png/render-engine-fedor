@@ -7,6 +7,7 @@
 #pragma once
 
 #include <algorithm>
+#include <vector>
 
 #include "render/integrator_base.h"
 #include "render/integrator_bdpt.h"
@@ -391,14 +392,16 @@ inline Vec3 traceRadianceBdptSpectral(
     const bool doSplats = splatFb != nullptr && camProj.valid;
     if (doSplats) splatFb->addSplatPath();
 
-    Vert eye[kMaxVerts];
-    Vert light[kMaxVerts];
-    SampledSpectrum eyeBeta[kMaxVerts];
-    SampledSpectrum lightBeta[kMaxVerts];
+    std::vector<Vert> eyeStorage(static_cast<size_t>(maxVerts));
+    std::vector<Vert> lightStorage(static_cast<size_t>(maxVerts));
+    Vert* eye = eyeStorage.data();
+    Vert* light = lightStorage.data();
+    std::vector<SampledSpectrum> eyeBeta(static_cast<size_t>(maxVerts));
+    std::vector<SampledSpectrum> lightBeta(static_cast<size_t>(maxVerts));
     SampledWavelengths lightWaves = waves;
     SampledWavelengths eyeWaves = waves;
-    SampledWavelengths lightWavePath[kMaxVerts];
-    SampledWavelengths eyeWavePath[kMaxVerts];
+    std::vector<SampledWavelengths> lightWavePath(static_cast<size_t>(maxVerts));
+    std::vector<SampledWavelengths> eyeWavePath(static_cast<size_t>(maxVerts));
     lightWavePath[0] = lightWaves;
     eyeWavePath[0] = eyeWaves;
 
@@ -424,9 +427,9 @@ inline Vec3 traceRadianceBdptSpectral(
             cfg.colorSpace = &filmCs;
             const bool inf = lightIsInfinite(scene.lights[light[0].lightIndex]);
             const Vec3 o = inf ? light[0].p : offsetRayOrigin(light[0].p, light[0].ng, emitDir);
-            nLight = spectral_bdpt::randomWalk(scene, tracer, rng, light, lightBeta, lightWavePath,
-                                               nLight, o, emitDir, pdfDirSa, maxVerts, cfg,
-                                               lightWaves, heroIdx);
+            nLight = spectral_bdpt::randomWalk(scene, tracer, rng, light, lightBeta.data(),
+                                               lightWavePath.data(), nLight, o, emitDir, pdfDirSa,
+                                               maxVerts, cfg, lightWaves, heroIdx);
             correctInfiniteLightSubpathPdfs(scene, light, nLight, emitDir);
         }
     }
@@ -451,9 +454,9 @@ inline Vec3 traceRadianceBdptSpectral(
         const Vec3 dc = transformVector(camProj.worldToCam, direction);
         camPdfSa = cameraPdfOmega(camProj, srMax(1e-4f, -dc.z));
     }
-    const int nEye =
-        spectral_bdpt::randomWalk(scene, tracer, rng, eye, eyeBeta, eyeWavePath, 1, origin,
-                                  direction, camPdfSa, maxVerts, eyeCfg, eyeWaves, heroIdx);
+    const int nEye = spectral_bdpt::randomWalk(scene, tracer, rng, eye, eyeBeta.data(),
+                                              eyeWavePath.data(), 1, origin, direction, camPdfSa,
+                                              maxVerts, eyeCfg, eyeWaves, heroIdx);
 
     SampledSpectrum radiance = SampledSpectrum::zero(waves.n);
     Vec3 filmRgb(0.0f);
