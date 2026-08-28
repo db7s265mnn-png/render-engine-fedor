@@ -119,11 +119,13 @@ __device__ inline void evalSurfaceNeeS(const LightData& light, Vec3 rgbLe, Vec3 
 }
 
 __device__ inline void enqueueShadowS(GpuShadow& shadow, Vec3 origin, Vec3 dir, float tMax,
-                                      const float* contribS, int n, int mediumIndex) {
+                                      const float* contribS, int n, int mediumIndex,
+                                      int eyeBounceNee = 0) {
     if (!specIsFinite(contribS, n) || specIsBlack(contribS, n)) {
         shadow.queue = kShadowIdle;
         shadow.splatPixel = -1;
         shadow.specContrib = 0;
+        shadow.eyeBounceNee = 0;
         return;
     }
     shadow.origin = origin;
@@ -137,16 +139,17 @@ __device__ inline void enqueueShadowS(GpuShadow& shadow, Vec3 origin, Vec3 dir, 
     shadow.mediumIndex = mediumIndex;
     shadow.splatPixel = -1;
     shadow.mneeCaster = -1;
+    shadow.eyeBounceNee = eyeBounceNee;
     shadow.queue = kShadowTrace;
 }
 
 __device__ inline void enqueueOrAddVertexNeeS(GpuPath& path, GpuShadow& shadow, Vec3 origin, Vec3 dir,
                                               float tMax, const float* neeS, int mediumIndex,
-                                              int shadowEnable, float clampValue) {
+                                              int shadowEnable, float clampValue, int eyeBounceNee = 0) {
     float baked[kMaxSpectrumSamples];
     bakeNeeAtVertexS(path, neeS, clampValue, baked);
     if (shadowEnable) {
-        enqueueShadowS(shadow, origin, dir, tMax, baked, path.nLambda, mediumIndex);
+        enqueueShadowS(shadow, origin, dir, tMax, baked, path.nLambda, mediumIndex, eyeBounceNee);
     } else {
         addBakedRadianceS(path, baked);
     }

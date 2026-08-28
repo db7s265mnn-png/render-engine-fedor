@@ -29,7 +29,8 @@ inline SampledSpectrum nextEventEstimationSpectralOnce(const SceneView& scene, c
                                                        const SurfaceInteraction& si, const Material& mat,
                                                        const Frame& frame, Vec3 wo, Rng& rng,
                                                        const SampledWavelengths& waves,
-                                                       const RGBColorSpace& cs, int mediumIndex) {
+                                                       const RGBColorSpace& cs, int mediumIndex,
+                                                       int eyeBounceNee = 0) {
     SampledSpectrum result = SampledSpectrum::zero(waves.n);
     if (scene.lightCount <= 0) return result;
 
@@ -52,7 +53,7 @@ inline SampledSpectrum nextEventEstimationSpectralOnce(const SceneView& scene, c
     if (scene.lights[lightIndex].shadowEnable) {
         shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
         if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-        visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax);
+        visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax, eyeBounceNee);
         if (visibility <= 1e-5f) return result;
     }
 
@@ -77,7 +78,7 @@ template <typename Tracer>
 inline SampledSpectrum nextEventEstimationVolumeSpectralOnce(const SceneView& scene, const Tracer& tracer,
                                                              Vec3 origin, Vec3 woVol, const MediumData& med,
                                                              Rng& rng, const SampledWavelengths& waves,
-                                                             const RGBColorSpace& cs) {
+                                                             const RGBColorSpace& cs, int eyeBounceNee = 0) {
     SampledSpectrum result = SampledSpectrum::zero(waves.n);
     if (scene.lightCount <= 0) return result;
 
@@ -96,7 +97,7 @@ inline SampledSpectrum nextEventEstimationVolumeSpectralOnce(const SceneView& sc
     float tShadow = 1.0e8f;
     if (scene.lights[li].shadowEnable) {
         if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
-        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
+        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow, eyeBounceNee);
         if (vis <= 1e-5f) return result;
     }
     const float misW = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phasePdfL);
@@ -174,7 +175,8 @@ public:
                     if (scene.lightCount > 0 && depth < maxDepth) {
                         SampledSpectrum contrib =
                             throughput * nextEventEstimationVolumeSpectralOnce(
-                                             scene, tracer, origin, woVol, medWalk, rng, waves, filmCs);
+                                             scene, tracer, origin, woVol, medWalk, rng, waves, filmCs,
+                                             depth > 0 ? 1 : 0);
                         contrib = clampPathContribution(contrib, settings, depth, false, false);
                         radiance += contrib;
                     }
@@ -331,7 +333,8 @@ public:
                 if (pSpec > 0.0f && !(suppressCausticLight && !specularBounce)) {
                     SampledSpectrum contrib =
                         throughput * nextEventEstimationSpectralOnce(scene, tracer, si, specMat, frame,
-                                                                     wo, rng, waves, filmCs, currentMedium);
+                                                                     wo, rng, waves, filmCs, currentMedium,
+                                                                     depth > 0 ? 1 : 0);
                     contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
                     radiance += contrib;
                 }
@@ -388,7 +391,8 @@ public:
                     SampledSpectrum contrib =
                         throughput * walk.pathWeight *
                         nextEventEstimationSpectralOnce(scene, tracer, ssSi, lambert, ssFrame,
-                                                        walk.exitWo, rng, waves, filmCs, currentMedium);
+                                                        walk.exitWo, rng, waves, filmCs, currentMedium,
+                                                        depth > 0 ? 1 : 0);
                     contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
                     radiance += contrib;
                 }
@@ -415,7 +419,8 @@ public:
                 // pbrt SampleLd: Illuminant(Le) × Albedo(f) × geom at this vertex.
                 SampledSpectrum contrib =
                     throughput * nextEventEstimationSpectralOnce(scene, tracer, si, mat, frame, wo, rng,
-                                                                 waves, filmCs, currentMedium);
+                                                                 waves, filmCs, currentMedium,
+                                                                 depth > 0 ? 1 : 0);
                 contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
                 radiance += contrib;
             }

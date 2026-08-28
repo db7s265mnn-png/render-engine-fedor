@@ -20,8 +20,8 @@ __device__ inline void traceClosest(int pixel, Vec3 origin, Vec3 direction, floa
                kRayTypeRadiance, kRayTypeCount, kRayTypeRadiance);
 }
 
-// Closest-hit shadow (no terminate-on-first): glass can be skipped via shadowOpacity
-// the same way Embree shadowVisibility walks hits. Closest-hit writes GpuHit.
+// Closest-hit shadow (no terminate-on-first): Iray-style NEE may continue through
+// glass; LT splats still see contributing glass as opaque. Closest-hit writes GpuHit.
 __device__ inline void traceShadowClosest(int pixel, Vec3 origin, Vec3 direction, float tMax) {
     const LaunchParams& params = launchParams();
     GpuHit& hit = params.hits[pixel];

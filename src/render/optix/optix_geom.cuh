@@ -104,13 +104,4 @@ __device__ inline Material gpuMaterialForCausticSlot(const SceneView& scene, int
     return scene.materials[slot];
 }
 
-// 1 = fully opaque to shadows, 0 = skip, else Material::shadowOpacity (fake caustics).
-__device__ inline float gpuShadowBlock(const SceneView& scene, int materialIndex) {
-    const Material mat = gpuMaterialForShadow(scene, materialIndex);
-    if (mat.transmission <= 1e-3f) return 1.0f;
-    const Material matCau = gpuMaterialForCausticSlot(scene, materialIndex);
-    if (scene.settings.caustics == 0 || matCau.contributeCaustics == 0) return saturatef(mat.shadowOpacity);
-    return 1.0f;
-}
-
 }  // namespace sol

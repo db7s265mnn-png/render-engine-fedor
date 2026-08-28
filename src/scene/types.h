@@ -88,8 +88,10 @@ struct Material {
     int specularColorProc = -1;
     int transmissionColorProc = -1;
     // Fake shadow control for transmissive surfaces when render-settings caustics
-    // are OFF: 1 = fully opaque shadow, 0 = fully open. With caustics ON shadow
-    // rays treat glass as opaque and light arrives via MNEE / BDPT instead.
+    // are OFF (or Contribute to Caustics is off): 1 = fully opaque, 0 = fully open.
+    // With caustics ON: primary NEE and LT camera splats still treat contributing
+    // glass as opaque (Iray caustic sampler — SDS on directly visible receivers).
+    // Eye NEE after a bounce uses Fresnel transmittance (Keller 2017).
     float shadowOpacity = 1.0f;
 
     // MaterialX normalmap.scale / bump.scale (tangent XY strength).

@@ -670,7 +670,7 @@ inline Vec3 traceRadianceBdptSpectral(
             float visibility = 1.0f;
             if (scene.lights[li].shadowEnable) {
                 const Vec3 o = offsetRayOrigin(E.p, E.ng, ls.wi);
-                visibility = shadowVisibility(scene, tracer, o, ls.wi, 1.0e8f);
+                visibility = shadowVisibility(scene, tracer, o, ls.wi, 1.0e8f, t > 2 ? 1 : 0);
             }
             if (visibility <= 1e-5f) continue;
             const float bsdfPdf = ls.delta ? 0.0f : bsdfPdfSa(E, E.wo, ls.wi);

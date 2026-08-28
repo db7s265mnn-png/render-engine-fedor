@@ -121,6 +121,32 @@ SR_INL SR_HD float fresnelDielectric(float cosThetaI, float eta) {
     return 0.5f * (rParl * rParl + rPerp * rPerp);
 }
 
+// Iray Photoreal (Keller et al. 2017, arXiv:1705.01263): NEE visibility may
+// partially evaluate transmissive materials instead of treating delta glass as a
+// hard occluder. Light-tracing camera connections and primary (depth-0) NEE stay
+// opaque so SDS lands only on directly visible receivers — NVIDIA: "The caustic
+// sampler only improves on directly visible caustics. Caustics seen through
+// mirrors or windows are currently not improved."
+//
+// Returns occlusion in [0,1] (1 = fully blocked). η² is a radiance measure
+// conversion, not opacity — it is not applied here.
+//
+// eyeBounceNee: 1 = camera/BDPT NEE after a bounce (Fresnel continue along the
+// straight shadow ray, biased vs Snell). 0 = primary NEE or LT splat / BDPT t=1.
+SR_INL SR_HD float shadowBlockFraction(const Material& matShadow, const Material& matCaustic,
+                                       int causticsOn, int eyeBounceNee, float nDotWo) {
+    if (matShadow.transmission <= 1e-3f) return 1.0f;
+    if (causticsOn == 0 || matCaustic.contributeCaustics == 0)
+        return saturatef(matShadow.shadowOpacity);
+    if (eyeBounceNee == 0) return 1.0f;
+
+    const float F = fresnelDielectric(nDotWo, srMax(1.0001f, matShadow.ior));
+    const float tint = srMax(0.0f, luminance(matShadow.transmissionColor));
+    const float T = (1.0f - F) * saturatef(matShadow.transmission) *
+                    (1.0f - saturatef(matShadow.metallic)) * tint;
+    return saturatef(1.0f - T);
+}
+
 // Rotate wo/wi in the tangent plane for specular_rotation (turns in [0,1] = 0–360°).
 SR_INL SR_HD Vec3 rotateForAnisotropy(Vec3 w, float rotationTurns) {
     if (fabsf(rotationTurns) < 1e-8f) return w;

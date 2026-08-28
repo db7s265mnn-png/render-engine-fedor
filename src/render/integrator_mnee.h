@@ -736,7 +736,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 
             if (pSpec > 0.0f) {
                 const Vec3 nee =
-                    nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding);
+                    nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding, -1,
+                                        depth > 0 ? 1 : 0);
                 Vec3 contrib = throughput * nee;
                 if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
                 radiance += contrib;
@@ -780,7 +781,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             ssSi.ng = walk.exitN;
             const Frame ssFrame(walk.exitN);
             const Vec3 nee =
-                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding);
+                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding, -1,
+                                    depth > 0 ? 1 : 0);
             Vec3 contrib = throughput * walk.pathWeight * nee;
             if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;
@@ -864,7 +866,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     float visibility = 1.0f;
                     if (l.shadowEnable) {
                         const Vec3 o = offsetRayOrigin(si.p, si.ng, lsam.wi);
-                        visibility = shadowVisibility(scene, tracer, o, lsam.wi, 1.0e8f);
+                        visibility = shadowVisibility(scene, tracer, o, lsam.wi, 1.0e8f,
+                                                      depth > 0 ? 1 : 0);
                     }
                     if (visibility <= 1e-5f) continue;
                     if (!shadingNormalConsistent(si.ng, si.ns, wo, lsam.wi)) continue;

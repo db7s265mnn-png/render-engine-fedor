@@ -91,6 +91,7 @@ __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, f
         shadow.queue = kShadowIdle;
         shadow.splatPixel = -1;
         shadow.specContrib = 0;
+        shadow.eyeBounceNee = 0;
         return;
     }
     shadow.origin = origin;
@@ -103,6 +104,7 @@ __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, f
     shadow.mediumIndex = mediumIndex;
     shadow.splatPixel = splatPixel;
     shadow.mneeCaster = -1;
+    shadow.eyeBounceNee = 0;  // LT splat: contributing glass stays opaque
     shadow.queue = kShadowTrace;
 }
 

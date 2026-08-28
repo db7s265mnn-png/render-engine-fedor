@@ -1,6 +1,7 @@
 // Cycles analogue: __raygen__kernel_optix_integrator_intersect_shadow
-// Walks closest hits like Embree shadowVisibility: volume proxies skip, lights
-// pass, transmissive surfaces use shadowOpacity when caustics are off.
+// Walks closest hits like Embree shadowVisibility. Iray Photoreal: eye NEE after
+// a bounce Fresnel-continues through contributing glass; LT camera splats and
+// primary NEE keep that glass opaque (SDS on the directly visible floor).
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_trace.cuh"
 #include "render/optix/optix_work.cuh"
@@ -42,7 +43,13 @@ __device__ inline void intersectShadowPixel(int pixel) {
             }
         }
 
-        const float block = gpuShadowBlock(scene, si.materialIndex);
+        const int eyeBounceNee =
+            (!path.lightPath && shadow.splatPixel < 0 && shadow.eyeBounceNee) ? 1 : 0;
+        const float nDotWo = -dot(si.ns, dir);
+        const Material mat = gpuMaterialForShadow(scene, si.materialIndex);
+        const Material matCau = gpuMaterialForCausticSlot(scene, si.materialIndex);
+        const float block =
+            shadowBlockFraction(mat, matCau, scene.settings.caustics, eyeBounceNee, nDotWo);
         vis *= (1.0f - block);
         if (block >= 0.999f || vis <= 1e-5f) {
             vis = 0.0f;

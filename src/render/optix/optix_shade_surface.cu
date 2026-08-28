@@ -27,6 +27,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     shadow.queue = kShadowIdle;
     shadow.splatPixel = -1;
     shadow.specContrib = 0;
+    shadow.eyeBounceNee = 0;
 
     Surf si;
     if (!buildSurf(scene, hit, path.origin, path.direction, si)) {
@@ -193,9 +194,11 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                                        path.mediumIndex, scene.lights[lightIndex].shadowEnable,
                                        pathContributionClamp(scene.settings, path.depth,
                                                              path.specularBounce != 0,
-                                                             path.causticSuffix != 0));
-                // CPU MNEE: glass-blocked NEE → manifold. With LT on, only after a
-                // specular eye prefix so the floor caustic is not counted twice.
+                                                             path.causticSuffix != 0),
+                                       path.depth > 0 ? 1 : 0);
+                // Iray: depth>0 NEE Fresnel-continues through glass (intersect_shadow),
+                // so MNEE peeks only when the interface still fully blocks (TIR).
+                // Arming stays depth>0 && specularBounce so the floor SDS is LT-only.
                 if (params.mneeJobs && gpuEyePathMneeEnabled(scene.settings) &&
                     shadow.queue == kShadowTrace &&
                     (path.depth > 0 && path.specularBounce != 0)) {

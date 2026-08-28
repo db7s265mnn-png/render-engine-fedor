@@ -827,14 +827,18 @@ SR_INL SR_HD float lightTraceSplatClamp(const RenderSettingsData& settings) {
 }
 
 // Multi-hit shadow visibility (Embree filter-function style): opaque surfaces
-// block fully; transmissive surfaces attenuate by Material::shadowOpacity when
-// refractive caustics are enabled (MaterialX / Arnold fake-caustics control).
+// block fully. Transmissive: shadowOpacity when caustics are off (or the material
+// does not contribute). Iray Photoreal (Keller 2017): contributing glass stays
+// opaque for primary NEE and light-tracing camera connections; eye NEE after a
+// bounce uses Fresnel transmittance along the straight shadow ray.
 // VDB: SDF level sets are hard occluders (tested against the field, not the AABB
 // proxy). Fog AABBs are skipped here — soft Tr is applied via ratio tracking
 // (shadowTransmittanceFogVolumes, PBRT §11.2.1 / VolPath §14.2.2).
+//
+// eyeBounceNee: 1 = camera/BDPT NEE from depth>0 (or BDPT s=1 with t>2).
 template <typename Tracer>
 SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 dir,
-                                    float tMax) {
+                                    float tMax, int eyeBounceNee = 0) {
 #if !defined(__CUDACC__)
     // Field-based SDF cast / self shadow (works from inside the AABB too).
     if (shadowOccludedBySdfVolumes(scene, origin, dir, tMax)) return 0.0f;
@@ -871,19 +875,9 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
         }
 
         Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Shadow);
-        // Opaque-glass when caustics estimators own transport (caustics / specular_transmission slot).
         const Material matCau = materialForCausticTransport(scene, si.materialIndex);
-
-        float block = 1.0f;
-        if (mat.transmission > 1e-3f) {
-            // Caustics ON + material contributes: shadow rays treat glass as opaque —
-            // transmitted light is delivered by MNEE / BDPT LT / photon gather.
-            // Caustics OFF, or material Contribute to Caustics off: fake with shadow_opacity.
-            if (scene.settings.caustics == 0 || !materialContributesCaustics(matCau))
-                block = saturatef(mat.shadowOpacity);
-            else
-                block = 1.0f;
-        }
+        const float nDotWo = -dot(si.ns, dir);
+        const float block = shadowBlockFraction(mat, matCau, scene.settings.caustics, eyeBounceNee, nDotWo);
         visibility *= (1.0f - block);
         if (block >= 0.999f || visibility <= 1e-5f) return 0.0f;
 
@@ -899,7 +893,7 @@ template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& tracer,
                                           const SurfaceInteraction& si, const Material& mat,
                                           const Frame& frame, Vec3 wo, Rng& rng, Guiding* guiding,
-                                          int mediumIndex = -1) {
+                                          int mediumIndex = -1, int eyeBounceNee = 0) {
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
@@ -932,7 +926,7 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     if (scene.lights[lightIndex].shadowEnable) {
         shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
         if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-        visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax);
+        visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax, eyeBounceNee);
         if (visibility <= 1e-5f) return result;
     }
 
@@ -969,7 +963,7 @@ SR_INL SR_HD float volumeScatterPdf(Vec3 woVol, Vec3 wi, const MediumData& med, 
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
                                                 Vec3 woVol, const MediumData& med, Rng& rng,
-                                                Guiding* guiding) {
+                                                Guiding* guiding, int eyeBounceNee = 0) {
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
@@ -990,7 +984,7 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
     float tShadow = 1.0e8f;
     if (scene.lights[li].shadowEnable) {
         if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
-        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
+        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow, eyeBounceNee);
         if (vis <= 1e-5f) return result;
     }
 
@@ -1007,29 +1001,31 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
 
 template <typename Tracer>
 SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
-                                                Vec3 woVol, const MediumData& med, Rng& rng) {
+                                                Vec3 woVol, const MediumData& med, Rng& rng,
+                                                int eyeBounceNee = 0) {
     return nextEventEstimationVolumeOnce<Tracer, NullGuiding>(scene, tracer, origin, woVol, med, rng,
-                                                              nullptr);
+                                                              nullptr, eyeBounceNee);
 }
 
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
                                       const Material& mat, const Frame& frame, Vec3 wo, Rng& rng,
-                                      Guiding* guiding, int mediumIndex = -1) {
+                                      Guiding* guiding, int mediumIndex = -1, int eyeBounceNee = 0) {
     (void)scene.settings.lightSamples;
     const int n = 1;  // pbrt-v4: one light sample per vertex, MIS with BSDF
     Vec3 sum(0.0f);
     for (int i = 0; i < n; ++i)
-        sum += nextEventEstimationOnce(scene, tracer, si, mat, frame, wo, rng, guiding, mediumIndex);
+        sum += nextEventEstimationOnce(scene, tracer, si, mat, frame, wo, rng, guiding, mediumIndex,
+                                       eyeBounceNee);
     return sum * (1.0f / float(n));
 }
 
 template <typename Tracer>
 SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
                                       const Material& mat, const Frame& frame, Vec3 wo, Rng& rng,
-                                      int mediumIndex = -1) {
+                                      int mediumIndex = -1, int eyeBounceNee = 0) {
     return nextEventEstimation<Tracer, NullGuiding>(scene, tracer, si, mat, frame, wo, rng, nullptr,
-                                                    mediumIndex);
+                                                    mediumIndex, eyeBounceNee);
 }
 
 template <typename Tracer, typename Guiding>
@@ -1112,7 +1108,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 if (scene.lightCount > 0 && depth < maxDepth) {
                     const Vec3 volDirect =
                         nextEventEstimationVolumeOnce(scene, tracer, origin, woVol, medWalk, rng,
-                                                      guiding);
+                                                      guiding, depth > 0 ? 1 : 0);
                     radiance += clampContribution(throughput * volDirect, settings.clampDirect);
 #if !defined(__CUDACC__)
                     if (guiding && guiding->active()) guiding->addScattered(volDirect);
@@ -1385,7 +1381,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             if (pSpec > 0.0f) {
                     const Vec3 nee =
                     nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding,
-                                        currentMedium);
+                                        currentMedium, depth > 0 ? 1 : 0);
                 Vec3 contrib = throughput * nee;
                 if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
                 radiance += contrib;
@@ -1432,7 +1428,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             // NEE at SSS exit (lightSamples is handled inside nextEventEstimation).
             const Vec3 nee =
                 nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding,
-                                    currentMedium);
+                                    currentMedium, depth > 0 ? 1 : 0);
             Vec3 contrib = throughput * walk.pathWeight * nee;
             if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;
@@ -1476,7 +1472,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         // NEE on diffuse after a caustic-disabled specular/transmission bounce is suppressed.
         if (!(suppressCausticLight && !specularBounce)) {
             const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, guiding,
-                                                 currentMedium);
+                                                 currentMedium, depth > 0 ? 1 : 0);
             Vec3 contrib = throughput * nee;
             if (depth > 0 && !specularBounce)
                 contrib = clampContribution(contrib, settings.clampDirect);

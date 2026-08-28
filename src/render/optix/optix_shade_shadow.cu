@@ -41,6 +41,7 @@ __device__ inline bool shadeShadowPixel(int pixel) {
     shadow.splatPixel = -1;
     shadow.specContrib = 0;
     shadow.mneeCaster = -1;
+    shadow.eyeBounceNee = 0;
     if (params.mneeJobs) {
         params.mneeJobs[pixel].armed = 0;
         params.mneeJobs[pixel].pending = 0;

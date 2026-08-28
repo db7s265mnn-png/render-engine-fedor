@@ -93,6 +93,10 @@ struct GpuShadow {
     int mediumIndex = -1;  // current path medium for homogeneous Beer–Lambert on the shadow ray
     int splatPixel = -1;  // >=0: unoccluded contrib atomicAdds RGB to that film pixel (no .w)
     int mneeCaster = -1;  // instanceIndex of a delta glass blocker; -1 = none
+    // 1 = camera NEE from depth>0: Iray Fresnel-continue through contributing glass.
+    // 0 = primary NEE or LT camera splat (glass stays opaque; SDS on the floor).
+    // Stored here because shade increments path.depth after enqueueing the shadow.
+    int eyeBounceNee = 0;
     // Camera NEE baked at the vertex: throughput × illuminant(Le) × albedo(f) × geom.
     // shade_shadow must add this as-is — live path throughput has already stepped.
     float contribS[kMaxSpectrumSamples]{};

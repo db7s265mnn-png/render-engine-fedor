@@ -15,6 +15,7 @@ __device__ inline void shadeVolumePixel(int pixel) {
     shadow.queue = kShadowIdle;
     shadow.splatPixel = -1;
     shadow.specContrib = 0;
+    shadow.eyeBounceNee = 0;
 
     const MediumData* med = getMedium(scene, path.mediumIndex);
     if (!med) {
@@ -71,7 +72,8 @@ __device__ inline void shadeVolumePixel(int pixel) {
                 if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
                 enqueueOrAddVertexNeeS(path, shadow, p, ls.wi, tSh, neeS, path.mediumIndex,
                                        scene.lights[lightIndex].shadowEnable,
-                                       pathContributionClamp(scene.settings, path.depth, false, false));
+                                       pathContributionClamp(scene.settings, path.depth, false, false),
+                                       path.depth > 0 ? 1 : 0);
             }
         }
 

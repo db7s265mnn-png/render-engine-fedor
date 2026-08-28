@@ -441,6 +441,32 @@ void testBsdf() {
         Material noCau = deltaGlass;
         noCau.contributeCaustics = 0;
         check(!isDeltaCausticCaster(noCau), "contribute_caustics=0 is not an MNEE caster");
+
+        // Iray Photoreal: contributing glass is opaque for primary/LT shadows and
+        // Fresnel-open for eye NEE after a bounce (straight shadow ray, not Snell).
+        {
+            Material g;
+            g.transmission = 1.0f;
+            g.ior = 1.5f;
+            g.roughness = 0.0f;
+            g.contributeCaustics = 1;
+            g.transmissionColor = Vec3(1.0f);
+            const float Fenter = fresnelDielectric(1.0f, 1.5f);
+            check(shadowBlockFraction(g, g, 1, 0, 1.0f) > 0.999f,
+                  "primary NEE / LT splat: contributing glass is opaque");
+            const float bounceBlock = shadowBlockFraction(g, g, 1, 1, 1.0f);
+            checkNear(bounceBlock, Fenter, 1e-5f,
+                      "eye NEE after bounce: block equals dielectric Fresnel");
+            check(bounceBlock < 0.1f, "normal-incidence glass NEE is mostly open");
+            const float critCos = sqrtf(1.0f - 1.0f / (1.5f * 1.5f));
+            check(shadowBlockFraction(g, g, 1, 1, -(critCos - 0.05f)) > 0.999f,
+                  "TIR still fully blocks Iray glass NEE");
+            Material fake = g;
+            fake.contributeCaustics = 0;
+            fake.shadowOpacity = 0.25f;
+            checkNear(shadowBlockFraction(fake, fake, 1, 0, 1.0f), 0.25f, 1e-5f,
+                      "contribute off uses shadowOpacity even with caustics ON");
+        }
     }
 
     // Specular = 0 must disable dielectric reflections completely.
