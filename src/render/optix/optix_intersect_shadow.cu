@@ -1,9 +1,8 @@
 // Cycles analogue: __raygen__kernel_optix_integrator_intersect_shadow
-// Walks closest hits like Embree shadowVisibility. Iray Photoreal: eye NEE after
-// a bounce Fresnel-continues through contributing glass; LT camera splats and
-// primary NEE keep that glass opaque (SDS on the directly visible floor).
-// Aimed LT + MNEE: finite through-glass NEE is opaque (CPU peek); dome/distant
-// still Fresnel. Peek only records a delta caster on eye NEE, not LT splats.
+// Walks closest hits like Embree shadowVisibility. Iray Photoreal / CPU PT:
+// eye NEE after a bounce Fresnel-continues through contributing glass. LT
+// camera splats and primary NEE keep that glass opaque (SDS on the floor).
+// MNEE peek still records a delta caster when block >= 0.999 (TIR).
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_trace.cuh"
 #include "render/optix/optix_work.cuh"

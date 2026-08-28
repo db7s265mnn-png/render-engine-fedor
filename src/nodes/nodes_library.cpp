@@ -1293,11 +1293,13 @@ public:
                                       "glass. Newton is not compiled into shade / path_tail.\n"
                                       "Aimed LT + MNEE: the same floor caustic (LT). In pixels "
                                       "where the camera already refracted through contributing "
-                                      "glass, LT does not write — those paths keep CPU-style "
-                                      "eye MNEE (finite lights, opaque first-hit peek) and BSDF "
-                                      "when Newton misses. Dome / distant NEE stays Fresnel "
-                                      "(CPU has no dome MNEE). Not a copy of floor pixels and "
-                                      "not fake mesh emission. TIR into a dark env stays dark.\n"
+                                      "glass, the eye path is CPU Path Tracer: Fresnel NEE "
+                                      "through glass and BSDF when the suffix would otherwise "
+                                      "be killed for LT. MNEE peeks only on TIR / fully blocked "
+                                      "interfaces — Newton does not replace that NEE (a tessellated "
+                                      "mesh rarely converges, and opaque NEE made the interior "
+                                      "blacker). Not a copy of floor pixels and not fake mesh "
+                                      "emission.\n"
                                       "Photon / VCM stays CPU-only."));
         // Hidden migration: v2 Automatic/MNEE/Photon → MNEE/MNEE+Photon/Photon.
         // v3 inserts pbrt as index 0 and shifts the rest +1.

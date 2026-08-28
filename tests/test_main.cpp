@@ -905,8 +905,8 @@ void testXpuDevice() {
         s.causticsEngineGpu = kGpuCausticsAimedLtMnee;
         check(gpuEyePathMneeEnabled(s), "Aimed LT + MNEE still runs the MNEE pipeline");
         check(gpuRefractionMneeEnabled(s), "Aimed LT + MNEE enables refraction-only eye MNEE");
-        check(gpuEyeBounceNee(s, 1, 1, 1, kLightRect) == 0,
-              "mode 2 finite through-glass NEE is opaque for MNEE peek");
+        check(gpuEyeBounceNee(s, 1, 1, 1, kLightRect) == 1,
+              "mode 2 through-glass NEE stays Fresnel like CPU PT");
         check(gpuEyeBounceNee(s, 1, 1, 1, kLightDome) == 1, "mode 2 dome NEE stays Fresnel");
         check(gpuEyeBounceNee(s, 1, 1, 1, kLightDistant) == 1, "mode 2 distant NEE stays Fresnel");
         check(gpuEyeBounceNee(s, 1, 0, 1, kLightRect) == 1,

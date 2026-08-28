@@ -483,10 +483,8 @@ __device__ inline void gpuAddMneeContribution(GpuPath& path, const float* throug
 }
 
 // Lazy MNEE upgrade after intersect_shadow peeked a delta-glass blocker.
-// Matches CPU integrator_mnee: finite lights, not the dome. Distant is mode-1
-// TIR only — mode 2 does not arm it (Fresnel NEE, like CPU).
-// Aimed LT + MNEE arms this at a connectable vertex after throughGlass, not as
-// a camera splat of an LT vertex.
+// Glass fill is Fresnel NEE + BSDF (CPU Path Tracer). Newton only runs when
+// the peek saw a fully blocked delta caster (TIR). Dome is never MNEE.
 __device__ inline void tryGpuMneeJob(int pixel, GpuPath& path, GpuMneeJob& job) {
     const LaunchParams& params = launchParams();
     const SceneView& scene = params.scene;

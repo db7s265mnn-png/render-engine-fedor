@@ -202,9 +202,9 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                                                              path.causticSuffix != 0),
                                        gpuEyeBounceNee(scene.settings, path.depth, path.throughGlass,
                                                        connectable, lightNee.type));
-                // Aimed LT: depth>0 NEE Fresnel-continues; MNEE peeks only on TIR.
-                // Aimed LT + MNEE: after throughGlass, finite NEE at a connectable
-                // vertex is opaque (CPU first-hit peek). Dome/distant stay Fresnel.
+                // Aimed LT / Aimed LT + MNEE: depth>0 NEE Fresnel-continues
+                // (CPU Path Tracer glass). MNEE peeks only when the interface
+                // still fully blocks (TIR). Mode 2 also keeps BSDF on throughGlass.
                 // Do not arm on the glass itself (first-hit glass→light).
                 const bool envLike =
                     lightNee.type == kLightDome || lightNee.type == kLightDistant;

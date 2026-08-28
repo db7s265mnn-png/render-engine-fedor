@@ -473,10 +473,9 @@ enum GpuCausticsEngine : int {
     // Aimed-only light tracing (caster AABBs) + eye-path MNEE for TIR / fully
     // blocked glass. SDS splats stay on directly visible receivers.
     kGpuCausticsAimedLt = 0,
-    // Same aimed LT on directly visible receivers (floor). In glass pixels
-    // (eye path already refracted through a delta caster) CPU-style MNEE + BSDF
-    // fill the interior. LT and eye MNEE write different pixels — no double.
-    // Menu index stays 1 so existing hip files keep the second GPU engine.
+    // Same aimed LT on directly visible receivers (floor). Glass pixels run
+    // the CPU Path Tracer eye path (Fresnel NEE + BSDF). MNEE peeks only when
+    // an interface fully blocks (TIR). Menu index stays 1.
     kGpuCausticsAimedLtMnee = 1,
 };
 
@@ -677,18 +676,18 @@ SR_INL SR_HD bool gpuSkipCameraSds(const RenderSettingsData& s, int lightPath, i
     return true;
 }
 
-// Shadow-ray glass opacity for NEE. 1 = Fresnel-continue (Keller). 0 = opaque
-// so MNEE peek can start. Mode 1: always Fresnel at depth>0. Mode 2: dome/distant
-// stay Fresnel (CPU has no dome MNEE); finite lights on a through-glass
-// connectable vertex are opaque; other bounces stay Fresnel so Newton-miss
-// paths do not go black.
+// Shadow-ray glass opacity for NEE. 1 = Fresnel-continue (Keller / CPU PT).
+// 0 = opaque (primary NEE and LT splats). Depth>0 always Fresnel: that is what
+// makes CPU Path Tracer glass bright. MNEE peek still fires on TIR
+// (block >= 0.999). Do not opaque through-glass finite NEE — Newton on a
+// tessellated mesh misses and the interior goes black.
 SR_INL SR_HD int gpuEyeBounceNee(const RenderSettingsData& s, int depth, int throughGlass,
                                  int connectable, int lightType) {
-    if (depth <= 0) return 0;
-    if (!gpuRefractionMneeEnabled(s)) return 1;
-    if (lightType == kLightDome || lightType == kLightDistant) return 1;
-    if (throughGlass && connectable) return 0;
-    return 1;
+    (void)s;
+    (void)throughGlass;
+    (void)connectable;
+    (void)lightType;
+    return depth > 0 ? 1 : 0;
 }
 
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
