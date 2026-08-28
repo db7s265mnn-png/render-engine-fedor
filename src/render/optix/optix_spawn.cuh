@@ -49,6 +49,7 @@ __device__ inline void spawnCameraPath(int pixel, int x, int y, int sampleOffset
     path.lightIndex = -1;
     path.sawNonSpecular = 0;
     path.causticSuffix = 0;
+    path.throughGlass = 0;
     path.mcmcRemain = 0;
     path.mcmcInfinite = 0;
     if (params.volumes && params.volumeCount > 0) {
@@ -105,6 +106,7 @@ __device__ inline bool spawnLightPath(int pixel, int x, int y, int sampleOffset)
     path.lightIndex = -1;
     path.sawNonSpecular = 0;
     path.causticSuffix = 0;
+    path.throughGlass = 0;
     path.mcmcRemain = 0;
     path.mcmcInfinite = 0;
     path.queue = kQueueDead;
@@ -173,6 +175,7 @@ __device__ inline bool spawnLightPathMutation(int pixel) {
     path.specPrefix = 0;
     path.sawNonSpecular = 0;
     path.causticSuffix = 0;
+    path.throughGlass = 0;
     hit = GpuHit{};
     shadow = GpuShadow{};
     shadow.splatPixel = -1;

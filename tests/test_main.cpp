@@ -905,6 +905,18 @@ void testXpuDevice() {
         s.causticsEngineGpu = kGpuCausticsAimedLtMnee;
         check(gpuEyePathMneeEnabled(s), "Aimed LT + MNEE still runs the MNEE pipeline");
         check(gpuRefractionMneeEnabled(s), "Aimed LT + MNEE enables refraction-only eye MNEE");
+        check(gpuEyeBounceNee(s, 1, 1, 1, kLightRect) == 0,
+              "mode 2 finite through-glass NEE is opaque for MNEE peek");
+        check(gpuEyeBounceNee(s, 1, 1, 1, kLightDome) == 1, "mode 2 dome NEE stays Fresnel");
+        check(gpuEyeBounceNee(s, 1, 1, 1, kLightDistant) == 1, "mode 2 distant NEE stays Fresnel");
+        check(gpuEyeBounceNee(s, 1, 0, 1, kLightRect) == 1,
+              "mode 2 without throughGlass keeps Fresnel (LT owns floor SDS)");
+        check(gpuEyeBounceNee(s, 0, 0, 1, kLightRect) == 0, "primary NEE stays opaque");
+        check(!gpuSkipCameraSds(s, 0, 1, 1, 1.0f), "mode 2 throughGlass keeps eye BSDF");
+        check(gpuSkipCameraSds(s, 0, 1, 0, 1.0f), "mode 2 floor-first still skips SDS for LT");
+        s.causticsEngineGpu = kGpuCausticsAimedLt;
+        check(gpuEyeBounceNee(s, 1, 1, 1, kLightRect) == 1, "Aimed LT Fresnel-continues at depth>0");
+        check(gpuSkipCameraSds(s, 0, 1, 1, 1.0f), "Aimed LT still skips camera SDS");
         s.caustics = 0;
         s.causticsEngineGpu = kGpuCausticsAimedLt;
         check(!gpuEyePathMneeEnabled(s), "caustics off disables GPU MNEE");

@@ -90,7 +90,9 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         }
         const bool suppressCausticLight =
             scene.settings.caustics == 0 && path.causticSuffix;
-        if ((params.splatInvLightPaths > 0.0f && path.causticSuffix) || suppressCausticLight) {
+        if ((gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
+                              params.splatInvLightPaths) ||
+             suppressCausticLight)) {
             terminatePath(pixel, path);
             return;
         }
@@ -163,7 +165,8 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     const bool suppressCausticLight =
         !path.lightPath && scene.settings.caustics == 0 && path.causticSuffix;
     const bool skipCameraSds =
-        !path.lightPath && params.splatInvLightPaths > 0.0f && path.causticSuffix;
+        gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
+                         params.splatInvLightPaths);
     if (params.mneeJobs && !path.lightPath) {
         params.mneeJobs[pixel].armed = 0;
         params.mneeJobs[pixel].pending = 0;
@@ -190,25 +193,26 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                 const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
                 float tMax = 1.0e8f;
                 if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
+                const LightData& lightNee = scene.lights[lightIndex];
+                const int connectable = isDeltaCausticCaster(mat) ? 0 : 1;
                 enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS,
-                                       path.mediumIndex, scene.lights[lightIndex].shadowEnable,
+                                       path.mediumIndex, lightNee.shadowEnable,
                                        pathContributionClamp(scene.settings, path.depth,
                                                              path.specularBounce != 0,
                                                              path.causticSuffix != 0),
-                                       path.depth > 0 && !gpuRefractionMneeEnabled(scene.settings)
-                                           ? 1
-                                           : 0);
-                // Aimed LT: depth>0 NEE Fresnel-continues through glass, so MNEE
-                // peeks only when the interface still fully blocks (TIR).
-                // Aimed LT + MNEE: contributing glass is opaque again (CPU peek)
-                // and Newton is armed only after a transmissive bounce — floor
-                // seen through glass, not first-hit glass→light, not mirrors.
+                                       gpuEyeBounceNee(scene.settings, path.depth, path.throughGlass,
+                                                       connectable, lightNee.type));
+                // Aimed LT: depth>0 NEE Fresnel-continues; MNEE peeks only on TIR.
+                // Aimed LT + MNEE: after throughGlass, finite NEE at a connectable
+                // vertex is opaque (CPU first-hit peek). Dome/distant stay Fresnel.
+                // Do not arm on the glass itself (first-hit glass→light).
+                const bool envLike =
+                    lightNee.type == kLightDome || lightNee.type == kLightDistant;
                 const bool wantMnee = gpuRefractionMneeEnabled(scene.settings)
-                                          ? path.transmittedBounce != 0
+                                          ? (path.throughGlass && connectable && !envLike)
                                           : path.specularBounce != 0;
                 if (params.mneeJobs && gpuEyePathMneeEnabled(scene.settings) &&
-                    shadow.queue == kShadowTrace && path.depth > 0 && wantMnee &&
-                    !isDeltaCausticCaster(mat)) {
+                    shadow.queue == kShadowTrace && path.depth > 0 && wantMnee) {
                     GpuMneeJob& job = params.mneeJobs[pixel];
                     job.p = si.p;
                     job.ns = si.ns;
@@ -218,7 +222,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                     job.wi = ls.wi;
                     job.distance = ls.distance;
                     job.y = si.p + ls.wi * ls.distance;
-                    const LightData& light = scene.lights[lightIndex];
+                    const LightData& light = lightNee;
                     job.yN = areaLightNormal(light);
                     if (light.type == kLightSphere) job.yN = normalize(job.y - lightOrigin(light));
                     if (light.type == kLightPoint) job.yN = Vec3(0.0f, 1.0f, 0.0f);
@@ -298,6 +302,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             path.sawNonSpecular = 1;
             path.causticSuffix = 0;
         }
+        if (bs.transmitted && isDeltaCausticCaster(mat)) path.throughGlass = 1;
     }
     if (bs.transmitted && volInst.mediumIndex >= 0) {
         const MediumData* med = getMedium(scene, volInst.mediumIndex);

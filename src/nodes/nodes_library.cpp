@@ -1291,12 +1291,13 @@ public:
                                       "(Keller 2017). Eye-path Newton MNEE (Hanika 2015) stays "
                                       "in a dedicated OptiX pipeline for TIR / fully blocked "
                                       "glass. Newton is not compiled into shade / path_tail.\n"
-                                      "Aimed LT + MNEE: the same floor caustic, plus eye-path "
-                                      "MNEE after a transmissive bounce (floor seen through "
-                                      "glass → light), with contributing glass opaque on that "
-                                      "NEE so Newton can start. Mirrors / reflection-only SDS "
-                                      "stay with LT. Not a copy of floor pixels and not fake "
-                                      "mesh emission. TIR / env misses stay dark.\n"
+                                      "Aimed LT + MNEE: the same floor caustic (LT). In pixels "
+                                      "where the camera already refracted through contributing "
+                                      "glass, LT does not write — those paths keep CPU-style "
+                                      "eye MNEE (finite lights, opaque first-hit peek) and BSDF "
+                                      "when Newton misses. Dome / distant NEE stays Fresnel "
+                                      "(CPU has no dome MNEE). Not a copy of floor pixels and "
+                                      "not fake mesh emission. TIR into a dark env stays dark.\n"
                                       "Photon / VCM stays CPU-only."));
         // Hidden migration: v2 Automatic/MNEE/Photon → MNEE/MNEE+Photon/Photon.
         // v3 inserts pbrt as index 0 and shifts the rest +1.

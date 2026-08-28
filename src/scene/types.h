@@ -473,8 +473,9 @@ enum GpuCausticsEngine : int {
     // Aimed-only light tracing (caster AABBs) + eye-path MNEE for TIR / fully
     // blocked glass. SDS splats stay on directly visible receivers.
     kGpuCausticsAimedLt = 0,
-    // Same aimed LT on the floor, plus CPU-style eye-path MNEE after a
-    // transmissive bounce (floor seen through glass → light). Mirrors stay LT.
+    // Same aimed LT on directly visible receivers (floor). In glass pixels
+    // (eye path already refracted through a delta caster) CPU-style MNEE + BSDF
+    // fill the interior. LT and eye MNEE write different pixels — no double.
     // Menu index stays 1 so existing hip files keep the second GPU engine.
     kGpuCausticsAimedLtMnee = 1,
 };
@@ -665,6 +666,29 @@ SR_INL SR_HD bool gpuRefractionMneeEnabled(const RenderSettingsData& s) {
 SR_INL SR_HD bool gpuEyePathMneeEnabled(const RenderSettingsData& s) {
     return s.caustics != 0 &&
            (s.causticsEngineGpu == kGpuCausticsAimedLt || s.causticsEngineGpu == kGpuCausticsAimedLtMnee);
+}
+
+// Aimed LT + MNEE: LT owns floor-first SDS. After the eye path has refracted
+// through contributing glass those are glass pixels — keep BSDF / env.
+SR_INL SR_HD bool gpuSkipCameraSds(const RenderSettingsData& s, int lightPath, int causticSuffix,
+                                   int throughGlass, float splatInv) {
+    if (lightPath || splatInv <= 0.0f || causticSuffix == 0) return false;
+    if (gpuRefractionMneeEnabled(s) && throughGlass) return false;
+    return true;
+}
+
+// Shadow-ray glass opacity for NEE. 1 = Fresnel-continue (Keller). 0 = opaque
+// so MNEE peek can start. Mode 1: always Fresnel at depth>0. Mode 2: dome/distant
+// stay Fresnel (CPU has no dome MNEE); finite lights on a through-glass
+// connectable vertex are opaque; other bounces stay Fresnel so Newton-miss
+// paths do not go black.
+SR_INL SR_HD int gpuEyeBounceNee(const RenderSettingsData& s, int depth, int throughGlass,
+                                 int connectable, int lightType) {
+    if (depth <= 0) return 0;
+    if (!gpuRefractionMneeEnabled(s)) return 1;
+    if (lightType == kLightDome || lightType == kLightDistant) return 1;
+    if (throughGlass && connectable) return 0;
+    return 1;
 }
 
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0

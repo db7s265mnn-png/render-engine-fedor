@@ -54,7 +54,8 @@ __device__ inline void shadeVolumePixel(int pixel) {
         if (!isBlack(med->emission) && !path.lightPath)
             addPathEmissionRgb(path, med->emission, 1.0f, 0.0f);
         const bool skipCameraSds =
-            !path.lightPath && params.splatInvLightPaths > 0.0f && path.causticSuffix;
+            gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
+                             params.splatInvLightPaths);
         if (!path.lightPath && !skipCameraSds && scene.lightCount > 0) {
             float selectPdf = 0.0f;
             const int lightIndex = sampleLightIndex(scene, p, path.rng.nextFloat(), selectPdf);
@@ -73,9 +74,8 @@ __device__ inline void shadeVolumePixel(int pixel) {
                 enqueueOrAddVertexNeeS(path, shadow, p, ls.wi, tSh, neeS, path.mediumIndex,
                                        scene.lights[lightIndex].shadowEnable,
                                        pathContributionClamp(scene.settings, path.depth, false, false),
-                                       path.depth > 0 && !gpuRefractionMneeEnabled(scene.settings)
-                                           ? 1
-                                           : 0);
+                                       gpuEyeBounceNee(scene.settings, path.depth, path.throughGlass, 1,
+                                                       scene.lights[lightIndex].type));
             }
         }
 

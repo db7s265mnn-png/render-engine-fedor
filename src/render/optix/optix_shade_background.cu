@@ -15,7 +15,9 @@ __device__ inline void shadeBackgroundPixel(int pixel) {
         terminatePath(pixel, path);
         return;
     }
-    if ((params.splatInvLightPaths > 0.0f && path.causticSuffix) || suppressCausticLight) {
+    if ((gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
+                          params.splatInvLightPaths) ||
+         suppressCausticLight)) {
         terminatePath(pixel, path);
         return;
     }
