@@ -477,13 +477,6 @@ enum GpuCausticsEngine : int {
     // the CPU Path Tracer eye path (Fresnel NEE + BSDF). MNEE peeks only when
     // an interface fully blocks (TIR). Menu index stays 1.
     kGpuCausticsAimedLtMnee = 1,
-    // Aimed LT + SDS: match CPU BDPT (pbrt) on GPU. Same aimed floor splats.
-    // Eye SDS after a diffuse bounce is dropped (BDPT s=0 under glass / LDS
-    // handed to t=1). Finite-light NEE is opaque through contributing glass
-    // (BDPT peek without MNEE). Dome/distant still Fresnel-continue after a
-    // bounce. No MNEE wavefront — path_tail walks the eye path like BDPT.
-    // Append-only: hip files store this as index 2.
-    kGpuCausticsAimedLtSds = 2,
 };
 
 constexpr int kGpuMcmcMutations = 4;
@@ -669,10 +662,6 @@ SR_INL SR_HD bool gpuRefractionMneeEnabled(const RenderSettingsData& s) {
     return s.caustics != 0 && s.causticsEngineGpu == kGpuCausticsAimedLtMnee;
 }
 
-SR_INL SR_HD bool gpuAimedLtSdsEnabled(const RenderSettingsData& s) {
-    return s.caustics != 0 && s.causticsEngineGpu == kGpuCausticsAimedLtSds;
-}
-
 SR_INL SR_HD bool gpuEyePathMneeEnabled(const RenderSettingsData& s) {
     return s.caustics != 0 &&
            (s.causticsEngineGpu == kGpuCausticsAimedLt || s.causticsEngineGpu == kGpuCausticsAimedLtMnee);
@@ -680,8 +669,6 @@ SR_INL SR_HD bool gpuEyePathMneeEnabled(const RenderSettingsData& s) {
 
 // Aimed LT + MNEE: LT owns floor-first SDS. After the eye path has refracted
 // through contributing glass those are glass pixels — keep BSDF / env.
-// Aimed LT and Aimed LT + SDS: skip camera SDS everywhere, including
-// throughGlass (BDPT drops s=0 SDS under glass; t=1 owns the floor).
 SR_INL SR_HD bool gpuSkipCameraSds(const RenderSettingsData& s, int lightPath, int causticSuffix,
                                    int throughGlass, float splatInv) {
     if (lightPath || splatInv <= 0.0f || causticSuffix == 0) return false;
@@ -690,22 +677,17 @@ SR_INL SR_HD bool gpuSkipCameraSds(const RenderSettingsData& s, int lightPath, i
 }
 
 // Shadow-ray glass opacity for NEE. 1 = Fresnel-continue (Keller / CPU PT).
-// 0 = opaque (primary NEE and LT splats). Aimed LT / Aimed LT + MNEE: depth>0
-// always Fresnel — that is what makes CPU Path Tracer glass bright. MNEE peek
-// still fires on TIR (block >= 0.999). Aimed LT + SDS matches CPU BDPT: dome
-// and distant Fresnel-continue after a bounce; finite lights stay opaque
-// through contributing glass (no MNEE upgrade).
+// 0 = opaque (primary NEE and LT splats). Depth>0 always Fresnel: that is what
+// makes CPU Path Tracer glass bright. MNEE peek still fires on TIR
+// (block >= 0.999). Do not opaque through-glass finite NEE — Newton on a
+// tessellated mesh misses and the interior goes black.
 SR_INL SR_HD int gpuEyeBounceNee(const RenderSettingsData& s, int depth, int throughGlass,
                                  int connectable, int lightType) {
+    (void)s;
     (void)throughGlass;
     (void)connectable;
-    if (depth <= 0) return 0;
-    if (gpuAimedLtSdsEnabled(s)) {
-        if (lightType == kLightDome || lightType == kLightDistant) return 1;
-        return 0;
-    }
     (void)lightType;
-    return 1;
+    return depth > 0 ? 1 : 0;
 }
 
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
