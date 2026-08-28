@@ -899,15 +899,16 @@ void testXpuDevice() {
         check(!gpuLightTraceSkipUnsafe(s), "GPU PT skip is safe");
         s.caustics = 1;
         s.causticsEngineGpu = kGpuCausticsAimedLt;
+        check(kGpuCausticsAimedLtMnee == 1, "GPU MNEE menu index stays 1");
         check(gpuEyePathMneeEnabled(s), "Aimed LT enables eye-path MNEE");
-        check(!gpuSdsRefractionEnabled(s), "Aimed LT does not enable SDS refraction MNEE");
-        s.causticsEngineGpu = kGpuCausticsAimedLtSds;
-        check(gpuEyePathMneeEnabled(s), "SDS refraction still runs the MNEE pipeline");
-        check(gpuSdsRefractionEnabled(s), "Aimed LT + SDS refraction enables camera MNEE");
+        check(!gpuRefractionMneeEnabled(s), "Aimed LT does not enable refraction MNEE");
+        s.causticsEngineGpu = kGpuCausticsAimedLtMnee;
+        check(gpuEyePathMneeEnabled(s), "Aimed LT + MNEE still runs the MNEE pipeline");
+        check(gpuRefractionMneeEnabled(s), "Aimed LT + MNEE enables refraction-only eye MNEE");
         s.caustics = 0;
         s.causticsEngineGpu = kGpuCausticsAimedLt;
         check(!gpuEyePathMneeEnabled(s), "caustics off disables GPU MNEE");
-        check(!gpuSdsRefractionEnabled(s), "caustics off disables SDS refraction");
+        check(!gpuRefractionMneeEnabled(s), "caustics off disables refraction MNEE");
         check(kShadowMnee != kShadowShade && kShadowMnee != kShadowIdle,
               "MNEE shadow slot is distinct from shade/idle");
     }
@@ -1056,17 +1057,17 @@ void testXpuDevice() {
         check(gpuCau != nullptr, "GPU caustics engine parameter exists");
         if (cpuCau && gpuCau) {
             check(cpuCau->menuItems.size() == 4, "CPU caustics menu has 4 engines");
-            check(gpuCau->menuItems.size() == 2, "GPU caustics menu has Aimed LT / SDS refraction");
+            check(gpuCau->menuItems.size() == 2, "GPU caustics menu has Aimed LT / MNEE");
             check(gpuCau->menuItems[0] == QLatin1String("Aimed LT"), "GPU default label is Aimed LT");
-            check(gpuCau->menuItems[1].contains(QLatin1String("SDS refraction")),
-                  "GPU second label is Aimed LT + SDS refraction");
+            check(gpuCau->menuItems[1] == QLatin1String("Aimed LT + MNEE"),
+                  "GPU second label is Aimed LT + MNEE");
             settings->setParameterValue("integrator", 0);
             settings->setParameterValue("backend", 0);
             check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings), "CPU caustics engine visible on CPU");
             check(!evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "separate GPU engine menu hidden on CPU");
             settings->setParameterValue("backend", 1);
             check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings),
-                  "Caustics Engine stays visible on GPU (items swap to Aimed LT / SDS refraction)");
+                  "Caustics Engine stays visible on GPU (items swap to Aimed LT / MNEE)");
             check(!evaluateVisibleWhen(gpuCau->visibleWhen, *settings),
                   "separate GPU engine menu hidden on GPU-only (same row as Caustics Engine)");
             settings->setParameterValue("backend", 2);
@@ -1077,8 +1078,8 @@ void testXpuDevice() {
             StagePtr cauStage = graph.cookDisplay(cauCtx);
             check(cauStage != nullptr, "GPU caustics cook produces a stage");
             ScenePtr cauScene = cauStage->toScene();
-            check(cauScene->settings.causticsEngineGpu == kGpuCausticsAimedLtSds,
-                  "causticsenginegpu 1 cooks to Aimed LT + SDS refraction");
+            check(cauScene->settings.causticsEngineGpu == kGpuCausticsAimedLtMnee,
+                  "causticsenginegpu 1 cooks to Aimed LT + MNEE");
             settings->setParameterValue("causticsenginegpu", 0);
             cauStage = graph.cookDisplay(cauCtx);
             cauScene = cauStage->toScene();

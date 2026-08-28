@@ -1483,8 +1483,9 @@ void RenderView::mouseMoveEvent(QMouseEvent* event) {
     const float precision = (event->modifiers() & Qt::ShiftModifier) ? 0.3f : 1.0f;
     switch (mode_) {
         case 1:
+            // Invert vertical orbit: Qt Y grows down, so negate pitch.
             camera_.orbitAround(tumbleCenter_, -float(delta.x()) * 0.22f * precision,
-                                float(delta.y()) * 0.22f * precision);
+                                -float(delta.y()) * 0.22f * precision);
             break;
         case 2:
             camera_.pan(float(delta.x()) * precision, float(delta.y()) * precision);

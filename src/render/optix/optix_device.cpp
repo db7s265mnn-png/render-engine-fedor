@@ -771,8 +771,8 @@ public:
                 if (gpuCaustics) {
                     msg << "  caustics=Iray LT aim n=" << nAim << " mix=" << launchParams.photonAimMix
                         << (launchParams.photonAimMix >= 1.0f - 1e-5f ? " aimed-only" : "");
-                    if (gpuEngine == kGpuCausticsAimedLtSds)
-                        msg << "  menu=Aimed LT+SDS refraction";
+                    if (gpuEngine == kGpuCausticsAimedLtMnee)
+                        msg << "  menu=Aimed LT+MNEE";
                     else
                         msg << "  menu=Aimed LT";
                 }

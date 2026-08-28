@@ -1247,7 +1247,7 @@ public:
                          .withTooltip("Enable caustic light transport (light focused through glass "
                                       "and off mirrors).\n"
                                       "Engine picks the estimator: CPU has pbrt / MNEE / Photon; "
-                                      "GPU has Aimed LT / Aimed LT + SDS refraction.\n"
+                                      "GPU has Aimed LT / Aimed LT + MNEE.\n"
                                       "Per-light and per-material Contribute to Caustics can disable "
                                       "individual sources or casters.\n"
                                       "Off: glass casts dark shadows (soften with shadow_opacity)."));
@@ -1265,7 +1265,7 @@ public:
                                           "integrator==1&&backend==1||integrator==1&&backend==2")
                          .withTooltip("CPU / Embree (and the CPU half of XPU).\n"
                                       "When Render Device is GPU this same menu shows the two "
-                                      "OptiX engines: Aimed LT and Aimed LT + SDS refraction.\n"
+                                      "OptiX engines: Aimed LT and Aimed LT + MNEE.\n"
                                       "Path / BDPT (pbrt, default): Path Tracer BSDF+NEE and BDPT "
                                       "Veach MIS with light-tracing splats — same as pbrt-v4. "
                                       "No MNEE, no photon map. SDS from small lights is noisy.\n"
@@ -1278,7 +1278,7 @@ public:
                                       "Photon / VCM: caustic-only photon map — rough glass and "
                                       "black bases through refraction."));
         addParameter(Parameter::makeMenu("causticsenginegpu", "Caustics Engine (GPU)",
-                                         {"Aimed LT", "Aimed LT + SDS refraction"}, 0)
+                                         {"Aimed LT", "Aimed LT + MNEE"}, 0)
                          .withGroup("Caustics")
                          .withVisibleWhen("integrator==0&&backend==2||integrator==1&&backend==2")
                          .withTooltip("OptiX half of XPU (Render Device = GPU uses the Caustics "
@@ -1291,10 +1291,12 @@ public:
                                       "(Keller 2017). Eye-path Newton MNEE (Hanika 2015) stays "
                                       "in a dedicated OptiX pipeline for TIR / fully blocked "
                                       "glass. Newton is not compiled into shade / path_tail.\n"
-                                      "Aimed LT + SDS refraction: the same floor caustic, plus "
-                                      "MNEE from a glass-blocked floor splat to the camera so "
-                                      "that SDS is visible through the object. Not a copy of "
-                                      "floor pixels and not fake mesh emission.\n"
+                                      "Aimed LT + MNEE: the same floor caustic, plus eye-path "
+                                      "MNEE after a transmissive bounce (floor seen through "
+                                      "glass → light), with contributing glass opaque on that "
+                                      "NEE so Newton can start. Mirrors / reflection-only SDS "
+                                      "stay with LT. Not a copy of floor pixels and not fake "
+                                      "mesh emission. TIR / env misses stay dark.\n"
                                       "Photon / VCM stays CPU-only."));
         // Hidden migration: v2 Automatic/MNEE/Photon → MNEE/MNEE+Photon/Photon.
         // v3 inserts pbrt as index 0 and shifts the rest +1.

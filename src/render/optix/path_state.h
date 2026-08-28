@@ -61,6 +61,7 @@ struct GpuPath {
     int hops = 0;
     int queue = kQueueDead;
     int specularBounce = 1;
+    int transmittedBounce = 0;  // 1 = last BSDF sample was refraction (not mirror / TIR)
     int mediumIndex = -1;
     int volumeScatters = 0;
     int localSample = 0;  // 0 .. batchSamples-1 when regenerating into the next spp
@@ -128,7 +129,6 @@ struct GpuMneeJob {
     int clampDepth = 0;
     int clampSpec = 0;
     int clampCaustic = 0;
-    int cameraSplat = 0;  // 1 = hybrid SDS refraction: MNEE floor → camera, splat
 };
 
 }  // namespace sol

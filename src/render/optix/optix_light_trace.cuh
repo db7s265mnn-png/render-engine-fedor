@@ -1,8 +1,8 @@
 // SDS-family camera splat for OptiX light paths. No optixTrace.
 // Connectable = lightTraceConnectable (not the caster). After a splat the path
 // continues; specPrefix is cleared by shade so later diffuse hits do not re-splat.
-// Hybrid (Aimed LT + SDS refraction): if the splat shadow is later blocked by
-// delta glass, the dedicated MNEE pipeline connects this vertex to the camera.
+// Floor SDS stays on directly visible receivers. Through-glass fill is eye-path
+// MNEE (Aimed LT + MNEE), not a camera-MNEE splat of this vertex.
 #pragma once
 
 #include "render/camera_proj.h"
@@ -62,33 +62,6 @@ __device__ inline void tryEnqueueCausticSplat(int pixel, GpuPath& path, GpuShado
     const Vec3 shadowOrigin = offsetRay(si.p, si.ng, toCam);
     const float dist = sqrtf(srMax(1e-12f, dist2));
     enqueueShadow(shadow, shadowOrigin, toCam, dist * (1.0f - 1e-3f), rgb, path.mediumIndex, dest);
-    if (shadow.queue != kShadowTrace || shadow.splatPixel < 0) return;
-
-    if (!params.mneeJobs || !gpuSdsRefractionEnabled(params.scene.settings)) return;
-    GpuMneeJob& job = params.mneeJobs[pixel];
-    job.p = si.p;
-    job.ns = si.ns;
-    job.ng = si.ng;
-    job.wo = wo;
-    job.uv = si.uv;
-    job.y = params.camProj.camPos;
-    job.yN = Vec3(0.0f, 1.0f, 0.0f);
-    job.LeRgb = Vec3(0.0f);
-    job.wi = toCam;
-    job.distance = dist;
-    job.pdfArea = 1.0f;
-    job.selectPdf = 1.0f;
-    job.materialIndex = si.materialIndex;
-    job.lightIndex = path.lightIndex;
-    job.casterInstance = -1;
-    job.armed = 1;
-    job.pending = 0;
-    job.distant = 0;
-    job.cameraSplat = 1;
-    job.clampDepth = path.depth;
-    job.clampSpec = 1;
-    job.clampCaustic = 1;
-    for (int i = 0; i < path.nLambda && i < kMaxSpectrumSamples; ++i) job.throughputS[i] = path.throughputS[i];
 }
 
 }  // namespace sol

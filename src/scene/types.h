@@ -473,9 +473,10 @@ enum GpuCausticsEngine : int {
     // Aimed-only light tracing (caster AABBs) + eye-path MNEE for TIR / fully
     // blocked glass. SDS splats stay on directly visible receivers.
     kGpuCausticsAimedLt = 0,
-    // Same aimed LT on the floor, plus MNEE from a glass-blocked floor splat
-    // to the camera so SDS is visible in refraction (silhouette).
-    kGpuCausticsAimedLtSds = 1,
+    // Same aimed LT on the floor, plus CPU-style eye-path MNEE after a
+    // transmissive bounce (floor seen through glass → light). Mirrors stay LT.
+    // Menu index stays 1 so existing hip files keep the second GPU engine.
+    kGpuCausticsAimedLtMnee = 1,
 };
 
 constexpr int kGpuMcmcMutations = 4;
@@ -657,13 +658,13 @@ SR_INL SR_HD bool gpuLightTraceSkipUnsafe(const RenderSettingsData& s) {
     return s.caustics != 0 && renderDeviceUsesGpu(s.backend);
 }
 
-SR_INL SR_HD bool gpuSdsRefractionEnabled(const RenderSettingsData& s) {
-    return s.caustics != 0 && s.causticsEngineGpu == kGpuCausticsAimedLtSds;
+SR_INL SR_HD bool gpuRefractionMneeEnabled(const RenderSettingsData& s) {
+    return s.caustics != 0 && s.causticsEngineGpu == kGpuCausticsAimedLtMnee;
 }
 
 SR_INL SR_HD bool gpuEyePathMneeEnabled(const RenderSettingsData& s) {
     return s.caustics != 0 &&
-           (s.causticsEngineGpu == kGpuCausticsAimedLt || s.causticsEngineGpu == kGpuCausticsAimedLtSds);
+           (s.causticsEngineGpu == kGpuCausticsAimedLt || s.causticsEngineGpu == kGpuCausticsAimedLtMnee);
 }
 
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0

@@ -73,7 +73,9 @@ __device__ inline void shadeVolumePixel(int pixel) {
                 enqueueOrAddVertexNeeS(path, shadow, p, ls.wi, tSh, neeS, path.mediumIndex,
                                        scene.lights[lightIndex].shadowEnable,
                                        pathContributionClamp(scene.settings, path.depth, false, false),
-                                       path.depth > 0 ? 1 : 0);
+                                       path.depth > 0 && !gpuRefractionMneeEnabled(scene.settings)
+                                           ? 1
+                                           : 0);
             }
         }
 
@@ -83,6 +85,7 @@ __device__ inline void shadeVolumePixel(int pixel) {
         path.direction = wi;
         path.bsdfPdf = phasePdf;
         path.specularBounce = 0;
+        path.transmittedBounce = 0;
         path.sawNonSpecular = 1;
         path.causticSuffix = 0;
         ++path.depth;

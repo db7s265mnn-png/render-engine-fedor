@@ -40,6 +40,7 @@ __device__ inline void spawnCameraPath(int pixel, int x, int y, int sampleOffset
     path.hops = 0;
     path.queue = kQueueIntersectClosest;
     path.specularBounce = 1;
+    path.transmittedBounce = 0;
     path.mediumIndex = -1;
     path.volumeScatters = 0;
     path.localSample = sampleOffset;
@@ -140,6 +141,7 @@ __device__ inline bool spawnLightPath(int pixel, int x, int y, int sampleOffset)
     path.depth = 0;
     path.hops = 0;
     path.specularBounce = 1;
+    path.transmittedBounce = 0;
     path.mediumIndex = -1;
     path.volumeScatters = 0;
     path.lightIndex = emit.lightIndex;
@@ -206,6 +208,7 @@ __device__ inline bool spawnLightPathMutation(int pixel) {
     path.depth = 0;
     path.hops = 0;
     path.specularBounce = 1;
+    path.transmittedBounce = 0;
     path.mediumIndex = -1;
     path.volumeScatters = 0;
     applySpawnMedium(params, path);

@@ -167,7 +167,6 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     if (params.mneeJobs && !path.lightPath) {
         params.mneeJobs[pixel].armed = 0;
         params.mneeJobs[pixel].pending = 0;
-        params.mneeJobs[pixel].cameraSplat = 0;
     }
     if (!path.lightPath && !skipCameraSds && !(suppressCausticLight && !path.specularBounce) &&
         scene.lightCount > 0) {
@@ -196,13 +195,20 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                                        pathContributionClamp(scene.settings, path.depth,
                                                              path.specularBounce != 0,
                                                              path.causticSuffix != 0),
-                                       path.depth > 0 ? 1 : 0);
-                // Iray: depth>0 NEE Fresnel-continues through glass (intersect_shadow),
-                // so MNEE peeks only when the interface still fully blocks (TIR).
-                // Arming stays depth>0 && specularBounce so the floor SDS is LT-only.
+                                       path.depth > 0 && !gpuRefractionMneeEnabled(scene.settings)
+                                           ? 1
+                                           : 0);
+                // Aimed LT: depth>0 NEE Fresnel-continues through glass, so MNEE
+                // peeks only when the interface still fully blocks (TIR).
+                // Aimed LT + MNEE: contributing glass is opaque again (CPU peek)
+                // and Newton is armed only after a transmissive bounce — floor
+                // seen through glass, not first-hit glass→light, not mirrors.
+                const bool wantMnee = gpuRefractionMneeEnabled(scene.settings)
+                                          ? path.transmittedBounce != 0
+                                          : path.specularBounce != 0;
                 if (params.mneeJobs && gpuEyePathMneeEnabled(scene.settings) &&
-                    shadow.queue == kShadowTrace &&
-                    (path.depth > 0 && path.specularBounce != 0)) {
+                    shadow.queue == kShadowTrace && path.depth > 0 && wantMnee &&
+                    !isDeltaCausticCaster(mat)) {
                     GpuMneeJob& job = params.mneeJobs[pixel];
                     job.p = si.p;
                     job.ns = si.ns;
@@ -244,7 +250,6 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                     job.clampCaustic = path.causticSuffix;
                     job.pending = 0;
                     job.armed = 1;
-                    job.cameraSplat = 0;
                     for (int i = 0; i < path.nLambda && i < kMaxSpectrumSamples; ++i)
                         job.throughputS[i] = path.throughputS[i];
                 }
@@ -274,6 +279,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     path.direction = wiWorld;
     path.bsdfPdf = bs.pdf;
     path.specularBounce = bs.specular ? 1 : 0;
+    path.transmittedBounce = bs.transmitted ? 1 : 0;
     BsdfSample rgbBs;
     rgbBs.wi = bs.wi;
     rgbBs.pdf = bs.pdf;
