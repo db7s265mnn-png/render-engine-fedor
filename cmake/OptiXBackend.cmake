@@ -153,7 +153,8 @@ endif()
 # shade inlined optixTrace into shade_surface and path_tail; nvcc and
 # optixModuleCreate hung for every GPU caustics engine (same PTX).
 # Eye-path MNEE is a third pipeline (optix_mnee.cu) so cicc never sees Newton
-# inside the interactive shade/tail modules.
+# inside the interactive shade/tail modules. Do not add optix_spawn.cuh to the
+# MNEE kernel: spawn/film regen stays in shade_shadow after Newton returns.
 #
 # Do NOT give ninja 16 separate custom commands. On Windows CI, after the
 # shade_surface embed finished, ninja never started [15/16] (shade_background)
@@ -354,7 +355,6 @@ solstice_optix_kernel(mnee
             ${_solstice_optix_dir}/optix_trace.cuh
             ${_solstice_optix_dir}/optix_geom.cuh
             ${_solstice_optix_dir}/optix_bsdf.cuh
-            ${_solstice_optix_dir}/optix_spawn.cuh
             ${_solstice_optix_dir}/optix_spectral.cuh
             ${_solstice_optix_dir}/optix_spectral_film.cuh
             ${CMAKE_SOURCE_DIR}/src/render/lights.h

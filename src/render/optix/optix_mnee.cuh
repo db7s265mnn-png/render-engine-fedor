@@ -23,8 +23,19 @@ constexpr int kGpuMneeBacktrack = 5;
 constexpr int kGpuMneeSeedRing = 4;
 constexpr float kGpuMneeSeedRingRadius = 0.75f;
 
-__device__ inline GpuHit gpuTraceHit(int pixel, Vec3 origin, Vec3 direction, float tMax) {
-    LaunchParams& params = launchParamsMutable();
+// __noinline__: inlined optixTrace would put Newton's live Material / Jacobian
+// on the continuation stack. Overflow is a CUDA illegal access; the next
+// optixLaunch then reports OPTIX_ERROR_CUDA_ERROR 7900 / "query command list event".
+__device__ __noinline__ GpuHit gpuTraceHit(int pixel, Vec3 origin, Vec3 direction, float tMax) {
+    GpuHit miss{};
+    if (pixel < 0) return miss;
+    if (!isFinite(origin) || !isFinite(direction)) return miss;
+    const float dir2 = lengthSquared(direction);
+    if (!(dir2 > 1e-20f) || !srIsFinite(dir2)) return miss;
+    if (!(tMax > 1e-8f) || !srIsFinite(tMax)) return miss;
+    if (tMax > 1.0e8f) tMax = 1.0e8f;
+    const LaunchParams& params = launchParams();
+    if (!params.hits) return miss;
     const GpuHit saved = params.hits[pixel];
     traceClosest(pixel, origin, direction, tMax);
     const GpuHit hit = params.hits[pixel];
@@ -85,6 +96,7 @@ __device__ inline GpuChainState gpuTraceChain(int pixel, const SceneView& scene,
     Vec3 T(1.0f);
     Vec3 lastP = p;
     Vec3 lastN = n;
+#pragma unroll 1
     for (int k = 0; k <= kGpuMneeMaxChain; ++k) {
         Surf si;
         if (!gpuTraceSurf(pixel, scene, o, d, kFloatMax, si)) {
@@ -174,7 +186,9 @@ __device__ inline GpuManifoldSolution gpuSolvePlane(int pixel, const SceneView& 
     const Vec3 planeN = dir;
     const Vec3 b1 = errFrame.t;
     const Vec3 b2 = errFrame.b;
+    if (lengthSquared(omegaInit) < 1e-12f) return sol;
     Vec3 omega = normalize(omegaInit);
+    if (!isFinite(omega)) return sol;
     const float tol = srMax(1e-5f, 1e-4f * distPy);
     float e1 = 0.0f, e2 = 0.0f;
     GpuChainState chain;
@@ -183,6 +197,7 @@ __device__ inline GpuManifoldSolution gpuSolvePlane(int pixel, const SceneView& 
         return sol;
     float err = sqrtf(e1 * e1 + e2 * e2);
     bool converged = err < tol;
+#pragma unroll 1
     for (int iter = 0; iter < kGpuMneeNewtonIters && !converged; ++iter) {
         const Frame dirFrame(omega);
         const float h = 1e-3f;
@@ -208,9 +223,10 @@ __device__ inline GpuManifoldSolution gpuSolvePlane(int pixel, const SceneView& 
         }
         bool accepted = false;
         float scale = 1.0f;
+#pragma unroll 1
         for (int k = 0; k < kGpuMneeBacktrack; ++k, scale *= 0.5f) {
             const Vec3 cand = normalize(omega - (dirFrame.t * du + dirFrame.b * dv) * scale);
-            if (dot(cand, dir) < -0.1f) continue;
+            if (!isFinite(cand) || dot(cand, dir) < -0.1f) continue;
             float c1 = 0.0f, c2 = 0.0f;
             GpuChainState candChain;
             if (!gpuChainPlaneError(pixel, scene, path, p, n, cand, y, lightIndex, planeN, b1, b2, c1, c2,
@@ -264,11 +280,13 @@ __device__ inline GpuManifoldSolution gpuSolveAngular(int pixel, const SceneView
                                                       Vec3 p, Vec3 n, Vec3 lightDir, Vec3 omegaInit) {
     GpuManifoldSolution sol;
     sol.distant = 1;
+    if (lengthSquared(lightDir) < 1e-12f || lengthSquared(omegaInit) < 1e-12f) return sol;
     const Vec3 L = normalize(lightDir);
     const Frame errFrame(L);
     const Vec3 b1 = errFrame.t;
     const Vec3 b2 = errFrame.b;
     Vec3 omega = normalize(omegaInit);
+    if (!isFinite(L) || !isFinite(omega)) return sol;
     const float tol = 2e-3f;
     float e1 = 0.0f, e2 = 0.0f;
     GpuChainState chain;
@@ -276,6 +294,7 @@ __device__ inline GpuManifoldSolution gpuSolveAngular(int pixel, const SceneView
     if (!gpuChainAngularError(pixel, scene, path, p, n, omega, L, b1, b2, e1, e2, &chain)) return sol;
     float err = sqrtf(e1 * e1 + e2 * e2);
     bool converged = err < tol;
+#pragma unroll 1
     for (int iter = 0; iter < kGpuMneeNewtonIters && !converged; ++iter) {
         const Frame dirFrame(omega);
         const float h = 1e-3f;
@@ -300,9 +319,10 @@ __device__ inline GpuManifoldSolution gpuSolveAngular(int pixel, const SceneView
         }
         bool accepted = false;
         float scale = 1.0f;
+#pragma unroll 1
         for (int k = 0; k < kGpuMneeBacktrack; ++k, scale *= 0.5f) {
             const Vec3 cand = normalize(omega - (dirFrame.t * du + dirFrame.b * dv) * scale);
-            if (dot(cand, L) < -0.1f) continue;
+            if (!isFinite(cand) || dot(cand, L) < -0.1f) continue;
             float c1 = 0.0f, c2 = 0.0f;
             GpuChainState candChain;
             if (!gpuChainAngularError(pixel, scene, path, p, n, cand, L, b1, b2, c1, c2, &candChain))

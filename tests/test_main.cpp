@@ -42,6 +42,7 @@
 #include "render/integrator.h"
 #include "render/pixel_filter.h"
 #include "render/metal_spectra.h"
+#include "render/optix/path_state.h"
 #include "render/photon_map.h"
 #include "render/photon_aim.h"
 #include "render/physical_sky.h"
@@ -878,6 +879,8 @@ void testXpuDevice() {
         s.caustics = 0;
         s.causticsEngineGpu = kGpuCausticsMneeLt;
         check(!gpuEyePathMneeEnabled(s), "caustics off disables GPU MNEE");
+        check(kShadowMnee != kShadowShade && kShadowMnee != kShadowIdle,
+              "MNEE shadow slot is distinct from shade/idle");
     }
 
     {

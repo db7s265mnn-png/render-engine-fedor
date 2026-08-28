@@ -1,8 +1,8 @@
 // Dedicated MNEE pipeline: Newton probes call optixTrace here, never from
 // shade_surface / path_tail (that combination hangs cicc / optixModuleCreate).
+// Do not include optix_spawn.cuh — spawn/film regen stays in shade_shadow.
 #define SOLSTICE_OPTIX_MNEE_KERNEL
 #include "render/optix/optix_mnee.cuh"
-#include "render/optix/optix_spawn.cuh"
 
 namespace sol {
 
@@ -11,7 +11,7 @@ extern "C" __global__ void __raygen__mnee() {
     const int pixel = wavefrontPixel(x, y);
     if (pixel < 0) return;
 
-    LaunchParams& params = launchParamsMutable();
+    const LaunchParams& params = launchParams();
     if (!params.mneeJobs || !params.paths || !params.shadows) return;
     GpuMneeJob& job = params.mneeJobs[pixel];
     if (!job.pending) return;
@@ -22,10 +22,10 @@ extern "C" __global__ void __raygen__mnee() {
     job.armed = 0;
     job.pending = 0;
     job.casterInstance = -1;
-    shadow.queue = kShadowIdle;
     shadow.mneeCaster = -1;
-    flushPathFilm(pixel);
-    maybeRegeneratePath(pixel, path);
+    // shade_shadow skipped flush/regen while this job was pending. Hand the
+    // slot back so the follow-up shade_shadow launch can close the path.
+    shadow.queue = kShadowShade;
 }
 
 }  // namespace sol

@@ -851,6 +851,9 @@ private:
         OptixPipeline pipe = pipeline_;
         if (raygenIndex == kRgPathTail) pipe = pipelineTail_;
         else if (raygenIndex == kRgMnee) pipe = pipelineMnee_;
+        if (!pipe) {
+            throw std::runtime_error(std::string("OptiX pipeline is null [") + kNames[raygenIndex] + "]");
+        }
         const OptixResult result =
             optixLaunch(pipe, stream_, launchParamsBuffer_.device(), sizeof(LaunchParams),
                         &sbts_[raygenIndex], width, height, 1);
@@ -891,7 +894,16 @@ private:
                 launches += 6;
                 if (gpuMnee) {
                     launchKernel(kRgMnee, launchW, launchH);
-                    ++launches;
+                    // Drain MNEE before the next wavefront pipeline. A device
+                    // fault here used to show up as 7900 "query command list
+                    // event" on the following optixLaunch.
+                    const cudaError_t mneeErr = cudaStreamSynchronize(stream_);
+                    if (mneeErr != cudaSuccess) {
+                        throw std::runtime_error(std::string("CUDA error after MNEE: ") +
+                                                 cudaGetErrorString(mneeErr));
+                    }
+                    launchKernel(kRgShadeShadow, launchW, launchH);
+                    launches += 2;
                 }
             }
             if (cancel.load(std::memory_order_relaxed)) return;
@@ -1184,7 +1196,8 @@ private:
                                         unsigned(sizeof(groupsMnee) / sizeof(groupsMnee[0])), log, &logSize,
                                         &pipelineMnee_));
 
-        auto setStack = [&](OptixPipeline pipe, OptixProgramGroup* groups, int n, unsigned floor) {
+        auto setStack = [&](OptixPipeline pipe, OptixProgramGroup* groups, int n, unsigned floor,
+                            const char* label) {
             OptixStackSizes stackSizes{};
             for (int i = 0; i < n; ++i) {
                 OPTIX_CHECK(optixUtilAccumulateStackSizes(groups[i], &stackSizes, pipe));
@@ -1199,12 +1212,15 @@ private:
             constexpr unsigned int kTraversableGraphDepth = 2;
             OPTIX_CHECK(optixPipelineSetStackSize(pipe, directCallableFromTraversal, directCallableFromState,
                                                   continuationStack, kTraversableGraphDepth));
+            logInfo(std::string("OptiX stack ") + label + " css=" + std::to_string(continuationStack) +
+                    " cssFromTrav=" + std::to_string(directCallableFromTraversal) +
+                    " cssFromState=" + std::to_string(directCallableFromState));
         };
         // IAS→GAS is two traversables. Depth 1 is OPTIX_ERROR_INVALID_VALUE (7001)
         // with ALLOW_SINGLE_LEVEL_INSTANCING.
-        setStack(pipeline_, groupsWf, int(sizeof(groupsWf) / sizeof(groupsWf[0])), 1024u);
-        setStack(pipelineTail_, groupsTail, int(sizeof(groupsTail) / sizeof(groupsTail[0])), 8192u);
-        setStack(pipelineMnee_, groupsMnee, int(sizeof(groupsMnee) / sizeof(groupsMnee[0])), 8192u);
+        setStack(pipeline_, groupsWf, int(sizeof(groupsWf) / sizeof(groupsWf[0])), 1024u, "wavefront");
+        setStack(pipelineTail_, groupsTail, int(sizeof(groupsTail) / sizeof(groupsTail[0])), 8192u, "path_tail");
+        setStack(pipelineMnee_, groupsMnee, int(sizeof(groupsMnee) / sizeof(groupsMnee[0])), 16384u, "mnee");
 
         RayGenRecord raygenRecords[kRgCount]{};
         for (int i = 0; i < kRgCount; ++i) {
