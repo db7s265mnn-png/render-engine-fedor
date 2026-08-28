@@ -34,6 +34,7 @@ enum ShadowQueue : int {
     kShadowIdle = 0,
     kShadowTrace = 1,
     kShadowShade = 2,
+    kShadowMnee = 3,  // glass-blocked NEE; dedicated MNEE pipeline owns the slot
 };
 
 struct GpuHit {
@@ -91,10 +92,38 @@ struct GpuShadow {
     int volumeTr = 0;     // 1 = multiply by GPU volume / homogeneous transmittance
     int mediumIndex = -1;  // current path medium for homogeneous Beer–Lambert on the shadow ray
     int splatPixel = -1;  // >=0: unoccluded contrib atomicAdds RGB to that film pixel (no .w)
+    int mneeCaster = -1;  // instanceIndex of a delta glass blocker; -1 = none
     // Camera NEE baked at the vertex: throughput × illuminant(Le) × albedo(f) × geom.
     // shade_shadow must add this as-is — live path throughput has already stepped.
     float contribS[kMaxSpectrumSamples]{};
     int specContrib = 0;  // 1 = shade_shadow uses contribS (not RGB contrib)
+};
+
+// Eye-path MNEE job filled at the NEE vertex (before BSDF steps throughput).
+// The Newton pipeline reads this after intersect_shadow peeks a glass blocker.
+struct GpuMneeJob {
+    Vec3 p{0.0f};
+    Vec3 ns{0.0f, 0.0f, 1.0f};
+    Vec3 ng{0.0f, 0.0f, 1.0f};
+    Vec3 wo{0.0f, 0.0f, 1.0f};
+    Vec2 uv{0.0f, 0.0f};
+    Vec3 y{0.0f};
+    Vec3 yN{0.0f, 1.0f, 0.0f};
+    Vec3 LeRgb{0.0f};
+    Vec3 wi{0.0f, 0.0f, 1.0f};
+    float distance = 0.0f;
+    float pdfArea = 0.0f;
+    float selectPdf = 0.0f;
+    float throughputS[kMaxSpectrumSamples]{};
+    int materialIndex = -1;
+    int lightIndex = -1;
+    int casterInstance = -1;
+    int armed = 0;
+    int pending = 0;
+    int distant = 0;
+    int clampDepth = 0;
+    int clampSpec = 0;
+    int clampCaustic = 0;
 };
 
 }  // namespace sol

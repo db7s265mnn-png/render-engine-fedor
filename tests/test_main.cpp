@@ -870,6 +870,14 @@ void testXpuDevice() {
         s.caustics = 0;
         s.backend = kBackendGpuOptix;
         check(!gpuLightTraceSkipUnsafe(s), "GPU PT skip is safe");
+        s.caustics = 1;
+        s.causticsEngineGpu = kGpuCausticsMneeLt;
+        check(gpuEyePathMneeEnabled(s), "MNEE+LT enables eye-path MNEE");
+        s.causticsEngineGpu = kGpuCausticsMcmc;
+        check(!gpuEyePathMneeEnabled(s), "MCMC menu does not run eye-path MNEE");
+        s.caustics = 0;
+        s.causticsEngineGpu = kGpuCausticsMneeLt;
+        check(!gpuEyePathMneeEnabled(s), "caustics off disables GPU MNEE");
     }
 
     {

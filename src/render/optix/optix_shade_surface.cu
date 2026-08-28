@@ -5,11 +5,9 @@
 // Light-trace: splat on connectable vertices after a spec prefix, then continue
 // (do not splat from the caster, do not kill the SDS path).
 //
-// Do not include optix_mnee.cuh here. Eye-path Newton probes call optixTrace from
-// shade; cicc then sees optixTrace+BSDF in the interactive pipeline and in
-// path_tail. That hangs nvcc / optixModuleCreate for every GPU engine (the MNEE
-// code is compiled in even when the menu is MCMC). CPU MNEE stays in
-// integrator_mnee.h. GPU MNEE+LT is light tracing + regular NEE.
+// Do not include optix_mnee.cuh here. Eye-path Newton lives in the dedicated
+// MNEE pipeline (optix_mnee.cu). Shade only arms a GpuMneeJob; intersect_shadow
+// peeks the glass blocker; __raygen__mnee runs the solver.
 #include "render/lights.h"
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_light_trace.cuh"
@@ -165,6 +163,10 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         !path.lightPath && scene.settings.caustics == 0 && path.causticSuffix;
     const bool skipCameraSds =
         !path.lightPath && params.splatInvLightPaths > 0.0f && path.causticSuffix;
+    if (params.mneeJobs) {
+        params.mneeJobs[pixel].armed = 0;
+        params.mneeJobs[pixel].pending = 0;
+    }
     if (!path.lightPath && !skipCameraSds && !(suppressCausticLight && !path.specularBounce) &&
         scene.lightCount > 0) {
         float selectPdf = 0.0f;
@@ -192,6 +194,55 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                                        pathContributionClamp(scene.settings, path.depth,
                                                              path.specularBounce != 0,
                                                              path.causticSuffix != 0));
+                // CPU MNEE: glass-blocked NEE → manifold. With LT on, only after a
+                // specular eye prefix so the floor caustic is not counted twice.
+                if (params.mneeJobs && gpuEyePathMneeEnabled(scene.settings) &&
+                    shadow.queue == kShadowTrace &&
+                    (path.depth > 0 && path.specularBounce != 0)) {
+                    GpuMneeJob& job = params.mneeJobs[pixel];
+                    job.p = si.p;
+                    job.ns = si.ns;
+                    job.ng = si.ng;
+                    job.wo = wo;
+                    job.uv = si.uv;
+                    job.wi = ls.wi;
+                    job.distance = ls.distance;
+                    job.y = si.p + ls.wi * ls.distance;
+                    const LightData& light = scene.lights[lightIndex];
+                    job.yN = areaLightNormal(light);
+                    if (light.type == kLightSphere) job.yN = normalize(job.y - lightOrigin(light));
+                    if (light.type == kLightPoint) job.yN = Vec3(0.0f, 1.0f, 0.0f);
+                    job.LeRgb = ls.radiance;
+                    job.pdfArea = ls.pdf;
+                    job.selectPdf = selectPdf;
+                    if (light.type == kLightPoint) {
+                        job.pdfArea = 1.0f;
+                        job.LeRgb = light.emittedRadiance();
+                    } else if (light.type == kLightRect) {
+                        const float area = rectLightArea(light);
+                        job.pdfArea = area > 1e-12f ? 1.0f / area : 0.0f;
+                        job.LeRgb = lightRadiance(light);
+                    } else if (light.type == kLightDisk) {
+                        const float area = diskLightArea(light);
+                        job.pdfArea = area > 1e-12f ? 1.0f / area : 0.0f;
+                        job.LeRgb = lightRadiance(light);
+                    } else if (light.type == kLightSphere) {
+                        const float radius = srMax(1e-5f, sphereLightRadius(light));
+                        job.pdfArea = 1.0f / (4.0f * kPi * radius * radius);
+                        job.LeRgb = lightRadiance(light);
+                    }
+                    job.distant = light.type == kLightDistant ? 1 : 0;
+                    job.materialIndex = si.materialIndex;
+                    job.lightIndex = lightIndex;
+                    job.casterInstance = -1;
+                    job.clampDepth = path.depth;
+                    job.clampSpec = path.specularBounce;
+                    job.clampCaustic = path.causticSuffix;
+                    job.pending = 0;
+                    job.armed = 1;
+                    for (int i = 0; i < path.nLambda && i < kMaxSpectrumSamples; ++i)
+                        job.throughputS[i] = path.throughputS[i];
+                }
             }
         }
     }

@@ -102,6 +102,7 @@ __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, f
     shadow.volumeTr = 1;
     shadow.mediumIndex = mediumIndex;
     shadow.splatPixel = splatPixel;
+    shadow.mneeCaster = -1;
     shadow.queue = kShadowTrace;
 }
 

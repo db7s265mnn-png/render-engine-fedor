@@ -8,6 +8,14 @@ __device__ inline bool shadeShadowPixel(int pixel) {
     const LaunchParams& params = launchParams();
     GpuShadow& shadow = params.shadows[pixel];
     GpuPath& path = params.paths[pixel];
+    if (shadow.occluded && shadow.mneeCaster >= 0 && params.mneeJobs &&
+        params.mneeJobs[pixel].armed && !path.lightPath && shadow.splatPixel < 0) {
+        GpuMneeJob& job = params.mneeJobs[pixel];
+        job.casterInstance = shadow.mneeCaster;
+        job.pending = 1;
+        shadow.queue = kShadowMnee;
+        return false;
+    }
     if (!shadow.occluded) {
         if (shadow.splatPixel >= 0) {
             Vec3 contrib = shadow.contrib;
@@ -32,6 +40,11 @@ __device__ inline bool shadeShadowPixel(int pixel) {
     shadow.queue = kShadowIdle;
     shadow.splatPixel = -1;
     shadow.specContrib = 0;
+    shadow.mneeCaster = -1;
+    if (params.mneeJobs) {
+        params.mneeJobs[pixel].armed = 0;
+        params.mneeJobs[pixel].pending = 0;
+    }
     flushPathFilm(pixel);
     return maybeRegeneratePath(pixel, path);
 }

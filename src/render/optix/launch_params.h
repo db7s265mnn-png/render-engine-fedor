@@ -51,6 +51,7 @@ struct alignas(16) LaunchParams {
     GpuPath* paths = nullptr;
     GpuHit* hits = nullptr;
     GpuShadow* shadows = nullptr;
+    GpuMneeJob* mneeJobs = nullptr;
 
     // Compacted work queues (pixel indices). Host launches 1D on live count.
     int* qIntersect = nullptr;

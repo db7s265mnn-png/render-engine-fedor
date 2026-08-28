@@ -1,16 +1,11 @@
-// Eye-path MNEE Newton (Hanika et al. 2015), kept as the GPU algorithm notes.
-// Do not include this from any OptiX .cu.
-//
-// shade_surface / path_tail must not call optixTrace: OptiXBackend.cmake splits
-// intersect vs shade so cicc never sees optixTrace+BSDF in the interactive
-// pipeline. Including this header compiles Newton probes into both kernels
-// (runtime menu MNEE vs MCMC does not strip them). nvcc, optixModuleCreate, and
-// GPU warmup then hang. CPU MNEE is integrator_mnee.h. GPU MNEE+LT is light
-// tracing that continues past the caster plus regular wavefront NEE.
+// Eye-path MNEE Newton (Hanika et al. 2015). Only the dedicated MNEE OptiX
+// pipeline includes this file (SOLSTICE_OPTIX_MNEE_KERNEL). shade_surface and
+// path_tail must not: Newton probes call optixTrace, and inlining them into
+// the interactive shade/tail TUs hangs cicc / optixModuleCreate.
 #pragma once
 
-#ifdef __CUDACC__
-#error "optix_mnee.cuh must not be included in OptiX programs (optixTrace+BSDF hangs cicc / optixModuleCreate)"
+#if defined(__CUDACC__) && !defined(SOLSTICE_OPTIX_MNEE_KERNEL)
+#error "optix_mnee.cuh must not be included in shade / path_tail (optixTrace+BSDF hangs cicc)"
 #endif
 
 #include "render/lights.h"
@@ -23,8 +18,8 @@
 namespace sol {
 
 constexpr int kGpuMneeMaxChain = 6;
-constexpr int kGpuMneeNewtonIters = 12;
-constexpr int kGpuMneeBacktrack = 4;
+constexpr int kGpuMneeNewtonIters = 24;
+constexpr int kGpuMneeBacktrack = 5;
 constexpr int kGpuMneeSeedRing = 4;
 constexpr float kGpuMneeSeedRingRadius = 0.75f;
 
@@ -428,9 +423,10 @@ __device__ inline bool gpuVerifyDistantExit(int pixel, const SceneView& scene, c
     return isDeltaCausticCaster(mat);
 }
 
-__device__ inline void gpuAddMneeContribution(GpuPath& path, const LightData& light, const Material& shadeMat,
-                                              Vec3 wo, Vec3 n, const GpuManifoldSolution& sol, Vec3 LeRgb,
-                                              Vec3 yN, float pdfArea, float selectPdf, float clampValue) {
+__device__ inline void gpuAddMneeContribution(GpuPath& path, const float* throughputS, const LightData& light,
+                                              const Material& shadeMat, Vec3 wo, Vec3 n,
+                                              const GpuManifoldSolution& sol, Vec3 LeRgb, Vec3 yN,
+                                              float pdfArea, float selectPdf, float clampValue) {
     const GpuChainState& chain = sol.chain;
     const Frame frame(n);
     const Vec3 woLocal = frame.toLocal(wo);
@@ -457,64 +453,45 @@ __device__ inline void gpuAddMneeContribution(GpuPath& path, const LightData& li
     specAuthoredRadiance(light, LeRgb, path, Le);
     evalBsdfSpectralGpu(shadeMat, woLocal, wiLocal, path, shadeMat.ior, fS);
     specUpsampleLinear(chain.throughput, path.lambda, path.nLambda, tS);
-    for (int i = 0; i < path.nLambda; ++i) neeS[i] = Le[i] * fS[i] * tS[i] * scale;
+    const int n = path.nLambda;
+    for (int i = 0; i < n; ++i) neeS[i] = Le[i] * fS[i] * tS[i] * scale;
     float baked[kMaxSpectrumSamples];
-    bakeNeeAtVertexS(path, neeS, clampValue, baked);
+    for (int i = 0; i < n; ++i) baked[i] = throughputS[i] * neeS[i];
+    specClampIndirect(baked, n, clampValue);
     addBakedRadianceS(path, baked);
 }
 
-enum GpuNeePeek : int { kGpuNeeClear = 0, kGpuNeeGlass = 1, kGpuNeeBlocked = 2 };
-
-__device__ inline GpuNeePeek gpuPeekNee(int pixel, const SceneView& scene, const GpuPath& path, Vec3 origin,
-                                        Vec3 dir, float tMax, int lightIndex, int& casterInstance) {
-    casterInstance = -1;
-    Surf si;
-    if (!gpuTraceSurf(pixel, scene, origin, dir, tMax, si)) return kGpuNeeClear;
-    if (si.lightIndex == lightIndex) return kGpuNeeClear;
-    if (si.lightIndex >= 0) return kGpuNeeBlocked;
-    Vec3 ns = si.ns;
-    const Material mat = gpuMneeCasterMat(scene, si, path, ns);
-    if (isDeltaCausticCaster(mat)) {
-        casterInstance = si.instanceIndex;
-        return kGpuNeeGlass;
-    }
-    return kGpuNeeBlocked;
-}
-
-// Returns true when the NEE sample was a glass SDS (MNEE ran or failed) — skip
-// the regular shadow NEE, which would be blocked by opaque-caustic glass.
-__device__ inline bool tryGpuMneeNee(int pixel, GpuPath& path, GpuShadow& shadow, const Surf& si,
-                                     const Material& mat, const Frame& frame, Vec3 wo, int lightIndex,
-                                     const LightSample& ls, float selectPdf) {
-    (void)shadow;
+// Lazy MNEE upgrade after intersect_shadow peeked a delta-glass blocker.
+// Matches CPU integrator_mnee: finite (and distant) lights, not the dome.
+__device__ inline void tryGpuMneeJob(int pixel, GpuPath& path, GpuMneeJob& job) {
     const LaunchParams& params = launchParams();
     const SceneView& scene = params.scene;
-    if (scene.settings.caustics == 0) return false;
-    if (scene.settings.causticsEngineGpu != kGpuCausticsMneeLt) return false;
-    if (lightIndex < 0 || lightIndex >= scene.lightCount) return false;
-    const LightData& light = scene.lights[lightIndex];
-    if (!lightContributesCaustics(light)) return false;
-    if (light.type == kLightDome) return false;
+    if (!job.pending) return;
+    job.pending = 0;
+    if (!gpuEyePathMneeEnabled(scene.settings)) return;
+    if (path.lightPath) return;
+    if (job.lightIndex < 0 || job.lightIndex >= scene.lightCount) return;
+    const LightData& light = scene.lights[job.lightIndex];
+    if (!lightContributesCaustics(light)) return;
+    if (light.type == kLightDome) return;
+    if (job.selectPdf <= 0.0f) return;
+    if (!job.distant && light.type != kLightDistant && job.pdfArea <= 0.0f) return;
 
-    const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
-    float tMax = 1.0e8f;
-    if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-    int casterInstance = -1;
-    const GpuNeePeek peek = gpuPeekNee(pixel, scene, path, shadowOrigin, ls.wi, tMax, lightIndex,
-                                       casterInstance);
-    if (peek != kGpuNeeGlass) return false;
+    Material mat = gpuMaterialAt(scene, job.materialIndex);
+    mat = optixpt::evaluateMaps(scene, mat, job.uv, job.ns);
 
     const float clampValue =
-        pathContributionClamp(scene.settings, path.depth, path.specularBounce != 0, path.causticSuffix != 0);
+        pathContributionClamp(scene.settings, job.clampDepth, job.clampSpec != 0, job.clampCaustic != 0);
 
     Vec3 seeds[1 + kGpuMneeSeedRing];
     Vec3 found[1 + kGpuMneeSeedRing];
     int foundCount = 0;
 
-    if (light.type == kLightDistant) {
-        const int nSeeds = gpuBuildSeedDirs(scene, si.p, ls.wi, casterInstance, seeds);
+    if (job.distant || light.type == kLightDistant) {
+        const int nSeeds = gpuBuildSeedDirs(scene, job.p, job.wi, job.casterInstance, seeds);
         for (int i = 0; i < nSeeds; ++i) {
-            const GpuManifoldSolution sol = gpuSolveAngular(pixel, scene, path, si.p, si.ns, ls.wi, seeds[i]);
+            const GpuManifoldSolution sol =
+                gpuSolveAngular(pixel, scene, path, job.p, job.ns, job.wi, seeds[i]);
             if (!sol.solved) continue;
             bool dup = false;
             for (int k = 0; k < foundCount; ++k)
@@ -524,47 +501,17 @@ __device__ inline bool tryGpuMneeNee(int pixel, GpuPath& path, GpuShadow& shadow
                 }
             if (dup) continue;
             found[foundCount++] = sol.omega;
-            if (!gpuVerifyDistantExit(pixel, scene, sol.chain, ls.wi)) continue;
-            gpuAddMneeContribution(path, light, mat, wo, si.ns, sol, ls.radiance, Vec3(0.0f, 1.0f, 0.0f),
-                                   ls.pdf, selectPdf, clampValue);
+            if (!gpuVerifyDistantExit(pixel, scene, sol.chain, job.wi)) continue;
+            gpuAddMneeContribution(path, job.throughputS, light, mat, job.wo, job.ns, sol, job.LeRgb,
+                                   Vec3(0.0f, 1.0f, 0.0f), job.pdfArea, job.selectPdf, clampValue);
         }
-        return true;
+        return;
     }
 
-    const Vec3 y = si.p + ls.wi * ls.distance;
-    Vec3 yN = areaLightNormal(light);
-    if (light.type == kLightSphere) yN = normalize(y - lightOrigin(light));
-    if (light.type == kLightPoint) yN = Vec3(0.0f, 1.0f, 0.0f);
-
-    float pdfArea = 1.0f;
-    Vec3 LeRgb = ls.radiance;
-    if (light.type == kLightPoint) {
-        pdfArea = 1.0f;
-        LeRgb = light.emittedRadiance();
-    } else if (light.type == kLightRect) {
-        const float area = rectLightArea(light);
-        if (area <= 1e-12f) return true;
-        pdfArea = 1.0f / area;
-        LeRgb = lightRadiance(light);
-    } else if (light.type == kLightDisk) {
-        const float area = diskLightArea(light);
-        if (area <= 1e-12f) return true;
-        pdfArea = 1.0f / area;
-        LeRgb = lightRadiance(light);
-    } else if (light.type == kLightSphere) {
-        const float radius = srMax(1e-5f, sphereLightRadius(light));
-        pdfArea = 1.0f / (4.0f * kPi * radius * radius);
-        LeRgb = lightRadiance(light);
-    }
-
-    Vec3 dir = y - si.p;
-    const float distPy = length(dir);
-    if (distPy < 1e-5f) return true;
-    dir = dir / distPy;
-    const int nSeeds = gpuBuildSeedDirs(scene, si.p, dir, casterInstance, seeds);
+    const int nSeeds = gpuBuildSeedDirs(scene, job.p, job.wi, job.casterInstance, seeds);
     for (int i = 0; i < nSeeds; ++i) {
         const GpuManifoldSolution sol =
-            gpuSolvePlane(pixel, scene, path, si.p, si.ns, lightIndex, y, seeds[i]);
+            gpuSolvePlane(pixel, scene, path, job.p, job.ns, job.lightIndex, job.y, seeds[i]);
         if (!sol.solved) continue;
         bool dup = false;
         for (int k = 0; k < foundCount; ++k)
@@ -574,11 +521,10 @@ __device__ inline bool tryGpuMneeNee(int pixel, GpuPath& path, GpuShadow& shadow
             }
         if (dup) continue;
         found[foundCount++] = sol.omega;
-        if (!gpuVerifyAreaExit(pixel, scene, sol.chain, lightIndex, y)) continue;
-        gpuAddMneeContribution(path, light, mat, wo, si.ns, sol, LeRgb, yN, pdfArea, selectPdf, clampValue);
+        if (!gpuVerifyAreaExit(pixel, scene, sol.chain, job.lightIndex, job.y)) continue;
+        gpuAddMneeContribution(path, job.throughputS, light, mat, job.wo, job.ns, sol, job.LeRgb, job.yN,
+                               job.pdfArea, job.selectPdf, clampValue);
     }
-    (void)frame;
-    return true;
 }
 
 }  // namespace sol

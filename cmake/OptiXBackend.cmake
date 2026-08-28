@@ -152,6 +152,8 @@ endif()
 # Never add optix_mnee.cuh / optix_trace.cuh to shade_surface. Newton probes from
 # shade inlined optixTrace into shade_surface and path_tail; nvcc and
 # optixModuleCreate hung for every GPU caustics engine (same PTX).
+# Eye-path MNEE is a third pipeline (optix_mnee.cu) so cicc never sees Newton
+# inside the interactive shade/tail modules.
 #
 # Do NOT give ninja 16 separate custom commands. On Windows CI, after the
 # shade_surface embed finished, ninja never started [15/16] (shade_background)
@@ -341,6 +343,22 @@ solstice_optix_kernel(path_tail
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
+
+solstice_optix_kernel(mnee
+    ${_solstice_optix_dir}/optix_mnee.cu
+    solsticeOptixMneeIr
+    LIGHTS
+    TIMEOUT 1800
+    DEPENDS ${_solstice_optix_base}
+            ${_solstice_optix_dir}/optix_mnee.cuh
+            ${_solstice_optix_dir}/optix_trace.cuh
+            ${_solstice_optix_dir}/optix_geom.cuh
+            ${_solstice_optix_dir}/optix_bsdf.cuh
+            ${_solstice_optix_dir}/optix_spawn.cuh
+            ${_solstice_optix_dir}/optix_spectral.cuh
+            ${_solstice_optix_dir}/optix_spectral_film.cuh
+            ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/shading_bsdf.h)
 
 get_property(_solstice_optix_kernels DIRECTORY PROPERTY SOLSTICE_OPTIX_KERNELS)
 get_property(SOLSTICE_OPTIX_EMBED_SOURCES DIRECTORY PROPERTY SOLSTICE_OPTIX_EMBED_SOURCES)

@@ -468,8 +468,9 @@ enum CausticsEngine : int {
 // OptiX-only caustic estimators (Render Device = GPU, or the GPU half of XPU).
 // CPU Embree keeps CausticsEngine 0..3; do not overload those indices.
 enum GpuCausticsEngine : int {
-    // Eye-path MNEE through delta glass + light tracing that continues past the
-    // caster (splat only on a true connectable after a spec prefix).
+    // Eye-path MNEE through delta glass (dedicated OptiX pipeline) + light
+    // tracing that continues past the caster (splat only on a true connectable
+    // after a spec prefix). Same lazy glass-blocked NEE upgrade as CPU MNEE.
     kGpuCausticsMneeLt = 0,
     // Same GPU transport as MNEE+LT (Iray PT+LT with photon aiming). The menu
     // label stays "MCMC" for the existing UI / tests; cone mutations are off.
@@ -653,6 +654,10 @@ struct RenderSettingsData {
 // by camera `w`. Variance skip freezes `w` while LT still splats — unbounded mean.
 SR_INL SR_HD bool gpuLightTraceSkipUnsafe(const RenderSettingsData& s) {
     return s.caustics != 0 && renderDeviceUsesGpu(s.backend);
+}
+
+SR_INL SR_HD bool gpuEyePathMneeEnabled(const RenderSettingsData& s) {
+    return s.caustics != 0 && s.causticsEngineGpu == kGpuCausticsMneeLt;
 }
 
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
