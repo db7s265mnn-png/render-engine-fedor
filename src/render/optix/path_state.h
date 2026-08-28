@@ -128,6 +128,7 @@ struct GpuMneeJob {
     int clampDepth = 0;
     int clampSpec = 0;
     int clampCaustic = 0;
+    int cameraSplat = 0;  // 1 = hybrid SDS refraction: MNEE floor → camera, splat
 };
 
 }  // namespace sol

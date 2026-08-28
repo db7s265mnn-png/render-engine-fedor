@@ -8,9 +8,11 @@
 #error "optix_mnee.cuh must not be included in shade / path_tail (optixTrace+BSDF hangs cicc)"
 #endif
 
+#include "render/camera_proj.h"
 #include "render/lights.h"
 #include "render/optix/optix_bsdf.cuh"
 #include "render/optix/optix_geom.cuh"
+#include "render/optix/optix_light_emit.cuh"
 #include "render/optix/optix_spectral.cuh"
 #include "render/optix/optix_trace.cuh"
 #include "render/shading_bsdf.h"
@@ -22,6 +24,8 @@ constexpr int kGpuMneeNewtonIters = 24;
 constexpr int kGpuMneeBacktrack = 5;
 constexpr int kGpuMneeSeedRing = 4;
 constexpr float kGpuMneeSeedRingRadius = 0.75f;
+// gpuTraceChain: not a scene light. Miss after glass is success; area lights block.
+constexpr int kGpuMneeCameraTarget = -2;
 
 // __noinline__: inlined optixTrace would put Newton's live Material / Jacobian
 // on the continuation stack. Overflow is a CUDA illegal access; the next
@@ -109,6 +113,8 @@ __device__ inline GpuChainState gpuTraceChain(int pixel, const SceneView& scene,
             return st;
         }
         if (si.lightIndex >= 0) {
+            // Camera MNEE: lights along the floor→camera chain are blockers.
+            if (targetLight == kGpuMneeCameraTarget) return st;
             if (si.lightIndex == targetLight || targetLight < 0) {
                 st.exitP = lastP;
                 st.exitDir = d;
@@ -481,13 +487,102 @@ __device__ inline void gpuAddMneeContribution(GpuPath& path, const float* throug
     addBakedRadianceS(path, baked);
 }
 
+__device__ inline bool gpuVerifyCameraExit(int pixel, const SceneView& scene, const GpuChainState& chain,
+                                           Vec3 camPos) {
+    Vec3 toC = camPos - chain.exitP;
+    const float d = length(toC);
+    if (d < 1e-5f) return false;
+    toC = toC / d;
+    if (dot(toC, chain.exitDir) < 0.2f) return false;
+    Surf si;
+    if (!gpuTraceSurf(pixel, scene, offsetRay(chain.exitP, chain.exitN, toC), toC, d * (1.0f - 1e-3f), si))
+        return true;
+    return false;
+}
+
+__device__ inline void gpuAddCameraMneeSplat(GpuPath& path, const GpuMneeJob& job, const Material& shadeMat,
+                                             const GpuManifoldSolution& sol) {
+    const LaunchParams& params = launchParams();
+    if (!params.camProj.valid || params.splatInvLightPaths <= 0.0f) return;
+    const GpuChainState& chain = sol.chain;
+    const Frame frame(job.ns);
+    const Vec3 woLocal = frame.toLocal(job.wo);
+    const Vec3 wiLocal = frame.toLocal(sol.omega);
+    const BsdfEval be = bsdfEvalLocal(shadeMat, woLocal, wiLocal);
+    if (isBlack(be.f) || !isFinite(be.f)) return;
+
+    float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
+    if (!projectToPixel(params.camProj, chain.exitP, px, py, cosTheta, dist2) || dist2 < 1e-8f) return;
+    const int ix = int(px);
+    const int iy = int(py);
+    if (ix < 0 || iy < 0 || ix >= params.width || iy >= params.height) return;
+    const int dest = iy * params.width + ix;
+
+    const float cosP = fabsf(dot(job.ns, sol.omega));
+    const float pdfOmega = cameraPdfOmega(params.camProj, cosTheta);
+    const float geom = cosP * pdfOmega / srMax(1e-12f, sol.detJ);
+    if (!(geom > 0.0f) || !srIsFinite(geom)) return;
+
+    float fS[kMaxSpectrumSamples];
+    float tS[kMaxSpectrumSamples];
+    float tmp[kMaxSpectrumSamples];
+    evalBsdfSpectralGpu(shadeMat, woLocal, wiLocal, path, shadeMat.ior, fS);
+    specUpsampleLinear(chain.throughput, path.lambda, path.nLambda, tS);
+    specZero(tmp, path.nLambda);
+    for (int i = 0; i < path.nLambda; ++i)
+        tmp[i] = job.throughputS[i] * fS[i] * tS[i] * geom;
+    specClampIndirect(tmp, path.nLambda, gpuLightTraceSplatClamp(params.scene.settings));
+    if (!specIsFinite(tmp, path.nLambda) || specIsBlack(tmp, path.nLambda)) return;
+    Vec3 rgb = specToRgb(params.spec, tmp, path.lambda, path.pdf, path.nLambda);
+    rgb = rgb * params.splatInvLightPaths;
+    if (!isFinite(rgb) || isBlack(rgb)) return;
+    addSplatRadiance(dest, rgb);
+}
+
+__device__ inline void tryGpuCameraMneeSplat(int pixel, GpuPath& path, GpuMneeJob& job) {
+    const LaunchParams& params = launchParams();
+    const SceneView& scene = params.scene;
+    if (!gpuSdsRefractionEnabled(scene.settings)) return;
+    if (!path.lightPath) return;
+    if (!params.camProj.valid) return;
+    if (job.selectPdf <= 0.0f) return;
+
+    Material mat = gpuMaterialAt(scene, job.materialIndex);
+    mat = optixpt::evaluateMaps(scene, mat, job.uv, job.ns);
+
+    Vec3 seeds[1 + kGpuMneeSeedRing];
+    Vec3 found[1 + kGpuMneeSeedRing];
+    int foundCount = 0;
+    const int nSeeds = gpuBuildSeedDirs(scene, job.p, job.wi, job.casterInstance, seeds);
+    for (int i = 0; i < nSeeds; ++i) {
+        const GpuManifoldSolution sol =
+            gpuSolvePlane(pixel, scene, path, job.p, job.ns, kGpuMneeCameraTarget, job.y, seeds[i]);
+        if (!sol.solved) continue;
+        bool dup = false;
+        for (int k = 0; k < foundCount; ++k)
+            if (gpuSameBranch(sol.omega, found[k])) {
+                dup = true;
+                break;
+            }
+        if (dup) continue;
+        found[foundCount++] = sol.omega;
+        if (!gpuVerifyCameraExit(pixel, scene, sol.chain, job.y)) continue;
+        gpuAddCameraMneeSplat(path, job, mat, sol);
+    }
+}
+
 // Lazy MNEE upgrade after intersect_shadow peeked a delta-glass blocker.
 // Matches CPU integrator_mnee: finite (and distant) lights, not the dome.
+// Hybrid SDS refraction: same Newton to the camera when an LT splat is blocked.
 __device__ inline void tryGpuMneeJob(int pixel, GpuPath& path, GpuMneeJob& job) {
     const LaunchParams& params = launchParams();
     const SceneView& scene = params.scene;
     if (!job.pending) return;
     job.pending = 0;
+    if (job.cameraSplat) {
+        tryGpuCameraMneeSplat(pixel, path, job);
+        return;
+    }
     if (!gpuEyePathMneeEnabled(scene.settings)) return;
     if (path.lightPath) return;
     if (job.lightIndex < 0 || job.lightIndex >= scene.lightCount) return;

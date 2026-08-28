@@ -53,7 +53,10 @@ __device__ inline void intersectShadowPixel(int pixel) {
         vis *= (1.0f - block);
         if (block >= 0.999f || vis <= 1e-5f) {
             vis = 0.0f;
-            if (!path.lightPath && shadow.splatPixel < 0) {
+            const bool eyePeek = !path.lightPath && shadow.splatPixel < 0;
+            const bool sdsPeek =
+                path.lightPath && shadow.splatPixel >= 0 && gpuSdsRefractionEnabled(scene.settings);
+            if (eyePeek || sdsPeek) {
                 const Material caster = gpuMaterialForCausticSlot(scene, si.materialIndex);
                 if (isDeltaCausticCaster(caster)) shadow.mneeCaster = si.instanceIndex;
             }

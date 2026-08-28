@@ -1080,7 +1080,7 @@ public:
                              "Relative stderr of luminance: at 128 spp a pixel with ~30% sample noise "
                              "is still above 0.01, so Variance will not stop it. Raise to 0.05 to see "
                              "adaptive stop, or watch the overlay skip %. Sampling Debug forces off.\n"
-                             "GPU Light Trace (MNEE+LT / MCMC) ignores Variance skip: SDS shares the "
+                             "GPU Aimed LT ignores Variance skip: SDS shares the "
                              "camera film weight, so freezing camera spawn would let the caustic grow "
                              "with remaining samples.\n"
                              "Used when Pixel Oracle is Variance. Uniform ignores this."));
@@ -1247,12 +1247,12 @@ public:
                          .withTooltip("Enable caustic light transport (light focused through glass "
                                       "and off mirrors).\n"
                                       "Engine picks the estimator: CPU has pbrt / MNEE / Photon; "
-                                      "GPU has MNEE + Light Trace / MCMC.\n"
+                                      "GPU has Aimed LT / Aimed LT + SDS refraction.\n"
                                       "Per-light and per-material Contribute to Caustics can disable "
                                       "individual sources or casters.\n"
                                       "Off: glass casts dark shadows (soften with shadow_opacity)."));
         // Same "Caustics Engine" row on every device. GPU (backend==1) swaps this
-        // menu's items in the parameter panel to the two OptiX/Iray estimators and
+        // menu's items in the parameter panel to the two OptiX estimators and
         // writes causticsenginegpu — otherwise GPU hid this row and the second
         // menu was easy to miss. XPU shows both rows.
         addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
@@ -1265,8 +1265,7 @@ public:
                                           "integrator==1&&backend==1||integrator==1&&backend==2")
                          .withTooltip("CPU / Embree (and the CPU half of XPU).\n"
                                       "When Render Device is GPU this same menu shows the two "
-                                      "OptiX engines: MNEE + Light Trace and MCMC (Iray PT+LT "
-                                      "photon aiming).\n"
+                                      "OptiX engines: Aimed LT and Aimed LT + SDS refraction.\n"
                                       "Path / BDPT (pbrt, default): Path Tracer BSDF+NEE and BDPT "
                                       "Veach MIS with light-tracing splats — same as pbrt-v4. "
                                       "No MNEE, no photon map. SDS from small lights is noisy.\n"
@@ -1279,24 +1278,23 @@ public:
                                       "Photon / VCM: caustic-only photon map — rough glass and "
                                       "black bases through refraction."));
         addParameter(Parameter::makeMenu("causticsenginegpu", "Caustics Engine (GPU)",
-                                         {"MNEE + Light Trace", "MCMC (Iray PT+LT)"}, 0)
+                                         {"Aimed LT", "Aimed LT + SDS refraction"}, 0)
                          .withGroup("Caustics")
                          .withVisibleWhen("integrator==0&&backend==2||integrator==1&&backend==2")
                          .withTooltip("OptiX half of XPU (Render Device = GPU uses the Caustics "
                                       "Engine menu above for these same two items).\n"
-                                      "Both items: Iray Photoreal PT+LT with photon aiming "
-                                      "(caster AABBs, aimed only — no uniform SampleLe mix, "
-                                      "same number of camera and light paths).\n"
-                                      "MNEE + Light Trace (default): Iray photon aiming + light "
-                                      "tracing SDS on directly visible receivers, plus Iray-style "
-                                      "eye NEE through glass (Fresnel transmittance, Keller 2017) "
-                                      "so refraction shows a lit floor — not a copy of the floor "
-                                      "caustic inside the object. Eye-path Newton MNEE (Hanika 2015) "
-                                      "stays in a dedicated OptiX pipeline for TIR / fully blocked "
+                                      "Both items: aimed-only light tracing at caster AABBs "
+                                      "(same number of camera and light paths, no uniform "
+                                      "SampleLe mix).\n"
+                                      "Aimed LT (default): SDS on directly visible receivers. "
+                                      "Eye NEE after a bounce Fresnel-continues through glass "
+                                      "(Keller 2017). Eye-path Newton MNEE (Hanika 2015) stays "
+                                      "in a dedicated OptiX pipeline for TIR / fully blocked "
                                       "glass. Newton is not compiled into shade / path_tail.\n"
-                                      "MCMC (Iray PT+LT): the same aimed transport (Keller 2017 "
-                                      "caster bounds). Sequential Metropolis / the "
-                                      "old 11° cone that reused Le/pdf is off.\n"
+                                      "Aimed LT + SDS refraction: the same floor caustic, plus "
+                                      "MNEE from a glass-blocked floor splat to the camera so "
+                                      "that SDS is visible through the object. Not a copy of "
+                                      "floor pixels and not fake mesh emission.\n"
                                       "Photon / VCM stays CPU-only."));
         // Hidden migration: v2 Automatic/MNEE/Photon → MNEE/MNEE+Photon/Photon.
         // v3 inserts pbrt as index 0 and shifts the rest +1.

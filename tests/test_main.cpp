@@ -898,13 +898,16 @@ void testXpuDevice() {
         s.backend = kBackendGpuOptix;
         check(!gpuLightTraceSkipUnsafe(s), "GPU PT skip is safe");
         s.caustics = 1;
-        s.causticsEngineGpu = kGpuCausticsMneeLt;
-        check(gpuEyePathMneeEnabled(s), "MNEE+LT enables eye-path MNEE");
-        s.causticsEngineGpu = kGpuCausticsMcmc;
-        check(!gpuEyePathMneeEnabled(s), "MCMC menu does not run eye-path MNEE");
+        s.causticsEngineGpu = kGpuCausticsAimedLt;
+        check(gpuEyePathMneeEnabled(s), "Aimed LT enables eye-path MNEE");
+        check(!gpuSdsRefractionEnabled(s), "Aimed LT does not enable SDS refraction MNEE");
+        s.causticsEngineGpu = kGpuCausticsAimedLtSds;
+        check(gpuEyePathMneeEnabled(s), "SDS refraction still runs the MNEE pipeline");
+        check(gpuSdsRefractionEnabled(s), "Aimed LT + SDS refraction enables camera MNEE");
         s.caustics = 0;
-        s.causticsEngineGpu = kGpuCausticsMneeLt;
+        s.causticsEngineGpu = kGpuCausticsAimedLt;
         check(!gpuEyePathMneeEnabled(s), "caustics off disables GPU MNEE");
+        check(!gpuSdsRefractionEnabled(s), "caustics off disables SDS refraction");
         check(kShadowMnee != kShadowShade && kShadowMnee != kShadowIdle,
               "MNEE shadow slot is distinct from shade/idle");
     }
@@ -1053,16 +1056,17 @@ void testXpuDevice() {
         check(gpuCau != nullptr, "GPU caustics engine parameter exists");
         if (cpuCau && gpuCau) {
             check(cpuCau->menuItems.size() == 4, "CPU caustics menu has 4 engines");
-            check(gpuCau->menuItems.size() == 2, "GPU caustics menu has MNEE+LT / MCMC");
-            check(gpuCau->menuItems[0].contains(QLatin1String("MNEE")), "GPU default label is MNEE + Light Trace");
-            check(gpuCau->menuItems[1].contains(QLatin1String("MCMC")), "GPU second label is MCMC");
+            check(gpuCau->menuItems.size() == 2, "GPU caustics menu has Aimed LT / SDS refraction");
+            check(gpuCau->menuItems[0] == QLatin1String("Aimed LT"), "GPU default label is Aimed LT");
+            check(gpuCau->menuItems[1].contains(QLatin1String("SDS refraction")),
+                  "GPU second label is Aimed LT + SDS refraction");
             settings->setParameterValue("integrator", 0);
             settings->setParameterValue("backend", 0);
             check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings), "CPU caustics engine visible on CPU");
             check(!evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "separate GPU engine menu hidden on CPU");
             settings->setParameterValue("backend", 1);
             check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings),
-                  "Caustics Engine stays visible on GPU (items swap to MNEE+LT / MCMC)");
+                  "Caustics Engine stays visible on GPU (items swap to Aimed LT / SDS refraction)");
             check(!evaluateVisibleWhen(gpuCau->visibleWhen, *settings),
                   "separate GPU engine menu hidden on GPU-only (same row as Caustics Engine)");
             settings->setParameterValue("backend", 2);
@@ -1073,12 +1077,13 @@ void testXpuDevice() {
             StagePtr cauStage = graph.cookDisplay(cauCtx);
             check(cauStage != nullptr, "GPU caustics cook produces a stage");
             ScenePtr cauScene = cauStage->toScene();
-            check(cauScene->settings.causticsEngineGpu == kGpuCausticsMcmc, "causticsenginegpu 1 cooks to MCMC");
+            check(cauScene->settings.causticsEngineGpu == kGpuCausticsAimedLtSds,
+                  "causticsenginegpu 1 cooks to Aimed LT + SDS refraction");
             settings->setParameterValue("causticsenginegpu", 0);
             cauStage = graph.cookDisplay(cauCtx);
             cauScene = cauStage->toScene();
-            check(cauScene->settings.causticsEngineGpu == kGpuCausticsMneeLt,
-                  "causticsenginegpu 0 cooks to MNEE+LT");
+            check(cauScene->settings.causticsEngineGpu == kGpuCausticsAimedLt,
+                  "causticsenginegpu 0 cooks to Aimed LT");
         }
         settings->setParameterValue("backend", 2);
         settings->setParameterValue("xpuschedule", 0);

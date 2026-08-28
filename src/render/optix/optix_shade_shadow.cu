@@ -9,12 +9,16 @@ __device__ inline bool shadeShadowPixel(int pixel) {
     GpuShadow& shadow = params.shadows[pixel];
     GpuPath& path = params.paths[pixel];
     if (shadow.occluded && shadow.mneeCaster >= 0 && params.mneeJobs &&
-        params.mneeJobs[pixel].armed && !path.lightPath && shadow.splatPixel < 0) {
+        params.mneeJobs[pixel].armed) {
         GpuMneeJob& job = params.mneeJobs[pixel];
-        job.casterInstance = shadow.mneeCaster;
-        job.pending = 1;
-        shadow.queue = kShadowMnee;
-        return false;
+        const bool eyeMnee = !path.lightPath && shadow.splatPixel < 0 && job.cameraSplat == 0;
+        const bool camMnee = path.lightPath && shadow.splatPixel >= 0 && job.cameraSplat != 0;
+        if (eyeMnee || camMnee) {
+            job.casterInstance = shadow.mneeCaster;
+            job.pending = 1;
+            shadow.queue = kShadowMnee;
+            return false;
+        }
     }
     if (!shadow.occluded) {
         if (shadow.splatPixel >= 0) {

@@ -164,9 +164,10 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         !path.lightPath && scene.settings.caustics == 0 && path.causticSuffix;
     const bool skipCameraSds =
         !path.lightPath && params.splatInvLightPaths > 0.0f && path.causticSuffix;
-    if (params.mneeJobs) {
+    if (params.mneeJobs && !path.lightPath) {
         params.mneeJobs[pixel].armed = 0;
         params.mneeJobs[pixel].pending = 0;
+        params.mneeJobs[pixel].cameraSplat = 0;
     }
     if (!path.lightPath && !skipCameraSds && !(suppressCausticLight && !path.specularBounce) &&
         scene.lightCount > 0) {
@@ -243,6 +244,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                     job.clampCaustic = path.causticSuffix;
                     job.pending = 0;
                     job.armed = 1;
+                    job.cameraSplat = 0;
                     for (int i = 0; i < path.nLambda && i < kMaxSpectrumSamples; ++i)
                         job.throughputS[i] = path.throughputS[i];
                 }

@@ -66,6 +66,7 @@ __device__ inline void spawnCameraPath(int pixel, int x, int y, int sampleOffset
     hit = GpuHit{};
     shadow = GpuShadow{};
     shadow.splatPixel = -1;
+    if (params.mneeJobs) params.mneeJobs[pixel] = GpuMneeJob{};
     params.accumBuffer[pixel].w += 1.0f;
 }
 
@@ -110,6 +111,7 @@ __device__ inline bool spawnLightPath(int pixel, int x, int y, int sampleOffset)
     hit = GpuHit{};
     shadow = GpuShadow{};
     shadow.splatPixel = -1;
+    if (params.mneeJobs) params.mneeJobs[pixel] = GpuMneeJob{};
 
     if (params.splatInvLightPaths <= 0.0f) return false;
 

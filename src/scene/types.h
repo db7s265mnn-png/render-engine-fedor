@@ -470,13 +470,12 @@ enum CausticsEngine : int {
 // OptiX-only caustic estimators (Render Device = GPU, or the GPU half of XPU).
 // CPU Embree keeps CausticsEngine 0..3; do not overload those indices.
 enum GpuCausticsEngine : int {
-    // Eye-path MNEE through delta glass (dedicated OptiX pipeline) + light
-    // tracing that continues past the caster (splat only on a true connectable
-    // after a spec prefix). Same lazy glass-blocked NEE upgrade as CPU MNEE.
-    kGpuCausticsMneeLt = 0,
-    // Same GPU transport as MNEE+LT (aimed light trace at caster AABBs). The menu
-    // label stays "MCMC" for the existing UI / tests; cone mutations are off.
-    kGpuCausticsMcmc = 1,
+    // Aimed-only light tracing (caster AABBs) + eye-path MNEE for TIR / fully
+    // blocked glass. SDS splats stay on directly visible receivers.
+    kGpuCausticsAimedLt = 0,
+    // Same aimed LT on the floor, plus MNEE from a glass-blocked floor splat
+    // to the camera so SDS is visible in refraction (silhouette).
+    kGpuCausticsAimedLtSds = 1,
 };
 
 constexpr int kGpuMcmcMutations = 4;
@@ -608,7 +607,7 @@ struct RenderSettingsData {
     // Which estimator carries caustics when enabled (see CausticsEngine).
     int causticsEngine = kCausticsEnginePbrt;  // pbrt PT/BDPT (default)
     // OptiX menu (see GpuCausticsEngine). Ignored by Embree.
-    int causticsEngineGpu = kGpuCausticsMneeLt;
+    int causticsEngineGpu = kGpuCausticsAimedLt;
     // Firefly cap for paths that look through glass/mirrors at a light (SDS) and for
     // BDPT near-specular NEE/connections. Those never converge with more samples when
     // the light is small; a safety floor of 10 is always applied when this is left at 0
@@ -658,8 +657,13 @@ SR_INL SR_HD bool gpuLightTraceSkipUnsafe(const RenderSettingsData& s) {
     return s.caustics != 0 && renderDeviceUsesGpu(s.backend);
 }
 
+SR_INL SR_HD bool gpuSdsRefractionEnabled(const RenderSettingsData& s) {
+    return s.caustics != 0 && s.causticsEngineGpu == kGpuCausticsAimedLtSds;
+}
+
 SR_INL SR_HD bool gpuEyePathMneeEnabled(const RenderSettingsData& s) {
-    return s.caustics != 0 && s.causticsEngineGpu == kGpuCausticsMneeLt;
+    return s.caustics != 0 &&
+           (s.causticsEngineGpu == kGpuCausticsAimedLt || s.causticsEngineGpu == kGpuCausticsAimedLtSds);
 }
 
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
