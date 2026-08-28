@@ -900,7 +900,7 @@ void testXpuDevice() {
         s.caustics = 1;
         s.causticsEngineGpu = kGpuCausticsAimedLt;
         check(kGpuCausticsAimedLtMnee == 1, "GPU MNEE menu index stays 1");
-        check(gpuEyePathMneeEnabled(s), "Aimed LT enables eye-path MNEE");
+        check(!gpuEyePathMneeEnabled(s), "Aimed LT skips the MNEE wavefront (path_tail)");
         check(!gpuRefractionMneeEnabled(s), "Aimed LT does not enable refraction MNEE");
         s.causticsEngineGpu = kGpuCausticsAimedLtMnee;
         check(gpuEyePathMneeEnabled(s), "Aimed LT + MNEE still runs the MNEE pipeline");

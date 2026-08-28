@@ -772,9 +772,9 @@ public:
                     msg << "  caustics=Iray LT aim n=" << nAim << " mix=" << launchParams.photonAimMix
                         << (launchParams.photonAimMix >= 1.0f - 1e-5f ? " aimed-only" : "");
                     if (gpuEngine == kGpuCausticsAimedLtMnee)
-                        msg << "  menu=Aimed LT+MNEE";
+                        msg << "  menu=Aimed LT+MNEE  camMNEE ltPathTail";
                     else
-                        msg << "  menu=Aimed LT";
+                        msg << "  menu=Aimed LT  path_tail";
                 }
                 logInfo(msg.str());
             }
@@ -878,10 +878,12 @@ private:
         lp.workCount = 0;
         lp.workSlot = -1;
         uploadLaunch(lp);
-        auto bounceAndTail = [&]() {
-            const bool gpuMnee = gpuEyePathMneeEnabled(lp.scene.settings);
+        auto bounceAndTail = [&](bool lightPass) {
             // MNEE is a separate pipeline per bounce. path_tail would overwrite
             // the job before Newton runs, so skip the megakernel while MNEE is on.
+            // Light paths never consume MNEE (tryGpuMneeJob returns on lightPath);
+            // keep that pass on the PT schedule (3 waves + path_tail).
+            const bool gpuMnee = !lightPass && gpuEyePathMneeEnabled(lp.scene.settings);
             const int wave =
                 gpuMnee ? std::max(1, maxDepth) : std::max(1, std::min(maxDepth, 3));
             for (int iter = 0; iter < wave; ++iter) {
@@ -916,12 +918,12 @@ private:
 
         launchKernel(kRgInit, launchW, launchH);
         ++launches;
-        bounceAndTail();
+        bounceAndTail(false);
         if (cancel.load(std::memory_order_relaxed)) return;
         if (lp.splatInvLightPaths > 0.0f) {
             launchKernel(kRgInitFromLight, launchW, launchH);
             ++launches;
-            bounceAndTail();
+            bounceAndTail(true);
         }
     }
 

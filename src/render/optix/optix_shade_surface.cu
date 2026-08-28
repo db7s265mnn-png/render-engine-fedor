@@ -202,17 +202,14 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                                                              path.causticSuffix != 0),
                                        gpuEyeBounceNee(scene.settings, path.depth, path.throughGlass,
                                                        connectable, lightNee.type));
-                // Aimed LT / Aimed LT + MNEE: depth>0 NEE Fresnel-continues
-                // (CPU Path Tracer glass). MNEE peeks only when the interface
-                // still fully blocks (TIR). Mode 2 also keeps BSDF on throughGlass.
-                // Do not arm on the glass itself (first-hit glass→light).
+                // Aimed LT + MNEE only: Newton peek after throughGlass when the
+                // interface fully blocks (TIR). Aimed LT does not arm — no MNEE
+                // wavefront. Do not arm on the glass itself (first-hit glass→light).
                 const bool envLike =
                     lightNee.type == kLightDome || lightNee.type == kLightDistant;
-                const bool wantMnee = gpuRefractionMneeEnabled(scene.settings)
-                                          ? (path.throughGlass && connectable && !envLike)
-                                          : path.specularBounce != 0;
                 if (params.mneeJobs && gpuEyePathMneeEnabled(scene.settings) &&
-                    shadow.queue == kShadowTrace && path.depth > 0 && wantMnee) {
+                    shadow.queue == kShadowTrace && path.depth > 0 && path.throughGlass &&
+                    connectable && !envLike) {
                     GpuMneeJob& job = params.mneeJobs[pixel];
                     job.p = si.p;
                     job.ns = si.ns;

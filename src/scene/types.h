@@ -470,8 +470,9 @@ enum CausticsEngine : int {
 // OptiX-only caustic estimators (Render Device = GPU, or the GPU half of XPU).
 // CPU Embree keeps CausticsEngine 0..3; do not overload those indices.
 enum GpuCausticsEngine : int {
-    // Aimed-only light tracing (caster AABBs) + eye-path MNEE for TIR / fully
-    // blocked glass. SDS splats stay on directly visible receivers.
+    // Aimed-only light tracing (caster AABBs). SDS splats stay on directly
+    // visible receivers. No MNEE wavefront — camera and light paths finish
+    // in path_tail (same cheap schedule as GPU PT).
     kGpuCausticsAimedLt = 0,
     // Same aimed LT on directly visible receivers (floor). Glass pixels run
     // the CPU Path Tracer eye path (Fresnel NEE + BSDF). MNEE peeks only when
@@ -662,9 +663,10 @@ SR_INL SR_HD bool gpuRefractionMneeEnabled(const RenderSettingsData& s) {
     return s.caustics != 0 && s.causticsEngineGpu == kGpuCausticsAimedLtMnee;
 }
 
+// Dedicated MNEE OptiX pipeline (Newton + per-bounce sync). Aimed LT skips it
+// so caustics use path_tail. Light tracing never needs it (jobs ignore lightPath).
 SR_INL SR_HD bool gpuEyePathMneeEnabled(const RenderSettingsData& s) {
-    return s.caustics != 0 &&
-           (s.causticsEngineGpu == kGpuCausticsAimedLt || s.causticsEngineGpu == kGpuCausticsAimedLtMnee);
+    return gpuRefractionMneeEnabled(s);
 }
 
 // Aimed LT + MNEE: LT owns floor-first SDS. After the eye path has refracted

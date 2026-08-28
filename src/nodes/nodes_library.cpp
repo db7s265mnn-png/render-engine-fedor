@@ -1288,9 +1288,9 @@ public:
                                       "SampleLe mix).\n"
                                       "Aimed LT (default): SDS on directly visible receivers. "
                                       "Eye NEE after a bounce Fresnel-continues through glass "
-                                      "(Keller 2017). Eye-path Newton MNEE (Hanika 2015) stays "
-                                      "in a dedicated OptiX pipeline for TIR / fully blocked "
-                                      "glass. Newton is not compiled into shade / path_tail.\n"
+                                      "(Keller 2017). Camera and light paths finish in path_tail "
+                                      "— no per-bounce MNEE pipeline or stream sync. TIR stays "
+                                      "blocked (pick Aimed LT + MNEE for Newton).\n"
                                       "Aimed LT + MNEE: the same floor caustic (LT). In pixels "
                                       "where the camera already refracted through contributing "
                                       "glass, the eye path is CPU Path Tracer: Fresnel NEE "
@@ -1298,8 +1298,8 @@ public:
                                       "be killed for LT. MNEE peeks only on TIR / fully blocked "
                                       "interfaces — Newton does not replace that NEE (a tessellated "
                                       "mesh rarely converges, and opaque NEE made the interior "
-                                      "blacker). Not a copy of floor pixels and not fake mesh "
-                                      "emission.\n"
+                                      "blacker). Light tracing still skips the MNEE wavefront. "
+                                      "Not a copy of floor pixels and not fake mesh emission.\n"
                                       "Photon / VCM stays CPU-only."));
         // Hidden migration: v2 Automatic/MNEE/Photon → MNEE/MNEE+Photon/Photon.
         // v3 inserts pbrt as index 0 and shifts the rest +1.
