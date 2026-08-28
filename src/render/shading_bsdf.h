@@ -738,4 +738,14 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
     return s;
 }
 
+// Tag the *next* ray after a BSDF sample (Arnold ray type for the child ray).
+SR_INL SR_HD RayShadeKind nextRayShadeKind(const BsdfSample& bs, const LobeWeights& lw) {
+    if (bs.transmitted) {
+        if (bs.specular || isNearSpecularLobe(lw)) return RayShadeKind::SpecularTransmission;
+        return RayShadeKind::DiffuseTransmission;
+    }
+    if (bs.specular || isNearSpecularLobe(lw)) return RayShadeKind::SpecularReflection;
+    return RayShadeKind::DiffuseReflection;
+}
+
 }  // namespace sol

@@ -772,7 +772,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             }
             if (pSpec > 0.0f && pSpec < 0.999f) throughput /= (1.0f - pSpec);
 
-            const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
+            const Material sssBody = sssBodyMaterial(scene, si, mat);
+            const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, sssBody, rng);
             if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
             Material lambert = sssExitLambertMaterial();
             SurfaceInteraction ssSi = si;

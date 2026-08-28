@@ -80,28 +80,13 @@ __device__ inline bool buildSurf(const SceneView& scene, const GpuHit& hit, Vec3
     return true;
 }
 
-__device__ inline Material gpuMaterialAt(const SceneView& scene, int index) {
-    Material fallback;
-    fallback.baseColor = Vec3(0.7f, 0.7f, 0.7f);
-    fallback.roughness = 0.5f;
-    if (index < 0 || index >= scene.materialCount || !scene.materials) return fallback;
-    return scene.materials[index];
-}
-
 // Shadow-port material (Arnold ray_switch). Does not include shading.h.
 __device__ inline Material gpuMaterialForShadow(const SceneView& scene, int baseIndex) {
-    const Material base = gpuMaterialAt(scene, baseIndex);
-    const int slot = base.raySwitch.shadow;
-    if (slot < 0 || slot >= scene.materialCount || !scene.materials) return base;
-    return scene.materials[slot];
+    return materialForRay(scene, baseIndex, RayShadeKind::Shadow);
 }
 
 __device__ inline Material gpuMaterialForCausticSlot(const SceneView& scene, int baseIndex) {
-    const Material base = gpuMaterialAt(scene, baseIndex);
-    int slot = base.raySwitch.caustics;
-    if (slot < 0) slot = base.raySwitch.specularTransmission;
-    if (slot < 0 || slot >= scene.materialCount || !scene.materials) return base;
-    return scene.materials[slot];
+    return materialForCausticTransport(scene, baseIndex);
 }
 
 }  // namespace sol

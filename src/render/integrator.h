@@ -51,82 +51,24 @@ struct SurfaceInteraction {
     int lightIndex = -1;
 };
 
-SR_INL SR_HD Material defaultMaterial() {
-    Material m;
-    m.baseColor = Vec3(0.7f, 0.7f, 0.7f);
-    m.roughness = 0.5f;
-    return m;
-}
-
-// Incoming ray classification for MaterialX ray_switch_shader — matches Arnold
-// aiRaySwitch: the *incoming* ray type selects which surfaceshader port is
-// evaluated for that hit (camera rays → camera port, specular transmission
-// rays → specular_transmission, etc.). Unconnected ports fall back to the
-// base/camera material (-1 in RaySwitchTable).
-enum class RayShadeKind : int {
-    Camera = 0,
-    Shadow,
-    DiffuseReflection,
-    SpecularReflection,
-    DiffuseTransmission,
-    SpecularTransmission,
-    Sss,
-    // Solstice-only convenience for photon / MNEE / BDPT light-tracing through
-    // glass. Never used for camera or other eye-path ray types.
-    Caustics
-};
-
-SR_INL SR_HD int raySwitchSlot(const RaySwitchTable& t, RayShadeKind kind) {
-    switch (kind) {
-        case RayShadeKind::Camera: return t.camera;
-        case RayShadeKind::Shadow: return t.shadow;
-        case RayShadeKind::DiffuseReflection: return t.diffuseReflection;
-        case RayShadeKind::SpecularReflection: return t.specularReflection;
-        case RayShadeKind::DiffuseTransmission: return t.diffuseTransmission;
-        case RayShadeKind::SpecularTransmission: return t.specularTransmission;
-        case RayShadeKind::Sss: return t.sss;
-        case RayShadeKind::Caustics: return t.caustics;
-    }
-    return -1;
-}
-
-// Resolve the Material POD for a hit given the incoming ray kind. `baseIndex` is
-// InstanceData::materialIndex (owns the RaySwitchTable).
-SR_INL SR_HD Material materialForRay(const SceneView& scene, int baseIndex, RayShadeKind kind) {
-    if (baseIndex < 0 || baseIndex >= scene.materialCount) return defaultMaterial();
-    const Material& base = scene.materials[baseIndex];
-    const int slot = raySwitchSlot(base.raySwitch, kind);
-    if (slot < 0 || slot >= scene.materialCount) return base;
-    return scene.materials[slot];
-}
-
 SR_INL SR_HD Material materialForRay(const SceneView& scene, const SurfaceInteraction& si,
                                      RayShadeKind kind) {
     return materialForRay(scene, si.materialIndex, kind);
 }
 
-// Photon / MNEE / BDPT light-path glass: prefer Solstice `caustics` port, else
-// Arnold `specular_transmission`, else the camera/base material.
-SR_INL SR_HD Material materialForCausticTransport(const SceneView& scene, int baseIndex) {
-    if (baseIndex < 0 || baseIndex >= scene.materialCount) return defaultMaterial();
-    const Material& base = scene.materials[baseIndex];
-    if (base.raySwitch.caustics >= 0) return materialForRay(scene, baseIndex, RayShadeKind::Caustics);
-    if (base.raySwitch.specularTransmission >= 0)
-        return materialForRay(scene, baseIndex, RayShadeKind::SpecularTransmission);
-    return base;
+// Solstice `sss` port (Arnold AI_RAY_SUBSURFACE). Unconnected → incoming shader.
+SR_INL Material sssBodyMaterial(const SceneView& scene, const SurfaceInteraction& si,
+                                const Material& incoming) {
+    if (si.materialIndex < 0 || si.materialIndex >= scene.materialCount || !scene.materials)
+        return incoming;
+    if (raySwitchSlot(scene.materials[si.materialIndex].raySwitch, RayShadeKind::Sss) < 0)
+        return incoming;
+    Vec3 ns = si.ns;
+    return evaluateTexturedMaterial(scene, materialForRay(scene, si.materialIndex, RayShadeKind::Sss),
+                                    si.uv, ns, si.pObject, si.nObject, si.uvFilterWidth, si.pRef, si.nRef,
+                                    si.hasPref);
 }
 
-// Tag the *next* ray after a BSDF sample (Arnold ray type for the child ray).
-SR_INL SR_HD RayShadeKind nextRayShadeKind(const BsdfSample& bs, const LobeWeights& lw) {
-    if (bs.transmitted) {
-        if (bs.specular || isNearSpecularLobe(lw)) return RayShadeKind::SpecularTransmission;
-        return RayShadeKind::DiffuseTransmission;
-    }
-    if (bs.specular || isNearSpecularLobe(lw)) return RayShadeKind::SpecularReflection;
-    return RayShadeKind::DiffuseReflection;
-}
-
-// Chiang et al. 2016: map artist multiple-scattering albedo A → single-scattering α.
 SR_INL SR_HD float chiangSingleScatterAlbedo(float A) {
     A = saturatef(A);
     return 1.0f - expf(-5.09406f * A + 2.61188f * A * A - 4.31805f * A * A * A);
@@ -1165,7 +1107,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #endif
                 specularBounce = false;
                 sawNonSpecular = true;
-                rayKind = RayShadeKind::DiffuseReflection;
+                rayKind = RayShadeKind::Volume;
                 ++depth;
                 ++volumeScatterCount;
                 if (depth >= settings.rrStartDepth) {
@@ -1417,7 +1359,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             }
             if (pSpec > 0.0f && pSpec < 0.999f) throughput /= (1.0f - pSpec);
 
-            const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
+            const Material sssBody = sssBodyMaterial(scene, si, mat);
+            const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, sssBody, rng);
             if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
             Material lambert = sssExitLambertMaterial();
             SurfaceInteraction ssSi = si;
@@ -1450,6 +1393,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 direction = wiWorld;
                 bsdfPdf = ssBs.pdf;
                 specularBounce = false;
+                rayKind = RayShadeKind::DiffuseReflection;
+                sawNonSpecular = true;
                 ++depth;
                 continue;
             }

@@ -187,6 +187,7 @@ public:
                     specularBounce = false;
                     sawNonSpecular = true;
                     causticSuffix = false;
+                    rayKind = RayShadeKind::Volume;
                     ++depth;
                     ++volumeScatterCount;
                     if (depth >= settings.rrStartDepth) {
@@ -378,8 +379,9 @@ public:
                 }
                 if (pSpec > 0.0f && pSpec < 0.999f) throughput *= (1.0f / (1.0f - pSpec));
 
+                const Material sssBody = sssBodyMaterial(scene, si, mat);
                 const SssWalkResultSpectral walk =
-                    sampleSssRandomWalkSpectral(scene, tracer, si, wo, mat, rng, waves);
+                    sampleSssRandomWalkSpectral(scene, tracer, si, wo, sssBody, rng, waves);
                 if (!walk.escaped || !sssSpectrumWeightValid(walk.pathWeight)) break;
                 Material lambert = sssExitLambertMaterial();
                 SurfaceInteraction ssSi = si;

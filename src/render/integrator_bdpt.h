@@ -405,6 +405,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
                 origin = v.p;
                 dir = wi;
                 pdfSaFwd = phasePdf;
+                if (cfg.eyePath) rayKind = RayShadeKind::Volume;
                 continue;
             }
         }
@@ -529,7 +530,8 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
                 break;
             } else {
                 if (pSpec > 0.0f && pSpec < 0.999f) beta = beta * (1.0f / (1.0f - pSpec));
-                const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, -dir, mat, rng);
+                const Material sssBody = sssBodyMaterial(scene, si, mat);
+                const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, -dir, sssBody, rng);
                 if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
                 cur.p = walk.exitP;
                 cur.ng = walk.exitN;

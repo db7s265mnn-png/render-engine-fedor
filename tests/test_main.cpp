@@ -6054,13 +6054,149 @@ void testMaterialXArnoldMapsAndConstants() {
 
 void testMaterialXRaySwitchCaustics() {
     std::printf("materialx-ray-switch-caustics\n");
+
+    // Incoming-ray tagging matches Arnold (child ray type after a BSDF sample).
+    {
+        BsdfSample specR{};
+        specR.specular = true;
+        specR.transmitted = false;
+        LobeWeights lw{};
+        lw.specular = 1.0f;
+        check(nextRayShadeKind(specR, lw) == RayShadeKind::SpecularReflection,
+              "specular bounce → SpecularReflection");
+        BsdfSample specT{};
+        specT.specular = true;
+        specT.transmitted = true;
+        check(nextRayShadeKind(specT, lw) == RayShadeKind::SpecularTransmission,
+              "specular transmit → SpecularTransmission");
+        BsdfSample diffR{};
+        diffR.specular = false;
+        diffR.transmitted = false;
+        LobeWeights dLw{};
+        dLw.diffuse = 1.0f;
+        check(nextRayShadeKind(diffR, dLw) == RayShadeKind::DiffuseReflection,
+              "diffuse bounce → DiffuseReflection");
+        BsdfSample diffT{};
+        diffT.specular = false;
+        diffT.transmitted = true;
+        check(nextRayShadeKind(diffT, dLw) == RayShadeKind::DiffuseTransmission,
+              "diffuse transmit → DiffuseTransmission");
+    }
+
 #if !SOLSTICE_HAVE_MATERIALX
     std::printf("  skip (no MaterialX)\n");
     return;
 #else
-    // Camera look = muddy glass (rough); caustics transport = sharp glass.
-    // Photon / MNEE / LT must pick RayShadeKind::Caustics, not the camera look.
-    const QString xml = QStringLiteral(
+    bool foundShader = false, foundColor = false, shaderHasVolume = false, colorHasVolume = false;
+    for (const MaterialXNodeCatalogEntry& e : listMaterialXNodeCatalog()) {
+        if (e.category == QStringLiteral("ray_switch_shader")) {
+            foundShader = true;
+            for (const MaterialXNodeInputDef& inp : e.inputsFor(e.type)) {
+                if (inp.name == QStringLiteral("volume")) shaderHasVolume = true;
+            }
+        }
+        if (e.category == QStringLiteral("ray_switch")) {
+            foundColor = true;
+            for (const MaterialXNodeInputDef& inp : e.inputsFor(e.type)) {
+                if (inp.name == QStringLiteral("volume")) colorHasVolume = true;
+            }
+        }
+    }
+    check(foundShader, "catalog contains ray_switch_shader");
+    check(foundColor, "catalog contains ray_switch");
+    check(shaderHasVolume, "ray_switch_shader has Arnold volume port");
+    check(colorHasVolume, "ray_switch has Arnold volume port");
+
+    auto ssXml = [](const char* name, float roughness, const char* color) {
+        return QStringLiteral(
+                   "  <standard_surface name=\"%1\" type=\"surfaceshader\">\n"
+                   "    <input name=\"base\" type=\"float\" value=\"1\"/>\n"
+                   "    <input name=\"base_color\" type=\"color3\" value=\"%2\"/>\n"
+                   "    <input name=\"specular\" type=\"float\" value=\"1\"/>\n"
+                   "    <input name=\"specular_roughness\" type=\"float\" value=\"%3\"/>\n"
+                   "    <input name=\"specular_IOR\" type=\"float\" value=\"1.5\"/>\n"
+                   "  </standard_surface>\n")
+            .arg(QString::fromUtf8(name), QString::fromUtf8(color))
+            .arg(roughness, 0, 'f', 3);
+    };
+
+    // Distinct shaders on every Arnold port (+ Solstice sss/caustics).
+    const QString allPortsXml =
+        QStringLiteral("<?xml version=\"1.0\"?>\n<materialx version=\"1.38\">\n") +
+        ssXml("ss_cam", 0.11f, "0.1, 0.1, 0.1") + ssXml("ss_sh", 0.21f, "0.2, 0.0, 0.0") +
+        ssXml("ss_dr", 0.31f, "0.0, 0.3, 0.0") + ssXml("ss_sr", 0.41f, "0.0, 0.0, 0.4") +
+        ssXml("ss_dt", 0.51f, "0.5, 0.0, 0.5") + ssXml("ss_st", 0.61f, "0.0, 0.6, 0.6") +
+        ssXml("ss_vol", 0.71f, "0.7, 0.7, 0.0") + ssXml("ss_sss", 0.81f, "0.8, 0.4, 0.2") +
+        ssXml("ss_cau", 0.00f, "1, 1, 1") +
+        QStringLiteral(
+            "  <ray_switch_shader name=\"rswitch\" type=\"surfaceshader\">\n"
+            "    <input name=\"camera\" type=\"surfaceshader\" nodename=\"ss_cam\"/>\n"
+            "    <input name=\"shadow\" type=\"surfaceshader\" nodename=\"ss_sh\"/>\n"
+            "    <input name=\"diffuse_reflection\" type=\"surfaceshader\" nodename=\"ss_dr\"/>\n"
+            "    <input name=\"specular_reflection\" type=\"surfaceshader\" nodename=\"ss_sr\"/>\n"
+            "    <input name=\"diffuse_transmission\" type=\"surfaceshader\" nodename=\"ss_dt\"/>\n"
+            "    <input name=\"specular_transmission\" type=\"surfaceshader\" nodename=\"ss_st\"/>\n"
+            "    <input name=\"volume\" type=\"surfaceshader\" nodename=\"ss_vol\"/>\n"
+            "    <input name=\"sss\" type=\"surfaceshader\" nodename=\"ss_sss\"/>\n"
+            "    <input name=\"caustics\" type=\"surfaceshader\" nodename=\"ss_cau\"/>\n"
+            "  </ray_switch_shader>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surface\" type=\"surfaceshader\" nodename=\"rswitch\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n");
+
+    MaterialXEvalResult eval = evaluateMaterialXDocument(allPortsXml, QString());
+    check(eval.ok, "ray_switch_shader evaluates with all ports");
+    if (!eval.ok) {
+        std::printf("  error: %s\n", eval.error.toUtf8().constData());
+        return;
+    }
+    check(std::fabs(eval.material.roughness - 0.11f) < 1e-4f, "camera branch roughness 0.11");
+    check(eval.raySwitchBranches.size() == 8, "eight non-camera branch materials");
+
+    Stage stage;
+    StagePrim prim;
+    prim.type = PrimType::Mesh;
+    prim.path = "/switch";
+    prim.mesh = makeSphereMesh(0.5f, 16, 8);
+    prim.material = eval.material;
+    prim.raySwitchBranches = eval.raySwitchBranches;
+    prim.materialAssigned = true;
+    stage.prims.push_back(prim);
+    ScenePtr scene = stage.toScene();
+    check(scene && scene->materials.size() >= 9, "scene has base + 8 branch materials");
+    if (!scene) return;
+    const int baseIdx = scene->instances.empty() ? -1 : scene->instances[0].materialIndex;
+    check(baseIdx >= 0, "instance material index");
+    SceneView view = scene->view();
+    const Material& baked = scene->materials[size_t(baseIdx)];
+    check(baked.raySwitch.shadow >= 0, "baked shadow slot");
+    check(baked.raySwitch.diffuseReflection >= 0, "baked diffuse_reflection slot");
+    check(baked.raySwitch.specularReflection >= 0, "baked specular_reflection slot");
+    check(baked.raySwitch.diffuseTransmission >= 0, "baked diffuse_transmission slot");
+    check(baked.raySwitch.specularTransmission >= 0, "baked specular_transmission slot");
+    check(baked.raySwitch.volume >= 0, "baked volume slot");
+    check(baked.raySwitch.sss >= 0, "baked sss slot");
+    check(baked.raySwitch.caustics >= 0, "baked caustics slot");
+
+    auto expectR = [&](RayShadeKind kind, float r, const char* label) {
+        const Material m = materialForRay(view, baseIdx, kind);
+        check(std::fabs(m.roughness - r) < 1e-4f, label);
+    };
+    expectR(RayShadeKind::Camera, 0.11f, "Camera → camera port");
+    expectR(RayShadeKind::Shadow, 0.21f, "Shadow → shadow port");
+    expectR(RayShadeKind::DiffuseReflection, 0.31f, "DiffuseReflection → diffuse_reflection");
+    expectR(RayShadeKind::SpecularReflection, 0.41f, "SpecularReflection → specular_reflection");
+    expectR(RayShadeKind::DiffuseTransmission, 0.51f, "DiffuseTransmission → diffuse_transmission");
+    expectR(RayShadeKind::SpecularTransmission, 0.61f, "SpecularTransmission → specular_transmission");
+    expectR(RayShadeKind::Volume, 0.71f, "Volume → volume port");
+    expectR(RayShadeKind::Sss, 0.81f, "Sss → sss port");
+    expectR(RayShadeKind::Caustics, 0.00f, "Caustics → caustics port");
+    const Material cau = materialForCausticTransport(view, baseIdx);
+    check(cau.roughness < 1e-5f, "caustic transport prefers caustics port");
+
+    // Unconnected ports fall back to camera/base (Arnold).
+    const QString fallbackXml = QStringLiteral(
         "<?xml version=\"1.0\"?>\n"
         "<materialx version=\"1.38\">\n"
         "  <standard_surface name=\"glass_camera\" type=\"surfaceshader\">\n"
@@ -6088,60 +6224,77 @@ void testMaterialXRaySwitchCaustics() {
         "  </surfacematerial>\n"
         "</materialx>\n");
 
-    MaterialXEvalResult eval = evaluateMaterialXDocument(xml, QString());
-    check(eval.ok, "ray_switch_shader evaluates");
-    if (!eval.ok) {
-        std::printf("  error: %s\n", eval.error.toUtf8().constData());
+    MaterialXEvalResult evalFb = evaluateMaterialXDocument(fallbackXml, QString());
+    check(evalFb.ok, "camera+caustics ray_switch evaluates");
+    if (!evalFb.ok) {
+        std::printf("  error: %s\n", evalFb.error.toUtf8().constData());
         return;
     }
-    check(std::fabs(eval.material.roughness - 0.12f) < 1e-4f, "camera branch roughness 0.12");
-    check(eval.material.transmission > 0.99f, "camera branch transmission");
-    check(eval.material.raySwitch.caustics == 0, "caustics slot is local index 0");
-    check(eval.raySwitchBranches.size() == 1, "one caustics branch material");
-    check(eval.raySwitchBranches[0].roughness < 1e-5f, "caustics branch roughness 0");
-    check(eval.raySwitchBranches[0].transmission > 0.99f, "caustics branch transmission");
+    check(std::fabs(evalFb.material.roughness - 0.12f) < 1e-4f, "camera branch roughness 0.12");
+    check(evalFb.material.transmission > 0.99f, "camera branch transmission");
+    check(evalFb.material.raySwitch.caustics == 0, "caustics slot is local index 0");
+    check(evalFb.raySwitchBranches.size() == 1, "one caustics branch material");
+    check(evalFb.raySwitchBranches[0].roughness < 1e-5f, "caustics branch roughness 0");
 
-    // Catalog must list Solstice ray_switch nodes even when MaterialX libs load.
-    bool foundShader = false, foundColor = false;
-    for (const MaterialXNodeCatalogEntry& e : listMaterialXNodeCatalog()) {
-        if (e.category == QStringLiteral("ray_switch_shader")) foundShader = true;
-        if (e.category == QStringLiteral("ray_switch")) foundColor = true;
-    }
-    check(foundShader, "catalog contains ray_switch_shader");
-    check(foundColor, "catalog contains ray_switch");
-
-    // Stage bake remaps local → scene-absolute indices; materialForRay picks slots.
-    Stage stage;
-    StagePrim prim;
-    prim.type = PrimType::Mesh;
-    prim.path = "/glass";
-    prim.mesh = makeSphereMesh(0.5f, 16, 8);
-    prim.material = eval.material;
-    prim.raySwitchBranches = eval.raySwitchBranches;
-    prim.materialAssigned = true;
-    stage.prims.push_back(prim);
-
-    ScenePtr scene = stage.toScene();
-    check(scene && scene->materials.size() >= 2, "scene has base + caustics materials");
-    if (!scene) return;
-    const int baseIdx = scene->instances.empty() ? -1 : scene->instances[0].materialIndex;
-    check(baseIdx >= 0, "instance material index");
-    const Material& base = scene->materials[size_t(baseIdx)];
-    check(base.raySwitch.caustics >= 0, "baked caustics slot is absolute");
-    check(std::fabs(base.roughness - 0.12f) < 1e-4f, "baked camera roughness");
-
-    SceneView view = scene->view();
-    const Material cam = materialForRay(view, baseIdx, RayShadeKind::Camera);
-    const Material specT = materialForRay(view, baseIdx, RayShadeKind::SpecularTransmission);
-    const Material cau = materialForCausticTransport(view, baseIdx);
+    Stage stageFb;
+    StagePrim primFb;
+    primFb.type = PrimType::Mesh;
+    primFb.path = "/glass";
+    primFb.mesh = makeSphereMesh(0.5f, 16, 8);
+    primFb.material = evalFb.material;
+    primFb.raySwitchBranches = evalFb.raySwitchBranches;
+    primFb.materialAssigned = true;
+    stageFb.prims.push_back(primFb);
+    ScenePtr sceneFb = stageFb.toScene();
+    check(sceneFb && sceneFb->materials.size() >= 2, "fallback scene has base + caustics");
+    if (!sceneFb) return;
+    const int fbIdx = sceneFb->instances.empty() ? -1 : sceneFb->instances[0].materialIndex;
+    check(fbIdx >= 0, "fallback instance material index");
+    SceneView viewFb = sceneFb->view();
+    const Material cam = materialForRay(viewFb, fbIdx, RayShadeKind::Camera);
+    const Material specT = materialForRay(viewFb, fbIdx, RayShadeKind::SpecularTransmission);
+    const Material vol = materialForRay(viewFb, fbIdx, RayShadeKind::Volume);
+    const Material sh = materialForRay(viewFb, fbIdx, RayShadeKind::Shadow);
+    const Material cauFb = materialForCausticTransport(viewFb, fbIdx);
     check(std::fabs(cam.roughness - 0.12f) < 1e-4f, "Camera ray → camera port roughness 0.12");
-    // Unconnected specular_transmission falls back to camera/base (Arnold-like).
     check(std::fabs(specT.roughness - 0.12f) < 1e-4f, "unconnected specular_transmission → camera");
-    check(cau.roughness < 1e-5f, "caustic transport → caustics port roughness 0");
-    check(std::fabs(cam.roughness - cau.roughness) > 0.05f,
-          "camera port must not equal caustics port");
-    std::printf("  cameraR=%.3f specTransR=%.3f causticTransportR=%.3f slot=%d\n", cam.roughness,
-                specT.roughness, cau.roughness, base.raySwitch.caustics);
+    check(std::fabs(vol.roughness - 0.12f) < 1e-4f, "unconnected volume → camera");
+    check(std::fabs(sh.roughness - 0.12f) < 1e-4f, "unconnected shadow → camera");
+    check(cauFb.roughness < 1e-5f, "caustic transport → caustics port roughness 0");
+    check(std::fabs(cam.roughness - cauFb.roughness) > 0.05f, "camera port must not equal caustics port");
+    std::printf("  cameraR=%.3f specTransR=%.3f volumeR=%.3f causticTransportR=%.3f\n", cam.roughness,
+                specT.roughness, vol.roughness, cauFb.roughness);
+
+    // Without surfacematerial, the first standard_surface must not steal the switch.
+    // Document order lists the GI shader first on purpose.
+    const QString noSurfXml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <standard_surface name=\"gi_only\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" value=\"1, 0, 0\"/>\n"
+        "    <input name=\"specular_roughness\" type=\"float\" value=\"0.90\"/>\n"
+        "  </standard_surface>\n"
+        "  <standard_surface name=\"camera_look\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" value=\"0, 1, 0\"/>\n"
+        "    <input name=\"specular_roughness\" type=\"float\" value=\"0.20\"/>\n"
+        "  </standard_surface>\n"
+        "  <ray_switch_shader name=\"rswitch\" type=\"surfaceshader\">\n"
+        "    <input name=\"camera\" type=\"surfaceshader\" nodename=\"camera_look\"/>\n"
+        "    <input name=\"diffuse_reflection\" type=\"surfaceshader\" nodename=\"gi_only\"/>\n"
+        "  </ray_switch_shader>\n"
+        "</materialx>\n");
+    MaterialXEvalResult evalNs = evaluateMaterialXDocument(noSurfXml, QString());
+    check(evalNs.ok, "ray_switch_shader without surfacematerial evaluates");
+    if (!evalNs.ok) {
+        std::printf("  error: %s\n", evalNs.error.toUtf8().constData());
+        return;
+    }
+    check(std::fabs(evalNs.material.roughness - 0.20f) < 1e-4f,
+          "no surfacematerial: camera port wins over first standard_surface");
+    check(evalNs.material.raySwitch.diffuseReflection >= 0, "no surfacematerial: GI port cooked");
+    check(evalNs.raySwitchBranches.size() == 1, "no surfacematerial: one GI branch");
+    check(std::fabs(evalNs.raySwitchBranches[0].roughness - 0.90f) < 1e-4f,
+          "no surfacematerial: GI branch roughness 0.90");
 #endif
 }
 

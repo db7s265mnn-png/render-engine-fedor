@@ -73,6 +73,7 @@ struct GpuPath {
     // 1 = this camera path already refracted through a delta caustic caster.
     // Aimed LT + MNEE: those pixels are the glass, not the floor — keep BSDF.
     int throughGlass = 0;
+    int rayKind = 0;  // RayShadeKind: incoming type for ray_switch_shader (Arnold)
     // MCMC / ERPT: stored SampleLe so mutations respawn without a new light pick.
     Vec3 mcmcOrigin{0.0f};
     Vec3 mcmcDir{0.0f, 0.0f, 1.0f};

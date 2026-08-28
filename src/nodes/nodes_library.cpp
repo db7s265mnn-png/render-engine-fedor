@@ -522,6 +522,17 @@ public:
             sanitizeProc(evaluated.material.displacementProc);
             sanitizeProc(evaluated.material.specularColorProc);
             sanitizeProc(evaluated.material.transmissionColorProc);
+            for (Material& branch : evaluated.raySwitchBranches) {
+                sanitizeProc(branch.baseColorProc);
+                sanitizeProc(branch.roughnessProc);
+                sanitizeProc(branch.metallicProc);
+                sanitizeProc(branch.opacityProc);
+                sanitizeProc(branch.emissionProc);
+                sanitizeProc(branch.normalProc);
+                sanitizeProc(branch.subsurfaceProc);
+                sanitizeProc(branch.specularColorProc);
+                sanitizeProc(branch.transmissionColorProc);
+            }
 
             const QString pattern = stringValue("pattern", "*");
             for (StagePrim& prim : stage.prims) {

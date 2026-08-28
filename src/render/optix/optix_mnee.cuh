@@ -499,7 +499,7 @@ __device__ inline void tryGpuMneeJob(int pixel, GpuPath& path, GpuMneeJob& job) 
     if (job.selectPdf <= 0.0f) return;
     if (!job.distant && light.type != kLightDistant && job.pdfArea <= 0.0f) return;
 
-    Material mat = gpuMaterialAt(scene, job.materialIndex);
+    Material mat = materialForRay(scene, job.materialIndex, RayShadeKind(path.rayKind));
     mat = optixpt::evaluateMaps(scene, mat, job.uv, job.ns);
 
     const float clampValue =

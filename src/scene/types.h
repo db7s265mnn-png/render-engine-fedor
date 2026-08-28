@@ -19,9 +19,24 @@ struct RaySwitchTable {
     int specularReflection = -1;
     int diffuseTransmission = -1;
     int specularTransmission = -1;
+    int volume = -1;  // Arnold volume rays
     int sss = -1;
     // Solstice extension: light-side caustic transport only (not camera rays).
     int caustics = -1;
+};
+
+// Incoming ray type — matches Arnold aiRaySwitch / ray_switch_shader.
+// Unconnected ports fall back to camera/base (-1 in RaySwitchTable).
+enum class RayShadeKind : int {
+    Camera = 0,
+    Shadow,
+    DiffuseReflection,
+    SpecularReflection,
+    DiffuseTransmission,
+    SpecularTransmission,
+    Volume,
+    Sss,
+    Caustics
 };
 
 // ---------------------------------------------------------------------------
@@ -760,5 +775,48 @@ struct SceneView {
     float infiniteLightPower               = 0.f;
     float finiteLightPower                 = 0.f;
 };
+
+SR_INL SR_HD Material defaultMaterial() {
+    Material m;
+    m.baseColor = Vec3(0.7f, 0.7f, 0.7f);
+    m.roughness = 0.5f;
+    return m;
+}
+
+SR_INL SR_HD int raySwitchSlot(const RaySwitchTable& t, RayShadeKind kind) {
+    switch (kind) {
+        case RayShadeKind::Camera: return t.camera;
+        case RayShadeKind::Shadow: return t.shadow;
+        case RayShadeKind::DiffuseReflection: return t.diffuseReflection;
+        case RayShadeKind::SpecularReflection: return t.specularReflection;
+        case RayShadeKind::DiffuseTransmission: return t.diffuseTransmission;
+        case RayShadeKind::SpecularTransmission: return t.specularTransmission;
+        case RayShadeKind::Volume: return t.volume;
+        case RayShadeKind::Sss: return t.sss;
+        case RayShadeKind::Caustics: return t.caustics;
+    }
+    return -1;
+}
+
+// Resolve the Material POD for a hit given the incoming ray kind. `baseIndex` is
+// InstanceData::materialIndex (owns the RaySwitchTable).
+SR_INL SR_HD Material materialForRay(const SceneView& scene, int baseIndex, RayShadeKind kind) {
+    if (baseIndex < 0 || baseIndex >= scene.materialCount || !scene.materials) return defaultMaterial();
+    const Material& base = scene.materials[baseIndex];
+    const int slot = raySwitchSlot(base.raySwitch, kind);
+    if (slot < 0 || slot >= scene.materialCount) return base;
+    return scene.materials[slot];
+}
+
+// Photon / MNEE / BDPT light-path glass: prefer Solstice `caustics` port, else
+// Arnold `specular_transmission`, else the camera/base material.
+SR_INL SR_HD Material materialForCausticTransport(const SceneView& scene, int baseIndex) {
+    if (baseIndex < 0 || baseIndex >= scene.materialCount || !scene.materials) return defaultMaterial();
+    const Material& base = scene.materials[baseIndex];
+    if (base.raySwitch.caustics >= 0) return materialForRay(scene, baseIndex, RayShadeKind::Caustics);
+    if (base.raySwitch.specularTransmission >= 0)
+        return materialForRay(scene, baseIndex, RayShadeKind::SpecularTransmission);
+    return base;
+}
 
 }  // namespace sol

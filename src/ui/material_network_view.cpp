@@ -775,6 +775,7 @@ QStringList MaterialNetworkGraphView::canonicalInputOrder(const QString& categor
                 QStringLiteral("specular_reflection"),
                 QStringLiteral("diffuse_transmission"),
                 QStringLiteral("specular_transmission"),
+                QStringLiteral("volume"),
                 QStringLiteral("sss"),
                 QStringLiteral("caustics")};
     }
@@ -890,6 +891,7 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
                 {"specular_reflection", "surfaceshader", {}, {}},
                 {"diffuse_transmission", "surfaceshader", {}, {}},
                 {"specular_transmission", "surfaceshader", {}, {}},
+                {"volume", "surfaceshader", {}, {}},
                 {"sss", "surfaceshader", {}, {}},
                 {"caustics", "surfaceshader", {}, {}}};
     }
@@ -900,6 +902,7 @@ QVector<MaterialNetworkGraphView::MtlxInput> MaterialNetworkGraphView::defaultIn
                 {"specular_reflection", "color3", "0.8, 0.8, 0.8", {}},
                 {"diffuse_transmission", "color3", "0.8, 0.8, 0.8", {}},
                 {"specular_transmission", "color3", "0.8, 0.8, 0.8", {}},
+                {"volume", "color3", "0.8, 0.8, 0.8", {}},
                 {"sss", "color3", "0.8, 0.8, 0.8", {}},
                 {"caustics", "color3", "0.8, 0.8, 0.8", {}}};
     }
@@ -1148,14 +1151,14 @@ void MaterialNetworkGraphView::rebuildFromXml(const QString& xml, bool rewriteRe
         repaired = true;
     }
 
+    MtlxNode* raySwitch = nullptr;
     MtlxNode* standard = nullptr;
     for (MtlxNode& node : graphNodes_) {
-        if (node.category == "standard_surface") {
-            standard = &node;
-            break;
-        }
+        if (!raySwitch && node.category == "ray_switch_shader") raySwitch = &node;
+        if (!standard && node.category == "standard_surface") standard = &node;
+        if (raySwitch && standard) break;
     }
-    if (!standard) {
+    if (!standard && !raySwitch) {
         MtlxNode node;
         node.name = uniqueNodeName("standard_surface1");
         node.category = "standard_surface";
@@ -1166,6 +1169,7 @@ void MaterialNetworkGraphView::rebuildFromXml(const QString& xml, bool rewriteRe
         standard = &graphNodes_.back();
         repaired = true;
     }
+    const QString terminalName = raySwitch ? raySwitch->name : (standard ? standard->name : QString());
 
     MtlxNode* surface = findModelNode("surface");
     if (!surface || surface->category != "surfacematerial") {
@@ -1189,8 +1193,8 @@ void MaterialNetworkGraphView::rebuildFromXml(const QString& xml, bool rewriteRe
             break;
         }
     }
-    if (surfaceShaderInput && surfaceShaderInput->nodename.isEmpty()) {
-        surfaceShaderInput->nodename = standard->name;
+    if (surfaceShaderInput && surfaceShaderInput->nodename.isEmpty() && !terminalName.isEmpty()) {
+        surfaceShaderInput->nodename = terminalName;
         surfaceShaderInput->value.clear();
         repaired = true;
     }

@@ -88,6 +88,7 @@ __device__ inline void shadeVolumePixel(int pixel) {
         path.transmittedBounce = 0;
         path.sawNonSpecular = 1;
         path.causticSuffix = 0;
+        path.rayKind = int(RayShadeKind::Volume);
         ++path.depth;
         ++path.volumeScatters;
         if (path.depth >= srMax(1, scene.settings.maxDepth)) {

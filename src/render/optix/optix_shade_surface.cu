@@ -127,8 +127,8 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         return;
     }
 
-    Material matSrc = scene.materials[si.materialIndex];
-    if (path.lightPath) matSrc = gpuMaterialForCausticTransport(scene, si.materialIndex);
+    Material matSrc = path.lightPath ? materialForCausticTransport(scene, si.materialIndex)
+                                    : materialForRay(scene, si.materialIndex, RayShadeKind(path.rayKind));
     Material mat = optixpt::evaluateMaps(scene, matSrc, si.uv, si.ns);
     if (mat.transmission <= 0.0f && mat.doubleSided && dot(si.ns, -path.direction) < 0.0f) {
         si.ns = -si.ns;
@@ -300,6 +300,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             path.causticSuffix = 0;
         }
         if (bs.transmitted && isDeltaCausticCaster(mat)) path.throughGlass = 1;
+        path.rayKind = int(nextRayShadeKind(rgbBs, lw));
     }
     if (bs.transmitted && volInst.mediumIndex >= 0) {
         const MediumData* med = getMedium(scene, volInst.mediumIndex);
