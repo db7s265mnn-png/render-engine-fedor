@@ -450,29 +450,10 @@ __device__ inline void gpuAddMneeContribution(GpuPath& path, const float* throug
     const GpuChainState& chain = sol.chain;
     const Frame frame(n);
     const Vec3 woLocal = frame.toLocal(wo);
-    const bool deltaAnchor = isDeltaCausticCaster(shadeMat);
-    if (deltaAnchor && dot(wo, n) * dot(sol.omega, n) > 0.0f) return;
-
-    float fS[kMaxSpectrumSamples];
-    specZero(fS, path.nLambda);
-    float cosP = 1.0f;
-    if (deltaAnchor) {
-        // Dirac f is zero on eval. Jacobian replaces the delta; the first
-        // interface contributes the same (1-F)/η² tint as gpuTraceChain.
-        const LobeWeights lw = computeLobes(shadeMat, woLocal);
-        float etaRel = 1.0f, fr = 0.0f;
-        Vec3 dNext;
-        if (!gpuRefractTravel(-wo, n, lw.eta, dNext, etaRel, fr)) return;
-        const Vec3 Tanchor = lw.transmissionTint * ((1.0f - fr) / srMax(1e-4f, etaRel * etaRel));
-        specUpsampleLinear(Tanchor, path.lambda, path.nLambda, fS);
-    } else {
-        const Vec3 wiLocal = frame.toLocal(sol.omega);
-        const BsdfEval be = bsdfEvalLocal(shadeMat, woLocal, wiLocal);
-        if (be.pdf <= 0.0f || isBlack(be.f)) return;
-        cosP = fabsf(dot(n, sol.omega));
-        evalBsdfSpectralGpu(shadeMat, woLocal, wiLocal, path, shadeMat.ior, fS);
-    }
-
+    const Vec3 wiLocal = frame.toLocal(sol.omega);
+    const BsdfEval be = bsdfEvalLocal(shadeMat, woLocal, wiLocal);
+    if (be.pdf <= 0.0f || isBlack(be.f)) return;
+    const float cosP = fabsf(dot(n, sol.omega));
     float planeToLight = 1.0f;
     if (!sol.distant && light.type != kLightPoint) {
         const float cEmit = dot(yN, -chain.exitDir);
@@ -484,12 +465,13 @@ __device__ inline void gpuAddMneeContribution(GpuPath& path, const float* throug
     const float geom = planeToLight / sol.detJ;
     const float scale = cosP * geom / srMax(1e-12f, pdfArea * selectPdf);
     if (!(scale > 0.0f) || !srIsFinite(scale)) return;
-    if (specIsBlack(fS, path.nLambda)) return;
 
     float Le[kMaxSpectrumSamples];
+    float fS[kMaxSpectrumSamples];
     float tS[kMaxSpectrumSamples];
     float neeS[kMaxSpectrumSamples];
     specAuthoredRadiance(light, LeRgb, path, Le);
+    evalBsdfSpectralGpu(shadeMat, woLocal, wiLocal, path, shadeMat.ior, fS);
     specUpsampleLinear(chain.throughput, path.lambda, path.nLambda, tS);
     const int nLambda = path.nLambda;
     for (int i = 0; i < nLambda; ++i) neeS[i] = Le[i] * fS[i] * tS[i] * scale;
@@ -500,8 +482,7 @@ __device__ inline void gpuAddMneeContribution(GpuPath& path, const float* throug
 }
 
 // Lazy MNEE upgrade after intersect_shadow peeked a delta-glass blocker.
-// Matches CPU integrator_mnee for connectable vertices. Depth-0 delta glass
-// uses a probe shadow (BSDF eval is black) and the same Newton pipeline.
+// Matches CPU integrator_mnee: finite (and distant) lights, not the dome.
 __device__ inline void tryGpuMneeJob(int pixel, GpuPath& path, GpuMneeJob& job) {
     const LaunchParams& params = launchParams();
     const SceneView& scene = params.scene;

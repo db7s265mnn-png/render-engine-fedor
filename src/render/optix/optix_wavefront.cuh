@@ -85,23 +85,6 @@ __device__ inline Vec3 offsetRay(Vec3 p, Vec3 n, Vec3 dir) {
     return dot(dir, n) > 0.0f ? p + offset : p - offset;
 }
 
-// Occlusion probe for MNEE when delta-glass NEE eval is black (no radiance to add
-// if the shadow is clear). intersect_shadow still peeks the first caster.
-__device__ inline void enqueueMneeProbe(GpuShadow& shadow, Vec3 origin, Vec3 dir, float tMax,
-                                        int mediumIndex) {
-    shadow.origin = origin;
-    shadow.direction = dir;
-    shadow.tMax = tMax;
-    shadow.contrib = Vec3(0.0f);
-    shadow.specContrib = 0;
-    shadow.occluded = 0;
-    shadow.volumeTr = 1;
-    shadow.mediumIndex = mediumIndex;
-    shadow.splatPixel = -1;
-    shadow.mneeCaster = -1;
-    shadow.queue = kShadowTrace;
-}
-
 __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, float tMax, Vec3 contrib,
                                      int mediumIndex, int splatPixel = -1) {
     if (!isFinite(contrib) || isBlack(contrib)) {
