@@ -1245,7 +1245,7 @@ public:
                          .withGroup("Depth")
                          .withTooltip("Max path bounces after the camera (surfaces + volume scatters).\n"
                                       "Dense fog / clouds with deep multiple scattering need 1000+.\n"
-                                      "BDPT eye and light subpaths cap at 1000 vertices each.\n"
+                                      "BDPT eye and light subpaths cap at 50 vertices each.\n"
                                       "Also raise Russian Roulette Depth, or RR will kill deep paths early."));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 4096)
                          .withGroup("Depth")

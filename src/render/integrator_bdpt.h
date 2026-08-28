@@ -35,9 +35,9 @@
 namespace sol {
 namespace bdpt {
 
-// Hard cap on eye and light subpath vertices (camera + bounces). Stack arrays
-// at this size would blow the Windows 1 MB default; allocate on the heap.
-constexpr int kMaxVerts = 1000;
+// Hard cap on eye and light subpath vertices (camera + bounces). Storage is
+// heap-allocated; this is only the length clamp.
+constexpr int kMaxVerts = 50;
 
 enum class VType : uint8_t { Camera, Light, Surface };
 

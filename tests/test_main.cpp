@@ -6629,7 +6629,7 @@ void testTxMipmaps() {
 
 void testBdptShadersAndSss() {
     std::printf("bdpt-shaders-sss\n");
-    check(bdpt::kMaxVerts == 1000, "BDPT vertex cap is 1000");
+    check(bdpt::kMaxVerts == 50, "BDPT vertex cap is 50");
     {
         Vec3 beta(0.25f, 0.25f, 0.25f);
         Rng rngBefore(1u, 2u);
