@@ -83,7 +83,7 @@ struct alignas(16) LaunchParams {
     float splatInvLightPaths = 0.0f;
     int mcmcMutations = 0;  // leftover cone-mutation slots; always 0 (Iray aiming)
 
-    // Iray photon aiming: caster bounding spheres + mixture with uniform SampleLe.
+    // Iray photon aiming: caster bounding spheres. Mix 1 = aimed only.
     const GpuPhotonCluster* photonClusters = nullptr;
     int photonClusterCount = 0;
     float photonAimMix = 0.0f;

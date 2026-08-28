@@ -769,7 +769,8 @@ public:
                     << "  " << width << "x" << height << "  batch=" << batch
                     << "  wavefront=" << launches << " launches";
                 if (gpuCaustics) {
-                    msg << "  caustics=Iray LT aim n=" << nAim << " mix=" << launchParams.photonAimMix;
+                    msg << "  caustics=Iray LT aim n=" << nAim << " mix=" << launchParams.photonAimMix
+                        << (launchParams.photonAimMix >= 1.0f - 1e-5f ? " aimed-only" : "");
                     if (gpuEngine == kGpuCausticsMcmc)
                         msg << "  menu=MCMC";
                     else

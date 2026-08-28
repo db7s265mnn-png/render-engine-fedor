@@ -1,10 +1,9 @@
-// Iray Photoreal photon aiming (Keller et al. 2017, arXiv 1705.01263).
+// GPU light-path photon aiming (Keller et al. 2017 caster AABBs).
 //
-// Light-path SampleLe is a mixture of uniform emission and a discrete
-// distribution over caustic-caster bounding spheres, weighted by the solid
-// angle of each cluster as seen from the camera (correlates with screen-space
-// photon density). The estimator stays unbiased because beta uses the mixture
-// pdf, not the pdf of the technique that generated the sample.
+// Mix 1 = aimed only (every SampleLe direction / infinite-light disk point is
+// drawn from caster cones). Mix 0 = uniform SampleLe. Values in (0, 1) keep
+// the unbiased uniform+aim mixture. GPU ships at 1 so the floor caustic is
+// the dense aimed kernel, not the uniform-tail 1λ sparkles.
 //
 // Device-safe: no STL in the helpers. Host cluster build is behind !__CUDACC__.
 #pragma once
@@ -14,8 +13,16 @@
 namespace sol {
 
 constexpr int kMaxGpuPhotonClusters = 64;
-// Probability of the aiming technique in the mixture. 0 = uniform SampleLe.
-constexpr float kGpuPhotonAimMix = 0.85f;
+// 1 = aimed only; 0 = uniform SampleLe; (0,1) = mixture.
+constexpr float kGpuPhotonAimMix = 1.0f;
+
+SR_INL SR_HD bool gpuPhotonAimOnly(float mix) { return mix >= 1.0f - 1e-5f; }
+
+SR_INL SR_HD bool gpuPhotonAimSelect(float mix, float u) {
+    if (mix <= 0.0f) return false;
+    if (gpuPhotonAimOnly(mix)) return true;
+    return u < mix;
+}
 
 struct GpuPhotonCluster {
     Vec3 center{0.0f};
@@ -57,7 +64,7 @@ SR_INL SR_HD float gpuUniformConePdf(float cosThetaMax) {
 
 // float32 1 - r²/d² collapses to 1 for a far tiny caster, so the geometric
 // cone pdf is 0 while sampling still returns the axis (nuclear β). Cap
-// 1-cosMax so the aimed sample and its mixture pdf stay finite and match.
+// 1-cosMax so the aimed sample and its pdf stay finite and match.
 constexpr float kGpuAimConeMinOneMinusCos = 1.0e-6f;
 
 SR_INL SR_HD float gpuAimConeCosThetaMax(Vec3 origin, Vec3 center, float radius) {
@@ -105,7 +112,9 @@ SR_INL SR_HD float gpuPhotonAimMixtureDiskPdf(Vec3 p, Vec3 planeC, Vec3 planeN, 
     const Vec3 dPlane = d - nn * dot(d, nn);
     const float uniPdf = lengthSquared(dPlane) <= R * R + 1e-6f ? 1.0f / (kPi * R * R) : 0.0f;
     if (n <= 0 || !clusters || mix <= 0.0f) return uniPdf;
-    return (1.0f - mix) * uniPdf + mix * gpuAimDiskPdf(p, planeC, nn, clusters, n);
+    const float aimPdf = gpuAimDiskPdf(p, planeC, nn, clusters, n);
+    if (gpuPhotonAimOnly(mix)) return aimPdf;
+    return (1.0f - mix) * uniPdf + mix * aimPdf;
 }
 
 SR_INL SR_HD Vec3 gpuClusterDiskPoint(const GpuPhotonCluster& c, Vec3 planeC, Vec3 planeN, Vec2 unitDisk) {
@@ -135,6 +144,14 @@ SR_INL SR_HD float gpuAimConePdf(Vec3 origin, Vec3 dir, const GpuPhotonCluster* 
         if (dot(w, axis * (1.0f / sqrtf(a2))) >= cosMax - 1e-5f) pdf += clusters[i].weight * conePdf;
     }
     return pdf;
+}
+
+SR_INL SR_HD float gpuPhotonAimDirPdf(Vec3 origin, Vec3 dir, float mix, const GpuPhotonCluster* clusters,
+                                      int n, float uniformPdf) {
+    const float aimPdf = gpuAimConePdf(origin, dir, clusters, n);
+    if (gpuPhotonAimOnly(mix)) return aimPdf;
+    if (mix <= 0.0f || !clusters || n <= 0) return uniformPdf;
+    return (1.0f - mix) * uniformPdf + mix * aimPdf;
 }
 
 SR_INL SR_HD bool gpuSamplePhotonAimDir(Vec3 origin, const GpuPhotonCluster& c, float u1, float u2,

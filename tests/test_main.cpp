@@ -2357,7 +2357,7 @@ void testBdptCausticThroughRefraction() {
     std::printf("  bdptOn=%.1f bdptOff=%.1f ptOn=%.1f ratio=%.3f\n", sumBdptOn, sumBdptOff, sumPtOn, ratio);
 }
 
-// Iray photon aiming: mixture pdf, screen solid angle, caster clusters.
+// GPU photon aiming: aimed-only SampleLe (mix=1), screen solid angle, clusters.
 void testPhotonAim() {
     std::printf("photon-aim\n");
 
@@ -2376,11 +2376,14 @@ void testPhotonAim() {
     const Vec3 planeN(0.0f, 1.0f, 0.0f);
     const float sceneR = 10.0f;
     const Vec3 aimedP = gpuClusterDiskPoint(cluster, planeC, planeN, Vec2(0.0f, 0.0f));
+    check(kGpuPhotonAimMix >= 1.0f, "GPU light trace is aimed-only (no uniform mix)");
     const float mixPdf = gpuPhotonAimMixtureDiskPdf(aimedP, planeC, planeN, sceneR, kGpuPhotonAimMix,
                                                     &cluster, 1);
     const float uniPdf = 1.0f / (kPi * sceneR * sceneR);
-    check(mixPdf > uniPdf * 10.0f, "aimed disk mixture pdf >> uniform scene-disk pdf");
-    check(gpuAimDiskPdf(aimedP, planeC, planeN, &cluster, 1) > 0.0f, "aimed point in cluster disk");
+    const float aimDisk = gpuAimDiskPdf(aimedP, planeC, planeN, &cluster, 1);
+    check(mixPdf > uniPdf * 10.0f, "aimed disk pdf >> uniform scene-disk pdf");
+    check(aimDisk > 0.0f, "aimed point in cluster disk");
+    checkNear(mixPdf, aimDisk, 1e-6f, "mix=1 disk pdf is the aim disk pdf");
 
     const Vec3 origin(0.0f, 0.0f, 0.0f);
     GpuPhotonCluster coneC;
@@ -2392,6 +2395,10 @@ void testPhotonAim() {
     check(conePdf > 0.0f, "aimed cone pdf of aimed dir > 0");
     const float missPdf = gpuAimConePdf(origin, Vec3(1.0f, 0.0f, 0.0f), &coneC, 1);
     check(missPdf == 0.0f, "direction outside caster cone has aim pdf 0");
+    check(gpuPhotonAimDirPdf(origin, Vec3(1.0f, 0.0f, 0.0f), 1.0f, &coneC, 1, kInv4Pi) == 0.0f,
+          "aimed-only pdf has no uniform floor outside the cone");
+    check(gpuPhotonAimSelect(1.0f, 0.999f), "aimed-only always selects aim");
+    check(!gpuPhotonAimSelect(0.0f, 0.0f), "mix 0 never selects aim");
     Vec3 sampledDir;
     check(gpuSamplePhotonAimDir(origin, coneC, 0.25f, 0.4f, sampledDir), "sample cone toward cluster");
     check(gpuAimConePdf(origin, sampledDir, &coneC, 1) > 0.0f, "sampled aim dir has positive cone pdf");
@@ -2408,8 +2415,10 @@ void testPhotonAim() {
     check(gpuSamplePhotonAimDir(origin, tiny, 0.25f, 0.4f, farDir), "sample far tiny caster");
     const float farPdf = gpuAimConePdf(origin, farDir, &tiny, 1);
     check(farPdf > 0.0f && srIsFinite(farPdf), "far tiny aim cone pdf is finite and > 0");
-    const float farMix = (1.0f - kGpuPhotonAimMix) * kInv4Pi + kGpuPhotonAimMix * farPdf;
-    check(farMix > 0.0f && srIsFinite(farMix), "mixture pdf of far tiny sample > 0");
+    const float farDirPdf =
+        gpuPhotonAimDirPdf(origin, farDir, kGpuPhotonAimMix, &tiny, 1, kInv4Pi);
+    check(farDirPdf > 0.0f && srIsFinite(farDirPdf), "aimed-only pdf of far tiny sample > 0");
+    checkNear(farDirPdf, farPdf, 1e-6f, "mix=1 dir pdf is the aim cone pdf");
 
     check(gpuPickPhotonCluster(&cluster, 1, 0.0f) == 0, "pick single cluster");
     check(gpuPickPhotonCluster(&cluster, 1, 0.99f) == 0, "pick single cluster high u");

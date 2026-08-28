@@ -472,7 +472,7 @@ enum GpuCausticsEngine : int {
     // tracing that continues past the caster (splat only on a true connectable
     // after a spec prefix). Same lazy glass-blocked NEE upgrade as CPU MNEE.
     kGpuCausticsMneeLt = 0,
-    // Same GPU transport as MNEE+LT (Iray PT+LT with photon aiming). The menu
+    // Same GPU transport as MNEE+LT (aimed light trace at caster AABBs). The menu
     // label stays "MCMC" for the existing UI / tests; cone mutations are off.
     kGpuCausticsMcmc = 1,
 };
