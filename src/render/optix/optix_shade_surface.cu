@@ -2,8 +2,9 @@
 // No optixTrace — NEE writes a shadow ray for intersect_shadow.
 // Opaque BSDF weights: pbrt RGBAlbedoSpectrum (CPU liftBsdfWeight). Dielectric stays 1/η².
 // NEE bakes throughput at the vertex (pbrt SampleLd) before the BSDF/RR step.
-// Light-trace: splat on connectable vertices after a spec prefix, then continue
-// (do not splat from the caster, do not kill the SDS path).
+// Light-trace: SDS splat on connectable vertices after a spec prefix, then
+// continue (do not splat from the caster, do not kill the SDS path). L S* C
+// splat after a delta sample whose wi continues into the camera (glass pixels).
 //
 // Do not include optix_mnee.cuh here. Eye-path Newton lives in the dedicated
 // MNEE pipeline (optix_mnee.cu). Shade only arms a GpuMneeJob; intersect_shadow
@@ -89,7 +90,11 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         }
         const bool suppressCausticLight =
             scene.settings.caustics == 0 && path.causticSuffix;
-        if ((params.splatInvLightPaths > 0.0f && path.causticSuffix) || suppressCausticLight) {
+        // L S* C owns the pure-specular eye image of the light while LT runs.
+        const bool skipSpecLightImage =
+            params.splatInvLightPaths > 0.0f && path.depth > 0 && path.sawNonSpecular == 0;
+        if ((params.splatInvLightPaths > 0.0f && path.causticSuffix) || suppressCausticLight ||
+            skipSpecLightImage) {
             terminatePath(pixel, path);
             return;
         }
@@ -280,6 +285,10 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     if (path.lightPath) {
         const bool nearSpec = rgbBs.specular || lw.delta || isNearSpecularLobe(lw);
         if (nearSpec && materialContributesCaustics(mat)) path.specPrefix = 1;
+        // Delta / true spec only: glossy sample weight already has |cos|.
+        if ((rgbBs.specular || lw.delta) && materialContributesCaustics(mat) &&
+            !gpuLightVertexConnectable(mat, frame.toLocal(wo)))
+            tryEnqueueSpecularCameraSplat(pixel, path, shadow, si, wiWorld);
     } else {
         const bool causticBounce = rgbBs.specular || lw.delta || isNearSpecularLobe(lw);
         if (causticBounce && path.sawNonSpecular) path.causticSuffix = 1;

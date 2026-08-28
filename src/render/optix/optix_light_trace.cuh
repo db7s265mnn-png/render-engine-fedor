@@ -1,6 +1,9 @@
-// SDS-family camera splat for OptiX light paths. No optixTrace.
-// Connectable = lightTraceConnectable (not the caster). After a splat the path
-// continues; specPrefix is cleared by shade so later diffuse hits do not re-splat.
+// Light-path camera splats for OptiX. No optixTrace.
+// SDS: connectable vertex after a spec prefix → tryEnqueueCausticSplat (floor).
+// L S* C: delta/near-spec sample on a non-connectable vertex whose wi continues
+// into the camera → tryEnqueueSpecularCameraSplat (lamp seen through glass).
+// After either splat the path continues. specPrefix is cleared on a connectable
+// hit so later diffuse hits do not re-splat SDS.
 #pragma once
 
 #include "render/camera_proj.h"
@@ -61,6 +64,50 @@ __device__ inline void tryEnqueueCausticSplat(int pixel, GpuPath& path, GpuShado
     const Vec3 shadowOrigin = offsetRay(si.p, si.ng, toCam);
     const float dist = sqrtf(srMax(1e-12f, dist2));
     enqueueShadow(shadow, shadowOrigin, toCam, dist * (1.0f - 1e-3f), rgb, path.mediumIndex, dest);
+}
+
+// L S* C: throughput already holds the BSDF sample weight (delta 1/η², Fresnel).
+// Do not multiply f again. Connection still needs |n·wi| × camera We. Skip when
+// a floor splat already owns the shadow slot. Path continues on occlusion.
+__device__ inline void tryEnqueueSpecularCameraSplat(int pixel, GpuPath& path, GpuShadow& shadow,
+                                                     const Surf& si, Vec3 wiWorld) {
+    const LaunchParams& params = launchParams();
+    (void)pixel;
+    if (!path.lightPath) return;
+    if (params.splatInvLightPaths <= 0.0f || !params.camProj.valid) return;
+    if (shadow.queue != kShadowIdle) return;
+    if (path.lightIndex >= 0 && path.lightIndex < params.scene.lightCount &&
+        !lightContributesCaustics(params.scene.lights[path.lightIndex]))
+        return;
+
+    float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
+    if (!cameraContinuesToFilm(params.camProj, si.p, wiWorld, px, py, cosTheta, dist2) || dist2 < 1e-8f)
+        return;
+    const int ix = int(px);
+    const int iy = int(py);
+    if (ix < 0 || iy < 0 || ix >= params.width || iy >= params.height) return;
+    const int dest = iy * params.width + ix;
+
+    Vec3 toAperture = normalize(params.camProj.camPos - si.p);
+    if (params.camProj.lensRadius > 1e-8f) toAperture = normalize(wiWorld);
+
+    const float pdfOmega = cameraPdfOmega(params.camProj, cosTheta);
+    const float cosV = fabsf(dot(si.ns, toAperture));
+    const float geom = cosV * pdfOmega / dist2;
+    if (!(geom > 0.0f) || !srIsFinite(geom)) return;
+
+    float tmp[kMaxSpectrumSamples];
+    specZero(tmp, path.nLambda);
+    for (int i = 0; i < path.nLambda; ++i) tmp[i] = path.throughputS[i] * geom;
+    specClampIndirect(tmp, path.nLambda, gpuLightTraceSplatClamp(params.scene.settings));
+    if (!specIsFinite(tmp, path.nLambda) || specIsBlack(tmp, path.nLambda)) return;
+    Vec3 rgb = specToRgb(params.spec, tmp, path.lambda, path.pdf, path.nLambda);
+    rgb = rgb * params.splatInvLightPaths;
+    if (!isFinite(rgb) || isBlack(rgb)) return;
+
+    const Vec3 shadowOrigin = offsetRay(si.p, si.ng, toAperture);
+    const float dist = sqrtf(srMax(1e-12f, dist2));
+    enqueueShadow(shadow, shadowOrigin, toAperture, dist * (1.0f - 1e-3f), rgb, path.mediumIndex, dest);
 }
 
 }  // namespace sol
