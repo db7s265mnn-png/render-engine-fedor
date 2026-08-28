@@ -355,6 +355,15 @@ SR_INL SR_HD bool isDeltaCausticCaster(const Material& m) {
     return lw.delta && lw.transmission > 0.25f && lw.diffuse < 1e-3f;
 }
 
+// GPU eye-path MNEE vertex. First delta-glass hit: Newton from that point to the
+// light (lamp seen through the object). Later connectable hit after a specular
+// prefix: glass-blocked NEE (floor seen through glass). Depth-0 Lambert stays
+// with light tracing so the floor caustic is not counted twice.
+SR_INL SR_HD bool gpuArmEyeMneeAtVertex(int depth, int specularBounce, const Material& mat) {
+    if (isDeltaCausticCaster(mat)) return depth == 0;
+    return depth > 0 && specularBounce != 0;
+}
+
 // Light-trace vertex that may connect to the camera. Casters (delta, near-spec,
 // or transmissive glass including roughness 0.1) are not connectable: do not
 // splat from them and do not kill the path — continue the SDS chain.

@@ -8,6 +8,8 @@
 // Do not include optix_mnee.cuh here. Eye-path Newton lives in the dedicated
 // MNEE pipeline (optix_mnee.cu). Shade only arms a GpuMneeJob; intersect_shadow
 // peeks the glass blocker; __raygen__mnee runs the solver.
+// First delta-glass hit (depth 0) also arms MNEE: the lamp through the object.
+// Depth-0 floor stays with LT (no double-count SDS).
 #include "render/lights.h"
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_light_trace.cuh"
@@ -16,6 +18,51 @@
 #include "render/optix/optix_volume.cuh"
 
 namespace sol {
+
+__device__ inline void fillEyeMneeJob(GpuMneeJob& job, const Surf& si, const GpuPath& path, Vec3 wo,
+                                      Vec3 seedWi, const LightSample& ls, const LightData& light,
+                                      int lightIndex, float selectPdf) {
+    job.p = si.p;
+    job.ns = si.ns;
+    job.ng = si.ng;
+    job.wo = wo;
+    job.uv = si.uv;
+    job.wi = seedWi;
+    job.distance = ls.distance;
+    job.y = si.p + ls.wi * ls.distance;
+    job.yN = areaLightNormal(light);
+    if (light.type == kLightSphere) job.yN = normalize(job.y - lightOrigin(light));
+    if (light.type == kLightPoint) job.yN = Vec3(0.0f, 1.0f, 0.0f);
+    job.LeRgb = ls.radiance;
+    job.pdfArea = ls.pdf;
+    job.selectPdf = selectPdf;
+    if (light.type == kLightPoint) {
+        job.pdfArea = 1.0f;
+        job.LeRgb = light.emittedRadiance();
+    } else if (light.type == kLightRect) {
+        const float area = rectLightArea(light);
+        job.pdfArea = area > 1e-12f ? 1.0f / area : 0.0f;
+        job.LeRgb = lightRadiance(light);
+    } else if (light.type == kLightDisk) {
+        const float area = diskLightArea(light);
+        job.pdfArea = area > 1e-12f ? 1.0f / area : 0.0f;
+        job.LeRgb = lightRadiance(light);
+    } else if (light.type == kLightSphere) {
+        const float radius = srMax(1e-5f, sphereLightRadius(light));
+        job.pdfArea = 1.0f / (4.0f * kPi * radius * radius);
+        job.LeRgb = lightRadiance(light);
+    }
+    job.distant = light.type == kLightDistant ? 1 : 0;
+    job.materialIndex = si.materialIndex;
+    job.lightIndex = lightIndex;
+    job.casterInstance = -1;
+    job.clampDepth = path.depth;
+    job.clampSpec = path.specularBounce;
+    job.clampCaustic = path.causticSuffix;
+    job.pending = 0;
+    job.armed = 1;
+    for (int i = 0; i < path.nLambda && i < kMaxSpectrumSamples; ++i) job.throughputS[i] = path.throughputS[i];
+}
 
 __device__ inline void shadeSurfacePixel(int pixel) {
     const LaunchParams& params = launchParams();
@@ -89,7 +136,10 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         }
         const bool suppressCausticLight =
             scene.settings.caustics == 0 && path.causticSuffix;
-        if ((params.splatInvLightPaths > 0.0f && path.causticSuffix) || suppressCausticLight) {
+        const bool skipSpecLightImage =
+            gpuEyePathMneeEnabled(scene.settings) && path.depth > 0 && path.sawNonSpecular == 0;
+        if ((params.splatInvLightPaths > 0.0f && path.causticSuffix) || suppressCausticLight ||
+            skipSpecLightImage) {
             terminatePath(pixel, path);
             return;
         }
@@ -169,6 +219,11 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     }
     if (!path.lightPath && !skipCameraSds && !(suppressCausticLight && !path.specularBounce) &&
         scene.lightCount > 0) {
+        Material matCau = gpuMaterialForCausticSlot(scene, si.materialIndex);
+        matCau = optixpt::evaluateMaps(scene, matCau, si.uv, si.ns);
+        const bool casterHit = isDeltaCausticCaster(matCau);
+        const bool armMnee = params.mneeJobs && gpuEyePathMneeEnabled(scene.settings) &&
+                             gpuArmEyeMneeAtVertex(path.depth, path.specularBounce, matCau);
         float selectPdf = 0.0f;
         const int lightIndex = sampleLightIndex(scene, si.p, path.rng.nextFloat(), selectPdf);
         LightSample ls;
@@ -179,70 +234,34 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             const Vec3 woLocal = frame.toLocal(wo);
             const Vec3 wiLocal = frame.toLocal(ls.wi);
             const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
-            if (be.pdf > 0.0f && !isBlack(be.f)) {
+            const bool neeOk = be.pdf > 0.0f && !isBlack(be.f);
+            const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
+            float tMax = 1.0e8f;
+            if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
+            if (neeOk) {
                 const float lightPdf = ls.pdf * selectPdf;
                 const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
                 const float scale = (fabsf(wiLocal.z) / lightPdf) * mis;
                 float neeS[kMaxSpectrumSamples];
                 evalSurfaceNeeSpectral(scene.lights[lightIndex], ls.radiance, mat, woLocal, wiLocal,
                                        scale, path, mat.ior, neeS);
-                const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
-                float tMax = 1.0e8f;
-                if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
                 enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS,
                                        path.mediumIndex, scene.lights[lightIndex].shadowEnable,
                                        pathContributionClamp(scene.settings, path.depth,
                                                              path.specularBounce != 0,
                                                              path.causticSuffix != 0));
-                // CPU MNEE: glass-blocked NEE → manifold. With LT on, only after a
-                // specular eye prefix so the floor caustic is not counted twice.
-                if (params.mneeJobs && gpuEyePathMneeEnabled(scene.settings) &&
-                    shadow.queue == kShadowTrace &&
-                    (path.depth > 0 && path.specularBounce != 0)) {
-                    GpuMneeJob& job = params.mneeJobs[pixel];
-                    job.p = si.p;
-                    job.ns = si.ns;
-                    job.ng = si.ng;
-                    job.wo = wo;
-                    job.uv = si.uv;
-                    job.wi = ls.wi;
-                    job.distance = ls.distance;
-                    job.y = si.p + ls.wi * ls.distance;
-                    const LightData& light = scene.lights[lightIndex];
-                    job.yN = areaLightNormal(light);
-                    if (light.type == kLightSphere) job.yN = normalize(job.y - lightOrigin(light));
-                    if (light.type == kLightPoint) job.yN = Vec3(0.0f, 1.0f, 0.0f);
-                    job.LeRgb = ls.radiance;
-                    job.pdfArea = ls.pdf;
-                    job.selectPdf = selectPdf;
-                    if (light.type == kLightPoint) {
-                        job.pdfArea = 1.0f;
-                        job.LeRgb = light.emittedRadiance();
-                    } else if (light.type == kLightRect) {
-                        const float area = rectLightArea(light);
-                        job.pdfArea = area > 1e-12f ? 1.0f / area : 0.0f;
-                        job.LeRgb = lightRadiance(light);
-                    } else if (light.type == kLightDisk) {
-                        const float area = diskLightArea(light);
-                        job.pdfArea = area > 1e-12f ? 1.0f / area : 0.0f;
-                        job.LeRgb = lightRadiance(light);
-                    } else if (light.type == kLightSphere) {
-                        const float radius = srMax(1e-5f, sphereLightRadius(light));
-                        job.pdfArea = 1.0f / (4.0f * kPi * radius * radius);
-                        job.LeRgb = lightRadiance(light);
-                    }
-                    job.distant = light.type == kLightDistant ? 1 : 0;
-                    job.materialIndex = si.materialIndex;
-                    job.lightIndex = lightIndex;
-                    job.casterInstance = -1;
-                    job.clampDepth = path.depth;
-                    job.clampSpec = path.specularBounce;
-                    job.clampCaustic = path.causticSuffix;
-                    job.pending = 0;
-                    job.armed = 1;
-                    for (int i = 0; i < path.nLambda && i < kMaxSpectrumSamples; ++i)
-                        job.throughputS[i] = path.throughputS[i];
+            } else if (armMnee && casterHit) {
+                enqueueMneeProbe(shadow, shadowOrigin, ls.wi, tMax, path.mediumIndex);
+            }
+            if (armMnee && shadow.queue == kShadowTrace) {
+                Vec3 seedWi = ls.wi;
+                if (casterHit && path.depth == 0) {
+                    float etap = 1.0f;
+                    Vec3 wt;
+                    if (refractDielectric(wo, si.ns, matCau.ior, etap, wt)) seedWi = wt;
                 }
+                fillEyeMneeJob(params.mneeJobs[pixel], si, path, wo, seedWi, ls,
+                               scene.lights[lightIndex], lightIndex, selectPdf);
             }
         }
     }

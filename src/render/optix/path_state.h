@@ -101,6 +101,7 @@ struct GpuShadow {
 
 // Eye-path MNEE job filled at the NEE vertex (before BSDF steps throughput).
 // The Newton pipeline reads this after intersect_shadow peeks a glass blocker.
+// Depth-0 delta glass also fills a job (probe shadow; BSDF eval is black).
 struct GpuMneeJob {
     Vec3 p{0.0f};
     Vec3 ns{0.0f, 0.0f, 1.0f};

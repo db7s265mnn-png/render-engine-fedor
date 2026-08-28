@@ -881,6 +881,20 @@ void testXpuDevice() {
         check(!gpuEyePathMneeEnabled(s), "caustics off disables GPU MNEE");
         check(kShadowMnee != kShadowShade && kShadowMnee != kShadowIdle,
               "MNEE shadow slot is distinct from shade/idle");
+        Material glass;
+        glass.transmission = 1.0f;
+        glass.roughness = 0.0f;
+        glass.specular = 1.0f;
+        glass.ior = 1.5f;
+        check(isDeltaCausticCaster(glass), "smooth glass is a delta caster");
+        check(gpuArmEyeMneeAtVertex(0, 1, glass), "first glass hit arms MNEE to the light");
+        check(!gpuArmEyeMneeAtVertex(1, 1, glass), "later glass is not an MNEE omega-anchor");
+        Material floor;
+        floor.roughness = 0.9f;
+        check(!isDeltaCausticCaster(floor), "Lambert is not a delta caster");
+        check(!gpuArmEyeMneeAtVertex(0, 1, floor), "primary floor does not arm MNEE (LT owns SDS)");
+        check(gpuArmEyeMneeAtVertex(1, 1, floor), "floor after a spec prefix arms MNEE");
+        check(!gpuArmEyeMneeAtVertex(1, 0, floor), "diffuse bounce does not arm MNEE");
     }
 
     {
