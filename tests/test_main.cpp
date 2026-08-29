@@ -831,6 +831,15 @@ void testBsdf() {
         pureGlass.baseWeight = 0.0f;
         const Material lamb0 = exitToDiffuseLambert(pureGlass);
         checkNear(lamb0.baseColor.y, 0.6f, 1e-4f, "base=0 glass exits as transmission_color");
+
+        // GPU used to require the flag on this hit — the floor behind glass
+        // never has it, so OptiX NEE was a no-op. Destination only needs Lambert.
+        Material floorDest{};
+        floorDest.baseColor = Vec3(0.75f);
+        floorDest.roughness = 0.9f;
+        check(!materialWantsExitToDiffuse(floorDest), "destination does not carry the flag");
+        const Material floorLamb = exitToDiffuseLambert(floorDest);
+        check(eyePathNeeConnectable(floorLamb, woN), "unflagged destination still NEE-connectable");
     }
 }
 

@@ -33,7 +33,8 @@ __device__ inline void beginExitToDiffuseEscape(GpuPath& path, const Surf& si, c
 __device__ inline void tryEnqueueExitToDiffuseNee(GpuPath& path, GpuShadow& shadow, const SceneView& scene,
                                                  const Surf& si, const Material& mat, const Frame& frame,
                                                  Vec3 wo) {
-    if (path.lightPath || !materialWantsExitToDiffuse(mat) || scene.lightCount <= 0) return;
+    // Destination only — the flag lives on the dying surface (exitEscapeMat).
+    if (path.lightPath || path.exitEscapeMat < 0 || scene.lightCount <= 0) return;
     const Material lambert = exitToDiffuseLambert(mat);
     const Vec3 woLocal = frame.toLocal(wo);
     if (!eyePathNeeConnectable(lambert, woLocal)) return;
