@@ -2631,7 +2631,8 @@ void testPhotonAim() {
 void testPhotonCaustics() {
     std::printf("photon-caustics\n");
 
-    auto buildScene = [](int caustics, int engine, int matContribute) {
+    auto buildScene = [](int caustics, int engine, int matContribute, float lightW = 0.8f,
+                         float lightH = 0.8f) {
         auto scene = std::make_shared<Scene>();
         MeshPtr floor = std::make_shared<Mesh>();
         floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
@@ -2667,8 +2668,8 @@ void testPhotonCaustics() {
 
         LightData light;
         light.type = kLightRect;
-        light.width = 0.8f;
-        light.height = 0.8f;
+        light.width = lightW;
+        light.height = lightH;
         light.intensity = 60.0f;
         light.normalize = 1;
         light.visibleCamera = 0;
@@ -2696,9 +2697,10 @@ void testPhotonCaustics() {
         return scene;
     };
 
-    auto renderSum = [&](int caustics, int engine, int matContribute, bool& finiteOut) -> double {
+    auto renderSum = [&](int caustics, int engine, int matContribute, bool& finiteOut,
+                         float lightW = 0.8f, float lightH = 0.8f) -> double {
         RenderSession session;
-        session.setScene(buildScene(caustics, engine, matContribute));
+        session.setScene(buildScene(caustics, engine, matContribute, lightW, lightH));
         session.start();
         session.waitForCompletion();
         const Image img = session.linearImage();
@@ -2723,6 +2725,18 @@ void testPhotonCaustics() {
     check(sumMatOff < sumPhoton * 0.85, "material Contribute to Caustics off reduces caustics");
     check(sumMnee > sumOff * 1.1, "MNEE engine still adds caustic energy");
     std::printf("  photon=%.1f off=%.1f matOff=%.1f mnee=%.1f\n", sumPhoton, sumOff, sumMatOff, sumMnee);
+
+    // Normalize means authored intensity is flux, not radiance. A 5 cm card must
+    // still deposit the same caustic energy as the 80 cm one — 0.9.65 multiplied
+    // power by area and the map went dark on typical small lights.
+    bool finTiny = true, finTinyOff = true;
+    const double sumTiny = renderSum(1, kCausticsEnginePhoton, 1, finTiny, 0.05f, 0.05f);
+    const double sumTinyOff = renderSum(0, kCausticsEnginePhoton, 1, finTinyOff, 0.05f, 0.05f);
+    check(finTiny && finTinyOff, "tiny-light photon renders are finite");
+    check(sumTiny > sumTinyOff * 1.1, "tiny normalized light still deposits photon caustics");
+    check(sumTiny > sumPhoton * 0.5 && sumTiny < sumPhoton * 2.0,
+          "tiny normalized light keeps photon energy of the large card");
+    std::printf("  tiny=%.1f tinyOff=%.1f\n", sumTiny, sumTinyOff);
 
     {
         auto rgbAt = [](float lambdaNm) {
