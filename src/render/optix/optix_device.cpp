@@ -322,6 +322,7 @@ public:
                     continue;
                 }
                 DeviceBuffer positions, normals, uvs, indices, restPositions, restNormals;
+                DeviceBuffer triEdgeMask, wireIndices, wirePositions;
                 positions.upload(mesh->positions);
                 indices.upload(mesh->indices);
                 if (mesh->normals.size() == mesh->positions.size()) normals.upload(mesh->normals);
@@ -330,6 +331,11 @@ public:
                     restPositions.upload(mesh->restPositions);
                 if (mesh->restNormals.size() == mesh->positions.size() && !mesh->restNormals.empty())
                     restNormals.upload(mesh->restNormals);
+                if (mesh->triEdgeMask.size() == mesh->indices.size() / 3)
+                    triEdgeMask.upload(mesh->triEdgeMask);
+                if (!mesh->wireIndices.empty() && (mesh->wireIndices.size() % 2) == 0)
+                    wireIndices.upload(mesh->wireIndices);
+                if (!mesh->wirePositions.empty()) wirePositions.upload(mesh->wirePositions);
 
                 view.positions = positions.as<const Vec3>();
                 view.normals = normals.as<const Vec3>();
@@ -337,8 +343,16 @@ public:
                 view.indices = indices.as<const uint32_t>();
                 view.restPositions = restPositions.as<const Vec3>();
                 view.restNormals = restNormals.as<const Vec3>();
+                view.triEdgeMask = triEdgeMask.as<const uint8_t>();
+                view.wireIndices = wireIndices.as<const uint32_t>();
+                view.wirePositions = wirePositions.as<const Vec3>();
                 view.triangleCount = uint32_t(mesh->indices.size() / 3);
                 view.vertexCount = uint32_t(mesh->positions.size());
+                if (!mesh->wireIndices.empty() && (mesh->wireIndices.size() % 2) == 0 &&
+                    !mesh->wirePositions.empty()) {
+                    view.wireEdgeCount = uint32_t(mesh->wireIndices.size() / 2);
+                    view.wireVertexCount = uint32_t(mesh->wirePositions.size());
+                }
                 if (mesh->bounds.valid()) {
                     view.boundsLo = mesh->bounds.lo;
                     view.boundsHi = mesh->bounds.hi;
@@ -353,6 +367,9 @@ public:
                 geometryBuffers_.push_back(std::move(uvs));
                 geometryBuffers_.push_back(std::move(restPositions));
                 geometryBuffers_.push_back(std::move(restNormals));
+                geometryBuffers_.push_back(std::move(triEdgeMask));
+                geometryBuffers_.push_back(std::move(wireIndices));
+                geometryBuffers_.push_back(std::move(wirePositions));
             }
 
             // Top level instance acceleration structure.
@@ -568,8 +585,8 @@ public:
         if (cancel.load(std::memory_order_relaxed)) return;
         try {
             CUDA_CHECK(cudaSetDevice(0));
-            if (scene_->settings.integrator != kIntegratorPathTracer && !warnedNonPath_) {
-                logWarning("GPU (OptiX) is Path Tracer only. Other integrators are rejected by the session.");
+            if (scene_->settings.integrator == kIntegratorBdpt && !warnedNonPath_) {
+                logWarning("GPU (OptiX) does not run BDPT. Switch Integrator to Path Tracer.");
                 warnedNonPath_ = true;
             }
             const int width = fb.width();
@@ -669,7 +686,11 @@ public:
             fillSpectralLaunch(launchParams);
             launchParams.camProj = buildCameraProj(launchParams.scene);
             if (launchParams.scene.camera.opticalModel != 0) launchParams.camProj.valid = false;
-            const bool gpuCaustics = launchParams.scene.settings.caustics != 0 &&
+            const bool skipLightTrace =
+                scene_->settings.integrator == kIntegratorDirectLighting ||
+                scene_->settings.integrator == kIntegratorAmbientOcclusion ||
+                scene_->settings.integrator == kIntegratorWireframe;
+            const bool gpuCaustics = !skipLightTrace && launchParams.scene.settings.caustics != 0 &&
                                      launchParams.scene.lightCount > 0 && launchParams.camProj.valid;
             const int lightSlots = srMax(1, launchW * launchH);
             const int gpuEngine = launchParams.scene.settings.causticsEngineGpu;
@@ -706,7 +727,9 @@ public:
 
             if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
 
-            const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
+            int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
+            if (scene_->settings.integrator == kIntegratorDirectLighting) maxDepth = 1;
+            launchParams.scene.settings.maxDepth = maxDepth;
 
             const auto wall0 = std::chrono::steady_clock::now();
             CUDA_CHECK(cudaEventRecord(gpuStartEvent_, stream_));

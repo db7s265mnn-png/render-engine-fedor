@@ -436,7 +436,7 @@ inline Vec3 traceRadianceBdptSpectral(
     if (!scratch) scratch = &bdptThreadScratch();
     {
         BdptPhaseTimer allocTimer(stats ? &stats->nsAlloc : nullptr);
-        scratch->ensure(kMaxVerts);
+        scratch->ensure(maxVerts);
     }
     Vert* eye = scratch->eye.data();
     Vert* light = scratch->light.data();

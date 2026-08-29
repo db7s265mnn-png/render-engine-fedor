@@ -12,6 +12,7 @@
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QLabel>
+#include <QList>
 #include <QMenuBar>
 #include <QIcon>
 #include <QMessageBox>
@@ -26,6 +27,7 @@
 #include <QToolButton>
 #include <QSignalBlocker>
 #include <QTimer>
+#include <QUndoStack>
 #include <QVector3D>
 #include <QEventLoop>
 #include <algorithm>
@@ -39,6 +41,7 @@
 
 #include "app/default_scene.h"
 #include "app/document.h"
+#include "app/undo_hub.h"
 #include "core/expr_eval.h"
 #include "core/log.h"
 #include "core/math.h"
@@ -155,6 +158,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     // Viewport stays the central widget (same proportions as before detach).
     // Docks around it can float; the viewer itself floats via a dedicated window.
     createDocks();
+    undoHub_.setGraph(&graph_);
+    undoHub_.setRefreshUi([this] { refreshAfterUndo(); });
+    undoHub_.setRebuildGraph([this] { rebuildGraphAfterUndo(); });
+    undoHub_.setApplyCamera([this](const OrbitCameraState& s) { applyOrbitCameraState(s); });
+    if (networkView_) networkView_->setUndoHub(&undoHub_);
+    if (parameterPanel_) parameterPanel_->setUndoHub(&undoHub_);
     createActions();
     createMenus();
     createToolBar();
@@ -178,10 +187,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
     connect(renderView_, &RenderView::cameraMoved, this, &MainWindow::onCameraMoved);
     connect(renderView_, &RenderView::cameraNavStarted, this, [this] {
+        captureOrbitCameraState(cameraUndoStart_);
         if (!renderArmed()) return;
         session_.setInteractivePreview(true);
     });
-    connect(renderView_, &RenderView::cameraNavEnded, this, [this] { session_.setInteractivePreview(false); });
+    connect(renderView_, &RenderView::cameraNavEnded, this, [this] {
+        OrbitCameraState end;
+        captureOrbitCameraState(end);
+        undoHub_.pushCamera(cameraUndoStart_, end);
+        session_.setInteractivePreview(false);
+    });
     connect(renderView_, &RenderView::viewTransformChanged, this, [this](int) {
         framePending_.store(true, std::memory_order_relaxed);
         onRenderTick();
@@ -359,6 +374,19 @@ void MainWindow::createActions() {
         rotateToolAction_->setChecked(tool == TransformTool::Rotate);
         scaleToolAction_->setChecked(tool == TransformTool::Scale);
     });
+
+    undoAction_ = undoHub_.stack().createUndoAction(this, QStringLiteral("&Undo"));
+    redoAction_ = undoHub_.stack().createRedoAction(this, QStringLiteral("&Redo"));
+    undoAction_->setShortcuts(QList<QKeySequence>{QKeySequence::Undo});
+    redoAction_->setShortcuts(QList<QKeySequence>{QKeySequence::Redo, QKeySequence(QStringLiteral("Ctrl+Y"))});
+    connect(qApp, &QApplication::focusChanged, this, [this](QWidget*, QWidget* now) {
+        const bool typing = isTypingFocus(now);
+        if (!undoAction_ || !redoAction_) return;
+        undoAction_->setShortcuts(typing ? QList<QKeySequence>{} : QList<QKeySequence>{QKeySequence::Undo});
+        redoAction_->setShortcuts(typing ? QList<QKeySequence>{}
+                                         : QList<QKeySequence>{QKeySequence::Redo,
+                                                               QKeySequence(QStringLiteral("Ctrl+Y"))});
+    });
 }
 
 void MainWindow::createMenus() {
@@ -375,6 +403,9 @@ void MainWindow::createMenus() {
     fileMenu->addAction("E&xit", QKeySequence::Quit, this, &QWidget::close);
 
     QMenu* editMenu = menuBar()->addMenu("&Edit");
+    editMenu->addAction(undoAction_);
+    editMenu->addAction(redoAction_);
+    editMenu->addSeparator();
     // Shortcuts live on the Scene Network view so Ctrl+C still copies prim paths
     // in the Scene Graph when that panel has focus.
     editMenu->addAction("Copy Nodes", this, [this] { networkView_->copySelectedNodes(); });
@@ -790,6 +821,29 @@ void MainWindow::createDocks() {
         // Keep the gizmo responsive; do not rebuild Parameters or restart IPR.
     });
     connect(renderView_, &RenderView::transformFinished, this, [this](Node* node) {
+        if (node) {
+            auto qv = [](Vec3 v) {
+                return QVariant::fromValue(QVector3D(v.x, v.y, v.z));
+            };
+            auto neq = [](Vec3 a, Vec3 b) {
+                return std::fabs(a.x - b.x) > 1e-6f || std::fabs(a.y - b.y) > 1e-6f ||
+                       std::fabs(a.z - b.z) > 1e-6f;
+            };
+            const Vec3 oldT = renderView_->gizmoDragStartTranslate();
+            const Vec3 oldR = renderView_->gizmoDragStartRotate();
+            const Vec3 oldS = renderView_->gizmoDragStartScale();
+            const Vec3 newT = node->vec3Value("translate");
+            const Vec3 newR = node->vec3Value("rotate");
+            const Vec3 newS = node->vec3Value("scale");
+            undoHub_.beginMacro(QStringLiteral("Transform"));
+            if (neq(oldT, newT))
+                undoHub_.pushParameter(node->name(), QStringLiteral("translate"), qv(oldT), qv(newT));
+            if (neq(oldR, newR))
+                undoHub_.pushParameter(node->name(), QStringLiteral("rotate"), qv(oldR), qv(newR));
+            if (neq(oldS, newS))
+                undoHub_.pushParameter(node->name(), QStringLiteral("scale"), qv(oldS), qv(newS));
+            undoHub_.endMacro();
+        }
         if (parameterPanel_->node() == node && !parameterPanel_->showingMaterialX())
             parameterPanel_->refresh();
         scheduleCook(0);
@@ -801,6 +855,7 @@ void MainWindow::createDocks() {
 // ---------------------------------------------------------------------------
 
 void MainWindow::newScene() {
+    undoHub_.clear();
     buildDefaultGraph(graph_);
     networkView_->setGraph(&graph_);
     parameterPanel_->clearSelection();
@@ -818,6 +873,7 @@ void MainWindow::newScene() {
 }
 
 void MainWindow::newSceneFromAlembic(const QString& alembicPath, const QString& hdriPath) {
+    undoHub_.clear();
     buildAlembicGraph(graph_, alembicPath, hdriPath);
     networkView_->setGraph(&graph_);
     parameterPanel_->clearSelection();
@@ -840,6 +896,7 @@ bool MainWindow::openScene(const QString& path) {
         appMessageBox(this, "Open scene", error);
         return false;
     }
+    undoHub_.clear();
     networkView_->setGraph(&graph_);
     parameterPanel_->clearSelection();
     materialNetworkView_->goUp();
@@ -1669,6 +1726,58 @@ void MainWindow::writeViewToCameraNode(Node* camera) {
     }
 }
 
+void MainWindow::captureOrbitCameraState(OrbitCameraState& out) const {
+    out = OrbitCameraState{};
+    if (!renderView_) return;
+    const ViewCamera& view = renderView_->camera();
+    out.pivot = view.pivot;
+    out.distance = view.distance;
+    out.yaw = view.yaw;
+    out.pitch = view.pitch;
+    out.nodeName = lookThroughCameraName_;
+    if (Node* cam = findCameraNodeByName(lookThroughCameraName_)) {
+        out.hasNode = true;
+        out.uselookat = cam->boolValue("uselookat", true);
+        if (const Parameter* p = cam->findParameter("eye")) out.eye = p->value;
+        if (const Parameter* p = cam->findParameter("target")) out.target = p->value;
+        if (const Parameter* p = cam->findParameter("translate")) out.translate = p->value;
+    }
+}
+
+void MainWindow::applyOrbitCameraState(const OrbitCameraState& state) {
+    if (!renderView_) return;
+    ViewCamera view;
+    view.pivot = state.pivot;
+    view.distance = state.distance;
+    view.yaw = state.yaw;
+    view.pitch = state.pitch;
+    renderView_->setCamera(view);
+    renderView_->update();
+    if (!scene_) return;
+    const Mat4 camXform = view.toMatrix();
+    scene_->camera.cameraToWorld = camXform;
+    if (!scene_->cameraMotionXforms.empty()) {
+        std::fill(scene_->cameraMotionXforms.begin(), scene_->cameraMotionXforms.end(), camXform);
+    }
+    if (const Node* cam = findCameraNodeByName(state.nodeName))
+        applyLensFromCameraNode(cam, scene_->camera);
+    session_.noteCameraMoved();
+}
+
+void MainWindow::refreshAfterUndo() {
+    if (parameterPanel_ && parameterPanel_->node() && !parameterPanel_->showingMaterialX())
+        parameterPanel_->refresh();
+    refreshViewportCameraMenu();
+}
+
+void MainWindow::rebuildGraphAfterUndo() {
+    if (parameterPanel_) parameterPanel_->clearSelection();
+    if (renderView_) renderView_->setTransformTarget(nullptr);
+    if (networkView_) networkView_->rebuild();
+    selectDisplayNode();
+    refreshViewportCameraMenu();
+}
+
 void MainWindow::onCopyViewToCameraNode() {
     Node* camera = findCameraNodeByName(lookThroughCameraName_);
     if (!camera) camera = findCameraNode();
@@ -1676,9 +1785,13 @@ void MainWindow::onCopyViewToCameraNode() {
         appMessageBox(this, "Copy view", "This network has no camera node. Add one with Tab > Camera.");
         return;
     }
+    OrbitCameraState before;
+    captureOrbitCameraState(before);
     writeViewToCameraNode(camera);
-    // Do not overwrite focusdistance with orbit radius — that is framing, not DOF focus.
     lookThroughCamera(camera->name());
+    OrbitCameraState after;
+    captureOrbitCameraState(after);
+    undoHub_.pushCamera(before, after);
     parameterPanel_->refresh();
     scheduleCook(0);
     statusBar()->showMessage("View copied to " + camera->name(), 4000);
@@ -1885,6 +1998,7 @@ void MainWindow::onShowShortcuts() {
                              "Layout\n"
                              "  square on a pane title   detach / redock Scene Graph, Viewport, Parameters\n\n"
                              "General\n"
+                             "  Ctrl+Z / Ctrl+Y   undo / redo (100 steps; sliders and camera on release)\n"
                              "  F5            Start cook + render (button stays pressed)\n"
                              "  Esc           Stop (no cook until Start; last frame held)\n"
                              "  Ctrl+E        save image");

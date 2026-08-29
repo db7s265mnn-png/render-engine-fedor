@@ -8,6 +8,7 @@
 // Do not include optix_mnee.cuh here. Eye-path Newton lives in the dedicated
 // MNEE pipeline (optix_mnee.cu). Shade only arms a GpuMneeJob; intersect_shadow
 // peeks the glass blocker; __raygen__mnee runs the solver.
+#include "render/integrator.h"
 #include "render/lights.h"
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_light_trace.cuh"
@@ -28,6 +29,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     shadow.splatPixel = -1;
     shadow.specContrib = 0;
     shadow.eyeBounceNee = 0;
+    shadow.diagnosticAo = 0;
 
     Surf si;
     if (!buildSurf(scene, hit, path.origin, path.direction, si)) {
@@ -36,7 +38,8 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     }
 
     const InstanceData& volInst = scene.instances[si.instanceIndex];
-    if (volInst.volumeIndex >= 0 && volInst.volumeIndex < params.volumeCount && params.volumes) {
+    if (scene.settings.integrator != kIntegratorWireframe && volInst.volumeIndex >= 0 &&
+        volInst.volumeIndex < params.volumeCount && params.volumes) {
         const GpuVolumeGrid& vol = params.volumes[volInst.volumeIndex];
         if (!vol.density) {
             path.origin = offsetRay(si.p, si.ng, path.direction);
@@ -71,6 +74,26 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                 return;
             }
         }
+    }
+
+    if (scene.settings.integrator == kIntegratorWireframe) {
+        RayHit rh;
+        rh.t = hit.t;
+        rh.instanceIndex = hit.instanceIndex;
+        rh.primIndex = hit.primIndex;
+        rh.u = hit.u;
+        rh.v = hit.v;
+        SurfaceInteraction siW;
+        siW.p = si.p;
+        siW.ng = si.ng;
+        siW.ns = si.ns;
+        siW.uv = si.uv;
+        siW.instanceIndex = si.instanceIndex;
+        siW.materialIndex = si.materialIndex;
+        siW.lightIndex = si.lightIndex;
+        addPathEmissionRgb(path, shadeWireframe(scene, rh, siW, path.direction), 1.0f, 0.0f);
+        terminatePath(pixel, path);
+        return;
     }
 
     if (si.lightIndex >= 0 && path.depth == 0 && !path.lightPath) {
@@ -143,6 +166,30 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         path.origin = offsetRay(si.p, si.ng, path.direction);
         ++path.hops;
         path.queue = kQueueIntersectClosest;
+        return;
+    }
+
+    if (scene.settings.integrator == kIntegratorAmbientOcclusion) {
+        const Vec3 n = dot(si.ns, -path.direction) < 0.0f ? -si.ns : si.ns;
+        const Frame aoFrame(n);
+        const Vec3 wi = aoFrame.toWorld(sampleCosineHemisphere(path.rng.nextFloat(), path.rng.nextFloat()));
+        if (dot(wi, n) <= 0.0f) {
+            terminatePath(pixel, path);
+            return;
+        }
+        shadow.origin = offsetRay(si.p, si.ng, wi);
+        shadow.direction = wi;
+        shadow.tMax = scene.settings.aoDistance > 0.0f ? scene.settings.aoDistance : 1.0e8f;
+        shadow.queue = kShadowTrace;
+        shadow.occluded = 0;
+        shadow.volumeTr = 0;
+        shadow.mediumIndex = -1;
+        shadow.splatPixel = -1;
+        shadow.specContrib = 0;
+        shadow.contrib = Vec3(1.0f);
+        shadow.mneeCaster = -1;
+        shadow.diagnosticAo = 1;
+        path.queue = kQueueDead;
         return;
     }
 

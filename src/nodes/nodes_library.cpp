@@ -1152,8 +1152,9 @@ public:
                                                            "(no 1:1 wait). Mixture is independent films plus "
                                                            "a ~12 Hz GPU snapshot. Set "
                                                            "XPU Schedule when this device is selected.\n"
-                                                           "XPU is Path Tracer only. BDPT, "
-                                                           "wireframe, AO stay CPU (Embree).\n"
+                                                           "XPU is Path Tracer, Direct Lighting, Ambient "
+                                                           "Occlusion, and Wireframe. BDPT stays CPU-only "
+                                                           "and is hidden while GPU/XPU is selected.\n"
                                                            "If OptiX cannot start, GPU/XPU stop with an "
                                                            "error — they do not switch to Embree.")
                                           : QStringLiteral("This executable was built without OptiX/CUDA. "
@@ -1180,8 +1181,8 @@ public:
                          .withGroup("Engine")
                          .withTooltip("Path Tracer: unidirectional hero-λ (pbrt-v4). Caustics Engine "
                                       "picks BSDF/NEE (book default), MNEE, or Photon.\n"
-                                      "BDPT: bidirectional + light-tracing (pbrt) "
-                                      "(CPU only — GPU/XPU stop with an error).\n"
+                                      "BDPT: bidirectional + light-tracing (pbrt). CPU only — hidden "
+                                      "on GPU/XPU (the CPU choice is restored when you switch back).\n"
                                       "Wireframe: triangle edges with screen-space thickness "
                                       "(see Wireframe Thickness).\n"
                                       "The log reports which caustics mode is active."));
@@ -1189,6 +1190,8 @@ public:
         // v3: drop PT Spectral / BDPT Spectral; Wireframe index 6 → 4.
         addParameter(Parameter::makeBool("_integrator_menu_v2", "", true));
         addParameter(Parameter::makeBool("_integrator_menu_v3", "", true));
+        addParameter(Parameter::makeInt("_integrator_cpu", "", 0));
+        addParameter(Parameter::makeInt("_integrator_gpu", "", 0));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
@@ -1245,7 +1248,7 @@ public:
                          .withGroup("Depth")
                          .withTooltip("Max path bounces after the camera (surfaces + volume scatters).\n"
                                       "Dense fog / clouds with deep multiple scattering need 1000+.\n"
-                                      "BDPT eye and light subpaths cap at 50 vertices each.\n"
+                                      "BDPT eye and light subpaths use this depth (capped at 4096).\n"
                                       "Also raise Russian Roulette Depth, or RR will kill deep paths early."));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 4096)
                          .withGroup("Depth")
@@ -1469,6 +1472,10 @@ public:
             settings.xpuSchedule = std::clamp(sched, 0, 1);
         }
         settings.integrator = std::clamp(intValue("integrator", 0), 0, 4);
+        if (renderDeviceUsesGpu(settings.backend) && settings.integrator == kIntegratorBdpt) {
+            settings.integrator = kIntegratorPathTracer;
+            setParameterValue("integrator", kIntegratorPathTracer, false);
+        }
         settings.maxDepth = std::clamp(intValue("maxdepth", 8), 1, 4096);
         settings.rrStartDepth = std::clamp(intValue("rrdepth", 3), 1, 4096);
         settings.lightSamples = std::max(1, intValue("lightsamples", 2));

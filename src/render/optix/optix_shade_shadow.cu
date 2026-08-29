@@ -8,7 +8,7 @@ __device__ inline bool shadeShadowPixel(int pixel) {
     const LaunchParams& params = launchParams();
     GpuShadow& shadow = params.shadows[pixel];
     GpuPath& path = params.paths[pixel];
-    if (shadow.occluded && shadow.mneeCaster >= 0 && params.mneeJobs &&
+    if (!shadow.diagnosticAo && shadow.occluded && shadow.mneeCaster >= 0 && params.mneeJobs &&
         params.mneeJobs[pixel].armed) {
         GpuMneeJob& job = params.mneeJobs[pixel];
         if (!path.lightPath && shadow.splatPixel < 0) {
@@ -18,7 +18,9 @@ __device__ inline bool shadeShadowPixel(int pixel) {
             return false;
         }
     }
-    if (!shadow.occluded) {
+    if (shadow.diagnosticAo) {
+        if (!shadow.occluded) addPathEmissionRgb(path, Vec3(1.0f), 1.0f, 0.0f);
+    } else if (!shadow.occluded) {
         if (shadow.splatPixel >= 0) {
             Vec3 contrib = shadow.contrib;
             if (shadow.volumeTr)
@@ -44,6 +46,7 @@ __device__ inline bool shadeShadowPixel(int pixel) {
     shadow.specContrib = 0;
     shadow.mneeCaster = -1;
     shadow.eyeBounceNee = 0;
+    shadow.diagnosticAo = 0;
     if (params.mneeJobs) {
         params.mneeJobs[pixel].armed = 0;
         params.mneeJobs[pixel].pending = 0;

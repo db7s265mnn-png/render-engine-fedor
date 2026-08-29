@@ -24,6 +24,7 @@
 #include <QLayout>
 #include <QLayoutItem>
 #include <QLineEdit>
+#include <QListView>
 #include <QList>
 #include <QMimeData>
 #include <QPushButton>
@@ -41,9 +42,12 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <memory>
 #include <vector>
 
 #include "nodes/node_registry.h"
+#include "app/integrator_device.h"
+#include "app/undo_hub.h"
 #include "core/expr_eval.h"
 #include "io/tx_convert.h"
 #include "render/pixel_filter.h"
@@ -346,7 +350,10 @@ NoWheelDoubleSpinBox* makeDoubleSpin(double value, double minimum, double maximu
 
 // Line-edit + soft slider. Edit accepts Houdini-style expressions ($F, math).
 QWidget* makeFreeFloatSliderRow(double value, const QString& expression, double sliderMin,
-                                double sliderMax, const std::function<void(const QString&)>& onCommitText) {
+                                double sliderMax, const std::function<void(const QString&)>& onCommitText,
+                                const std::function<void()>& onSliderPressed = {},
+                                const std::function<void()>& onSliderReleased = {},
+                                const std::function<void()>& onDiscreteStep = {}) {
     auto* container = new QWidget();
     auto* layout = new QHBoxLayout(container);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -373,13 +380,15 @@ QWidget* makeFreeFloatSliderRow(double value, const QString& expression, double 
         slider->setValue(int(std::lround(std::clamp((v - sliderMin) / span, 0.0, 1.0) * 1000.0)));
     };
 
-    QObject::connect(edit, &QLineEdit::editingFinished, container, [edit, onCommitText, syncSlider] {
+    QObject::connect(edit, &QLineEdit::editingFinished, container,
+                     [edit, onCommitText, onDiscreteStep, syncSlider] {
         const QString text = edit->text().trimmed();
         applyExpressionFieldStyle(edit, looksLikeExpression(text));
         if (looksLikeExpression(text)) {
             double v = 0.0;
             if (evalExpression(text, exprFrame(), v)) syncSlider(v);
             onCommitText(text);
+            if (onDiscreteStep) onDiscreteStep();
             return;
         }
         bool ok = false;
@@ -387,18 +396,27 @@ QWidget* makeFreeFloatSliderRow(double value, const QString& expression, double 
         if (!ok) {
             edit->setValue(0.0, true);
             onCommitText(QStringLiteral("0"));
+            if (onDiscreteStep) onDiscreteStep();
             return;
         }
         edit->setValue(v, true);
         syncSlider(v);
         onCommitText(QString::number(v, 'g', 9));
+        if (onDiscreteStep) onDiscreteStep();
+    });
+    QObject::connect(slider, &QSlider::sliderPressed, container, [onSliderPressed] {
+        if (onSliderPressed) onSliderPressed();
+    });
+    QObject::connect(slider, &QSlider::sliderReleased, container, [onSliderReleased] {
+        if (onSliderReleased) onSliderReleased();
     });
     QObject::connect(slider, &QSlider::valueChanged, container,
-                     [edit, sliderMin, span, onCommitText](int pos) {
+                     [edit, slider, sliderMin, span, onCommitText, onDiscreteStep](int pos) {
                          const double v = sliderMin + span * (double(pos) / 1000.0);
                          edit->setValue(v, true);
                          applyExpressionFieldStyle(edit, false);
                          onCommitText(QString::number(v, 'g', 9));
+                         if (!slider->isSliderDown() && onDiscreteStep) onDiscreteStep();
                      });
     return container;
 }
@@ -1177,12 +1195,49 @@ void ParameterPanel::rebuildMaterialX() {
     contentLayout_->addWidget(scroll, 1);
 }
 
+void ParameterPanel::applyRenderDeviceChange(int newBackend) {
+    if (!node_ || updating_) return;
+    const int oldBackend = node_->intValue(QStringLiteral("backend"), 0);
+    const int oldIntegrator = node_->intValue(QStringLiteral("integrator"), 0);
+    int cpuMem = node_->intValue(QStringLiteral("_integrator_cpu"), 0);
+    int gpuMem = node_->intValue(QStringLiteral("_integrator_gpu"), 0);
+    const int newIntegrator =
+        switchIntegratorForBackend(oldBackend, newBackend, oldIntegrator, cpuMem, gpuMem);
+    const int oldCpu = node_->intValue(QStringLiteral("_integrator_cpu"), 0);
+    const int oldGpu = node_->intValue(QStringLiteral("_integrator_gpu"), 0);
+    if (undoHub_) undoHub_->beginMacro(QStringLiteral("Render Device"));
+    node_->setParameterValue(QStringLiteral("backend"), newBackend);
+    node_->setParameterValue(QStringLiteral("_integrator_cpu"), cpuMem, false);
+    node_->setParameterValue(QStringLiteral("_integrator_gpu"), gpuMem, false);
+    if (newIntegrator != oldIntegrator)
+        node_->setParameterValue(QStringLiteral("integrator"), newIntegrator);
+    if (undoHub_) {
+        undoHub_->pushParameter(node_->name(), QStringLiteral("backend"), oldBackend, newBackend);
+        if (newIntegrator != oldIntegrator) {
+            undoHub_->pushParameter(node_->name(), QStringLiteral("integrator"), oldIntegrator,
+                                    newIntegrator);
+        }
+        undoHub_->pushParameter(node_->name(), QStringLiteral("_integrator_cpu"), oldCpu, cpuMem);
+        undoHub_->pushParameter(node_->name(), QStringLiteral("_integrator_gpu"), oldGpu, gpuMem);
+        undoHub_->endMacro();
+    }
+    emit parameterEdited(node_, QStringLiteral("backend"));
+    if (newIntegrator != oldIntegrator) emit parameterEdited(node_, QStringLiteral("integrator"));
+    QTimer::singleShot(0, this, [this] { refresh(); });
+}
+
 QWidget* ParameterPanel::createEditor(Parameter& parameter) {
     const QString name = parameter.name;
     Node* node = node_;
     auto notify = [this, node, name](const QVariant& value) {
         if (updating_ || !node) return;
+        Parameter* p = node->findParameter(name);
+        const QVariant old = p ? p->value : QVariant();
         node->setParameterValue(name, value);
+        if (undoHub_ && p) {
+            Parameter* np = node->findParameter(name);
+            undoHub_->pushParameter(node->name(), name, old, np ? np->value : value);
+        }
         emit parameterEdited(node, name);
         bool affectsVisibility = false;
         for (const Parameter& p : node->parameters()) {
@@ -1193,6 +1248,11 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
         }
         if (affectsVisibility || name == QLatin1String("backend") || name == QLatin1String("integrator"))
             QTimer::singleShot(0, this, [this] { refresh(); });
+    };
+    auto notifyLive = [this, node, name](const QVariant& value) {
+        if (updating_ || !node) return;
+        node->setParameterValue(name, value);
+        emit parameterEdited(node, name);
     };
     auto notifyText = [this, node, name](const QString& text) {
         if (updating_ || !node) return;
@@ -1230,13 +1290,33 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             QTimer::singleShot(0, this, [this] { refresh(); });
     };
 
+    auto lastCommitted = std::make_shared<QVariant>(parameter.value);
+    auto commitDiscrete = [this, node, name, lastCommitted] {
+        if (!undoHub_ || !node) return;
+        Parameter* p = node->findParameter(name);
+        if (!p) return;
+        undoHub_->pushParameter(node->name(), name, *lastCommitted, p->value);
+        *lastCommitted = p->value;
+    };
+    auto sliderPressed = [this, node, name, lastCommitted] {
+        if (undoHub_ && node) undoHub_->beginParameter(node->name(), name, *lastCommitted);
+    };
+    auto sliderReleased = [this, node, name, lastCommitted] {
+        if (!undoHub_ || !node) return;
+        Parameter* p = node->findParameter(name);
+        if (!p) return;
+        undoHub_->endParameter(node->name(), name, p->value);
+        *lastCommitted = p->value;
+    };
+
     switch (parameter.type) {
         case ParamType::Float: {
             const double lo = parameter.minValue;
             const double hi = parameter.maxValue;
             const double shown = parameter.hasExpression() ? parameter.evaluatedNumber()
                                                            : parameter.toDouble();
-            QWidget* slider = makeFreeFloatSliderRow(shown, parameter.expression, lo, hi, notifyText);
+            QWidget* slider = makeFreeFloatSliderRow(shown, parameter.expression, lo, hi, notifyText,
+                                                     sliderPressed, sliderReleased, commitDiscrete);
             // Camera DOF: Focus Pick next to Focus Distance.
             if (name == QLatin1String("focusdistance") && node_ && node_->typeName() == QLatin1String("camera")) {
                 auto* row = new QWidget();
@@ -1330,7 +1410,8 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             const int hi = int(parameter.maxValue);
             const double shown = parameter.hasExpression() ? parameter.evaluatedNumber()
                                                            : double(parameter.toInt());
-            return makeFreeFloatSliderRow(shown, parameter.expression, double(lo), double(hi), notifyText);
+            return makeFreeFloatSliderRow(shown, parameter.expression, double(lo), double(hi), notifyText,
+                                          sliderPressed, sliderReleased, commitDiscrete);
         }
         case ParamType::Bool: {
             auto* check = new QCheckBox();
@@ -1352,11 +1433,14 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             }
             for (int i = 0; i < 3; ++i) {
                 connect(spins[i], &QDoubleSpinBox::valueChanged, this,
-                        [notify, spins](double) {
-                            notify(QVariant::fromValue(QVector3D(float(spins[0]->value()),
-                                                                 float(spins[1]->value()),
-                                                                 float(spins[2]->value()))));
+                        [notifyLive, spins](double) {
+                            notifyLive(QVariant::fromValue(QVector3D(float(spins[0]->value()),
+                                                                    float(spins[1]->value()),
+                                                                    float(spins[2]->value()))));
                         });
+                connect(spins[i], &QAbstractSpinBox::editingFinished, this, [commitDiscrete] {
+                    commitDiscrete();
+                });
             }
             return container;
         }
@@ -1377,8 +1461,8 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                 spins[i]->setDecimals(3);
                 layout->addWidget(spins[i]);
             }
-            auto pushValue = [notify, spins] {
-                notify(QVariant::fromValue(
+            auto pushValue = [notifyLive, spins] {
+                notifyLive(QVariant::fromValue(
                     QVector3D(float(spins[0]->value()), float(spins[1]->value()), float(spins[2]->value()))));
             };
             for (int i = 0; i < 3; ++i) {
@@ -1388,8 +1472,11 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                                               .arg(linearToDisplayColor(linear).name()));
                     pushValue();
                 });
+                connect(spins[i], &QAbstractSpinBox::editingFinished, this, [commitDiscrete] {
+                    commitDiscrete();
+                });
             }
-            connect(button, &QPushButton::clicked, this, [this, spins, button] {
+            connect(button, &QPushButton::clicked, this, [this, spins, button, commitDiscrete] {
                 const Vec3 current(float(spins[0]->value()), float(spins[1]->value()), float(spins[2]->value()));
                 const QColor chosen = QColorDialog::getColor(linearToDisplayColor(current), this, "Pick colour");
                 if (!chosen.isValid()) return;
@@ -1397,14 +1484,19 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                 for (int i = 0; i < 3; ++i) spins[i]->setValue(double(linear[i]));
                 button->setStyleSheet(
                     QString("background-color: %1; border: 1px solid #22242a;").arg(chosen.name()));
+                commitDiscrete();
             });
             return container;
         }
         case ParamType::String: {
+            auto commitText = [notifyText, commitDiscrete](const QString& text) {
+                notifyText(text);
+                commitDiscrete();
+            };
             if (parameter.name == QLatin1String("colorspace"))
                 return makeColorSpaceCombo(parameter.hasExpression() ? parameter.expression
                                                                      : parameter.toString(),
-                                           notifyText);
+                                           commitText);
             auto* edit = new PathLineEdit(parameter.hasExpression() ? parameter.expression
                                                                     : parameter.toString());
             edit->setAcceptDrops(true);
@@ -1417,14 +1509,14 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                     edit->setToolTip("Prim path or glob. Copy a prim with Ctrl+C in the Scene Graph, "
                                      "or drag its name into this field.");
             }
-            edit->onCommitted = [notifyText, edit](const QString& text) {
+            edit->onCommitted = [commitText, edit](const QString& text) {
                 applyExpressionFieldStyle(edit, looksLikeExpression(text) || text.contains(QLatin1Char('$')));
-                notifyText(text);
+                commitText(text);
             };
-            connect(edit, &QLineEdit::editingFinished, this, [notifyText, edit] {
+            connect(edit, &QLineEdit::editingFinished, this, [commitText, edit] {
                 applyExpressionFieldStyle(edit, looksLikeExpression(edit->text()) ||
                                                     edit->text().contains(QLatin1Char('$')));
-                notifyText(edit->text());
+                commitText(edit->text());
             });
             return edit;
         }
@@ -1444,13 +1536,14 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             const QString filter = parameter.fileFilter;
             const bool saveMode = parameter.fileSaveMode;
             const bool dirMode = parameter.fileDirectoryMode;
-            connect(edit, &QLineEdit::editingFinished, this, [notifyText, edit] {
+            connect(edit, &QLineEdit::editingFinished, this, [notifyText, commitDiscrete, edit] {
                 applyExpressionFieldStyle(edit, looksLikeExpression(edit->text()) ||
                                                     edit->text().contains(QLatin1Char('$')));
                 notifyText(edit->text());
+                commitDiscrete();
             });
             connect(browse, &QPushButton::clicked, this,
-                    [this, edit, filter, notifyText, saveMode, dirMode] {
+                    [this, edit, filter, notifyText, commitDiscrete, saveMode, dirMode] {
                         QString path;
                         if (dirMode) {
                             path = QFileDialog::getExistingDirectory(this, "Choose folder", edit->text());
@@ -1471,6 +1564,7 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                         applyExpressionFieldStyle(edit, looksLikeExpression(path) ||
                                                             path.contains(QLatin1Char('$')));
                         notifyText(path);
+                        commitDiscrete();
                     });
             return container;
         }
@@ -1513,12 +1607,26 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
                 combo->setItemData(combo->count() - 1, item, Qt::ToolTipRole);
             }
             combo->setCurrentIndex(std::clamp(currentIndex, 0, std::max(0, combo->count() - 1)));
+            if (name == QLatin1String("integrator") && node &&
+                node->typeName() == QLatin1String("rendersettings") &&
+                renderDeviceUsesGpu(node->intValue(QStringLiteral("backend"), 0))) {
+                if (auto* view = qobject_cast<QListView*>(combo->view()))
+                    view->setRowHidden(kIntegratorBdpt, true);
+            }
             connect(combo, &QComboBox::currentIndexChanged, this,
                     [this, notify, name, valueName](int index) {
                 // Ignore teardown (-1) and empty combos — see ParameterPanel::rebuild.
                 if (index < 0) return;
+                if (name == QLatin1String("backend") && node_ &&
+                    node_->typeName() == QLatin1String("rendersettings")) {
+                    applyRenderDeviceChange(index);
+                    return;
+                }
                 if (valueName != name && node_) {
+                    Parameter* p = node_->findParameter(valueName);
+                    const QVariant old = p ? p->value : QVariant();
                     node_->setParameterValue(valueName, index);
+                    if (undoHub_) undoHub_->pushParameter(node_->name(), valueName, old, index);
                     emit parameterEdited(node_, valueName);
                 } else {
                     notify(index);

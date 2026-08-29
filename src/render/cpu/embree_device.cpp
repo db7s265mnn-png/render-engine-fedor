@@ -317,7 +317,7 @@ public:
                 logInfo(std::string("Integrator: BDPT (hero λ=") +
                         std::to_string(kMaxSpectrumSamples) + ")" +
                         (useGuiding ? " + OpenPGL guiding" : "") +
-                        " scratch " + std::to_string(bdpt::kMaxVerts) + " verts × " +
+                        " scratch " + std::to_string(bdpt::bdptSessionVerts(settings.maxDepth)) + " verts × " +
                         std::to_string(pool_->threadCount() + 1) + " threads");
             else if (useSpectralPt)
                 logInfo(std::string("Integrator: Path Tracer (hero λ=") +
@@ -393,7 +393,8 @@ public:
             (settings.bdptTimers && useSpectralBdpt && !hasVolumes) ? &bdptStatsStorage : nullptr;
         if (useSpectralBdpt && !hasVolumes) {
             // ThreadPool: caller is threadId 0, workers are 1..N.
-            bdptScratchPool_.ensureThreads(pool_->threadCount() + 1, bdpt::kMaxVerts);
+            bdptScratchPool_.ensureThreads(pool_->threadCount() + 1,
+                                           bdpt::bdptSessionVerts(settings.maxDepth), true);
         }
         struct SplatDiagGuard {
             Framebuffer* fb = nullptr;
@@ -749,9 +750,9 @@ public:
             meta.maxVerts = std::clamp(settings.maxDepth + 1, 2, bdpt::kMaxVerts);
             meta.poolThreads = pool_->threadCount();
             meta.vertBytes = sizeof(bdpt::Vert);
-            meta.scratchVerts = bdpt::kMaxVerts;
+            meta.scratchVerts = meta.maxVerts;
             meta.scratchThreads = pool_->threadCount() + 1;
-            meta.scratchBytes = bdptScratchBytes(bdpt::kMaxVerts);
+            meta.scratchBytes = bdptScratchBytes(meta.maxVerts);
             meta.allocBytesPerPixel = meta.scratchBytes;
             meta.wallNs = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                        std::chrono::steady_clock::now() - bdptWall0)

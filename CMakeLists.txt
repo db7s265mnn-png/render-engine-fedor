@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.59 LANGUAGES CXX)
+project(Solstice VERSION 0.9.60 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -631,6 +631,7 @@ set(SOLSTICE_LIB_SOURCES
     src/app/default_scene.cpp
     src/app/document.cpp
     src/app/headless.cpp
+    src/app/undo_hub.cpp
 )
 
 set(SOLSTICE_LIB_HEADERS
@@ -686,6 +687,8 @@ set(SOLSTICE_LIB_HEADERS
     src/app/default_scene.h
     src/app/document.h
     src/app/headless.h
+    src/app/integrator_device.h
+    src/app/undo_hub.h
 )
 
 add_library(solstice_lib STATIC ${SOLSTICE_LIB_SOURCES} ${SOLSTICE_LIB_HEADERS})
@@ -693,7 +696,7 @@ target_include_directories(solstice_lib PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_B
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lentil)
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/earcut)
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/hosek_wilkie)
-target_link_libraries(solstice_lib PUBLIC Qt6::Core Qt6::Gui embree)
+target_link_libraries(solstice_lib PUBLIC Qt6::Core Qt6::Gui Qt6::Widgets embree)
 
 if(SOLSTICE_HAVE_ALEMBIC_01)
     target_link_libraries(solstice_lib PUBLIC Alembic::Alembic)

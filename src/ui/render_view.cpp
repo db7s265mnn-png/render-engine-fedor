@@ -20,6 +20,7 @@
 #include <QResizeEvent>
 #include <QShowEvent>
 #include <QSignalBlocker>
+#include <QTimer>
 #include <QToolButton>
 #include <QVector3D>
 #include <QWheelEvent>
@@ -266,6 +267,14 @@ RenderView::RenderView(QWidget* parent) : QWidget(parent) {
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
     setAutoFillBackground(true);
+    wheelNavTimer_ = new QTimer(this);
+    wheelNavTimer_->setSingleShot(true);
+    wheelNavTimer_->setInterval(400);
+    connect(wheelNavTimer_, &QTimer::timeout, this, [this] {
+        if (!wheelNavActive_) return;
+        wheelNavActive_ = false;
+        emit cameraNavEnded();
+    });
     QPalette pal = palette();
     pal.setColor(QPalette::Window, theme::gridDark());
     setPalette(pal);
@@ -885,6 +894,11 @@ bool RenderView::widgetToCameraRay(const QPoint& pos, Vec3& origin, Vec3& direct
 }
 
 void RenderView::beginNavigation(int mode, const QPoint& pos) {
+    if (wheelNavActive_) {
+        wheelNavTimer_->stop();
+        wheelNavActive_ = false;
+        emit cameraNavEnded();
+    }
     mode_ = mode;
     lastMousePosition_ = pos;
     if (mode_ == 1) {
@@ -1526,8 +1540,13 @@ void RenderView::wheelEvent(QWheelEvent* event) {
         return;
     }
     const float precision = (event->modifiers() & Qt::ShiftModifier) ? 0.3f : 1.0f;
+    if (!wheelNavActive_) {
+        wheelNavActive_ = true;
+        emit cameraNavStarted();
+    }
     camera_.dolly(float(event->angleDelta().y()) * 0.28f * precision);
     emit cameraMoved();
+    wheelNavTimer_->start();
     event->accept();
 }
 
@@ -1554,7 +1573,9 @@ void RenderView::frameBounds(const Bounds3& bounds) {
     camera_.pivot = center;
     camera_.distance = std::max(0.05f, distance);
     // Keep current orbit angles — only reframe distance/pivot like Houdini F.
+    emit cameraNavStarted();
     emit cameraMoved();
+    emit cameraNavEnded();
     update();
 }
 

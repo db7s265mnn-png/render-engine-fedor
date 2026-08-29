@@ -2,8 +2,8 @@
 // CPU spectral BDPT used to HeapAlloc six std::vectors per pixel, sized
 // maxDepth+1. At maxDepth 30 that crosses the Windows ~16 KiB LFH line
 // (31 × 528 B Vert with OpenPGL) and the allocator dominates the pass.
-// One buffer per ThreadPool slot (N workers + caller = N+1), grown once
-// to kMaxVerts and reused for every pixel.
+// One buffer per ThreadPool slot (N workers + caller = N+1), grown to the
+// session Max Ray Depth (not the 4096 compile cap) and reused for every pixel.
 #pragma once
 
 #include <algorithm>
@@ -25,6 +25,14 @@ struct BdptScratch {
     void ensure(int verts) {
         const size_t n = size_t(std::max(2, verts));
         if (eye.size() >= n) return;
+        resizeTo(int(n));
+    }
+
+    // Grow or shrink. Call at pass start when Max Ray Depth changes — never
+    // per pixel (that reintroduces the Windows LFH cliff).
+    void resizeTo(int verts) {
+        const size_t n = size_t(std::max(2, verts));
+        if (eye.size() == n) return;
         eye.resize(n);
         light.resize(n);
         eyeBeta.resize(n);
@@ -42,10 +50,13 @@ inline size_t bdptScratchBytes(int verts) {
 
 class BdptScratchPool {
 public:
-    void ensureThreads(int threadSlots, int verts) {
+    void ensureThreads(int threadSlots, int verts, bool shrink = false) {
         if (threadSlots < 1) threadSlots = 1;
         if (int(slots_.size()) < threadSlots) slots_.resize(size_t(threadSlots));
-        for (BdptScratch& s : slots_) s.ensure(verts);
+        for (BdptScratch& s : slots_) {
+            if (shrink) s.resizeTo(verts);
+            else s.ensure(verts);
+        }
     }
 
     BdptScratch* get(int threadId) {

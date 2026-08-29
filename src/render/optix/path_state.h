@@ -106,6 +106,7 @@ struct GpuShadow {
     // shade_shadow must add this as-is — live path throughput has already stepped.
     float contribS[kMaxSpectrumSamples]{};
     int specContrib = 0;  // 1 = shade_shadow uses contribS (not RGB contrib)
+    int diagnosticAo = 0;  // 1 = Ambient Occlusion visibility (white if unoccluded)
 };
 
 // Eye-path MNEE job filled at the NEE vertex (before BSDF steps throughput).

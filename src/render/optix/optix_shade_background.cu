@@ -15,6 +15,10 @@ __device__ inline void shadeBackgroundPixel(int pixel) {
         terminatePath(pixel, path);
         return;
     }
+    if (scene.settings.integrator == kIntegratorWireframe) {
+        terminatePath(pixel, path);
+        return;
+    }
     if ((gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
                           params.splatInvLightPaths) ||
          suppressCausticLight)) {

@@ -37,7 +37,7 @@ struct BdptPassMeta {
     int poolThreads = 0;
     size_t vertBytes = 0;
     size_t allocBytesPerPixel = 0;
-    int scratchVerts = 0;     // kMaxVerts when per-thread scratch is on
+    int scratchVerts = 0;     // session verts (maxDepth+1), not the compile cap
     int scratchThreads = 0;   // pool workers + caller
     size_t scratchBytes = 0;  // one thread's six arrays
     uint64_t wallNs = 0;

@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include <QCoreApplication>
 #include <QColor>
 #include <QDir>
 #include <QImage>
@@ -23,6 +24,8 @@
 #include <QVector3D>
 
 #include "app/default_scene.h"
+#include "app/integrator_device.h"
+#include "app/undo_hub.h"
 #include "core/image.h"
 #include "core/rng.h"
 #include "io/alembic_loader.h"
@@ -1280,6 +1283,18 @@ void testRenderSettingsFolders() {
     }
     check(indexOf("diag_bdpt_sep") == indexOf("samplingdebug") + 1, "separator after samplingdebug");
     check(indexOf("bdpttimers") == indexOf("diag_bdpt_head") + 1, "bdpttimers after CPU BDPT note");
+    settings->setParameterValue("backend", kBackendGpuOptix);
+    settings->setParameterValue("integrator", kIntegratorBdpt);
+    {
+        CookContext cookCtx;
+        StagePtr cooked = graph.cook(settings, cookCtx);
+        check(settings->intValue("integrator") == kIntegratorPathTracer,
+              "cook drops BDPT when the device uses GPU");
+        check(cooked && cooked->settings.integrator == kIntegratorPathTracer,
+              "cooked GPU settings store Path Tracer");
+        check(cooked && cooked->settings.backend == kBackendGpuOptix, "cooked backend stays GPU");
+    }
+    settings->setParameterValue("backend", kBackendCpuEmbree);
     settings->setParameterValue("bdpttimers", true);
     {
         CookContext cookCtx;
@@ -2991,11 +3006,11 @@ void testBdptTimersFormat() {
     check(text.find("parallel=") != std::string::npos, "timer parallel factor");
     check(text.find("scratch") == std::string::npos, "no scratch line when scratchVerts=0");
 
-    meta.scratchVerts = 50;
+    meta.scratchVerts = 31;
     meta.scratchThreads = 33;
-    meta.scratchBytes = 50ull * (2 * 528 + 2 * 20 + 2 * 36);
+    meta.scratchBytes = 31ull * (2 * 528 + 2 * 20 + 2 * 36);
     const std::string scratchText = formatBdptPassStats(stats, meta);
-    check(scratchText.find("scratch 50 verts") != std::string::npos, "timer scratch reuse line");
+    check(scratchText.find("scratch 31 verts") != std::string::npos, "timer scratch reuse line");
     check(scratchText.find("no per-pixel malloc") != std::string::npos, "timer scratch no malloc");
     check(scratchText.find("KiB/thread") != std::string::npos, "timer scratch per-thread footprint");
 
@@ -3014,40 +3029,133 @@ void testBdptTimersFormat() {
 
 void testBdptScratchReuse() {
     std::printf("bdpt-scratch\n");
+    check(bdpt::kMaxVerts == 4096, "BDPT vertex cap is 4096");
+    check(bdpt::bdptSessionVerts(30) == 31, "session verts are maxDepth+1");
+    check(bdpt::bdptSessionVerts(4096) == 4096, "session verts clamp to kMaxVerts");
+    check(bdpt::bdptSessionVerts(0) == 2, "session verts floor at 2");
+
     BdptScratchPool pool;
-    pool.ensureThreads(4, bdpt::kMaxVerts);
+    pool.ensureThreads(4, 31);
     check(pool.threadSlots() == 4, "scratch pool has caller+workers slots");
     BdptScratch* a = pool.get(0);
     BdptScratch* b = pool.get(1);
     check(a != nullptr && b != nullptr && a != b, "scratch slots are distinct");
-    check(int(a->eye.size()) == bdpt::kMaxVerts, "eye scratch sized to kMaxVerts");
-    check(int(a->light.size()) == bdpt::kMaxVerts, "light scratch sized to kMaxVerts");
+    check(int(a->eye.size()) == 31, "eye scratch sized to session verts");
+    check(int(a->light.size()) == 31, "light scratch sized to session verts");
+    check(a->eye.size() != size_t(bdpt::kMaxVerts), "working depth does not allocate the 4096 cap");
     check(a->eye.size() == a->eyeBeta.size() && a->eye.size() == a->eyeWave.size(),
           "six scratch arrays match");
     const bdpt::Vert* eyePtr = a->eye.data();
     const SampledSpectrum* betaPtr = a->eyeBeta.data();
-    pool.ensureThreads(4, bdpt::kMaxVerts);
+    pool.ensureThreads(4, 31);
     check(pool.get(0)->eye.data() == eyePtr, "second ensure keeps eye pointer");
     check(pool.get(0)->eyeBeta.data() == betaPtr, "second ensure keeps beta pointer");
-    pool.ensureThreads(4, 8);  // smaller request must not shrink
-    check(int(pool.get(0)->eye.size()) == bdpt::kMaxVerts, "scratch never shrinks");
+    pool.ensureThreads(4, 8);  // grow-only path must not shrink
+    check(int(pool.get(0)->eye.size()) == 31, "ensure() never shrinks");
     check(pool.get(0)->eye.data() == eyePtr, "smaller ensure does not reallocate");
+    pool.ensureThreads(4, 9, true);
+    check(int(pool.get(0)->eye.size()) == 9, "pass start shrinks to the new session depth");
 
     pool.get(1)->eye[0].pdfFwd = 42.0f;
     check(pool.get(0)->eye[0].pdfFwd != 42.0f, "thread slots do not share Vert storage");
 
-    const size_t vertBytes = size_t(bdpt::kMaxVerts) * sizeof(bdpt::Vert);
-    check(vertBytes > 16384, "kMaxVerts Vert array is above the 16 KiB LFH line");
-    check(bdptScratchBytes(bdpt::kMaxVerts) ==
-              2 * vertBytes + 2 * size_t(bdpt::kMaxVerts) * sizeof(SampledSpectrum) +
-                  2 * size_t(bdpt::kMaxVerts) * sizeof(SampledWavelengths),
+    const size_t vertBytes = size_t(31) * sizeof(bdpt::Vert);
+    check(bdptScratchBytes(31) == 2 * vertBytes + 2 * size_t(31) * sizeof(SampledSpectrum) +
+                                      2 * size_t(31) * sizeof(SampledWavelengths),
           "scratch byte helper matches six arrays");
 
     BdptScratch& tls = bdptThreadScratch();
-    tls.ensure(bdpt::kMaxVerts);
+    tls.ensure(31);
     const bdpt::Vert* tlsPtr = tls.eye.data();
-    tls.ensure(bdpt::kMaxVerts);
+    tls.ensure(31);
     check(tls.eye.data() == tlsPtr, "thread-local fallback pointer is stable");
+}
+
+void testIntegratorDeviceMemory() {
+    std::printf("integrator-device\n");
+    int cpu = 0, gpu = 0;
+    int next = switchIntegratorForBackend(kBackendCpuEmbree, kBackendGpuOptix, kIntegratorBdpt, cpu, gpu);
+    check(cpu == kIntegratorBdpt, "leaving CPU stores BDPT");
+    check(next == kIntegratorPathTracer, "GPU drops BDPT to Path Tracer");
+    next = switchIntegratorForBackend(kBackendGpuOptix, kBackendCpuEmbree, next, cpu, gpu);
+    check(next == kIntegratorBdpt, "CPU restores BDPT");
+
+    cpu = 0;
+    gpu = 0;
+    next = switchIntegratorForBackend(kBackendCpuEmbree, kBackendGpuOptix, kIntegratorWireframe, cpu, gpu);
+    check(next == kIntegratorWireframe, "GPU keeps Wireframe");
+    next = switchIntegratorForBackend(kBackendGpuOptix, kBackendXpu, kIntegratorAmbientOcclusion, cpu, gpu);
+    check(next == kIntegratorAmbientOcclusion, "XPU keeps Ambient Occlusion");
+    check(cpu == kIntegratorWireframe, "CPU memory is not overwritten on GPU↔XPU");
+
+    next = switchIntegratorForBackend(kBackendXpu, kBackendCpuEmbree, kIntegratorDirectLighting, cpu, gpu);
+    check(next == kIntegratorWireframe, "CPU restores the remembered CPU integrator");
+
+    check(clampIntegratorForBackend(kBackendGpuOptix, kIntegratorBdpt) == kIntegratorPathTracer,
+          "GPU clamp drops BDPT");
+    check(clampIntegratorForBackend(kBackendXpu, kIntegratorBdpt) == kIntegratorPathTracer,
+          "XPU clamp drops BDPT");
+    check(clampIntegratorForBackend(kBackendCpuEmbree, kIntegratorBdpt) == kIntegratorBdpt,
+          "CPU keeps BDPT");
+}
+
+void testUndoHub() {
+    std::printf("undo-hub\n");
+    registerBuiltinNodes();
+    NodeGraph graph;
+    Node* settings = graph.createNode("rendersettings", "rs1");
+    check(settings != nullptr, "undo test rendersettings");
+    if (!settings) return;
+
+    UndoHub hub;
+    hub.setGraph(&graph);
+    check(hub.stack().undoLimit() == 100, "undo limit is 100");
+
+    const int oldDepth = settings->intValue("maxdepth", 8);
+    settings->setParameterValue("maxdepth", 30);
+    hub.pushParameter(settings->name(), "maxdepth", oldDepth, 30);
+    check(settings->intValue("maxdepth") == 30, "parameter stays at the new value after push");
+    hub.undo();
+    check(settings->intValue("maxdepth") == oldDepth, "undo restores the old parameter");
+    hub.redo();
+    check(settings->intValue("maxdepth") == 30, "redo restores the new parameter");
+
+    const QJsonObject before = graph.toJson();
+    Node* grid = graph.createNode("grid", "grid1");
+    check(grid != nullptr, "create grid for graph undo");
+    hub.pushGraphSnapshot(before, graph.toJson(), "Create node");
+    check(graph.findNode("grid1") != nullptr, "created node is in the graph");
+    hub.undo();
+    check(graph.findNode("grid1") == nullptr, "undo removes the created node");
+    hub.redo();
+    check(graph.findNode("grid1") != nullptr, "redo restores the created node");
+    settings = graph.findNode("rs1");
+    check(settings != nullptr, "rendersettings survives graph undo/redo");
+    if (!settings) return;
+
+    const int samples0 = settings->intValue("samples", 128);
+    for (int i = 0; i < 110; ++i) {
+        hub.pushParameter(settings->name(), QStringLiteral("samples"), samples0 + i, samples0 + i + 1);
+    }
+    check(hub.stack().count() <= 100, "undo stack drops entries past 100");
+
+    OrbitCameraState camBefore;
+    OrbitCameraState camAfter;
+    camAfter.distance = 20.0f;
+    camAfter.yaw = 45.0f;
+    int cameraApplies = 0;
+    float lastDistance = 0.0f;
+    hub.setApplyCamera([&](const OrbitCameraState& s) {
+        ++cameraApplies;
+        lastDistance = s.distance;
+    });
+    hub.pushCamera(camBefore, camAfter);
+    hub.undo();
+    check(cameraApplies == 1, "camera undo applies the start view");
+    check(std::fabs(lastDistance - camBefore.distance) < 1e-5f, "camera undo restores distance");
+    hub.redo();
+    check(cameraApplies == 2, "camera redo applies the end view");
+    check(std::fabs(lastDistance - camAfter.distance) < 1e-5f, "camera redo restores distance");
 }
 
 // Chromatic dispersion + thin-film iridescence sanity.
@@ -6756,7 +6864,7 @@ void testTxMipmaps() {
 
 void testBdptShadersAndSss() {
     std::printf("bdpt-shaders-sss\n");
-    check(bdpt::kMaxVerts == 50, "BDPT vertex cap is 50");
+    check(bdpt::kMaxVerts == 4096, "BDPT vertex cap is 4096");
     {
         Vec3 beta(0.25f, 0.25f, 0.25f);
         Rng rngBefore(1u, 2u);
@@ -7989,7 +8097,9 @@ void testBinaryUsdLoad() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    (void)app;
     std::printf("Solstice tests\n");
     if (getenv("SOL_ONLY_WF")) {
         registerBuiltinNodes();
@@ -8028,6 +8138,7 @@ int main() {
         registerBuiltinNodes();
         testXpuDevice();
         testRenderSettingsFolders();
+        testIntegratorDeviceMemory();
         testSceneGraphFolders();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
@@ -8042,6 +8153,8 @@ int main() {
         testBdptShadersAndSss();
         testBdptTimersFormat();
         testBdptScratchReuse();
+        testIntegratorDeviceMemory();
+        testUndoHub();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -8094,6 +8207,8 @@ int main() {
     testSplatAccumulationPrecision();
     testBdptTimersFormat();
     testBdptScratchReuse();
+    testIntegratorDeviceMemory();
+    testUndoHub();
     testDispersionAndThinFilm();
     testIntegratorSwitchStress();
     testInstanceTransform();

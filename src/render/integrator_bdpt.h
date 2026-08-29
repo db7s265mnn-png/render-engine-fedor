@@ -15,6 +15,7 @@
 // stays valid.
 #pragma once
 
+#include <algorithm>
 #include <vector>
 
 #include "core/rng.h"
@@ -35,9 +36,12 @@
 namespace sol {
 namespace bdpt {
 
-// Hard cap on eye and light subpath vertices (camera + bounces). Storage is
-// heap-allocated; this is only the length clamp.
-constexpr int kMaxVerts = 50;
+// Hard cap on eye and light subpath vertices (camera + bounces). Matches the
+// UI Max Ray Depth ceiling. Per-thread scratch is sized to the session depth,
+// not this compile-time cap.
+constexpr int kMaxVerts = 4096;
+
+inline int bdptSessionVerts(int maxDepth) { return std::clamp(maxDepth + 1, 2, kMaxVerts); }
 
 enum class VType : uint8_t { Camera, Light, Surface };
 
