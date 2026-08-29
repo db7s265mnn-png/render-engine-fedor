@@ -459,6 +459,11 @@ SR_INL SR_HD bool exitToDiffuseWantsRefractWalk(const Material& mat) {
     return mat.transmission > 1e-4f;
 }
 
+// Dest NEE is a bounce (card → light). gpuEyeBounceNee(path.depth) is 0 on the
+// camera hit (maxDepth == 1), and primary shadows treat glass as opaque — that
+// blacks out the walk when the light is on the camera side of the pane.
+SR_INL SR_HD int exitToDiffuseEyeBounceNee() { return 1; }
+
 // Mirror of the incoming ray about Ng facing the ray (no Snell).
 SR_INL SR_HD Vec3 exitToDiffuseReflectDirection(Vec3 direction, Vec3 ng) {
     const Vec3 n = faceforward(ng, -direction);
@@ -1109,7 +1114,7 @@ inline Vec3 exitToDiffuseContribution(const SceneView& scene, const Tracer& trac
                                       Vec3 throughput, Rng& rng, int mediumIndex) {
     const Vec3 extra =
         exitToDiffuseWalkReflectAndRefract(scene, tracer, p, ng, incoming, escapeMat, dyingMat, rng,
-                                           mediumIndex, 1);
+                                           mediumIndex, exitToDiffuseEyeBounceNee());
     return clampContribution(throughput * extra, scene.settings.clampDirect);
 }
 #endif
@@ -1448,7 +1453,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             const Frame frameExit(si.ns);
             const Vec3 nee =
                 nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), frameExit, woExit, rng,
-                                    guiding, currentMedium, 1);
+                                    guiding, currentMedium, exitToDiffuseEyeBounceNee());
             Vec3 contrib = throughput * nee;
             contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;

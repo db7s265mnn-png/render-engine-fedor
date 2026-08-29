@@ -410,7 +410,8 @@ public:
                 SampledSpectrum contrib =
                     throughput * nextEventEstimationSpectralOnce(
                                      scene, tracer, si, exitToDiffuseLambert(mat), Frame(si.ns),
-                                     -direction, rng, waves, filmCs, currentMedium, 1);
+                                     -direction, rng, waves, filmCs, currentMedium,
+                                     exitToDiffuseEyeBounceNee());
                 contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
                 radiance += contrib;
                 break;
@@ -420,7 +421,7 @@ public:
             if (exitNow) {
                 SampledSpectrum extra = exitToDiffuseWalkReflectAndRefractSpectral(
                     scene, tracer, si.p, si.ng, direction, si.materialIndex, mat, rng, waves, filmCs,
-                    currentMedium, 1);
+                    currentMedium, exitToDiffuseEyeBounceNee());
                 SampledSpectrum contrib = throughput * extra;
                 contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
                 radiance += contrib;

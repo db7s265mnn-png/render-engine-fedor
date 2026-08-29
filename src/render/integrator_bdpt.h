@@ -1408,7 +1408,8 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 
     if (nEye == maxVerts && nEye >= 2) {
         const Vert& last = eye[nEye - 1];
-        const Vec3 extra = exitToDiffuseEscapeFromVertex(scene, tracer, last, rng, 1);
+        const Vec3 extra =
+            exitToDiffuseEscapeFromVertex(scene, tracer, last, rng, exitToDiffuseEyeBounceNee());
         if (!isBlack(extra) && isFinite(extra)) {
             Vec3 c = last.beta * extra;
             c = clampContribution(c, settings.clampDirect);

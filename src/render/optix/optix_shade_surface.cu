@@ -19,15 +19,13 @@
 namespace sol {
 
 __device__ inline void beginExitToDiffuseEscape(GpuPath& path, const Surf& si, const Material& mat) {
-    float weight = 1.0f;
-    const Vec3 dir = exitToDiffuseSampleEscapeDir(path.direction, si.ng, mat, path.rng.nextFloat(), weight);
-    if (weight != 1.0f) specMulS(path.throughputS, weight, path.nLambda);
+    // Stash the dying vertex. path_tail fires both CPU walks — shade cannot
+    // optixTrace, and a one-continuation *2 is not the same at low spp.
     path.exitEscapeMat = si.materialIndex;
-    path.hops = 0;
-    path.origin = offsetRay(si.p, si.ng, dir);
-    path.direction = dir;
-    ++path.hops;
-    path.queue = kQueueIntersectClosest;
+    path.exitWantsRefract = exitToDiffuseWantsRefractWalk(mat) ? 1 : 0;
+    path.exitP = si.p;
+    path.exitNg = si.ng;
+    path.queue = kQueueExitToDiffuse;
 }
 
 __device__ inline void tryEnqueueExitToDiffuseNee(GpuPath& path, GpuShadow& shadow, const SceneView& scene,
@@ -63,7 +61,7 @@ __device__ inline void tryEnqueueExitToDiffuseNee(GpuPath& path, GpuShadow& shad
                            lightNee.shadowEnable,
                            pathContributionClamp(scene.settings, path.depth, path.specularBounce != 0,
                                                  path.causticSuffix != 0),
-                           gpuEyeBounceNee(scene.settings, path.depth, path.throughGlass, 1, lightNee.type));
+                           exitToDiffuseEyeBounceNee());
 }
 
 __device__ inline void shadeSurfacePixel(int pixel) {
@@ -161,14 +159,16 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         }
         const bool suppressCausticLight =
             scene.settings.caustics == 0 && path.causticSuffix;
-        if ((gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
+        const bool exitEscaping = path.exitEscapeMat >= 0;
+        if (!exitEscaping &&
+            (gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
                               params.splatInvLightPaths) ||
              suppressCausticLight)) {
             terminatePath(pixel, path);
             return;
         }
         const LightData& light = scene.lights[si.lightIndex];
-        if (path.causticSuffix && !lightContributesCaustics(light)) {
+        if (!exitEscaping && path.causticSuffix && !lightContributesCaustics(light)) {
             terminatePath(pixel, path);
             return;
         }

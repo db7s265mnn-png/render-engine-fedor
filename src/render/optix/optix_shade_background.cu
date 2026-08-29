@@ -4,6 +4,33 @@
 
 namespace sol {
 
+// Exit to Diffuse miss: always take the dome / sun (CPU walk), even when the
+// environment is hidden from the camera. Does not terminate the path.
+__device__ inline void addExitToDiffuseMissRadiance(GpuPath& path) {
+    const LaunchParams& params = launchParams();
+    const SceneView& scene = params.scene;
+    const float clampValue = pathContributionClamp(scene.settings, path.depth, path.specularBounce != 0,
+                                                   path.causticSuffix != 0);
+    if (scene.domeLightIndex >= 0 && scene.lights) {
+        const LightData& dome = scene.lights[scene.domeLightIndex];
+        const Vec3 envL = domeRadiance(scene, dome, path.direction, /*nearestTexel=*/true);
+        if (!isBlack(envL)) {
+            float envS[kMaxSpectrumSamples];
+            if (dome.colorTemperatureK > 50.0f) {
+                specLightEmission(dome, path, envS);
+                const float rgbScale = length(envL) / srMax(1e-6f, length(dome.emittedRadiance()));
+                specMulS(envS, rgbScale, path.nLambda);
+            } else {
+                specUpsampleEmission(gpuSpec(), envL, path.lambda, path.nLambda, envS);
+            }
+            addPathRadianceS(path, envS, 1.0f, clampValue);
+        }
+    }
+    const Vec3 sunL =
+        cameraSunDiscRadiance(scene, path.origin, path.direction, 0.0f, true, false, false);
+    if (!isBlack(sunL)) addPathEmissionRgb(path, sunL, 1.0f, clampValue);
+}
+
 __device__ inline void shadeBackgroundPixel(int pixel) {
     const LaunchParams& params = launchParams();
     GpuPath& path = params.paths[pixel];

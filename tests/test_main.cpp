@@ -840,6 +840,10 @@ void testBsdf() {
         check(!materialWantsExitToDiffuse(floorDest), "destination does not carry the flag");
         const Material floorLamb = exitToDiffuseLambert(floorDest);
         check(eyePathNeeConnectable(floorLamb, woN), "unflagged destination still NEE-connectable");
+        check(exitToDiffuseEyeBounceNee() == 1, "dest NEE is a bounce so glass stays open");
+        RenderSettingsData gpuNee{};
+        check(gpuEyeBounceNee(gpuNee, 0, 0, 1, kLightPoint) == 0,
+              "primary NEE still opaques glass — ETD must not use path.depth");
     }
 }
 

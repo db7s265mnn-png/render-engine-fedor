@@ -51,6 +51,9 @@ __device__ inline void spawnCameraPath(int pixel, int x, int y, int sampleOffset
     path.causticSuffix = 0;
     path.throughGlass = 0;
     path.exitEscapeMat = -1;
+    path.exitWantsRefract = 0;
+    path.exitP = Vec3(0.0f);
+    path.exitNg = Vec3(0.0f, 0.0f, 1.0f);
     path.rayKind = int(RayShadeKind::Camera);
     path.mcmcRemain = 0;
     path.mcmcInfinite = 0;
@@ -148,6 +151,9 @@ __device__ inline bool spawnLightPath(int pixel, int x, int y, int sampleOffset)
     path.specularBounce = 1;
     path.transmittedBounce = 0;
     path.exitEscapeMat = -1;
+    path.exitWantsRefract = 0;
+    path.exitP = Vec3(0.0f);
+    path.exitNg = Vec3(0.0f, 0.0f, 1.0f);
     path.mediumIndex = -1;
     path.volumeScatters = 0;
     path.lightIndex = emit.lightIndex;
@@ -218,6 +224,9 @@ __device__ inline bool spawnLightPathMutation(int pixel) {
     path.specularBounce = 1;
     path.transmittedBounce = 0;
     path.exitEscapeMat = -1;
+    path.exitWantsRefract = 0;
+    path.exitP = Vec3(0.0f);
+    path.exitNg = Vec3(0.0f, 0.0f, 1.0f);
     path.mediumIndex = -1;
     path.volumeScatters = 0;
     applySpawnMedium(params, path);

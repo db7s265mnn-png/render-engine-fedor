@@ -731,7 +731,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             }
             const Vec3 nee =
                 nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), Frame(si.ns),
-                                    -direction, rng, guiding, -1, 1);
+                                    -direction, rng, guiding, -1, exitToDiffuseEyeBounceNee());
             Vec3 contrib = throughput * nee;
             contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;

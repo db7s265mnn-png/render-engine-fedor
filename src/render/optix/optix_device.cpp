@@ -797,7 +797,7 @@ public:
                     msg << "  caustics=Iray LT aim n=" << nAim << " mix=" << launchParams.photonAimMix
                         << (launchParams.photonAimMix >= 1.0f - 1e-5f ? " aimed-only" : "");
                     if (gpuEngine == kGpuCausticsAimedLtMnee)
-                        msg << "  menu=Aimed LT+MNEE  camMNEE ltPathTail";
+                        msg << "  menu=Aimed LT+MNEE  camMNEE etdTail";
                     else
                         msg << "  menu=Aimed LT  path_tail";
                 }
@@ -902,12 +902,12 @@ private:
         lp.workItems = nullptr;
         lp.workCount = 0;
         lp.workSlot = -1;
+        lp.pathTailExitOnly = 0;
         uploadLaunch(lp);
         auto bounceAndTail = [&](bool lightPass) {
-            // MNEE is a separate pipeline per bounce. path_tail would overwrite
-            // the job before Newton runs, so skip the megakernel while MNEE is on.
-            // Light paths never consume MNEE (tryGpuMneeJob returns on lightPath);
-            // keep that pass on the PT schedule (3 waves + path_tail).
+            // MNEE is a separate pipeline per bounce. The PT megakernel must not
+            // grow leftover eye bounces after Newton. Light paths never consume
+            // MNEE; they stay on the PT schedule (3 waves + full path_tail).
             const bool gpuMnee = !lightPass && gpuEyePathMneeEnabled(lp.scene.settings);
             const int wave =
                 gpuMnee ? std::max(1, maxDepth) : std::max(1, std::min(maxDepth, 3));
@@ -935,10 +935,14 @@ private:
                 }
             }
             if (cancel.load(std::memory_order_relaxed)) return;
-            if (!gpuMnee) {
-                launchKernel(kRgPathTail, launchW, launchH);
-                ++launches;
-            }
+            // Exit to Diffuse hops do not increment depth. MNEE uses
+            // wave=maxDepth and used to skip this megakernel, so the card
+            // never shaded. Drain ETD here; when MNEE is on, only that queue.
+            lp.pathTailExitOnly = gpuMnee ? 1 : 0;
+            uploadLaunch(lp);
+            launchKernel(kRgPathTail, launchW, launchH);
+            ++launches;
+            lp.pathTailExitOnly = 0;
         };
 
         launchKernel(kRgInit, launchW, launchH);

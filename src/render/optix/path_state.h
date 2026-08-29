@@ -18,6 +18,9 @@ enum PathQueue : int {
     kQueueShadeSurface = 2,
     kQueueShadeBackground = 3,
     kQueueShadeVolume = 4,
+    // Armed Exit to Diffuse: path_tail fires both CPU walks (shade cannot
+    // optixTrace, and the hops do not increment depth).
+    kQueueExitToDiffuse = 5,
 };
 
 enum WorkSlot : int {
@@ -74,6 +77,9 @@ struct GpuPath {
     // Aimed LT + MNEE: those pixels are the glass, not the floor — keep BSDF.
     int throughGlass = 0;
     int exitEscapeMat = -1;  // >=0: skip this materialIndex as opacity (reflect or through)
+    int exitWantsRefract = 0;
+    Vec3 exitP{0.0f};
+    Vec3 exitNg{0.0f, 0.0f, 1.0f};
     int rayKind = 0;  // RayShadeKind: incoming type for ray_switch_shader (Arnold)
     // MCMC / ERPT: stored SampleLe so mutations respawn without a new light pick.
     Vec3 mcmcOrigin{0.0f};
