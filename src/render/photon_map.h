@@ -24,22 +24,29 @@ struct CausticPhoton {
     float lambdaNm = 0.0f;   // hero λ used for Abbe Snell (0 = no spectral IOR)
 };
 
-// Film CMF of one λ, same luminance as `beta`. Only for paths that hit η(λ).
-// Abbe=0 keeps `beta` — a spike here would rainbow constant-η glass.
+// E[spectrumToRgb(1-λ)] for λ ~ SampleVisible is illuminant E, not the
+// working white. Used to unbias a 1-λ film RGB so the mean tint is 1.
+inline Vec3 photonVisibleMeanRgb(const RGBColorSpace& cs = colorSpaceSrgb()) {
+    const float invY = 1.0f / cie_tab::kCieYIntegral1nm;
+    return cs.toRgb(Xyz(cie_tab::kCieXIntegral1nm * invY, 1.0f, cie_tab::kCieZIntegral1nm * invY));
+}
+
+// 1-λ film RGB times path flux. Do not clamp-and-Y-normalise: that maps the
+// spectral locus onto the line of purples and paints every caustic magenta.
+// Abbe=0 keeps `beta`. Signed channels must survive so many λ sum to white.
 inline Vec3 photonDispersedPower(Vec3 beta, float lambdaNm,
                                  const RGBColorSpace& cs = colorSpaceSrgb()) {
-    const float y = luminance(beta);
-    if (!(y > 1e-12f) || !isFinite(beta)) return beta;
+    if (!isFinite(beta) || isBlack(beta)) return beta;
     SampledWavelengths w;
     w.n = 1;
     w.lambda[0] = lambdaNm;
     w.pdf[0] = SampledWavelengths::visibleWavelengthPdf(lambdaNm);
     if (w.pdf[0] <= 0.0f) return beta;
-    Vec3 c = spectrumToRgb(SampledSpectrum::constant(1, 1.0f), w, cs);
-    c = vmax(Vec3(0.0f), c);
-    const float cy = luminance(c);
-    if (!(cy > 1e-8f) || !isFinite(c)) return beta;
-    return c * (y / cy);
+    const Vec3 c = spectrumToRgb(SampledSpectrum::constant(1, 1.0f), w, cs);
+    if (!isFinite(c)) return beta;
+    const Vec3 mean = photonVisibleMeanRgb(cs);
+    return Vec3(beta.x * c.x / srMax(1e-8f, mean.x), beta.y * c.y / srMax(1e-8f, mean.y),
+                beta.z * c.z / srMax(1e-8f, mean.z));
 }
 
 // Flat hash-grid photon map. Built once per progressive pass from lights that

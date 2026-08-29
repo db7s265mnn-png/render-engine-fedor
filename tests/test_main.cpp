@@ -2756,9 +2756,17 @@ void testPhotonCaustics() {
         const Vec3 pB = photonDispersedPower(white, 465.0f);
         const Vec3 pR = photonDispersedPower(white, 630.0f);
         check(pB.z > pR.z && pR.x > pB.x, "dispersed photon power is blue vs red");
-        check(std::fabs(luminance(pB) - 1.0f) < 0.05f && std::fabs(luminance(pR) - 1.0f) < 0.05f,
-              "dispersed photon tint keeps luminance");
         check(photonDispersedPower(white, 0.0f) == white, "invalid λ leaves RGB flux alone");
+        Vec3 acc(0.0f);
+        constexpr int kMeanN = 512;
+        for (int i = 0; i < kMeanN; ++i) {
+            const float u = (float(i) + 0.5f) / float(kMeanN);
+            acc += photonDispersedPower(white, SampledWavelengths::sampleVisibleWavelength(u));
+        }
+        acc = acc / float(kMeanN);
+        check(std::fabs(acc.x - 1.0f) < 0.12f && std::fabs(acc.y - 1.0f) < 0.12f &&
+                  std::fabs(acc.z - 1.0f) < 0.12f,
+              "mean dispersed tint is white, not magenta");
     }
 }
 
