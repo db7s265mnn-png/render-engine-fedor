@@ -3,6 +3,7 @@
 // CPU / Embree only — included from embree_device.cpp and the integrators.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -11,6 +12,7 @@
 #include "render/integrator.h"
 #include "render/lights.h"
 #include "render/shading.h"
+#include "render/spectral_common.h"
 #include "scene/types.h"
 
 namespace sol {
@@ -20,6 +22,8 @@ struct CausticPhoton {
     Vec3 wi{0.0f};   // incident direction at the deposit (toward the surface)
     Vec3 power{0.0f};
     Vec3 n{0.0f};
+    float lambdaNm = 0.0f;   // hero λ used for Snell / Abbe (0 = RGB fallback)
+    float lambdaPdf = 0.0f;  // visible-wavelength PDF at lambdaNm
 };
 
 // Flat hash-grid photon map. Built once per progressive pass from lights that
@@ -66,22 +70,56 @@ public:
 
     // Estimate reflected radiance at a diffuse-ish shading point (W/m²/sr).
     Vec3 gather(Vec3 p, Vec3 n, Vec3 wo, const Material& mat, float radius) const {
-        if (photons_.empty() || radius <= 1e-8f) return Vec3(0.0f);
-        const LobeWeights lw = computeLobes(mat, Frame(n).toLocal(wo));
-        if (lw.diffuse < 1e-4f && !lw.delta) {
-            // Still allow rough dielectrics with a diffuse leftover; pure delta skips.
+        Vec3 sum(0.0f);
+        forEachPhotonInBall_(p, n, wo, mat, radius, [&](const CausticPhoton&, const Vec3& rgb) {
+            sum += rgb;
+        });
+        return sum;
+    }
+
+    // Same kernel, reconstructed at the eye path's wavelengths. A stored hero λ
+    // becomes a monochromatic illuminant (spectral-locus colour).
+    SampledSpectrum gatherSpectral(Vec3 p, Vec3 n, Vec3 wo, const Material& mat, float radius,
+                                   const SampledWavelengths& waves, const RGBColorSpace& cs) const {
+        SampledSpectrum sum = SampledSpectrum::zero(waves.n);
+        forEachPhotonInBall_(p, n, wo, mat, radius, [&](const CausticPhoton& ph, const Vec3& rgb) {
+            sum += photonPowerSpectrum(ph, rgb, waves, cs);
+        });
+        return sum;
+    }
+
+    static SampledSpectrum photonPowerSpectrum(const CausticPhoton& ph, Vec3 rgbContrib,
+                                              const SampledWavelengths& waves,
+                                              const RGBColorSpace& cs) {
+        if (isBlack(rgbContrib)) return SampledSpectrum::zero(waves.n);
+        if (ph.lambdaNm >= kSpectrumLambdaMin && ph.lambdaNm <= kSpectrumLambdaMax &&
+            ph.lambdaPdf > 1e-12f) {
+            SampledWavelengths wPh;
+            wPh.n = 1;
+            wPh.lambda[0] = ph.lambdaNm;
+            wPh.pdf[0] = ph.lambdaPdf;
+            const Vec3 rgbSpike = spectrumToRgb(SampledSpectrum::constant(1, 1.0f), wPh, cs);
+            const float spikeLum = srMax(luminance(rgbSpike), 1e-8f);
+            return upsampleEmission(rgbSpike * (luminance(rgbContrib) / spikeLum), waves, cs);
         }
-        if (lw.delta && lw.diffuse < 1e-4f) return Vec3(0.0f);
+        return upsampleLightRadiance(rgbContrib, waves, cs);
+    }
+
+private:
+    template <typename Fn>
+    void forEachPhotonInBall_(Vec3 p, Vec3 n, Vec3 wo, const Material& mat, float radius, Fn&& fn) const {
+        if (photons_.empty() || radius <= 1e-8f) return;
+        const LobeWeights lw = computeLobes(mat, Frame(n).toLocal(wo));
+        if (lw.delta && lw.diffuse < 1e-4f) return;
 
         const float r2 = radius * radius;
-        if (r2 <= 1e-20f) return Vec3(0.0f);
+        if (r2 <= 1e-20f) return;
+        const float norm = 3.0f / (kPi * r2);
 
-        Vec3 sum(0.0f);
         const Vec3 cellF = (p - origin_) * invCellSize_;
         const int cx = int(floorf(cellF.x));
         const int cy = int(floorf(cellF.y));
         const int cz = int(floorf(cellF.z));
-        // Neighbourhood must cover the gather ball: ceil(r/cell)+1 in each axis.
         const int nHood = srMax(1, int(ceilf(radius * invCellSize_)) + 1);
         for (int dz = -nHood; dz <= nHood; ++dz)
             for (int dy = -nHood; dy <= nHood; ++dy)
@@ -94,25 +132,20 @@ public:
                         const Vec3 d = ph.p - p;
                         const float dist2 = dot(d, d);
                         if (dist2 > r2) continue;
-                        if (dot(ph.n, n) <= 0.1f) continue;  // opposite-facing deposit
+                        if (dot(ph.n, n) <= 0.1f) continue;
                         const float cosI = fabsf(dot(n, ph.wi));
                         if (cosI <= 1e-6f) continue;
-                        // Epanechnikov kernel (1-u)² — soft falloff removes the hard-disk
-                        // "square / blob" tiling that a constant kernel shows in shadows.
                         const float u = dist2 / r2;
                         const float kern = (1.0f - u);
                         const float kern2 = kern * kern;
                         const Frame fr(n);
                         const BsdfEval be = bsdfEvalLocal(mat, fr.toLocal(wo), fr.toLocal(ph.wi));
                         if (be.pdf <= 0.0f || isBlack(be.f)) continue;
-                        sum += be.f * ph.power * kern2;
+                        fn(ph, be.f * ph.power * kern2 * norm);
                     }
                 }
-        // ∫₀ᴿ (1-(r/R)²)² 2πr dr = π R² / 3  →  normalize by 3/(π R²).
-        return sum * (3.0f / (kPi * r2));
     }
 
-private:
     std::vector<CausticPhoton> photons_;
     std::vector<uint32_t> cells_;
     std::vector<uint32_t> cellStarts_;
@@ -167,16 +200,23 @@ private:
         if (!lightContributesCaustics(l)) return;
         if (l.type == kLightDome || l.type == kLightDistant) return;
 
-        Vec3 p, n, beta;
+        const RGBColorSpace& filmCs = pathColorSpace(scene.settings);
+        SampledWavelengths waves = SampledWavelengths::sampleVisible(kMaxSpectrumSamples, rng.nextFloat());
+        const int heroPick = std::clamp(int(rng.nextFloat() * float(waves.n)), 0, std::max(0, waves.n - 1));
+        waves.promoteHero(heroPick);
+        const int heroIdx = 0;
+
+        Vec3 p, n;
         Vec3 dir;
         float pdfDir = 0.0f;
+        SampledSpectrum betaS = lightEmissionSpectrum(l, waves, filmCs);
 
         if (l.type == kLightPoint) {
             p = lightOrigin(l);
             n = Vec3(0.0f, 1.0f, 0.0f);
             dir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
             pdfDir = kInv4Pi;
-            beta = l.emittedRadiance() / srMax(1e-12f, selectPdf * pdfDir);
+            betaS *= 1.0f / srMax(1e-12f, selectPdf * pdfDir);
         } else {
             float area = 0.0f;
             if (l.type == kLightRect) {
@@ -204,7 +244,7 @@ private:
             dir = normalize(frame.toWorld(local));
             pdfDir = fabsf(dot(nEmit, dir)) * kInvPi * (l.twoSided ? 0.5f : 1.0f);
             if (pdfDir <= 0.0f) return;
-            beta = lightRadiance(l) * fabsf(dot(n, dir)) / srMax(1e-12f, selectPdf * (1.0f / area) * pdfDir);
+            betaS *= fabsf(dot(n, dir)) / srMax(1e-12f, selectPdf * (1.0f / area) * pdfDir);
         }
 
         bool causticChain = false;
@@ -219,17 +259,26 @@ private:
             if (si.lightIndex >= 0) break;
 
             Material mat = materialForCausticTransport(scene, si.materialIndex);
-            mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
+            mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject,
+                                           si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
+            // Abbe is often authored only on the camera port — still bend Snell.
+            if (mat.dispersionAbbe <= 1e-3f) {
+                Material cam = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
+                cam = evaluateTexturedMaterial(scene, cam, si.uv, si.ns, si.pObject, si.nObject,
+                                               si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
+                if (cam.dispersionAbbe > 1e-3f) {
+                    mat.dispersionAbbe = cam.dispersionAbbe;
+                    if (mat.ior < 1.01f) mat.ior = cam.ior;
+                }
+            }
 
             if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
                 o = offsetRayOrigin(si.p, si.ng, d);
                 continue;
             }
 
+            const float baseIor = mat.ior;
             const LobeWeights lw = computeLobes(mat, Frame(si.ns).toLocal(-d));
-            // Photon map owns all refractive casters (any roughness) plus near-spec
-            // mirrors — not only α ≤ kCausticAlpha. Otherwise Auto→Photon picked for
-            // rough glass while emit skipped those lobes → empty map + BSDF leak.
             const bool causticLink =
                 isPhotonCausticCasterLobe(lw) && materialContributesCaustics(mat);
             const bool diffuseHit = lw.diffuse > 1e-4f || (!lw.delta && !causticLink);
@@ -238,18 +287,26 @@ private:
                 causticChain = true;
                 const Frame frame(si.ns);
                 const Vec3 woLocal = frame.toLocal(-d);
-                const BsdfSample bs =
-                    bsdfSampleLocal(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(), rng.nextFloat());
-                if (bs.pdf <= 0.0f || isBlack(bs.weight)) break;
-                const Vec3 wiWorld = normalize(frame.toWorld(bs.wi));
+                terminateSecondaryIfSpectralEta(mat, waves);
+                const BsdfSampleSpectral ss =
+                    bsdfSampleSpectral(mat, woLocal, rng.nextFloat(), rng.nextFloat(), rng.nextFloat(),
+                                       rng.nextFloat(), waves, baseIor, heroIdx, filmCs);
+                if (!ss.valid || ss.pdf <= 0.0f) break;
+                const Vec3 wiWorld = normalize(frame.toWorld(ss.wi));
                 if (!shadingNormalConsistent(si.ng, si.ns, -d, wiWorld)) break;
-                beta = beta * bs.weight;
-                if (!isFinite(beta) || isBlack(beta)) break;
-                // Russian roulette after a few specular bounces.
+                betaS *= ss.weight;
+                if (spectrumMaxComponent(betaS) < 1e-20f) break;
+                BsdfSample rgbBs;
+                rgbBs.wi = ss.wi;
+                rgbBs.pdf = ss.pdf;
+                rgbBs.specular = ss.specular;
+                rgbBs.transmitted = ss.transmitted;
+                if (shouldTerminateSecondaryWavelengths(rgbBs, lw, mat) && !waves.secondaryTerminated())
+                    waves.terminateSecondary();
                 if (depth >= 2) {
-                    const float q = saturatef(1.0f - average(beta));
-                    if (rng.nextFloat() < q) break;
-                    beta = beta / srMax(1e-4f, 1.0f - q);
+                    const float q = clampf(spectrumMaxComponent(betaS), 0.05f, 1.0f);
+                    if (rng.nextFloat() > q) break;
+                    betaS *= 1.0f / q;
                 }
                 o = offsetRayOrigin(si.p, si.ng, wiWorld);
                 d = wiWorld;
@@ -261,8 +318,11 @@ private:
                 ph.p = si.p;
                 ph.wi = -d;
                 ph.n = si.ns;
-                ph.power = beta;
-                if (isFinite(ph.power) && !isBlack(ph.power)) photons_.push_back(ph);
+                ph.lambdaNm = waves.lambda[0];
+                ph.lambdaPdf = waves.pdf[0];
+                ph.power = spectrumToRgb(betaS, waves, filmCs);
+                if (isFinite(ph.power) && !isBlack(ph.power) && ph.lambdaPdf > 0.0f)
+                    photons_.push_back(ph);
                 break;
             }
             break;

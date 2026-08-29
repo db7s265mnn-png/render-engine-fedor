@@ -187,6 +187,10 @@ public:
         Rng& rng = *ctx.rng;
         const RenderSettingsData& settings = scene.settings;
         const RGBColorSpace& filmCs = pathColorSpace(settings);
+        const CausticPhotonMap* photons = ctx.photons;
+        const bool photonEngine = photons != nullptr;
+        const bool photonCaustics = photonEngine && !photons->empty();
+        const float photonRadius = photonCaustics ? photons->gatherRadius(settings) : 0.0f;
 
         const int nLambda = kMaxSpectrumSamples;
         SampledWavelengths waves = SampledWavelengths::sampleVisible(nLambda, rng.nextFloat());
@@ -347,6 +351,10 @@ public:
                 if (suppressCausticLight) break;
                 if (cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0)) break;
                 const LightData& light = scene.lights[si.lightIndex];
+                const bool finiteLight = light.type == kLightRect || light.type == kLightDisk ||
+                                         light.type == kLightSphere || light.type == kLightPoint;
+                if (photonEngine && causticSuffix && finiteLight && lightContributesCaustics(light))
+                    break;
                 if (causticSuffix && !lightContributesCaustics(light)) break;
                 const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
                 Vec3 emitted = areaLightEmission(scene, light, direction, lightN);
@@ -520,6 +528,15 @@ public:
 
             if (!(suppressCausticLight && !specularBounce) &&
                 !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0)) {
+                if (photonCaustics && eyePathNeeConnectable(mat, frame.toLocal(wo))) {
+                    SampledSpectrum g = photons->gatherSpectral(si.p, si.ns, wo, mat, photonRadius, waves,
+                                                               filmCs);
+                    if (spectrumMaxComponent(g) > 0.0f) {
+                        SampledSpectrum contrib = throughput * g;
+                        contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
+                        radiance += contrib;
+                    }
+                }
                 // pbrt SampleLd: Illuminant(Le) × Albedo(f) × geom at this vertex.
                 SampledSpectrum contrib =
                     throughput * nextEventEstimationSpectralOnce(scene, tracer, si, mat, frame, wo, rng,

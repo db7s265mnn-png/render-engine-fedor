@@ -527,17 +527,16 @@ inline Vec3 traceRadianceBdptSpectral(
         for (int t = 2; t <= nEye; ++t) {
             const Vert& E = eye[t - 1];
             if (E.type != VType::Surface || !E.connectable || E.nearSpec) continue;
-            const Vec3 gather = photons->gather(E.p, E.ns, E.wo, E.mat, photonRadius);
-            if (isBlack(gather) || !isFinite(gather)) continue;
             const SampledWavelengths& wE = eyeWavePath[t - 1];
-            SampledSpectrum c = eyeBeta[t - 1] * upsampleLightRadiance(gather, wE, filmCs);
+            const SampledSpectrum gather =
+                photons->gatherSpectral(E.p, E.ns, E.wo, E.mat, photonRadius, wE, filmCs);
+            if (spectrumMaxComponent(gather) <= 0.0f) continue;
+            SampledSpectrum c = eyeBeta[t - 1] * gather;
             if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
             addFilm(c, wE);
 #if SOLSTICE_HAVE_OPENPGL
             if (guiding && guiding->active() && E.guideSeg)
-                guiding->addScatteredAt(E.guideSeg,
-                                        spectrumToRgb(upsampleLightRadiance(gather, wE, filmCs), wE,
-                                                      filmCs));
+                guiding->addScatteredAt(E.guideSeg, spectrumToRgb(gather, wE, filmCs));
 #endif
         }
         }

@@ -286,7 +286,9 @@ public:
         if (useAimedLt) nAim = fillPhotonAimClusters(scene, aimClusters, kMaxGpuPhotonClusters);
         scene.photonAimClusters = nAim > 0 ? aimClusters : nullptr;
         scene.photonAimClusterCount = nAim;
-        const bool causticSpecialized = usePhoton || useMnee;
+        // Photon stays on the spectral Path Tracer (λ-tagged map + gatherSpectral).
+        // MNEE still uses the RGB PathMnee kernel.
+        const bool causticSpecialized = useMnee;
         const bool useSpectralBdpt = wantBdpt && !hasVolumes && !diagnosticIntegrator;
         const bool useSpectralPt = !diagnosticIntegrator && !(pathTracer && causticSpecialized) &&
                                    (pathTracer || (wantBdpt && hasVolumes));
@@ -544,7 +546,7 @@ public:
                     radiance = integ.Li(ctx);
                 } else if (useBdptPath) {
                     radiance = BdptIntegrator<EmbreeTracer>{}.Li(ctx);
-                } else if (useMnee || usePhoton) {
+                } else if (useMnee) {
                     radiance = PathMneeIntegrator<EmbreeTracer>{}.Li(ctx);
                 } else {
                     radiance = PathIntegrator<EmbreeTracer>{}.Li(ctx);
@@ -564,7 +566,7 @@ public:
                     radiance = integ.Li(ctx);
                 } else if (useBdptPath) {
                     radiance = BdptIntegrator<EmbreeTracer>{}.Li(ctx);
-                } else if (useMnee || usePhoton) {
+                } else if (useMnee) {
                     radiance = PathMneeIntegrator<EmbreeTracer>{}.Li(ctx);
                 } else {
                     radiance = PathIntegrator<EmbreeTracer>{}.Li(ctx);

@@ -2723,6 +2723,119 @@ void testPhotonCaustics() {
     check(sumMatOff < sumPhoton * 0.85, "material Contribute to Caustics off reduces caustics");
     check(sumMnee > sumOff * 1.1, "MNEE engine still adds caustic energy");
     std::printf("  photon=%.1f off=%.1f matOff=%.1f mnee=%.1f\n", sumPhoton, sumOff, sumMatOff, sumMnee);
+
+    {
+        SampledWavelengths w = SampledWavelengths::sampleVisible(kMaxSpectrumSamples, 0.31f);
+        CausticPhoton ph;
+        ph.power = Vec3(1.0f);
+        ph.lambdaNm = 465.0f;
+        ph.lambdaPdf = SampledWavelengths::visibleWavelengthPdf(465.0f);
+        const Vec3 rgbB =
+            spectrumToRgb(CausticPhotonMap::photonPowerSpectrum(ph, Vec3(1.0f), w, colorSpaceSrgb()), w);
+        ph.lambdaNm = 630.0f;
+        ph.lambdaPdf = SampledWavelengths::visibleWavelengthPdf(630.0f);
+        const Vec3 rgbR =
+            spectrumToRgb(CausticPhotonMap::photonPowerSpectrum(ph, Vec3(1.0f), w, colorSpaceSrgb()), w);
+        check(rgbB.z > rgbR.z && rgbR.x > rgbB.x, "photon λ reconstructs blue vs red");
+        check(spectralAbsoluteIor(1.5f, 30.0f, 465.0f) >
+                  spectralAbsoluteIor(1.5f, 30.0f, 630.0f) + 0.01f,
+              "photon Abbe IOR is higher in the blue");
+    }
+}
+
+void testPhotonDispersion() {
+    std::printf("photon-dispersion\n");
+
+    auto buildScene = [](float abbe) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+        floor->validate();
+        InstanceData floorInst;
+        floorInst.meshIndex = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.75f);
+        floorMat.roughness = 0.9f;
+        floorMat.specular = 0.0f;
+        floorInst.materialIndex = scene->addMaterial(floorMat);
+        scene->instances.push_back(floorInst);
+
+        MeshPtr ball = makeSphereMesh(0.7f, 48, 24);
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.roughness = 0.0f;
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.specular = 1.0f;
+        glass.dispersionAbbe = abbe;
+        InstanceData ballInst;
+        ballInst.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+        ballInst.meshIndex = scene->addMesh(ball);
+        ballInst.materialIndex = scene->addMaterial(glass);
+        scene->instances.push_back(ballInst);
+
+        LightData light;
+        light.type = kLightRect;
+        light.width = 0.8f;
+        light.height = 0.8f;
+        light.intensity = 60.0f;
+        light.normalize = 1;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.0f, 4.0f, 0.0f)) * Mat4::rotateX(-90.0f);
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 72;
+        scene->settings.resolutionY = 54;
+        scene->settings.samplesPerPixel = 16;
+        scene->settings.maxDepth = 8;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.caustics = 1;
+        scene->settings.causticsEngine = kCausticsEnginePhoton;
+        scene->settings.photonCount = 40000;
+        scene->settings.photonRadius = 0.15f;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto render = [&](float abbe, double& chroma, bool& finite) -> double {
+        RenderSession session;
+        session.setScene(buildScene(abbe));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        chroma = 0.0;
+        finite = true;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finite = false;
+                sum += double(luminance(c));
+                const float mean = (c.x + c.y + c.z) / 3.0f;
+                chroma += double(std::fabs(c.x - mean) + std::fabs(c.y - mean) + std::fabs(c.z - mean));
+            }
+        }
+        return sum;
+    };
+
+    double chromaOff = 0.0, chromaOn = 0.0;
+    bool finOff = true, finOn = true;
+    const double sumOff = render(0.0f, chromaOff, finOff);
+    const double sumOn = render(20.0f, chromaOn, finOn);
+    check(finOff && finOn, "photon dispersion renders are finite");
+    check(sumOn > 1.0 && sumOff > 1.0, "photon dispersion caustics have energy");
+    check(chromaOn > chromaOff * 1.15, "Abbe on photon caustics increases chroma");
+    std::printf("  off=%.1f on=%.1f chromaOff=%.1f chromaOn=%.1f\n", sumOff, sumOn, chromaOff, chromaOn);
 }
 
 // Rough (but still tightly focusing) glass must converge like smooth glass: the
@@ -8604,6 +8717,7 @@ int main(int argc, char** argv) {
     testBdptCausticThroughRefraction();
     testPhotonAim();
     testPhotonCaustics();
+    testPhotonDispersion();
     testRoughGlassCaustics();
     testRefractionSparkleClamp();
     testSplatAccumulationPrecision();
