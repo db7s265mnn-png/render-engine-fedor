@@ -8689,6 +8689,14 @@ int main(int argc, char** argv) {
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
+    if (getenv("SOL_ONLY_PHOTON")) {
+        registerBuiltinNodes();
+        testPhotonAim();
+        testPhotonCaustics();
+        testPhotonDispersion();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (getenv("SOL_ONLY_BDPT")) {
         registerBuiltinNodes();
         testBdptShadersAndSss();
