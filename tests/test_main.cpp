@@ -3307,25 +3307,28 @@ void testExitToDiffuse() {
 
     auto buildScene = [](int exitFlag) {
         auto scene = std::make_shared<Scene>();
-        MeshPtr mirror = std::make_shared<Mesh>();
-        mirror->positions = {Vec3(0, 0, -1.2f), Vec3(0, 0, 1.2f), Vec3(0, 2.2f, 1.2f), Vec3(0, 2.2f, -1.2f)};
-        mirror->indices = {0, 3, 2, 0, 2, 1};
-        mirror->normals = {Vec3(1, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 0)};
-        mirror->validate();
-        Material mirrorMat;
-        mirrorMat.baseColor = Vec3(1.0f);
-        mirrorMat.metallic = 1.0f;
-        mirrorMat.roughness = 0.0f;
-        mirrorMat.specular = 1.0f;
-        InstanceData mirrorInst;
-        mirrorInst.meshIndex = scene->addMesh(mirror);
-        mirrorInst.materialIndex = scene->addMaterial(mirrorMat);
-        scene->instances.push_back(mirrorInst);
+        // Camera → glass pane (depth 0, no NEE) → red card (depth 1 = maxDepth).
+        MeshPtr pane = std::make_shared<Mesh>();
+        pane->positions = {Vec3(-1.6f, 0, 1.2f), Vec3(1.6f, 0, 1.2f), Vec3(1.6f, 2.2f, 1.2f),
+                           Vec3(-1.6f, 2.2f, 1.2f)};
+        pane->indices = {0, 1, 2, 0, 2, 3};
+        pane->normals = {Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1)};
+        pane->validate();
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.roughness = 0.0f;
+        glass.specular = 1.0f;
+        InstanceData paneInst;
+        paneInst.meshIndex = scene->addMesh(pane);
+        paneInst.materialIndex = scene->addMaterial(glass);
+        scene->instances.push_back(paneInst);
 
         MeshPtr card = std::make_shared<Mesh>();
-        card->positions = {Vec3(-2, 0, -1.2f), Vec3(-2, 0, 1.2f), Vec3(-2, 2.2f, 1.2f), Vec3(-2, 2.2f, -1.2f)};
-        card->indices = {0, 3, 2, 0, 2, 1};
-        card->normals = {Vec3(1, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 0)};
+        card->positions = {Vec3(-1.6f, 0, 0), Vec3(1.6f, 0, 0), Vec3(1.6f, 2.2f, 0), Vec3(-1.6f, 2.2f, 0)};
+        card->indices = {0, 1, 2, 0, 2, 3};
+        card->normals = {Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1)};
         card->validate();
         Material cardMat;
         cardMat.baseColor = Vec3(0.85f, 0.15f, 0.1f);
@@ -3342,7 +3345,7 @@ void testExitToDiffuse() {
         light.type = kLightPoint;
         light.intensity = 60.0f;
         light.visibleCamera = 0;
-        light.xform = Mat4::translate(Vec3(-1.0f, 1.8f, 0.0f));
+        light.xform = Mat4::translate(Vec3(0.7f, 1.6f, 0.55f));
         light.xformInv = inverse(light.xform);
         scene->lights.push_back(light);
 
@@ -3358,7 +3361,7 @@ void testExitToDiffuse() {
         scene->settings.clampDirect = 0.0f;
         scene->settings.clampIndirect = 0.0f;
         scene->camera.cameraToWorld =
-            lookAtMatrix(Vec3(2.6f, 1.1f, 0.0f), Vec3(0.0f, 1.1f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+            lookAtMatrix(Vec3(0.0f, 1.1f, 3.2f), Vec3(0.0f, 1.1f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
         scene->cameraAuthored = true;
         scene->finalize();
         return scene;
