@@ -142,6 +142,8 @@ public:
         bool throughGlass = false;
         int depth = 0;
         int passThrough = 0;
+        int exitEscapeMat = -1;
+        int exitEscapeSkips = 0;
         int volumeScatterCount = 0;
         Vec3 origin = ctx.origin;
         Vec3 direction = ctx.direction;
@@ -208,13 +210,16 @@ public:
                 }
             }
             if (!didHit) {
-                if (!suppressCausticLight &&
-                    !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0) &&
+                const bool exitEscaping = exitEscapeMat >= 0;
+                if ((exitEscaping ||
+                     (!suppressCausticLight &&
+                      !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0))) &&
                     scene.domeLightIndex >= 0) {
                     const LightData& dome = scene.lights[scene.domeLightIndex];
-                    if (!(causticSuffix && !lightContributesCaustics(dome))) {
-                    const bool primary = depth == 0 && passThrough == 0;
-                    if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
+                    if (exitEscaping || !(causticSuffix && !lightContributesCaustics(dome))) {
+                    const bool primary = depth == 0 && passThrough == 0 && !exitEscaping;
+                    if (exitEscaping ||
+                        !(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
                         Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
                         if (!isBlack(envL)) {
                             float weight = 1.0f;
@@ -240,9 +245,10 @@ public:
                     }
                     }
                 }
-                if (!suppressCausticLight &&
-                    !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0)) {
-                    const bool primarySun = depth == 0 && passThrough == 0;
+                if (exitEscaping ||
+                    (!suppressCausticLight &&
+                     !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0))) {
+                    const bool primarySun = depth == 0 && passThrough == 0 && !exitEscaping;
                     if (!(primarySun && !settings.envVisibleCamera)) {
                         const Vec3 sunL =
                             cameraSunDiscRadiance(scene, origin, direction, bsdfPdf, specularBounce,
@@ -323,16 +329,28 @@ public:
                 continue;
             }
 
+            if (exitEscapeMat >= 0) {
+                if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips)) {
+                    origin = offsetRayOrigin(si.p, si.ng, direction);
+                    ++exitEscapeSkips;
+                    ++passThrough;
+                    continue;
+                }
+                SampledSpectrum contrib =
+                    throughput * nextEventEstimationSpectralOnce(
+                                     scene, tracer, si, exitToDiffuseLambert(mat), Frame(si.ns),
+                                     -direction, rng, waves, filmCs, currentMedium, 1);
+                contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
+                radiance += contrib;
+                break;
+            }
             if (depth >= maxDepth) {
-                if (materialWantsExitToDiffuse(mat)) {
-                    const Vec3 woExit = -direction;
-                    const Frame frameExit(si.ns);
-                    SampledSpectrum contrib =
-                        throughput * nextEventEstimationSpectralOnce(
-                                         scene, tracer, si, exitToDiffuseLambert(mat), frameExit, woExit,
-                                         rng, waves, filmCs, currentMedium, depth > 0 ? 1 : 0);
-                    contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
-                    radiance += contrib;
+                if (exitToDiffuseShouldStart(mat, depth)) {
+                    exitEscapeMat = si.materialIndex;
+                    origin = offsetRayOrigin(si.p, si.ng, direction);
+                    ++exitEscapeSkips;
+                    ++passThrough;
+                    continue;
                 }
                 break;
             }

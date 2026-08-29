@@ -442,7 +442,18 @@ SR_INL SR_HD Material sssExitLambertMaterial() {
 
 SR_INL SR_HD bool materialWantsExitToDiffuse(const Material& mat) { return mat.exitToDiffuse != 0; }
 
-// Last-hit cheat: Lambert from base_color × base. Glass with base ≈ 0 uses
+constexpr int kExitToDiffuseMaxSkips = 16;
+
+SR_INL SR_HD bool exitToDiffuseShouldStart(const Material& mat, int depth) {
+    return depth > 0 && materialWantsExitToDiffuse(mat);
+}
+
+SR_INL SR_HD bool exitToDiffuseSkipSelf(int escapeMaterialIndex, int hitMaterialIndex, int skips) {
+    return escapeMaterialIndex >= 0 && hitMaterialIndex == escapeMaterialIndex &&
+           skips < kExitToDiffuseMaxSkips;
+}
+
+// Destination Lambert: base_color × base. Glass with base ≈ 0 uses
 // transmission_color so a coloured dielectric does not exit as black or chalk.
 SR_INL SR_HD Material exitToDiffuseLambert(const Material& mat) {
     Material lambert = defaultMaterial();
@@ -1015,6 +1026,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     bool causticSuffix = false;
     int depth = 0;
     int passThrough = 0;
+    int exitEscapeMat = -1;
+    int exitEscapeSkips = 0;
     int volumeScatterCount = 0;
     // Last volume scatter (for MIS vs HG×sun volume NEE). Cleared on surface BSDF.
     bool volumePhaseMis = false;
@@ -1166,11 +1179,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             // Wireframe diagnostic: empty background (no env).
             if (settings.integrator == kIntegratorWireframe) break;
             if (scene.domeLightIndex >= 0) {
-                if (!suppressCausticLight) {
+                if (!suppressCausticLight || exitEscapeMat >= 0) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
-                if (!(causticSuffix && !lightContributesCaustics(dome))) {
-                const bool primary = depth == 0 && passThrough == 0;
-                if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
+                if (exitEscapeMat >= 0 || !(causticSuffix && !lightContributesCaustics(dome))) {
+                const bool primary = depth == 0 && passThrough == 0 && exitEscapeMat < 0;
+                if (exitEscapeMat >= 0 ||
+                    !(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
                     Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
                         if (!isBlack(envL)) {
                         float weight = 1.0f;
@@ -1199,8 +1213,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 }
                 }
             }
-            if (!suppressCausticLight) {
-                const bool primarySun = depth == 0 && passThrough == 0;
+            if (!suppressCausticLight || exitEscapeMat >= 0) {
+                const bool primarySun = depth == 0 && passThrough == 0 && exitEscapeMat < 0;
                 if (!(primarySun && !settings.envVisibleCamera)) {
                     const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, bsdfPdf,
                                                             specularBounce, primarySun, causticSuffix,
@@ -1317,16 +1331,32 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
+        // Exit to Diffuse: skip the dying material (opacity, no IOR) until another
+        // material, then Lambert + NEE × existing throughput. Camera hit never starts.
+        if (exitEscapeMat >= 0) {
+            if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips)) {
+                origin = offsetRayOrigin(si.p, si.ng, direction);
+                ++exitEscapeSkips;
+                ++passThrough;
+                continue;
+            }
+            const Vec3 woExit = -direction;
+            const Frame frameExit(si.ns);
+            const Vec3 nee =
+                nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), frameExit, woExit, rng,
+                                    guiding, currentMedium, 1);
+            Vec3 contrib = throughput * nee;
+            contrib = clampContribution(contrib, settings.clampDirect);
+            radiance += contrib;
+            break;
+        }
         if (depth >= maxDepth) {
-            if (materialWantsExitToDiffuse(mat)) {
-                const Vec3 woExit = -direction;
-                const Frame frameExit(si.ns);
-                const Vec3 nee =
-                    nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), frameExit, woExit,
-                                        rng, guiding, currentMedium, depth > 0 ? 1 : 0);
-                Vec3 contrib = throughput * nee;
-                if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
-                radiance += contrib;
+            if (exitToDiffuseShouldStart(mat, depth)) {
+                exitEscapeMat = si.materialIndex;
+                origin = offsetRayOrigin(si.p, si.ng, direction);
+                ++exitEscapeSkips;
+                ++passThrough;
+                continue;
             }
             break;
         }

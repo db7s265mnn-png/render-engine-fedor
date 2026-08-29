@@ -204,6 +204,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
         v.wo = -dir;
         v.beta = spectrumToRgb(beta, waves, cs);
         v.mediumIndex = scene.instances[si.instanceIndex].mediumIndex;
+        v.materialIndex = si.materialIndex;
         v.pdfFwd = toAreaPdf(pdfSaFwd, prev.p, si.p, si.ns);
         {
             Material matHero = mat;
@@ -979,18 +980,56 @@ inline Vec3 traceRadianceBdptSpectral(
 
     if (nEye == maxVerts && nEye >= 2) {
         const Vert& last = eye[nEye - 1];
-        if (last.type == VType::Surface && materialWantsExitToDiffuse(last.mat) && !last.connectable) {
-            SurfaceInteraction si{};
-            si.p = last.p;
-            si.ng = last.ng;
-            si.ns = last.ns;
-            const Frame frame(last.ns);
+        if (last.type == VType::Surface && materialWantsExitToDiffuse(last.mat) &&
+            last.materialIndex >= 0) {
+            const int escapeMat = last.materialIndex;
+            Vec3 origin = offsetRayOrigin(last.p, last.ng, -last.wo);
+            const Vec3 direction = -last.wo;
             const SampledWavelengths& wE = eyeWavePath[nEye - 1];
-            SampledSpectrum extra = nextEventEstimationSpectralOnce(
-                scene, tracer, si, exitToDiffuseLambert(last.mat), frame, last.wo, rng, wE, filmCs,
-                last.mediumIndex, 1);
-            extra = clampSpectrumIndirect(extra, settings.clampDirect);
-            addFilm(eyeBeta[nEye - 1] * extra, wE);
+            SampledSpectrum extra = SampledSpectrum::zero(wE.n);
+            bool got = false;
+            for (int skip = 0; skip < kExitToDiffuseMaxSkips; ++skip) {
+                RayHit hit;
+                if (!tracer.intersect(origin, direction, kFloatMax, hit)) {
+                    if (scene.domeLightIndex >= 0) {
+                        const LightData& dome = scene.lights[scene.domeLightIndex];
+                        const Vec3 envL = domeRadiance(scene, dome, direction, true);
+                        extra = upsampleEmission(envL, wE, filmCs);
+                        got = true;
+                    }
+                    break;
+                }
+                SurfaceInteraction si;
+                if (!buildSurfaceInteraction(scene, hit, origin, direction, si)) break;
+                if (si.lightIndex >= 0) {
+                    const LightData& light = scene.lights[si.lightIndex];
+                    const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
+                    extra = upsampleEmission(areaLightEmission(scene, light, direction, lightN), wE,
+                                            filmCs);
+                    got = true;
+                    break;
+                }
+                if (exitToDiffuseSkipSelf(escapeMat, si.materialIndex, skip)) {
+                    origin = offsetRayOrigin(si.p, si.ng, direction);
+                    continue;
+                }
+                Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
+                mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject,
+                                               si.uvFilterWidth, si.pRef, si.nRef, si.hasPref);
+                if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
+                    origin = offsetRayOrigin(si.p, si.ng, direction);
+                    continue;
+                }
+                extra = nextEventEstimationSpectralOnce(scene, tracer, si, exitToDiffuseLambert(mat),
+                                                        Frame(si.ns), -direction, rng, wE, filmCs,
+                                                        last.mediumIndex, 1);
+                got = true;
+                break;
+            }
+            if (got) {
+                extra = clampSpectrumIndirect(extra, settings.clampDirect);
+                addFilm(eyeBeta[nEye - 1] * extra, wE);
+            }
         }
     }
     }

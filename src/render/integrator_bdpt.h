@@ -68,6 +68,7 @@ struct Vert {
     bool mediumScatter = false;
     float mediumG = 0.0f;
     int mediumIndex = -1;
+    int materialIndex = -1;
 #if SOLSTICE_HAVE_OPENPGL
     // OpenPGL segment opened at this eye vertex — NEE/connection radiance is
     // attributed here (not to the last bounce's currentSegment_).
@@ -77,20 +78,49 @@ struct Vert {
 
 SR_INL float remap0(float f) { return f > 0.0f ? f : 1.0f; }
 
-// Last eye vertex at the vertex cap: glass/mirror is not connectable, so s=1
-// never fires. One Lambert NEE with the arriving beta — does not rewrite the
+// Last eye vertex at the vertex cap: skip that material as opacity (same
+// direction, no IOR) until a different material, then Lambert + NEE. Miss
+// takes the dome even if it is hidden from the camera. Does not rewrite the
 // vertex for pbrt / MNEE / Photon / Aimed family partition.
 template <typename Tracer>
-inline Vec3 exitToDiffuseVertexNee(const SceneView& scene, const Tracer& tracer, const Vert& v, Rng& rng,
-                                   int eyeBounceNee) {
-    if (v.type != VType::Surface || !materialWantsExitToDiffuse(v.mat) || v.connectable) return Vec3(0.0f);
-    SurfaceInteraction si{};
-    si.p = v.p;
-    si.ng = v.ng;
-    si.ns = v.ns;
-    const Frame frame(v.ns);
-    return nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(v.mat), frame, v.wo, rng,
-                               v.mediumIndex, eyeBounceNee);
+inline Vec3 exitToDiffuseEscapeFromVertex(const SceneView& scene, const Tracer& tracer, const Vert& v,
+                                          Rng& rng, int eyeBounceNee) {
+    if (v.type != VType::Surface || !materialWantsExitToDiffuse(v.mat) || v.materialIndex < 0)
+        return Vec3(0.0f);
+    const int escapeMat = v.materialIndex;
+    Vec3 origin = offsetRayOrigin(v.p, v.ng, -v.wo);
+    const Vec3 direction = -v.wo;
+    for (int skip = 0; skip < kExitToDiffuseMaxSkips; ++skip) {
+        RayHit hit;
+        if (!tracer.intersect(origin, direction, kFloatMax, hit)) {
+            if (scene.domeLightIndex < 0) return Vec3(0.0f);
+            const LightData& dome = scene.lights[scene.domeLightIndex];
+            return domeRadiance(scene, dome, direction, /*nearestTexel=*/true);
+        }
+        SurfaceInteraction si;
+        if (!buildSurfaceInteraction(scene, hit, origin, direction, si)) return Vec3(0.0f);
+        if (si.lightIndex >= 0) {
+            const LightData& light = scene.lights[si.lightIndex];
+            const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
+            return areaLightEmission(scene, light, direction, lightN);
+        }
+        if (exitToDiffuseSkipSelf(escapeMat, si.materialIndex, skip)) {
+            origin = offsetRayOrigin(si.p, si.ng, direction);
+            continue;
+        }
+        Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
+        mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth,
+                                       si.pRef, si.nRef, si.hasPref);
+        if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
+            origin = offsetRayOrigin(si.p, si.ng, direction);
+            continue;
+        }
+        const Frame frame(si.ns);
+        return nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), frame, -direction, rng,
+                                   si.instanceIndex >= 0 ? scene.instances[si.instanceIndex].mediumIndex : -1,
+                                   eyeBounceNee);
+    }
+    return Vec3(0.0f);
 }
 
 // Path Tracer Russian roulette on a BDPT subpath. The vertex already on the
@@ -602,6 +632,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, Ve
         v.wo = -dir;
         v.beta = beta;
         v.mediumIndex = scene.instances[si.instanceIndex].mediumIndex;
+        v.materialIndex = si.materialIndex;
         v.pdfFwd = toAreaPdf(pdfSaFwd, prev.p, si.p, si.ns);
         {
             const LobeWeights lw = computeLobes(mat, Frame(si.ns).toLocal(-dir));
@@ -1409,7 +1440,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
 
     if (nEye == maxVerts && nEye >= 2) {
         const Vert& last = eye[nEye - 1];
-        const Vec3 extra = exitToDiffuseVertexNee(scene, tracer, last, rng, 1);
+        const Vec3 extra = exitToDiffuseEscapeFromVertex(scene, tracer, last, rng, 1);
         if (!isBlack(extra) && isFinite(extra)) {
             Vec3 c = last.beta * extra;
             c = clampContribution(c, settings.clampDirect);

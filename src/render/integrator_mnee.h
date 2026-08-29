@@ -542,6 +542,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
     Material anchorMat{};
     int depth = 0;
     int passThrough = 0;
+    int exitEscapeMat = -1;
+    int exitEscapeSkips = 0;
     RayShadeKind rayKind = RayShadeKind::Camera;
     const RenderSettingsData& settings = scene.settings;
     const int maxDepth = srMax(1, settings.maxDepth);
@@ -557,9 +559,10 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             if (scene.domeLightIndex >= 0) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
                 // Per-light caustics off: skip env after a diffuse→specular suffix.
-                if (!(mneeFamily && !lightContributesCaustics(dome))) {
-                const bool primary = depth == 0 && passThrough == 0;
-                if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
+                if (exitEscapeMat >= 0 || !(mneeFamily && !lightContributesCaustics(dome))) {
+                const bool primary = depth == 0 && passThrough == 0 && exitEscapeMat < 0;
+                if (exitEscapeMat >= 0 ||
+                    !(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
                     Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
                     if (!isBlack(envL)) {
                         float weight = 1.0f;
@@ -719,16 +722,28 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             continue;
         }
 
+        if (exitEscapeMat >= 0) {
+            if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips)) {
+                origin = offsetRayOrigin(si.p, si.ng, direction);
+                ++exitEscapeSkips;
+                ++passThrough;
+                continue;
+            }
+            const Vec3 nee =
+                nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), Frame(si.ns),
+                                    -direction, rng, guiding, -1, 1);
+            Vec3 contrib = throughput * nee;
+            contrib = clampContribution(contrib, settings.clampDirect);
+            radiance += contrib;
+            break;
+        }
         if (depth >= maxDepth) {
-            if (materialWantsExitToDiffuse(mat)) {
-                const Vec3 woExit = -direction;
-                const Frame frameExit(si.ns);
-                const Vec3 nee =
-                    nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), frameExit, woExit,
-                                        rng, guiding, -1, depth > 0 ? 1 : 0);
-                Vec3 contrib = throughput * nee;
-                if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
-                radiance += contrib;
+            if (exitToDiffuseShouldStart(mat, depth)) {
+                exitEscapeMat = si.materialIndex;
+                origin = offsetRayOrigin(si.p, si.ng, direction);
+                ++exitEscapeSkips;
+                ++passThrough;
+                continue;
             }
             break;
         }

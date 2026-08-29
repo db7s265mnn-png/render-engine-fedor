@@ -789,7 +789,7 @@ void testBsdf() {
                   "Lambert is albedo/π when diffuse_roughness=0");
     }
 
-    // Exit to Diffuse: last-hit Lambert from base × base_color (glass uses transmission tint).
+    // Exit to Diffuse destination Lambert: base × base_color (glass uses transmission tint).
     {
         Material def{};
         check(def.exitToDiffuse == 0, "Exit to Diffuse defaults off");
@@ -805,6 +805,11 @@ void testBsdf() {
         glass.ior = 1.5f;
         glass.exitToDiffuse = 1;
         check(materialWantsExitToDiffuse(glass), "flag enables exit");
+        check(!exitToDiffuseShouldStart(glass, 0), "camera hit does not start Exit to Diffuse");
+        check(exitToDiffuseShouldStart(glass, 1), "bounce at max depth can start Exit to Diffuse");
+        check(exitToDiffuseSkipSelf(3, 3, 0), "same material is skipped");
+        check(!exitToDiffuseSkipSelf(3, 4, 0), "other material is the destination");
+        check(!exitToDiffuseSkipSelf(3, 3, kExitToDiffuseMaxSkips), "skip cap stops self-walk");
         const Material lamb = exitToDiffuseLambert(glass);
         check(lamb.transmission <= 1e-6f && lamb.specular <= 1e-6f && lamb.metallic <= 1e-6f,
               "exit material is Lambert");
@@ -3307,37 +3312,40 @@ void testExitToDiffuse() {
 
     auto buildScene = [](int exitFlag) {
         auto scene = std::make_shared<Scene>();
-        // Camera → glass pane (depth 0, no NEE) → red card (depth 1 = maxDepth).
-        MeshPtr pane = std::make_shared<Mesh>();
-        pane->positions = {Vec3(-1.6f, 0, 1.2f), Vec3(1.6f, 0, 1.2f), Vec3(1.6f, 2.2f, 1.2f),
-                           Vec3(-1.6f, 2.2f, 1.2f)};
-        pane->indices = {0, 1, 2, 0, 2, 3};
-        pane->normals = {Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1)};
-        pane->validate();
+        // Camera → glass front (depth 0) → same-material back (depth 1 = maxDepth).
+        // Flag on glass: skip that material as opacity, Lambert+NEE the red card.
+        auto makeQuad = [](float z) {
+            MeshPtr m = std::make_shared<Mesh>();
+            m->positions = {Vec3(-1.6f, 0, z), Vec3(1.6f, 0, z), Vec3(1.6f, 2.2f, z), Vec3(-1.6f, 2.2f, z)};
+            m->indices = {0, 1, 2, 0, 2, 3};
+            m->normals = {Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1)};
+            m->validate();
+            return m;
+        };
         Material glass;
         glass.baseColor = Vec3(1.0f);
         glass.transmission = 1.0f;
         glass.ior = 1.5f;
         glass.roughness = 0.0f;
         glass.specular = 1.0f;
-        InstanceData paneInst;
-        paneInst.meshIndex = scene->addMesh(pane);
-        paneInst.materialIndex = scene->addMaterial(glass);
-        scene->instances.push_back(paneInst);
+        glass.exitToDiffuse = exitFlag;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData frontInst;
+        frontInst.meshIndex = scene->addMesh(makeQuad(1.2f));
+        frontInst.materialIndex = glassIdx;
+        scene->instances.push_back(frontInst);
+        InstanceData backInst;
+        backInst.meshIndex = scene->addMesh(makeQuad(0.6f));
+        backInst.materialIndex = glassIdx;
+        scene->instances.push_back(backInst);
 
-        MeshPtr card = std::make_shared<Mesh>();
-        card->positions = {Vec3(-1.6f, 0, 0), Vec3(1.6f, 0, 0), Vec3(1.6f, 2.2f, 0), Vec3(-1.6f, 2.2f, 0)};
-        card->indices = {0, 1, 2, 0, 2, 3};
-        card->normals = {Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1)};
-        card->validate();
         Material cardMat;
         cardMat.baseColor = Vec3(0.85f, 0.15f, 0.1f);
         cardMat.baseWeight = 1.0f;
         cardMat.roughness = 1.0f;
         cardMat.specular = 0.0f;
-        cardMat.exitToDiffuse = exitFlag;
         InstanceData cardInst;
-        cardInst.meshIndex = scene->addMesh(card);
+        cardInst.meshIndex = scene->addMesh(makeQuad(0.0f));
         cardInst.materialIndex = scene->addMaterial(cardMat);
         scene->instances.push_back(cardInst);
 
@@ -3389,7 +3397,8 @@ void testExitToDiffuse() {
     const double sumOff = renderSum(0, finOff);
     const double sumOn = renderSum(1, finOn);
     check(finOff && finOn, "exit-to-diffuse renders are finite");
-    check(sumOn > sumOff * 1.5 && sumOn > 1.0, "Exit to Diffuse adds last-hit Lambert NEE");
+    check(sumOn > sumOff * 1.5 && sumOn > 1.0,
+          "Exit to Diffuse skips the dying glass and lights the next material");
     std::printf("  off=%.3f on=%.3f\n", sumOff, sumOn);
 }
 

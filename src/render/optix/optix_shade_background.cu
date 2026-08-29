@@ -19,7 +19,9 @@ __device__ inline void shadeBackgroundPixel(int pixel) {
         terminatePath(pixel, path);
         return;
     }
-    if ((gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
+    const bool exitEscaping = path.exitEscapeMat >= 0;
+    if (!exitEscaping &&
+        (gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
                           params.splatInvLightPaths) ||
          suppressCausticLight)) {
         terminatePath(pixel, path);
@@ -28,7 +30,8 @@ __device__ inline void shadeBackgroundPixel(int pixel) {
 
     if (scene.domeLightIndex >= 0 && scene.lights) {
         const LightData& dome = scene.lights[scene.domeLightIndex];
-        const bool hidePrimary = primary && (!scene.settings.envVisibleCamera || !dome.visibleCamera);
+        const bool hidePrimary =
+            !exitEscaping && primary && (!scene.settings.envVisibleCamera || !dome.visibleCamera);
         if (!hidePrimary && !(path.causticSuffix && !lightContributesCaustics(dome))) {
             Vec3 envL = domeRadiance(scene, dome, path.direction, /*nearestTexel=*/path.depth > 0);
             if (!isBlack(envL)) {

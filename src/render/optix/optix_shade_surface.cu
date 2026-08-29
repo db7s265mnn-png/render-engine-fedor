@@ -239,8 +239,26 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     }
 
     const int maxDepth = srMax(1, scene.settings.maxDepth);
-    if (path.depth >= maxDepth) {
+    if (path.exitEscapeMat >= 0) {
+        if (exitToDiffuseSkipSelf(path.exitEscapeMat, si.materialIndex, path.hops)) {
+            path.origin = offsetRay(si.p, si.ng, path.direction);
+            ++path.hops;
+            path.queue = kQueueIntersectClosest;
+            return;
+        }
         tryEnqueueExitToDiffuseNee(path, shadow, scene, si, mat, frame, wo);
+        terminatePath(pixel, path);
+        return;
+    }
+    if (path.depth >= maxDepth) {
+        if (!path.lightPath && exitToDiffuseShouldStart(mat, path.depth)) {
+            path.exitEscapeMat = si.materialIndex;
+            path.hops = 0;
+            path.origin = offsetRay(si.p, si.ng, path.direction);
+            ++path.hops;
+            path.queue = kQueueIntersectClosest;
+            return;
+        }
         terminatePath(pixel, path);
         return;
     }
