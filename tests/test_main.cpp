@@ -3364,7 +3364,7 @@ void testExitToDiffuse() {
         return scene;
     };
 
-    auto renderSum = [](int exitFlag, bool& finiteOut) -> double {
+    auto renderSum = [&](int exitFlag, bool& finiteOut) -> double {
         RenderSession session;
         session.setScene(buildScene(exitFlag));
         session.start();
