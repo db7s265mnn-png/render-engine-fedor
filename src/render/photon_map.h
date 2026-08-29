@@ -289,6 +289,8 @@ SR_INL bool sceneHasRoughCausticCaster(const SceneView& scene) {
 SR_INL bool causticsUsePhotonMap(const RenderSettingsData& s, const SceneView* scene = nullptr) {
     if (s.caustics == 0) return false;
     if (s.causticsEngine == kCausticsEnginePbrt) return false;
+    if (s.causticsEngine == kCausticsEngineAimedLt || s.causticsEngine == kCausticsEngineAimedLtMnee)
+        return false;
     if (s.causticsEngine == kCausticsEnginePhoton) return true;
     if (s.causticsEngine == kCausticsEngineAuto && scene && sceneHasRoughCausticCaster(*scene))
         return true;
@@ -300,8 +302,10 @@ SR_INL bool causticsUsePhotonMap(const RenderSettingsData& s, const SceneView* s
 SR_INL bool causticsUseMnee(const RenderSettingsData& s, const SceneView* scene = nullptr) {
     if (s.caustics == 0) return false;
     if (s.causticsEngine == kCausticsEnginePbrt) return false;
+    if (s.causticsEngine == kCausticsEngineAimedLt) return false;
     if (s.causticsEngine == kCausticsEnginePhoton) return false;
     if (s.causticsEngine == kCausticsEngineMnee) return true;
+    if (s.causticsEngine == kCausticsEngineAimedLtMnee) return true;
     if (s.causticsEngine == kCausticsEngineAuto) {
         // MNEE+Photon + rough glass → photons; + delta-only → MNEE.
         return !causticsUsePhotonMap(s, scene);

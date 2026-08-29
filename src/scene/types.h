@@ -480,10 +480,16 @@ enum CausticsEngine : int {
     // Caustic-only photon map gather (VCM-style density estimation) — better for
     // rough glass and caustics seen through thick refractive bases.
     kCausticsEnginePhoton = 3,
+    // CPU Aimed LT (Keller 2017 caster AABBs). Same idea as GpuCausticsEngine,
+    // but on Embree PT/BDPT. Appended so older 0..3 scene files stay put.
+    kCausticsEngineAimedLt = 4,
+    kCausticsEngineAimedLtMnee = 5,
 };
 
+struct GpuPhotonCluster;
+
 // OptiX-only caustic estimators (Render Device = GPU, or the GPU half of XPU).
-// CPU Embree keeps CausticsEngine 0..3; do not overload those indices.
+// CPU Embree uses CausticsEngine 0..5; these GPU indices stay 0..1.
 enum GpuCausticsEngine : int {
     // Aimed-only light tracing (caster AABBs). SDS splats stay on directly
     // visible receivers. No MNEE wavefront — camera and light paths finish
@@ -673,6 +679,20 @@ struct RenderSettingsData {
 
 // GPU light tracing deposits SDS into the same accum.rgb that display divides
 // by camera `w`. Variance skip freezes `w` while LT still splats — unbounded mean.
+SR_INL SR_HD bool causticsUseAimedLt(const RenderSettingsData& s) {
+    return s.caustics != 0 &&
+           (s.causticsEngine == kCausticsEngineAimedLt || s.causticsEngine == kCausticsEngineAimedLtMnee);
+}
+
+// Aimed LT family partition on the eye path (these two engines only).
+// Skip LDS camera SDS that light tracing owns. Aimed LT + MNEE keeps the
+// through-glass suffix (MNEE / Fresnel NEE), matching GPU Aimed LT + MNEE.
+SR_INL SR_HD bool cpuAimedSkipCameraSds(const RenderSettingsData& s, int causticSuffix, int throughGlass) {
+    if (!causticsUseAimedLt(s) || causticSuffix == 0) return false;
+    if (s.causticsEngine == kCausticsEngineAimedLtMnee && throughGlass) return false;
+    return true;
+}
+
 SR_INL SR_HD bool gpuLightTraceSkipUnsafe(const RenderSettingsData& s) {
     return s.caustics != 0 && renderDeviceUsesGpu(s.backend);
 }
@@ -777,6 +797,11 @@ struct SceneView {
     // Precomputed total-power sums used for the infinite-vs-finite split decision.
     float infiniteLightPower               = 0.f;
     float finiteLightPower                 = 0.f;
+
+    // CPU Aimed LT clusters (host pointers). Null unless causticsUseAimedLt.
+    // GPU uses LaunchParams::photonClusters — keep these null on the device copy.
+    const GpuPhotonCluster* photonAimClusters = nullptr;
+    int photonAimClusterCount = 0;
 };
 
 SR_INL SR_HD Material defaultMaterial() {

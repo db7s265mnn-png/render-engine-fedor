@@ -1588,7 +1588,7 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             QString valueName = name;
             int currentIndex = parameter.toInt();
             // GPU: keep the same "Caustics Engine" row, swap in the two OptiX
-            // estimators, and store the choice on causticsenginegpu (CPU 0..3 stays).
+            // estimators, and store the choice on causticsenginegpu (CPU 0..5 stays).
             if (name == QLatin1String("causticsengine") && node &&
                 node->typeName() == QLatin1String("rendersettings") &&
                 node->intValue(QStringLiteral("backend"), 0) == 1) {

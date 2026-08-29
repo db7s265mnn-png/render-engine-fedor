@@ -533,6 +533,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
     bool sawNonSpecular = false;
     bool mneeFamily = false;
     bool photonFamily = false;  // diffuse → photon-caster → … (owned by photon map)
+    bool throughGlass = false;  // Aimed LT + MNEE: eye already refracted through glass
     int familyChainLen = 0;
     Vec3 anchorP(0.0f);  // last non-specular surface vertex (MNEE launch point)
     Vec3 anchorN(0.0f, 1.0f, 0.0f);
@@ -837,7 +838,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         // Same connectable test as Path Tracer / BDPT s=1: skip near-spec glass
         // (roughness 0.1) so GGX-toward-light does not light the surface up.
         const bool connectable = eyePathNeeConnectable(mat, woLocal);
-        if (connectable) {
+        const bool skipAimedSds =
+            cpuAimedSkipCameraSds(settings, mneeFamily ? 1 : 0, throughGlass ? 1 : 0);
+        if (connectable && !skipAimedSds) {
             if (photonCaustics) {
                 Vec3 g = photons->gather(si.p, si.ns, wo, mat, photonRadius);
                 if (!isBlack(g) && isFinite(g)) {
@@ -965,6 +968,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         neeSumGuide += c;
                     }
                 } else if (glassPath && !photonEngine) {
+                    // Aimed LT + MNEE: LT owns the open-floor SDS. MNEE only after
+                    // the eye has already gone through contributing glass.
+                    if (causticsUseAimedLt(settings) && !throughGlass) continue;
                     // Multi-seed MNEE: manifold connections through the refraction
                     // chain (matching BSDF path copies are MIS'd at light hits).
                     // Skipped when the photon engine owns caustics.
@@ -1096,6 +1102,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 #endif
 
         throughput *= weight;
+        if (bs.transmitted && materialContributesCaustics(matCau)) throughGlass = true;
         if (bs.transmitted) throughput = applyFakeDispersionThroughput(throughput, mat, dispersion);
         if (!isFinite(throughput) || isBlack(throughput)) break;
 

@@ -21,6 +21,8 @@
 #include "render/bdpt_scratch.h"
 #include "render/integrator_mnee.h"
 #include "render/integrator_spectral.h"
+#include "render/integrator_aimed_lt.h"
+#include "render/photon_aim.h"
 #include "render/photon_map.h"
 #include "render/render_device.h"
 #include "solstice_config.h"
@@ -277,6 +279,13 @@ public:
             !diagnosticIntegrator && !hasVolumes && causticsUsePhotonMap(settings, &scene);
         const bool useMnee =
             !diagnosticIntegrator && !hasVolumes && causticsUseMnee(settings, &scene);
+        const bool useAimedLt =
+            !diagnosticIntegrator && !hasVolumes && causticsUseAimedLt(settings);
+        GpuPhotonCluster aimClusters[kMaxGpuPhotonClusters];
+        int nAim = 0;
+        if (useAimedLt) nAim = fillPhotonAimClusters(scene, aimClusters, kMaxGpuPhotonClusters);
+        scene.photonAimClusters = nAim > 0 ? aimClusters : nullptr;
+        scene.photonAimClusterCount = nAim;
         const bool causticSpecialized = usePhoton || useMnee;
         const bool useSpectralBdpt = wantBdpt && !hasVolumes && !diagnosticIntegrator;
         const bool useSpectralPt = !diagnosticIntegrator && !(pathTracer && causticSpecialized) &&
@@ -331,6 +340,14 @@ public:
             else if (useBdpt && hasVolumes)
                 logInfo("BDPT skipped: scene has VDB volumes — using Path Tracer "
                         "(no light subpath from sky/sun; fog walk is PT-only)");
+            else if (useAimedLt && useBdpt)
+                logInfo(std::string("Caustics: BDPT Aimed LT") +
+                        (settings.causticsEngine == kCausticsEngineAimedLtMnee ? " + MNEE" : "") +
+                        " nAim=" + std::to_string(scene.photonAimClusterCount));
+            else if (useAimedLt)
+                logInfo(std::string("Caustics: Path Tracer Aimed LT") +
+                        (settings.causticsEngine == kCausticsEngineAimedLtMnee ? " + MNEE" : "") +
+                        " nAim=" + std::to_string(scene.photonAimClusterCount));
             else if (useMnee)
                 logInfo(std::string("Caustics: MNEE (manifold next-event, refractive)") +
                         (settings.causticsEngine == kCausticsEngineAuto ? " [MNEE+Photon→delta]" : "") +
@@ -391,7 +408,7 @@ public:
         BdptPassStats bdptStatsStorage;
         BdptPassStats* bdptStats =
             (settings.bdptTimers && useSpectralBdpt && !hasVolumes) ? &bdptStatsStorage : nullptr;
-        if (useSpectralBdpt && !hasVolumes) {
+        if ((useSpectralBdpt && !hasVolumes) || useAimedLt) {
             // ThreadPool: caller is threadId 0, workers are 1..N.
             bdptScratchPool_.ensureThreads(pool_->threadCount() + 1,
                                            bdpt::bdptSessionVerts(settings.maxDepth), true);
@@ -507,8 +524,9 @@ public:
                 ctx.splatFb = splatFbFor(disp);
                 ctx.photons = photonPtr;
                 ctx.bdptStats = bdptStats;
-                ctx.bdptScratch =
-                    (useSpectralBdpt && !hasVolumes) ? bdptScratchPool_.get(threadId) : nullptr;
+                ctx.bdptScratch = ((useSpectralBdpt && !hasVolumes) || useAimedLt)
+                                      ? bdptScratchPool_.get(threadId)
+                                      : nullptr;
 #if SOLSTICE_HAVE_OPENPGL
                 PathGuiding::ThreadState* guidingPtr = nullptr;
                 if (useGuiding) {
@@ -531,6 +549,9 @@ public:
                 } else {
                     radiance = PathIntegrator<EmbreeTracer>{}.Li(ctx);
                 }
+                if (useAimedLt && !useSpectralBdpt && ctx.splatFb)
+                    bdpt::splatAimedLightTrace(scene, tracer, *ctx.rng, ctx.splatFb, ctx.dispersion,
+                                               ctx.bdptScratch);
                 if (guidingPtr) guidingPtr->endPath();
 #else
                 (void)useGuiding;
@@ -548,6 +569,9 @@ public:
                 } else {
                     radiance = PathIntegrator<EmbreeTracer>{}.Li(ctx);
                 }
+                if (useAimedLt && !useSpectralBdpt && ctx.splatFb)
+                    bdpt::splatAimedLightTrace(scene, tracer, *ctx.rng, ctx.splatFb, ctx.dispersion,
+                                               ctx.bdptScratch);
 #endif
                 return radiance;
             };

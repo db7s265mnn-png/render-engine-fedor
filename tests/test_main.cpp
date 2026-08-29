@@ -1087,7 +1087,10 @@ void testXpuDevice() {
         check(cpuCau != nullptr, "CPU caustics engine parameter exists");
         check(gpuCau != nullptr, "GPU caustics engine parameter exists");
         if (cpuCau && gpuCau) {
-            check(cpuCau->menuItems.size() == 4, "CPU caustics menu has 4 engines");
+            check(cpuCau->menuItems.size() == 6, "CPU caustics menu has 6 engines");
+            check(cpuCau->menuItems[4] == QLatin1String("Aimed LT"), "CPU Aimed LT is index 4");
+            check(cpuCau->menuItems[5] == QLatin1String("Aimed LT + MNEE"),
+                  "CPU Aimed LT + MNEE is index 5");
             check(gpuCau->menuItems.size() == 2, "GPU caustics menu has Aimed LT / MNEE");
             check(gpuCau->menuItems[0] == QLatin1String("Aimed LT"), "GPU default label is Aimed LT");
             check(gpuCau->menuItems[1] == QLatin1String("Aimed LT + MNEE"),
@@ -3097,6 +3100,125 @@ void testIntegratorDeviceMemory() {
           "XPU clamp drops BDPT");
     check(clampIntegratorForBackend(kBackendCpuEmbree, kIntegratorBdpt) == kIntegratorBdpt,
           "CPU keeps BDPT");
+}
+
+void testAimedLtCpu() {
+    std::printf("aimed-lt-cpu\n");
+    RenderSettingsData s;
+    s.caustics = 1;
+    s.causticsEngine = kCausticsEnginePbrt;
+    check(!causticsUseAimedLt(s), "pbrt is not Aimed LT");
+    check(!causticsUseMnee(s), "pbrt does not use MNEE");
+    s.causticsEngine = kCausticsEngineAimedLt;
+    check(kCausticsEngineAimedLt == 4, "Aimed LT is engine 4");
+    check(causticsUseAimedLt(s), "Aimed LT flag");
+    check(!causticsUseMnee(s, nullptr), "Aimed LT does not run MNEE");
+    check(!causticsUsePhotonMap(s, nullptr), "Aimed LT does not run photons");
+    check(cpuAimedSkipCameraSds(s, 1, 0), "Aimed LT skips camera SDS");
+    check(!cpuAimedSkipCameraSds(s, 0, 0), "Aimed LT keeps non-SDS eye");
+    s.causticsEngine = kCausticsEngineAimedLtMnee;
+    check(kCausticsEngineAimedLtMnee == 5, "Aimed LT + MNEE is engine 5");
+    check(causticsUseMnee(s, nullptr), "Aimed LT + MNEE runs MNEE");
+    check(!causticsUsePhotonMap(s, nullptr), "Aimed LT + MNEE does not run photons");
+    check(!cpuAimedSkipCameraSds(s, 1, 1), "Aimed LT + MNEE keeps through-glass SDS");
+    check(cpuAimedSkipCameraSds(s, 1, 0), "Aimed LT + MNEE still skips floor-first SDS");
+    s.causticsEngine = kCausticsEngineMnee;
+    check(!causticsUseAimedLt(s), "classic MNEE is not Aimed LT");
+
+    registerBuiltinNodes();
+    NodeGraph graph;
+    Node* settings = graph.createNode("rendersettings", "rs_aim");
+    check(settings != nullptr, "aimed LT rendersettings");
+    if (settings) {
+        settings->setParameterValue("backend", 0);
+        settings->setParameterValue("causticsengine", 4);
+        CookContext ctx;
+        StagePtr stage = graph.cook(settings, ctx);
+        check(settings->intValue("causticsengine") == kCausticsEngineAimedLt, "cook keeps Aimed LT");
+        check(stage && stage->settings.causticsEngine == kCausticsEngineAimedLt,
+              "cooked settings store Aimed LT");
+        settings->setParameterValue("causticsengine", 5);
+        stage = graph.cook(settings, ctx);
+        check(stage && stage->settings.causticsEngine == kCausticsEngineAimedLtMnee,
+              "cooked settings store Aimed LT + MNEE");
+        settings->setParameterValue("causticsengine", 0);
+        stage = graph.cook(settings, ctx);
+        check(stage && stage->settings.causticsEngine == kCausticsEnginePbrt,
+              "pbrt engine still cooks as 0");
+    }
+
+    auto scene = std::make_shared<Scene>();
+    MeshPtr floor = std::make_shared<Mesh>();
+    floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+    floor->indices = {0, 2, 1, 0, 3, 2};
+    floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+    floor->validate();
+    const int floorMesh = scene->addMesh(floor);
+    Material floorMat;
+    floorMat.roughness = 0.9f;
+    floorMat.specular = 0.0f;
+    InstanceData floorInst;
+    floorInst.meshIndex = floorMesh;
+    floorInst.materialIndex = scene->addMaterial(floorMat);
+    scene->instances.push_back(floorInst);
+    MeshPtr ball = makeSphereMesh(0.7f, 24, 12);
+    Material glass;
+    glass.transmission = 1.0f;
+    glass.ior = 1.5f;
+    glass.roughness = 0.0f;
+    glass.specular = 1.0f;
+    InstanceData ballInst;
+    ballInst.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+    ballInst.meshIndex = scene->addMesh(ball);
+    ballInst.materialIndex = scene->addMaterial(glass);
+    scene->instances.push_back(ballInst);
+    LightData light;
+    light.type = kLightRect;
+    light.width = 0.8f;
+    light.height = 0.8f;
+    light.intensity = 60.0f;
+    light.normalize = 1;
+    light.xform = Mat4::translate(Vec3(0.0f, 4.0f, 0.0f)) * Mat4::rotateX(-90.0f);
+    light.xformInv = inverse(light.xform);
+    scene->lights.push_back(light);
+    scene->settings.caustics = 1;
+    scene->settings.causticsEngine = kCausticsEngineAimedLt;
+    scene->camera.cameraToWorld =
+        lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+    scene->cameraAuthored = true;
+    scene->finalize();
+
+    SceneView view = scene->view();
+    GpuPhotonCluster clusters[kMaxGpuPhotonClusters];
+    const int n = fillPhotonAimClusters(view, clusters, kMaxGpuPhotonClusters);
+    check(n >= 1, "glass sphere is an aim cluster");
+    view.photonAimClusters = n > 0 ? clusters : nullptr;
+    view.photonAimClusterCount = n;
+    view.settings.caustics = 1;
+    view.settings.causticsEngine = kCausticsEngineAimedLt;
+
+    Rng rng(1, 2);
+    int ok = 0;
+    for (int i = 0; i < 48; ++i) {
+        bdpt::Vert v0;
+        Vec3 dir;
+        float pdf = 0.0f;
+        if (bdpt::startLightPath(view, rng, v0, dir, pdf) && pdf > 0.0f && isFinite(v0.beta) &&
+            !isBlack(v0.beta))
+            ++ok;
+    }
+    check(ok > 8, "aimed startLightPath produces finite light paths");
+
+    view.settings.causticsEngine = kCausticsEnginePbrt;
+    int okPbrt = 0;
+    Rng rngPbrt(3, 4);
+    for (int i = 0; i < 48; ++i) {
+        bdpt::Vert v0;
+        Vec3 dir;
+        float pdf = 0.0f;
+        if (bdpt::startLightPath(view, rngPbrt, v0, dir, pdf) && pdf > 0.0f) ++okPbrt;
+    }
+    check(okPbrt > 8, "pbrt startLightPath still works without aim clusters");
 }
 
 void testUndoHub() {
@@ -8154,6 +8276,7 @@ int main(int argc, char** argv) {
         testBdptTimersFormat();
         testBdptScratchReuse();
         testIntegratorDeviceMemory();
+        testAimedLtCpu();
         testUndoHub();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
@@ -8208,6 +8331,7 @@ int main(int argc, char** argv) {
     testBdptTimersFormat();
     testBdptScratchReuse();
     testIntegratorDeviceMemory();
+    testAimedLtCpu();
     testUndoHub();
     testDispersionAndThinFilm();
     testIntegratorSwitchStress();

@@ -154,6 +154,26 @@ SR_INL SR_HD float gpuPhotonAimDirPdf(Vec3 origin, Vec3 dir, float mix, const Gp
     return (1.0f - mix) * uniformPdf + mix * aimPdf;
 }
 
+// Infinite-light disk on the scene sphere. mix=1 + clusters → caster projections
+// (aimed-only). mix=0 → uniform scene disk. PDF is the mixture, not the sampled
+// technique alone.
+SR_INL SR_HD Vec3 samplePhotonAimDisk(Vec3 center, Vec3 axis, float sceneR, float uMix, float uPick,
+                                      float u1, float u2, const GpuPhotonCluster* clusters, int n,
+                                      float mix, float& pdfPos) {
+    const float r = srMax(1e-4f, sceneR);
+    const Frame wFrame(axis);
+    Vec3 pDisk;
+    if (gpuPhotonAimSelect(mix, uMix) && clusters && n > 0) {
+        const int ci = gpuPickPhotonCluster(clusters, n, uPick);
+        pDisk = gpuClusterDiskPoint(clusters[ci], center, axis, sampleConcentricDisk(u1, u2));
+    } else {
+        const Vec2 cd = sampleConcentricDisk(u1, u2);
+        pDisk = center + wFrame.toWorld(Vec3(cd.x, cd.y, 0.0f)) * r;
+    }
+    pdfPos = gpuPhotonAimMixtureDiskPdf(pDisk, center, axis, r, mix, clusters, n);
+    return pDisk;
+}
+
 SR_INL SR_HD bool gpuSamplePhotonAimDir(Vec3 origin, const GpuPhotonCluster& c, float u1, float u2,
                                         Vec3& dir) {
     const Vec3 delta = c.center - origin;

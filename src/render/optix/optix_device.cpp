@@ -516,6 +516,8 @@ public:
             envViewBuffer_.upload(envViews);
 
             deviceScene_ = hostView;
+            deviceScene_.photonAimClusters = nullptr;
+            deviceScene_.photonAimClusterCount = 0;
             deviceScene_.meshes = meshViewBuffer_.as<const MeshView>();
             deviceScene_.instances = instanceBuffer_.as<const InstanceData>();
             deviceScene_.materials = materialBuffer_.as<const Material>();

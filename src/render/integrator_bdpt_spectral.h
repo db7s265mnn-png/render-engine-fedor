@@ -690,7 +690,7 @@ inline Vec3 traceRadianceBdptSpectral(
         ov.eyeLastRev = pdfLightOrigin(scene, l, v.lightIndex, eye[t - 2].p);
         const Vec3 emitToPrev = normalize(eye[t - 2].p - v.p);
         ov.eyePrevRev =
-            toAreaPdf(pdfLightDirSa(l, lightN, emitToPrev), v.p, eye[t - 2].p,
+            toAreaPdf(pdfLightEmitDirSa(scene, l, v.p, lightN, emitToPrev), v.p, eye[t - 2].p,
                       eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
         const SampledWavelengths& wE = eyeWavePath[t - 1];
         SampledSpectrum c =
@@ -880,7 +880,7 @@ inline Vec3 traceRadianceBdptSpectral(
         ov.splatStrategy = doSplats;
         ov.lightOriginDelta = l.type == kLightPoint;
         ov.lightLastRev = toAreaPdf(bsdfPdfSa(E, E.wo, wi), E.p, Ls.p, Ls.ns);
-        ov.eyeLastRev = toAreaPdf(pdfLightDirSa(l, lightN, -wi), Ls.p, E.p, E.ns);
+        ov.eyeLastRev = toAreaPdf(pdfLightEmitDirSa(scene, l, Ls.p, lightN, -wi), Ls.p, E.p, E.ns);
         if (t >= 3)
             ov.eyePrevRev =
                 toAreaPdf(bsdfPdfSa(E, wi, normalize(eye[t - 2].p - E.p)), E.p,

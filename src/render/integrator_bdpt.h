@@ -24,6 +24,7 @@
 #include "render/integrator.h"
 #include "render/integrator_mnee.h"
 #include "render/lights.h"
+#include "render/photon_aim.h"
 #include "render/photon_map.h"
 #include "render/shading.h"
 #include "render/volume.h"
@@ -207,6 +208,29 @@ SR_INL float pdfLightDirSa(const LightData& l, Vec3 lightNormal, Vec3 dir) {
     }
 }
 
+// Aimed LT only: emission-direction pdf is the caster-cone mixture (mix=1).
+// Other engines keep cosine / 4π so Veach weights stay the book estimator.
+SR_INL float pdfLightEmitDirSa(const SceneView& scene, const LightData& l, Vec3 origin, Vec3 lightNormal,
+                               Vec3 dir) {
+    const float uni = pdfLightDirSa(l, lightNormal, dir);
+    if (!causticsUseAimedLt(scene.settings) || scene.photonAimClusterCount <= 0 ||
+        !scene.photonAimClusters)
+        return uni;
+    return gpuPhotonAimDirPdf(origin, dir, 1.0f, scene.photonAimClusters, scene.photonAimClusterCount, uni);
+}
+
+SR_INL void aimedLtState(const SceneView& scene, const GpuPhotonCluster*& clusters, int& n, float& mix) {
+    clusters = nullptr;
+    n = 0;
+    mix = 0.0f;
+    if (!causticsUseAimedLt(scene.settings)) return;
+    if (!scene.photonAimClusters || scene.photonAimClusterCount <= 0) return;
+    clusters = scene.photonAimClusters;
+    n = scene.photonAimClusterCount;
+    if (n > kMaxGpuPhotonClusters) n = kMaxGpuPhotonClusters;
+    mix = 1.0f;
+}
+
 // --------------------------------------------------------------------------
 // Subpath generation
 // --------------------------------------------------------------------------
@@ -241,7 +265,18 @@ SR_INL void correctInfiniteLightSubpathPdfs(const SceneView& scene, Vert* light,
     if (nLight < 1 || light[0].type != VType::Light || light[0].lightIndex < 0) return;
     if (!lightIsInfinite(scene.lights[light[0].lightIndex])) return;
     const float r = sceneRadius(scene);
-    const float pdfPos = 1.0f / (kPi * r * r);
+    float pdfPos = 1.0f / (kPi * r * r);
+    const GpuPhotonCluster* clusters = nullptr;
+    int nAim = 0;
+    float mix = 0.0f;
+    aimedLtState(scene, clusters, nAim, mix);
+    if (mix > 0.0f && clusters && nAim > 0) {
+        const Vec3 axis = -emitDir;
+        const Vec3 center = scene.worldBounds.valid() ? scene.worldBounds.center() : Vec3(0.0f);
+        const Vec3 pDisk = light[0].p - axis * r;
+        const float aimPdf = gpuPhotonAimMixtureDiskPdf(pDisk, center, axis, r, mix, clusters, nAim);
+        if (aimPdf > 0.0f) pdfPos = aimPdf;
+    }
     if (nLight >= 2) {
         light[1].pdfFwd = pdfPos;
         if (!light[1].mediumScatter) light[1].pdfFwd *= fabsf(dot(emitDir, light[1].ng));
@@ -262,9 +297,13 @@ SR_INL bool startLightPath(const SceneView& scene, Rng& rng, Vert& v0, Vec3& emi
     v0.type = VType::Light;
     v0.lightIndex = li;
 
+    const GpuPhotonCluster* clusters = nullptr;
+    int nAim = 0;
+    float aimMix = 0.0f;
+    aimedLtState(scene, clusters, nAim, aimMix);
+
     if (l.type == kLightDistant || l.type == kLightDome) {
         const float r = sceneRadius(scene);
-        const float pdfPos = 1.0f / (kPi * r * r);
         const Vec3 center = scene.worldBounds.valid() ? scene.worldBounds.center() : Vec3(0.0f);
         if (l.type == kLightDistant) {
             const Vec3 axis = normalize(lightAxisZ(l));
@@ -283,9 +322,11 @@ SR_INL bool startLightPath(const SceneView& scene, Rng& rng, Vert& v0, Vec3& emi
                                                                     cosThetaMax)));
                 pdfDirSa = 1.0f / omega;
             }
-            const Frame wFrame(axis);
-            const Vec2 cd = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
-            const Vec3 pDisk = center + wFrame.toWorld(Vec3(cd.x, cd.y, 0.0f)) * r;
+            float pdfPos = 0.0f;
+            const Vec3 pDisk = samplePhotonAimDisk(center, axis, r, rng.nextFloat(), rng.nextFloat(),
+                                                   rng.nextFloat(), rng.nextFloat(), clusters, nAim,
+                                                   aimMix, pdfPos);
+            if (pdfPos <= 0.0f) return false;
             v0.p = pDisk + axis * r;
             v0.ng = v0.ns = -emitDir;
             v0.pdfFwd = selectPdf * pdfPos;
@@ -307,9 +348,11 @@ SR_INL bool startLightPath(const SceneView& scene, Rng& rng, Vert& v0, Vec3& emi
         const Vec3 wi = normalize(transformVector(l.xform, wiLocal));
         emitDir = -wi;
         pdfDirSa = pdfDir;
-        const Frame wFrame(wi);
-        const Vec2 cd = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
-        const Vec3 pDisk = center + wFrame.toWorld(Vec3(cd.x, cd.y, 0.0f)) * r;
+        float pdfPos = 0.0f;
+        const Vec3 pDisk = samplePhotonAimDisk(center, wi, r, rng.nextFloat(), rng.nextFloat(),
+                                               rng.nextFloat(), rng.nextFloat(), clusters, nAim, aimMix,
+                                               pdfPos);
+        if (pdfPos <= 0.0f) return false;
         v0.p = pDisk + wi * r;
         v0.ng = v0.ns = -emitDir;
         v0.pdfFwd = selectPdf * pdfPos;
@@ -328,8 +371,18 @@ SR_INL bool startLightPath(const SceneView& scene, Rng& rng, Vert& v0, Vec3& emi
         v0.delta = false;
         v0.connectable = true;
         v0.pdfFwd = selectPdf;
-        emitDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
-        pdfDirSa = kInv4Pi;
+        bool aimed = false;
+        if (gpuPhotonAimSelect(aimMix, rng.nextFloat()) && clusters && nAim > 0) {
+            const int ci = gpuPickPhotonCluster(clusters, nAim, rng.nextFloat());
+            aimed = gpuSamplePhotonAimDir(v0.p, clusters[ci], rng.nextFloat(), rng.nextFloat(), emitDir);
+            if (aimed && gpuAimConePdf(v0.p, emitDir, clusters, nAim) <= 0.0f) aimed = false;
+        }
+        if (!aimed) {
+            if (gpuPhotonAimOnly(aimMix)) return false;
+            emitDir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
+        }
+        pdfDirSa = gpuPhotonAimDirPdf(v0.p, emitDir, aimMix, clusters, nAim, kInv4Pi);
+        if (pdfDirSa <= 0.0f) return false;
         // Throughput folds BOTH the position and the direction pdf (I / (p_A·p_ω));
         // there is no cosine at a point emitter.
         v0.beta = l.emittedRadiance() / srMax(1e-12f, v0.pdfFwd * pdfDirSa);
@@ -358,13 +411,36 @@ SR_INL bool startLightPath(const SceneView& scene, Rng& rng, Vert& v0, Vec3& emi
     if (area <= 1e-12f) return false;
     v0.pdfFwd = selectPdf / area;
 
-    // Cosine-hemisphere emission around the light normal.
+    // Cosine-hemisphere emission around the light normal. Aimed LT replaces
+    // the direction with a caster cone (mix=1); pdf is the cone mixture.
     Vec3 nEmit = v0.ns;
     if (l.twoSided && rng.nextFloat() < 0.5f) nEmit = -nEmit;
-    const Frame frame(nEmit);
-    const Vec3 local = sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat());
-    emitDir = normalize(frame.toWorld(local));
-    pdfDirSa = fabsf(dot(nEmit, emitDir)) * kInvPi * (l.twoSided ? 0.5f : 1.0f);
+    bool aimed = false;
+    if (gpuPhotonAimSelect(aimMix, rng.nextFloat()) && clusters && nAim > 0) {
+        const int ci = gpuPickPhotonCluster(clusters, nAim, rng.nextFloat());
+        Vec3 aimDir;
+        if (gpuSamplePhotonAimDir(v0.p, clusters[ci], rng.nextFloat(), rng.nextFloat(), aimDir) &&
+            gpuAimConePdf(v0.p, aimDir, clusters, nAim) > 0.0f) {
+            const float cosN = dot(v0.ns, aimDir);
+            if (l.twoSided) {
+                if (fabsf(cosN) > 1e-4f) {
+                    emitDir = aimDir;
+                    aimed = true;
+                }
+            } else if (cosN > 1e-4f) {
+                emitDir = aimDir;
+                aimed = true;
+            }
+        }
+    }
+    if (!aimed) {
+        if (gpuPhotonAimOnly(aimMix)) return false;
+        const Frame frame(nEmit);
+        const Vec3 local = sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat());
+        emitDir = normalize(frame.toWorld(local));
+    }
+    const float cosinePdf = fabsf(dot(nEmit, emitDir)) * kInvPi * (l.twoSided ? 0.5f : 1.0f);
+    pdfDirSa = gpuPhotonAimDirPdf(v0.p, emitDir, aimMix, clusters, nAim, cosinePdf);
     if (pdfDirSa <= 0.0f) return false;
     v0.beta = lightRadiance(l) * fabsf(dot(v0.ns, emitDir)) / srMax(1e-12f, v0.pdfFwd * pdfDirSa);
     return true;
@@ -1018,7 +1094,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         ov.lightOriginDelta = false;
         ov.eyeLastRev = pdfLightOrigin(scene, l, v.lightIndex, eye[t - 2].p);
         const Vec3 emitToPrev = normalize(eye[t - 2].p - v.p);
-        ov.eyePrevRev = toAreaPdf(pdfLightDirSa(l, lightN, emitToPrev), v.p, eye[t - 2].p,
+        ov.eyePrevRev = toAreaPdf(pdfLightEmitDirSa(scene, l, v.p, lightN, emitToPrev), v.p, eye[t - 2].p,
                                   eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
         const float w = misWeight(eye, t, light, 0, ov);
         Vec3 c = v.beta * Le * w;
@@ -1220,7 +1296,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
         // Light vertex generated from the eye side: bsdf at E toward L.
         ov.lightLastRev = toAreaPdf(bsdfPdfSa(E, E.wo, wi), E.p, Ls.p, Ls.ns);
         // Eye vertex generated from the light: emission dir pdf.
-        ov.eyeLastRev = toAreaPdf(pdfLightDirSa(l, lightN, -wi), Ls.p, E.p, E.ns);
+        ov.eyeLastRev = toAreaPdf(pdfLightEmitDirSa(scene, l, Ls.p, lightN, -wi), Ls.p, E.p, E.ns);
         // Eye prev regenerated by bsdf at E arriving from L.
         if (t >= 3)
             ov.eyePrevRev = toAreaPdf(bsdfPdfSa(E, wi, normalize(eye[t - 2].p - E.p)), E.p,

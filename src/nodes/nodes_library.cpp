@@ -1126,10 +1126,10 @@ public:
                                       "Default 10; ~100 is a soft look. 0 disables (unbiased)."));
         addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Sampling")
-                         .withTooltip("Caps BDPT light-tracing splat contributions in linear pixel "
+                         .withTooltip("Caps light-tracing splat contributions in linear pixel "
                                       "radiance (Arnold Indirect Clamp). Raw LT deposits carry "
                                       "camera PDF — they are scaled to radiance before clamping.\n"
-                                      "Affects BDPT light-tracing caustics. 0 disables."));
+                                      "Affects BDPT t=1 and CPU Aimed LT splats. 0 disables."));
 
         // --- Engine -------------------------------------------------------------------
         // OptiX is optional at compile time — label the menu so artists know when
@@ -1264,8 +1264,8 @@ public:
                          .withVisibleWhen("integrator==0||integrator==1")
                          .withTooltip("Enable caustic light transport (light focused through glass "
                                       "and off mirrors).\n"
-                                      "Engine picks the estimator: CPU has pbrt / MNEE / Photon; "
-                                      "GPU has Aimed LT / Aimed LT + MNEE.\n"
+                                      "Engine picks the estimator: CPU has pbrt / MNEE / Photon / "
+                                      "Aimed LT; GPU has Aimed LT / Aimed LT + MNEE.\n"
                                       "Per-light and per-material Contribute to Caustics can disable "
                                       "individual sources or casters.\n"
                                       "Off: glass casts dark shadows (soften with shadow_opacity)."));
@@ -1275,7 +1275,7 @@ public:
         // menu was easy to miss. XPU shows both rows.
         addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
                                          {"Path / BDPT (pbrt)", "MNEE (manifolds)", "MNEE+Photon",
-                                          "Photon / VCM"},
+                                          "Photon / VCM", "Aimed LT", "Aimed LT + MNEE"},
                                          0)
                          .withGroup("Caustics")
                          .withVisibleWhen("integrator==0&&backend==0||integrator==0&&backend==1||"
@@ -1294,7 +1294,12 @@ public:
                                       "Photon / VCM. When Photon is active, MNEE / LT / eye-path "
                                       "BSDF caustics are turned off (no stacking).\n"
                                       "Photon / VCM: caustic-only photon map — rough glass and "
-                                      "black bases through refraction."));
+                                      "black bases through refraction.\n"
+                                      "Aimed LT: Keller 2017 caster-AABB light tracing (aimed-only). "
+                                      "PT gains LT splats; BDPT aims the existing t=1 subpath. "
+                                      "No MNEE, no photon map. SDS on directly visible receivers.\n"
+                                      "Aimed LT + MNEE: the same aimed LT, plus CPU MNEE after the "
+                                      "eye has gone through contributing glass (not on open floor)."));
         addParameter(Parameter::makeMenu("causticsenginegpu", "Caustics Engine (GPU)",
                                          {"Aimed LT", "Aimed LT + MNEE"}, 0)
                          .withGroup("Caustics")
@@ -1499,7 +1504,7 @@ public:
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
         settings.volumeSimilarity = boolValue("volumesimilarity", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
-        settings.causticsEngine = std::clamp(intValue("causticsengine", 0), 0, 3);
+        settings.causticsEngine = std::clamp(intValue("causticsengine", 0), 0, 5);
         settings.causticsEngineGpu = std::clamp(intValue("causticsenginegpu", 0), 0, 1);
         settings.causticClamp = float(floatValue("causticclamp", 0.0));
         settings.dispersionMode = intValue("dispersionmode", 0);

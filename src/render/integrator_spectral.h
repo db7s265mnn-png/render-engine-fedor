@@ -139,6 +139,7 @@ public:
         bool suppressCausticLight = false;
         bool sawNonSpecular = false;
         bool causticSuffix = false;
+        bool throughGlass = false;
         int depth = 0;
         int passThrough = 0;
         int volumeScatterCount = 0;
@@ -207,7 +208,9 @@ public:
                 }
             }
             if (!didHit) {
-                if (!suppressCausticLight && scene.domeLightIndex >= 0) {
+                if (!suppressCausticLight &&
+                    !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0) &&
+                    scene.domeLightIndex >= 0) {
                     const LightData& dome = scene.lights[scene.domeLightIndex];
                     if (!(causticSuffix && !lightContributesCaustics(dome))) {
                     const bool primary = depth == 0 && passThrough == 0;
@@ -237,7 +240,8 @@ public:
                     }
                     }
                 }
-                if (!suppressCausticLight) {
+                if (!suppressCausticLight &&
+                    !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0)) {
                     const bool primarySun = depth == 0 && passThrough == 0;
                     if (!(primarySun && !settings.envVisibleCamera)) {
                         const Vec3 sunL =
@@ -272,6 +276,7 @@ public:
 
             if (si.lightIndex >= 0) {
                 if (suppressCausticLight) break;
+                if (cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0)) break;
                 const LightData& light = scene.lights[si.lightIndex];
                 if (causticSuffix && !lightContributesCaustics(light)) break;
                 const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
@@ -418,7 +423,8 @@ public:
                 break;
             }
 
-            if (!(suppressCausticLight && !specularBounce)) {
+            if (!(suppressCausticLight && !specularBounce) &&
+                !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0)) {
                 // pbrt SampleLd: Illuminant(Le) × Albedo(f) × geom at this vertex.
                 SampledSpectrum contrib =
                     throughput * nextEventEstimationSpectralOnce(scene, tracer, si, mat, frame, wo, rng,
@@ -461,6 +467,7 @@ public:
                 currentMedium = entering ? inst.mediumIndex : -1;
             }
             const bool causticBounce = ss.specular || isNearSpecularLobe(lw);
+            if (ss.transmitted && materialContributesCaustics(mat)) throughGlass = true;
             if (settings.caustics == 0 && causticBounce && sawNonSpecular) suppressCausticLight = true;
             if (causticBounce && sawNonSpecular) causticSuffix = true;
             if (!causticBounce) {
