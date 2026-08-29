@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.57 LANGUAGES CXX)
+project(Solstice VERSION 0.9.58 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -668,6 +668,7 @@ set(SOLSTICE_LIB_HEADERS
     src/render/photon_map.h
     src/render/photon_aim.h
     src/render/framebuffer.h
+    src/render/bdpt_stats.h
     src/render/render_device.h
     src/render/xpu_split.h
     src/render/pixel_oracle.h

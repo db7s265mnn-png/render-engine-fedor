@@ -39,6 +39,7 @@
 #include "render/cpu/polynomial_optics.h"
 #include "render/film_tile.h"
 #include "render/framebuffer.h"
+#include "render/bdpt_stats.h"
 #include "render/integrator.h"
 #include "render/integrator_bdpt.h"
 #include "render/pixel_filter.h"
@@ -1259,6 +1260,32 @@ void testRenderSettingsFolders() {
                                QStringLiteral("Displacement"), QStringLiteral("Film"),
                                QStringLiteral("Diagnostic")};
     check(groups == expected, "render settings tab order");
+
+    check(groupOf("samplingdebug") == QLatin1String("Diagnostic"), "samplingdebug in Diagnostic");
+    check(groupOf("bdpttimers") == QLatin1String("Diagnostic"), "bdpttimers in Diagnostic");
+    check(groupOf("diag_bdpt_sep") == QLatin1String("Diagnostic"), "diag_bdpt_sep in Diagnostic");
+    check(groupOf("diag_bdpt_head") == QLatin1String("Diagnostic"), "diag_bdpt_head in Diagnostic");
+    {
+        QStringList diagnosticOrder;
+        for (const Parameter& parameter : settings->parameters()) {
+            if (parameter.group != QLatin1String("Diagnostic")) continue;
+            if (parameter.name.startsWith(QLatin1Char('_'))) continue;
+            diagnosticOrder << parameter.name;
+        }
+        const QStringList diagnosticExpected{
+            QStringLiteral("samplingdebug"), QStringLiteral("diag_bdpt_sep"),
+            QStringLiteral("diag_bdpt_head"), QStringLiteral("bdpttimers")};
+        check(diagnosticOrder == diagnosticExpected, "diagnostic tab parameter order");
+    }
+    check(indexOf("diag_bdpt_sep") == indexOf("samplingdebug") + 1, "separator after samplingdebug");
+    check(indexOf("bdpttimers") == indexOf("diag_bdpt_head") + 1, "bdpttimers after CPU BDPT note");
+    settings->setParameterValue("bdpttimers", true);
+    {
+        CookContext cookCtx;
+        StagePtr cooked = graph.cookDisplay(cookCtx);
+        check(cooked && cooked->settings.bdptTimers != 0, "cook copies BDPT Timers flag");
+    }
+    settings->setParameterValue("bdpttimers", false);
 
     // Older scene files omit noisethreshold / pixeloracle; ctor defaults must remain.
     {
@@ -2921,6 +2948,58 @@ void testSplatAccumulationPrecision() {
     deep.addSplatPaths(1);
     // 1e6 is below the float spacing at 1e13, so float accumulation loses every add.
     check(deep.resolvePixel(0, 0).x > 1.00005e13f, "large splat sums keep absorbing small adds");
+}
+
+void testBdptTimersFormat() {
+    std::printf("bdpt-timers\n");
+    check(RenderSettingsData{}.bdptTimers == 0, "BDPT timers default off");
+
+    BdptPassStats stats;
+    stats.pixels.store(10);
+    stats.nsTotal.store(10ull * 1000000000ull);
+    stats.nsAlloc.store(6ull * 1000000000ull);
+    stats.nsWalk.store(2ull * 1000000000ull);
+    stats.nsSss.store(500ull * 1000000ull);
+    stats.nsConnect.store(1ull * 1000000000ull);
+    stats.nsSplat.store(1ull * 1000000000ull);
+    stats.nEyeSum.store(250);
+    stats.nLightSum.store(80);
+    stats.nEyeMax.store(31);
+    stats.nLightMax.store(12);
+    stats.pairs.store(400);
+    stats.shadows.store(350);
+    stats.splatDeposits.store(40);
+    stats.casRetries.store(100);
+
+    BdptPassMeta meta;
+    meta.spp = 2;
+    meta.maxDepth = 30;
+    meta.maxVerts = 31;
+    meta.poolThreads = 32;
+    meta.vertBytes = 528;
+    meta.allocBytesPerPixel = 32736;
+    meta.wallNs = 5ull * 1000000000ull;
+
+    const std::string text = formatBdptPassStats(stats, meta);
+    check(text.find("BDPT timers") != std::string::npos, "timer header");
+    check(text.find("maxDepth=30") != std::string::npos, "timer maxDepth");
+    check(text.find("alloc") != std::string::npos, "timer alloc phase");
+    check(text.find("inside walk") != std::string::npos, "timer SSS nested in walk");
+    check(text.find("KiB/pixel") != std::string::npos, "timer alloc footprint");
+    check(text.find("casRetries") != std::string::npos, "timer CAS retries");
+    check(text.find("parallel=") != std::string::npos, "timer parallel factor");
+
+    Framebuffer fb;
+    fb.resize(2, 2);
+    std::atomic<uint64_t> cas{0};
+    std::atomic<uint64_t> dep{0};
+    fb.setSplatDiag(&cas, &dep);
+    fb.addSplat(0, 0, Vec3(1.0f, 0.0f, 0.0f));
+    check(dep.load() == 1, "splat deposit counter");
+    check(cas.load() == 0, "single-thread splat has no CAS retries");
+    fb.setSplatDiag(nullptr, nullptr);
+    fb.addSplat(0, 0, Vec3(1.0f, 0.0f, 0.0f));
+    check(dep.load() == 1, "deposit counter disabled with nullptr");
 }
 
 // Chromatic dispersion + thin-film iridescence sanity.
@@ -7913,6 +7992,7 @@ int main() {
     if (getenv("SOL_ONLY_BDPT")) {
         registerBuiltinNodes();
         testBdptShadersAndSss();
+        testBdptTimersFormat();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -7963,6 +8043,7 @@ int main() {
     testRoughGlassCaustics();
     testRefractionSparkleClamp();
     testSplatAccumulationPrecision();
+    testBdptTimersFormat();
     testDispersionAndThinFilm();
     testIntegratorSwitchStress();
     testInstanceTransform();

@@ -792,8 +792,12 @@ void ParameterPanel::rebuildLop() {
                 }
             }
             // Buttons carry their own label text — avoid "Render: [Render]".
+            // Labels span the full row (notes / separators), not a cramped
+            // "text | text" form pair.
             if (parameter.type == ParamType::Button)
                 folder->form->addRow(QString(), editor);
+            else if (parameter.type == ParamType::Label)
+                folder->form->addRow(editor);
             else
                 folder->form->addRow(parameter.label, editor);
         }
@@ -1530,8 +1534,20 @@ QWidget* ParameterPanel::createEditor(Parameter& parameter) {
             return combo;
         }
         case ParamType::Label: {
+            if (parameter.toString().trimmed().isEmpty()) {
+                auto* wrap = new QWidget();
+                auto* box = new QVBoxLayout(wrap);
+                box->setContentsMargins(0, 10, 0, 8);
+                auto* line = new QFrame();
+                line->setFrameShape(QFrame::HLine);
+                line->setFrameShadow(QFrame::Sunken);
+                line->setStyleSheet("color: #666b73;");
+                box->addWidget(line);
+                return wrap;
+            }
             auto* label = new QLabel(parameter.toString());
             label->setWordWrap(true);
+            label->setStyleSheet("color: #969aa0; padding-bottom: 4px;");
             return label;
         }
     }

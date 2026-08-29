@@ -658,6 +658,9 @@ struct RenderSettingsData {
 
     // Sampling / seed diagnostics (skip light transport; write debug RGB).
     int samplingDebug = 0;        // SamplingDebug enum
+    // CPU BDPT: one aggregated timer block per sample in the log (alloc / walk /
+    // connect / splat + path counts). Off has no clocks in the integrator.
+    int bdptTimers = 0;
 
     // Texture TX cache: convert source textures to .tx mipmaps (maketx → ACEScg).
     int enableTxCache = 1;

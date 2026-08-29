@@ -1433,6 +1433,20 @@ public:
                                       "Bucket ID: color by Bucket Size tiles (threading only).\n"
                                       "Pixel Hash: RGB from the per-pixel seed hash.\n"
                                       "Tip: set View to Raw for a clearer diagnostic."));
+        // Empty label → a horizontal rule in the parameter panel, so the timer
+        // checkbox sits in its own block under Sampling Debug.
+        addParameter(Parameter::makeLabel("diag_bdpt_sep", QString()).withGroup("Diagnostic"));
+        addParameter(Parameter::makeLabel("diag_bdpt_head",
+                                          "CPU BDPT — one aggregated summary per sample in the log. "
+                                          "Does not change the image.")
+                         .withGroup("Diagnostic"));
+        addParameter(Parameter::makeBool("bdpttimers", "BDPT Timers", false)
+                         .withGroup("Diagnostic")
+                         .withTooltip("CPU BDPT only. Each sample writes one summary to the log:\n"
+                                      "alloc / walk / SSS / connect / splat thread-ms, "
+                                      "mean nEye/nLight, (s,t) pairs, shadow rays, splat CAS retries.\n"
+                                      "Compare Max Ray Depth 29 vs 30 (and 4 vs 32 threads) with 8 spp.\n"
+                                      "Off: no extra clocks. Does not change the image."));
     }
 
     void cook(CookContext&, const std::vector<StagePtr>&, Stage& stage) override {
@@ -1505,6 +1519,7 @@ public:
         settings.filterRadius = float(floatValue("filterradius", 0.5));
         settings.envVisibleCamera = boolValue("envvisible", true) ? 1 : 0;
         settings.samplingDebug = std::clamp(intValue("samplingdebug", 0), 0, 4);
+        settings.bdptTimers = boolValue("bdpttimers", false) ? 1 : 0;
         settings.enableTxCache = boolValue("enabletxcache", true) ? 1 : 0;
         settings.ocioUseEnv = boolValue("ociousenv", true) ? 1 : 0;
         {
