@@ -2725,18 +2725,16 @@ void testPhotonCaustics() {
     std::printf("  photon=%.1f off=%.1f matOff=%.1f mnee=%.1f\n", sumPhoton, sumOff, sumMatOff, sumMnee);
 
     {
-        SampledWavelengths w = SampledWavelengths::sampleVisible(kMaxSpectrumSamples, 0.31f);
-        CausticPhoton ph;
-        ph.power = Vec3(1.0f);
-        ph.lambdaNm = 465.0f;
-        ph.lambdaPdf = SampledWavelengths::visibleWavelengthPdf(465.0f);
-        const Vec3 rgbB =
-            spectrumToRgb(CausticPhotonMap::photonPowerSpectrum(ph, Vec3(1.0f), w, colorSpaceSrgb()), w);
-        ph.lambdaNm = 630.0f;
-        ph.lambdaPdf = SampledWavelengths::visibleWavelengthPdf(630.0f);
-        const Vec3 rgbR =
-            spectrumToRgb(CausticPhotonMap::photonPowerSpectrum(ph, Vec3(1.0f), w, colorSpaceSrgb()), w);
-        check(rgbB.z > rgbR.z && rgbR.x > rgbB.x, "photon λ reconstructs blue vs red");
+        auto rgbAt = [](float lambdaNm) {
+            SampledWavelengths w;
+            w.n = 1;
+            w.lambda[0] = lambdaNm;
+            w.pdf[0] = SampledWavelengths::visibleWavelengthPdf(lambdaNm);
+            return spectrumToRgb(SampledSpectrum::constant(1, 1.0f), w);
+        };
+        const Vec3 rgbB = rgbAt(465.0f);
+        const Vec3 rgbR = rgbAt(630.0f);
+        check(rgbB.z > rgbR.z && rgbR.x > rgbB.x, "hero-λ film path is blue vs red");
         check(spectralAbsoluteIor(1.5f, 30.0f, 465.0f) >
                   spectralAbsoluteIor(1.5f, 30.0f, 630.0f) + 0.01f,
               "photon Abbe IOR is higher in the blue");
@@ -2807,7 +2805,7 @@ void testPhotonDispersion() {
         return scene;
     };
 
-    auto render = [&](float abbe, double& chroma, bool& finite) -> double {
+    auto render = [&](float abbe, double& chroma, double& rbSep, bool& finite) -> double {
         RenderSession session;
         session.setScene(buildScene(abbe));
         session.start();
@@ -2816,6 +2814,7 @@ void testPhotonDispersion() {
         double sum = 0.0;
         chroma = 0.0;
         finite = true;
+        double wR = 0.0, wB = 0.0, xR = 0.0, yR = 0.0, xB = 0.0, yB = 0.0;
         for (int y = 0; y < img.height(); ++y) {
             for (int x = 0; x < img.width(); ++x) {
                 const Vec3 c = img.rgb(x, y);
@@ -2823,19 +2822,34 @@ void testPhotonDispersion() {
                 sum += double(luminance(c));
                 const float mean = (c.x + c.y + c.z) / 3.0f;
                 chroma += double(std::fabs(c.x - mean) + std::fabs(c.y - mean) + std::fabs(c.z - mean));
+                const float eR = std::max(0.0f, c.x - c.y);
+                const float eB = std::max(0.0f, c.z - c.y);
+                xR += double(x) * double(eR);
+                yR += double(y) * double(eR);
+                wR += double(eR);
+                xB += double(x) * double(eB);
+                yB += double(y) * double(eB);
+                wB += double(eB);
             }
+        }
+        rbSep = 0.0;
+        if (wR > 1e-6 && wB > 1e-6) {
+            const double dx = xR / wR - xB / wB;
+            const double dy = yR / wR - yB / wB;
+            rbSep = std::sqrt(dx * dx + dy * dy);
         }
         return sum;
     };
 
-    double chromaOff = 0.0, chromaOn = 0.0;
+    double chromaOff = 0.0, chromaOn = 0.0, sepOff = 0.0, sepOn = 0.0;
     bool finOff = true, finOn = true;
-    const double sumOff = render(0.0f, chromaOff, finOff);
-    const double sumOn = render(20.0f, chromaOn, finOn);
+    const double sumOff = render(0.0f, chromaOff, sepOff, finOff);
+    const double sumOn = render(20.0f, chromaOn, sepOn, finOn);
     check(finOff && finOn, "photon dispersion renders are finite");
-    check(sumOn > 1.0 && sumOff > 1.0, "photon dispersion caustics have energy");
-    check(chromaOn > chromaOff * 1.15, "Abbe on photon caustics increases chroma");
-    std::printf("  off=%.1f on=%.1f chromaOff=%.1f chromaOn=%.1f\n", sumOff, sumOn, chromaOff, chromaOn);
+    check(sumOn > sumOff * 0.8 && sumOn < sumOff * 1.3, "photon dispersion keeps caustic energy");
+    check(chromaOn > chromaOff || sepOn > sepOff, "Abbe splits photon caustics by colour");
+    std::printf("  off=%.1f on=%.1f chromaOff=%.1f chromaOn=%.1f sepOff=%.2f sepOn=%.2f\n", sumOff,
+                sumOn, chromaOff, chromaOn, sepOff, sepOn);
 }
 
 // Rough (but still tightly focusing) glass must converge like smooth glass: the

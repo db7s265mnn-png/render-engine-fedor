@@ -88,20 +88,13 @@ public:
         return sum;
     }
 
+    // λ is baked into `power` at emit (spectrumToRgb of the hero path). Do not
+    // rebuild a spike here — that would rainbow Abbe=0 caustics.
     static SampledSpectrum photonPowerSpectrum(const CausticPhoton& ph, Vec3 rgbContrib,
                                               const SampledWavelengths& waves,
                                               const RGBColorSpace& cs) {
+        (void)ph;
         if (isBlack(rgbContrib)) return SampledSpectrum::zero(waves.n);
-        if (ph.lambdaNm >= kSpectrumLambdaMin && ph.lambdaNm <= kSpectrumLambdaMax &&
-            ph.lambdaPdf > 1e-12f) {
-            SampledWavelengths wPh;
-            wPh.n = 1;
-            wPh.lambda[0] = ph.lambdaNm;
-            wPh.pdf[0] = ph.lambdaPdf;
-            const Vec3 rgbSpike = spectrumToRgb(SampledSpectrum::constant(1, 1.0f), wPh, cs);
-            const float spikeLum = srMax(luminance(rgbSpike), 1e-8f);
-            return upsampleEmission(rgbSpike * (luminance(rgbContrib) / spikeLum), waves, cs);
-        }
         return upsampleLightRadiance(rgbContrib, waves, cs);
     }
 
