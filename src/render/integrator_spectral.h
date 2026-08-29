@@ -323,7 +323,19 @@ public:
                 continue;
             }
 
-            if (depth >= maxDepth) break;
+            if (depth >= maxDepth) {
+                if (materialWantsExitToDiffuse(mat)) {
+                    const Vec3 woExit = -direction;
+                    const Frame frameExit(si.ns);
+                    SampledSpectrum contrib =
+                        throughput * nextEventEstimationSpectralOnce(
+                                         scene, tracer, si, exitToDiffuseLambert(mat), frameExit, woExit,
+                                         rng, waves, filmCs, currentMedium, depth > 0 ? 1 : 0);
+                    contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
+                    radiance += contrib;
+                }
+                break;
+            }
 
             const Vec3 wo = -direction;
             const Frame frame(si.ns);

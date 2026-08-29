@@ -719,7 +719,19 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             continue;
         }
 
-        if (depth >= maxDepth) break;
+        if (depth >= maxDepth) {
+            if (materialWantsExitToDiffuse(mat)) {
+                const Vec3 woExit = -direction;
+                const Frame frameExit(si.ns);
+                const Vec3 nee =
+                    nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), frameExit, woExit,
+                                        rng, guiding, -1, depth > 0 ? 1 : 0);
+                Vec3 contrib = throughput * nee;
+                if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
+                radiance += contrib;
+            }
+            break;
+        }
 
         const Vec3 wo = -direction;
         const Frame frame(si.ns);

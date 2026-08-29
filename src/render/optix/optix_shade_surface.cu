@@ -18,6 +18,41 @@
 
 namespace sol {
 
+__device__ inline void tryEnqueueExitToDiffuseNee(GpuPath& path, GpuShadow& shadow, const SceneView& scene,
+                                                 const Surf& si, const Material& mat, const Frame& frame,
+                                                 Vec3 wo) {
+    if (path.lightPath || !materialWantsExitToDiffuse(mat) || scene.lightCount <= 0) return;
+    const Material lambert = exitToDiffuseLambert(mat);
+    const Vec3 woLocal = frame.toLocal(wo);
+    if (!eyePathNeeConnectable(lambert, woLocal)) return;
+    float selectPdf = 0.0f;
+    const int lightIndex = sampleLightIndex(scene, si.p, path.rng.nextFloat(), selectPdf);
+    LightSample ls;
+    if (lightIndex < 0 || selectPdf <= 0.0f ||
+        !sampleLight(scene, lightIndex, si.p, path.rng.nextFloat(), path.rng.nextFloat(), ls) ||
+        ls.pdf <= 0.0f || isBlack(ls.radiance) ||
+        !shadingNormalConsistent(si.ng, si.ns, wo, ls.wi))
+        return;
+    const Vec3 wiLocal = frame.toLocal(ls.wi);
+    const BsdfEval be = bsdfEvalLocal(lambert, woLocal, wiLocal);
+    if (be.pdf <= 0.0f || isBlack(be.f)) return;
+    const float lightPdf = ls.pdf * selectPdf;
+    const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
+    const float scale = (fabsf(wiLocal.z) / lightPdf) * mis;
+    float neeS[kMaxSpectrumSamples];
+    evalSurfaceNeeSpectral(scene.lights[lightIndex], ls.radiance, lambert, woLocal, wiLocal, scale, path,
+                           lambert.ior, neeS);
+    const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
+    float tMax = 1.0e8f;
+    if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
+    const LightData& lightNee = scene.lights[lightIndex];
+    enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS, path.mediumIndex,
+                           lightNee.shadowEnable,
+                           pathContributionClamp(scene.settings, path.depth, path.specularBounce != 0,
+                                                 path.causticSuffix != 0),
+                           gpuEyeBounceNee(scene.settings, path.depth, path.throughGlass, 1, lightNee.type));
+}
+
 __device__ inline void shadeSurfacePixel(int pixel) {
     const LaunchParams& params = launchParams();
     GpuPath& path = params.paths[pixel];
@@ -205,6 +240,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
 
     const int maxDepth = srMax(1, scene.settings.maxDepth);
     if (path.depth >= maxDepth) {
+        tryEnqueueExitToDiffuseNee(path, shadow, scene, si, mat, frame, wo);
         terminatePath(pixel, path);
         return;
     }

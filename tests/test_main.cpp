@@ -788,6 +788,37 @@ void testBsdf() {
         checkNear(average(bsdfEvalLocal(lamb, wo, wi).f), 0.8f * kInvPi, 1e-5f,
                   "Lambert is albedo/π when diffuse_roughness=0");
     }
+
+    // Exit to Diffuse: last-hit Lambert from base × base_color (glass uses transmission tint).
+    {
+        Material def{};
+        check(def.exitToDiffuse == 0, "Exit to Diffuse defaults off");
+        check(!materialWantsExitToDiffuse(def), "default material does not want exit");
+
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.baseWeight = 0.8f;
+        glass.transmission = 1.0f;
+        glass.transmissionColor = Vec3(0.2f, 0.6f, 1.0f);
+        glass.roughness = 0.0f;
+        glass.specular = 1.0f;
+        glass.ior = 1.5f;
+        glass.exitToDiffuse = 1;
+        check(materialWantsExitToDiffuse(glass), "flag enables exit");
+        const Material lamb = exitToDiffuseLambert(glass);
+        check(lamb.transmission <= 1e-6f && lamb.specular <= 1e-6f && lamb.metallic <= 1e-6f,
+              "exit material is Lambert");
+        checkNear(lamb.baseColor.x, 0.16f, 1e-4f, "glass exit albedo includes transmission tint");
+        checkNear(lamb.baseColor.z, 0.8f, 1e-4f, "glass exit keeps the blue channel");
+        const Vec3 woN(0.0f, 0.0f, 1.0f);
+        check(!eyePathNeeConnectable(glass, woN), "smooth glass is not NEE-connectable");
+        check(eyePathNeeConnectable(lamb, woN), "exit Lambert is NEE-connectable");
+
+        Material pureGlass = glass;
+        pureGlass.baseWeight = 0.0f;
+        const Material lamb0 = exitToDiffuseLambert(pureGlass);
+        checkNear(lamb0.baseColor.y, 0.6f, 1e-4f, "base=0 glass exits as transmission_color");
+    }
 }
 
 void testGlob() {
@@ -3219,6 +3250,144 @@ void testAimedLtCpu() {
         if (bdpt::startLightPath(view, rngPbrt, v0, dir, pdf) && pdf > 0.0f) ++okPbrt;
     }
     check(okPbrt > 8, "pbrt startLightPath still works without aim clusters");
+}
+
+void testExitToDiffuse() {
+    std::printf("exit-to-diffuse\n");
+
+    bool catalogHas = false;
+    bool catalogDefaultOff = false;
+    for (const MaterialXNodeCatalogEntry& e : listMaterialXNodeCatalog()) {
+        if (e.category != QStringLiteral("standard_surface")) continue;
+        for (const MaterialXNodeInputDef& inp : e.inputsFor(e.type)) {
+            if (inp.name == QStringLiteral("exit_to_diffuse")) {
+                catalogHas = true;
+                catalogDefaultOff = inp.value == QStringLiteral("false") || inp.value == QStringLiteral("0");
+            }
+        }
+    }
+    check(catalogHas, "standard_surface catalog has exit_to_diffuse");
+    check(catalogDefaultOff, "exit_to_diffuse catalog default is false");
+
+    if (materialXAvailable()) {
+        auto bakeFlag = [](const char* value) -> int {
+            const QString xml = QStringLiteral(
+                                    "<?xml version=\"1.0\"?>\n"
+                                    "<materialx version=\"1.38\">\n"
+                                    "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+                                    "    <input name=\"exit_to_diffuse\" type=\"boolean\" value=\"%1\"/>\n"
+                                    "  </standard_surface>\n"
+                                    "  <surfacematerial name=\"surface\" type=\"material\">\n"
+                                    "    <input name=\"surfaceshader\" type=\"surfaceshader\" "
+                                    "nodename=\"ss\"/>\n"
+                                    "  </surfacematerial>\n"
+                                    "</materialx>\n")
+                                    .arg(QString::fromUtf8(value));
+            const MaterialXEvalResult eval = evaluateMaterialXDocument(xml, QString());
+            check(eval.ok, "exit_to_diffuse document evaluates");
+            return eval.material.exitToDiffuse;
+        };
+        check(bakeFlag("true") == 1, "exit_to_diffuse true bakes on");
+        check(bakeFlag("false") == 0, "exit_to_diffuse false bakes off");
+        const QString defXml = QStringLiteral(
+            "<?xml version=\"1.0\"?>\n"
+            "<materialx version=\"1.38\">\n"
+            "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+            "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\"/>\n"
+            "  </standard_surface>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n");
+        const MaterialXEvalResult defEval = evaluateMaterialXDocument(defXml, QString());
+        check(defEval.ok && defEval.material.exitToDiffuse == 0, "omitted exit_to_diffuse stays off");
+    } else {
+        std::printf("  skip MaterialX bake\n");
+    }
+
+    auto buildScene = [](int exitFlag) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr mirror = std::make_shared<Mesh>();
+        mirror->positions = {Vec3(0, 0, -1.2f), Vec3(0, 0, 1.2f), Vec3(0, 2.2f, 1.2f), Vec3(0, 2.2f, -1.2f)};
+        mirror->indices = {0, 3, 2, 0, 2, 1};
+        mirror->normals = {Vec3(1, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 0)};
+        mirror->validate();
+        Material mirrorMat;
+        mirrorMat.baseColor = Vec3(1.0f);
+        mirrorMat.metallic = 1.0f;
+        mirrorMat.roughness = 0.0f;
+        mirrorMat.specular = 1.0f;
+        InstanceData mirrorInst;
+        mirrorInst.meshIndex = scene->addMesh(mirror);
+        mirrorInst.materialIndex = scene->addMaterial(mirrorMat);
+        scene->instances.push_back(mirrorInst);
+
+        MeshPtr card = std::make_shared<Mesh>();
+        card->positions = {Vec3(-2, 0, -1.2f), Vec3(-2, 0, 1.2f), Vec3(-2, 2.2f, 1.2f), Vec3(-2, 2.2f, -1.2f)};
+        card->indices = {0, 3, 2, 0, 2, 1};
+        card->normals = {Vec3(1, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 0), Vec3(1, 0, 0)};
+        card->validate();
+        Material cardMat;
+        cardMat.baseColor = Vec3(0.85f, 0.15f, 0.1f);
+        cardMat.baseWeight = 1.0f;
+        cardMat.roughness = 1.0f;
+        cardMat.specular = 0.0f;
+        cardMat.exitToDiffuse = exitFlag;
+        InstanceData cardInst;
+        cardInst.meshIndex = scene->addMesh(card);
+        cardInst.materialIndex = scene->addMaterial(cardMat);
+        scene->instances.push_back(cardInst);
+
+        LightData light;
+        light.type = kLightPoint;
+        light.intensity = 60.0f;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(-1.0f, 1.8f, 0.0f));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 48;
+        scene->settings.resolutionY = 36;
+        scene->settings.samplesPerPixel = 12;
+        scene->settings.maxDepth = 1;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.caustics = 0;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(2.6f, 1.1f, 0.0f), Vec3(0.0f, 1.1f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto renderSum = [](int exitFlag, bool& finiteOut) -> double {
+        RenderSession session;
+        session.setScene(buildScene(exitFlag));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        }
+        return sum;
+    };
+
+    bool finOff = true, finOn = true;
+    const double sumOff = renderSum(0, finOff);
+    const double sumOn = renderSum(1, finOn);
+    check(finOff && finOn, "exit-to-diffuse renders are finite");
+    check(sumOn > sumOff * 1.5 && sumOn > 1.0, "Exit to Diffuse adds last-hit Lambert NEE");
+    std::printf("  off=%.3f on=%.3f\n", sumOff, sumOn);
 }
 
 void testUndoHub() {
@@ -8277,6 +8446,7 @@ int main(int argc, char** argv) {
         testBdptScratchReuse();
         testIntegratorDeviceMemory();
         testAimedLtCpu();
+        testExitToDiffuse();
         testUndoHub();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
@@ -8332,6 +8502,7 @@ int main(int argc, char** argv) {
     testBdptScratchReuse();
     testIntegratorDeviceMemory();
     testAimedLtCpu();
+    testExitToDiffuse();
     testUndoHub();
     testDispersionAndThinFilm();
     testIntegratorSwitchStress();

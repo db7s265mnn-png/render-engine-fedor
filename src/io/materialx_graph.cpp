@@ -385,6 +385,25 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
         material.internalReflections = ir;
     }
 
+    // Exit to Diffuse (default off). Last hit at Max Ray Depth → Lambert + NEE.
+    {
+        float etd = 0.0f;
+        if (!resolveConnectedNode(ss, "exit_to_diffuse")) {
+            const std::string raw = inputValueString(ss, "exit_to_diffuse");
+            if (!raw.empty()) {
+                if (raw == "false" || raw == "0" || raw == "False" || raw == "FALSE")
+                    etd = 0.0f;
+                else if (raw == "true" || raw == "1" || raw == "True" || raw == "TRUE")
+                    etd = 1.0f;
+                else {
+                    float v = 0.0f;
+                    if (parseFloat(raw, v)) etd = v > 0.5f ? 1.0f : 0.0f;
+                }
+            }
+        }
+        material.exitToDiffuse = etd > 0.5f ? 1 : 0;
+    }
+
     setColor("emission_color", material.emissionColor);
     setFloat("emission", material.emissionStrength);
     setFloat("subsurface", material.subsurface);
@@ -689,6 +708,7 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"thin_film_thickness", "float", "0"},
          {"thin_film_IOR", "float", "1.4"},
          {"internal_reflections", "boolean", "true"},
+         {"exit_to_diffuse", "boolean", "false"},
          {"emission", "float", "0"},
          {"emission_color", "color3", "1, 1, 1"},
          {"normal", "vector3", {}},

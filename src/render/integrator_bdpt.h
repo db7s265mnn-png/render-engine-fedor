@@ -77,6 +77,22 @@ struct Vert {
 
 SR_INL float remap0(float f) { return f > 0.0f ? f : 1.0f; }
 
+// Last eye vertex at the vertex cap: glass/mirror is not connectable, so s=1
+// never fires. One Lambert NEE with the arriving beta — does not rewrite the
+// vertex for pbrt / MNEE / Photon / Aimed family partition.
+template <typename Tracer>
+inline Vec3 exitToDiffuseVertexNee(const SceneView& scene, const Tracer& tracer, const Vert& v, Rng& rng,
+                                   int eyeBounceNee) {
+    if (v.type != VType::Surface || !materialWantsExitToDiffuse(v.mat) || v.connectable) return Vec3(0.0f);
+    SurfaceInteraction si{};
+    si.p = v.p;
+    si.ng = v.ng;
+    si.ns = v.ns;
+    const Frame frame(v.ns);
+    return nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(v.mat), frame, v.wo, rng,
+                               v.mediumIndex, eyeBounceNee);
+}
+
 // Path Tracer Russian roulette on a BDPT subpath. The vertex already on the
 // path stays connectable; failure only stops growing. bounceDepth is scatter
 // events from the subpath origin (camera or light), same counting as PT depth.
@@ -1388,6 +1404,16 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                 c = clampContribution(c, causticFireflyCap(settings));
             if (!isFinite(c)) continue;
             L += c;
+        }
+    }
+
+    if (nEye == maxVerts && nEye >= 2) {
+        const Vert& last = eye[nEye - 1];
+        const Vec3 extra = exitToDiffuseVertexNee(scene, tracer, last, rng, 1);
+        if (!isBlack(extra) && isFinite(extra)) {
+            Vec3 c = last.beta * extra;
+            c = clampContribution(c, settings.clampDirect);
+            if (isFinite(c)) L += c;
         }
     }
 

@@ -141,6 +141,10 @@ struct Material {
     // Arnold Advanced → Internal Reflections (1 = on). When off, rays inside a
     // dielectric skip Fresnel reflections (TIR still reflects — nowhere else to go).
     float internalReflections = 1.0f;
+    // When Max Ray Depth is exhausted on this standard_surface, shade one
+    // Lambert + NEE from the surface diffuse instead of returning black.
+    // Default off — not a global Render Settings exit colour.
+    int exitToDiffuse = 0;
 
     // Separate dielectric coat (pbrt-style overlay, not mixed into the base lobes).
     // thickness is an optical depth in the coat medium (Beer–Lambert); 0 = clear.

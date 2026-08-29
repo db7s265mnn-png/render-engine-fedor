@@ -10,6 +10,7 @@
 
 #include "render/integrator_base.h"
 #include "render/integrator_bdpt.h"
+#include "render/integrator_spectral.h"
 #include "render/bdpt_stats.h"
 #include "render/bdpt_scratch.h"
 #include "render/spectral_common.h"
@@ -973,6 +974,23 @@ inline Vec3 traceRadianceBdptSpectral(
             if (lightPrefixCaustic || Lv.nearSpec || E.nearSpec)
                 c = clampSpectrumIndirect(c, causticFireflyCap(settings));
             addFilm(c, wConn);
+        }
+    }
+
+    if (nEye == maxVerts && nEye >= 2) {
+        const Vert& last = eye[nEye - 1];
+        if (last.type == VType::Surface && materialWantsExitToDiffuse(last.mat) && !last.connectable) {
+            SurfaceInteraction si{};
+            si.p = last.p;
+            si.ng = last.ng;
+            si.ns = last.ns;
+            const Frame frame(last.ns);
+            const SampledWavelengths& wE = eyeWavePath[nEye - 1];
+            SampledSpectrum extra = nextEventEstimationSpectralOnce(
+                scene, tracer, si, exitToDiffuseLambert(last.mat), frame, last.wo, rng, wE, filmCs,
+                last.mediumIndex, 1);
+            extra = clampSpectrumIndirect(extra, settings.clampDirect);
+            addFilm(eyeBeta[nEye - 1] * extra, wE);
         }
     }
     }

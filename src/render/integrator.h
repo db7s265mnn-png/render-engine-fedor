@@ -440,6 +440,35 @@ SR_INL SR_HD Material sssExitLambertMaterial() {
     return lambert;
 }
 
+SR_INL SR_HD bool materialWantsExitToDiffuse(const Material& mat) { return mat.exitToDiffuse != 0; }
+
+// Last-hit cheat: Lambert from base_color × base. Glass with base ≈ 0 uses
+// transmission_color so a coloured dielectric does not exit as black or chalk.
+SR_INL SR_HD Material exitToDiffuseLambert(const Material& mat) {
+    Material lambert = defaultMaterial();
+    Vec3 albedo = vmax(Vec3(0.0f), mat.baseColor) * srMax(0.0f, mat.baseWeight);
+    if (mat.transmission > 1e-4f) {
+        const Vec3 tint = vmax(Vec3(0.0f), mat.transmissionColor);
+        const float mag = srMax(albedo.x, srMax(albedo.y, albedo.z));
+        albedo = mag < 1e-4f ? tint : albedo * tint;
+    }
+    lambert.baseColor = albedo;
+    lambert.baseWeight = 1.0f;
+    lambert.specular = 0.0f;
+    lambert.metallic = 0.0f;
+    lambert.transmission = 0.0f;
+    lambert.subsurface = 0.0f;
+    lambert.roughness = 1.0f;
+    lambert.coat = 0.0f;
+    lambert.sheen = 0.0f;
+    lambert.diffuseRoughness = 0.0f;
+    lambert.doubleSided = mat.doubleSided;
+    lambert.shadowOpacity = mat.shadowOpacity;
+    lambert.contributeCaustics = 0;
+    lambert.exitToDiffuse = 0;
+    return lambert;
+}
+
 // Fresnel RR probability of reflecting at the SSS entry instead of entering the body.
 SR_INL SR_HD float sssEntrySpecularProb(const Material& specMat, Vec3 woLocal) {
     const LobeWeights specLw = computeLobes(specMat, woLocal);
@@ -1288,7 +1317,19 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
-        if (depth >= maxDepth) break;
+        if (depth >= maxDepth) {
+            if (materialWantsExitToDiffuse(mat)) {
+                const Vec3 woExit = -direction;
+                const Frame frameExit(si.ns);
+                const Vec3 nee =
+                    nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), frameExit, woExit,
+                                        rng, guiding, currentMedium, depth > 0 ? 1 : 0);
+                Vec3 contrib = throughput * nee;
+                if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
+                radiance += contrib;
+            }
+            break;
+        }
 
         const Vec3 wo = -direction;
         const Frame frame(si.ns);
