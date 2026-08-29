@@ -448,6 +448,39 @@ SR_INL SR_HD bool exitToDiffuseShouldStart(const Material& mat, int depth) {
     return depth > 0 && materialWantsExitToDiffuse(mat);
 }
 
+// Last bounce from a flagged surface — including the camera hit when
+// maxDepth == 1. Replaces BSDF with reflect + refract opacity walks; does
+// not Lambert this surface.
+SR_INL SR_HD bool exitToDiffuseShouldArmBounce(const Material& mat, int depth, int maxDepth) {
+    return materialWantsExitToDiffuse(mat) && depth + 1 >= maxDepth;
+}
+
+SR_INL SR_HD bool exitToDiffuseWantsRefractWalk(const Material& mat) {
+    return mat.transmission > 1e-4f;
+}
+
+// Mirror of the incoming ray about Ng facing the ray (no Snell).
+SR_INL SR_HD Vec3 exitToDiffuseReflectDirection(Vec3 direction, Vec3 ng) {
+    const Vec3 n = faceforward(ng, -direction);
+    const Vec3 r = reflect(-direction, n);
+    const float len2 = lengthSquared(r);
+    if (len2 < 1e-20f) return direction;
+    return r * (1.0f / sqrtf(len2));
+}
+
+// GPU / one-continuation: pick reflect or through. weightOut is 2 when both
+// walks exist so the expectation matches summing both on CPU.
+SR_INL SR_HD Vec3 exitToDiffuseSampleEscapeDir(Vec3 incoming, Vec3 ng, const Material& mat, float u,
+                                               float& weightOut) {
+    const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
+    if (!exitToDiffuseWantsRefractWalk(mat)) {
+        weightOut = 1.0f;
+        return refl;
+    }
+    weightOut = 2.0f;
+    return u < 0.5f ? refl : incoming;
+}
+
 SR_INL SR_HD bool exitToDiffuseSkipSelf(int escapeMaterialIndex, int hitMaterialIndex, int skips) {
     return escapeMaterialIndex >= 0 && hitMaterialIndex == escapeMaterialIndex &&
            skips < kExitToDiffuseMaxSkips;
@@ -1011,6 +1044,76 @@ SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& trac
                                                     mediumIndex, eyeBounceNee);
 }
 
+#if !defined(__CUDACC__)
+template <typename Tracer>
+inline Vec3 exitToDiffuseWalkOne(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
+                                 int escapeMat, Rng& rng, int mediumIndex, int eyeBounceNee) {
+    for (int skip = 0; skip < kExitToDiffuseMaxSkips; ++skip) {
+        RayHit hit;
+        if (!tracer.intersect(origin, direction, kFloatMax, hit)) {
+            Vec3 L(0.0f);
+            if (scene.domeLightIndex >= 0) {
+                const LightData& dome = scene.lights[scene.domeLightIndex];
+                L += domeRadiance(scene, dome, direction, /*nearestTexel=*/true);
+            }
+            L += cameraSunDiscRadiance(scene, origin, direction, 0.0f, true, false, false);
+            return L;
+        }
+        SurfaceInteraction si;
+        if (!buildSurfaceInteraction(scene, hit, origin, direction, si)) return Vec3(0.0f);
+        if (si.lightIndex >= 0) {
+            const LightData& light = scene.lights[si.lightIndex];
+            const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
+            return areaLightEmission(scene, light, direction, lightN);
+        }
+        if (exitToDiffuseSkipSelf(escapeMat, si.materialIndex, skip)) {
+            origin = offsetRayOrigin(si.p, si.ng, direction);
+            continue;
+        }
+        Material dest = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
+        dest = evaluateTexturedMaterial(scene, dest, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth,
+                                        si.pRef, si.nRef, si.hasPref);
+        if (dest.opacity <= 1e-6f || (dest.opacity < 0.999f && rng.nextFloat() > dest.opacity)) {
+            origin = offsetRayOrigin(si.p, si.ng, direction);
+            continue;
+        }
+        const int destMedium =
+            mediumIndex >= 0
+                ? mediumIndex
+                : (si.instanceIndex >= 0 ? scene.instances[si.instanceIndex].mediumIndex : -1);
+        return nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(dest), Frame(si.ns), -direction,
+                                   rng, destMedium, eyeBounceNee);
+    }
+    return Vec3(0.0f);
+}
+
+// Reflect walk always. Through walk (incoming direction) only when the dying
+// material transmits — mirrors do not x-ray.
+template <typename Tracer>
+inline Vec3 exitToDiffuseWalkReflectAndRefract(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng,
+                                               Vec3 incoming, int escapeMat, const Material& dyingMat,
+                                               Rng& rng, int mediumIndex, int eyeBounceNee) {
+    const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
+    Vec3 L = exitToDiffuseWalkOne(scene, tracer, offsetRayOrigin(p, ng, refl), refl, escapeMat, rng,
+                                  mediumIndex, eyeBounceNee);
+    if (exitToDiffuseWantsRefractWalk(dyingMat)) {
+        L += exitToDiffuseWalkOne(scene, tracer, offsetRayOrigin(p, ng, incoming), incoming, escapeMat, rng,
+                                  mediumIndex, eyeBounceNee);
+    }
+    return L;
+}
+
+template <typename Tracer>
+inline Vec3 exitToDiffuseContribution(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng,
+                                      Vec3 incoming, int escapeMat, const Material& dyingMat,
+                                      Vec3 throughput, Rng& rng, int mediumIndex) {
+    const Vec3 extra =
+        exitToDiffuseWalkReflectAndRefract(scene, tracer, p, ng, incoming, escapeMat, dyingMat, rng,
+                                           mediumIndex, 1);
+    return clampContribution(throughput * extra, scene.settings.clampDirect);
+}
+#endif
+
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
                                 Rng& rng, Guiding* guiding, DispersionContext* dispersion = nullptr) {
@@ -1332,7 +1435,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         }
 
         // Exit to Diffuse: skip the dying material (opacity, no IOR) until another
-        // material, then Lambert + NEE × existing throughput. Camera hit never starts.
+        // material, then Lambert + NEE × existing throughput. The flagged surface
+        // is never painted as Lambert. Reflect and refract walks both fire.
         if (exitEscapeMat >= 0) {
             if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips)) {
                 origin = offsetRayOrigin(si.p, si.ng, direction);
@@ -1350,16 +1454,28 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             radiance += contrib;
             break;
         }
-        if (depth >= maxDepth) {
-            if (exitToDiffuseShouldStart(mat, depth)) {
-                exitEscapeMat = si.materialIndex;
-                origin = offsetRayOrigin(si.p, si.ng, direction);
-                ++exitEscapeSkips;
-                ++passThrough;
-                continue;
-            }
+        const bool exitNow = (depth >= maxDepth && exitToDiffuseShouldStart(mat, depth)) ||
+                             (depth < maxDepth && exitToDiffuseShouldArmBounce(mat, depth, maxDepth));
+        if (exitNow) {
+#if !defined(__CUDACC__)
+            radiance += exitToDiffuseContribution(scene, tracer, si.p, si.ng, direction, si.materialIndex,
+                                                  mat, throughput, rng, currentMedium);
             break;
+#else
+            float escW = 1.0f;
+            const Vec3 escDir =
+                exitToDiffuseSampleEscapeDir(direction, si.ng, mat, rng.nextFloat(), escW);
+            throughput = throughput * escW;
+            exitEscapeMat = si.materialIndex;
+            exitEscapeSkips = 0;
+            origin = offsetRayOrigin(si.p, si.ng, escDir);
+            direction = escDir;
+            ++exitEscapeSkips;
+            ++passThrough;
+            continue;
+#endif
         }
+        if (depth >= maxDepth) break;
 
         const Vec3 wo = -direction;
         const Frame frame(si.ns);

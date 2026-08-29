@@ -78,49 +78,17 @@ struct Vert {
 
 SR_INL float remap0(float f) { return f > 0.0f ? f : 1.0f; }
 
-// Last eye vertex at the vertex cap: skip that material as opacity (same
-// direction, no IOR) until a different material, then Lambert + NEE. Miss
-// takes the dome even if it is hidden from the camera. Does not rewrite the
-// vertex for pbrt / MNEE / Photon / Aimed family partition.
+// Last eye vertex at the vertex cap: reflect + refract opacity walks from
+// that flagged surface (skip same materialIndex, Lambert + NEE the first
+// other). Miss takes the dome even if it is hidden from the camera. Does
+// not rewrite the vertex for pbrt / MNEE / Photon / Aimed family partition.
 template <typename Tracer>
 inline Vec3 exitToDiffuseEscapeFromVertex(const SceneView& scene, const Tracer& tracer, const Vert& v,
                                           Rng& rng, int eyeBounceNee) {
     if (v.type != VType::Surface || !materialWantsExitToDiffuse(v.mat) || v.materialIndex < 0)
         return Vec3(0.0f);
-    const int escapeMat = v.materialIndex;
-    Vec3 origin = offsetRayOrigin(v.p, v.ng, -v.wo);
-    const Vec3 direction = -v.wo;
-    for (int skip = 0; skip < kExitToDiffuseMaxSkips; ++skip) {
-        RayHit hit;
-        if (!tracer.intersect(origin, direction, kFloatMax, hit)) {
-            if (scene.domeLightIndex < 0) return Vec3(0.0f);
-            const LightData& dome = scene.lights[scene.domeLightIndex];
-            return domeRadiance(scene, dome, direction, /*nearestTexel=*/true);
-        }
-        SurfaceInteraction si;
-        if (!buildSurfaceInteraction(scene, hit, origin, direction, si)) return Vec3(0.0f);
-        if (si.lightIndex >= 0) {
-            const LightData& light = scene.lights[si.lightIndex];
-            const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
-            return areaLightEmission(scene, light, direction, lightN);
-        }
-        if (exitToDiffuseSkipSelf(escapeMat, si.materialIndex, skip)) {
-            origin = offsetRayOrigin(si.p, si.ng, direction);
-            continue;
-        }
-        Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
-        mat = evaluateTexturedMaterial(scene, mat, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth,
-                                       si.pRef, si.nRef, si.hasPref);
-        if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && rng.nextFloat() > mat.opacity)) {
-            origin = offsetRayOrigin(si.p, si.ng, direction);
-            continue;
-        }
-        const Frame frame(si.ns);
-        return nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), frame, -direction, rng,
-                                   si.instanceIndex >= 0 ? scene.instances[si.instanceIndex].mediumIndex : -1,
-                                   eyeBounceNee);
-    }
-    return Vec3(0.0f);
+    return exitToDiffuseWalkReflectAndRefract(scene, tracer, v.p, v.ng, -v.wo, v.materialIndex, v.mat, rng,
+                                              v.mediumIndex, eyeBounceNee);
 }
 
 // Path Tracer Russian roulette on a BDPT subpath. The vertex already on the

@@ -737,16 +737,14 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             radiance += contrib;
             break;
         }
-        if (depth >= maxDepth) {
-            if (exitToDiffuseShouldStart(mat, depth)) {
-                exitEscapeMat = si.materialIndex;
-                origin = offsetRayOrigin(si.p, si.ng, direction);
-                ++exitEscapeSkips;
-                ++passThrough;
-                continue;
-            }
+        const bool exitNow = (depth >= maxDepth && exitToDiffuseShouldStart(mat, depth)) ||
+                             (depth < maxDepth && exitToDiffuseShouldArmBounce(mat, depth, maxDepth));
+        if (exitNow) {
+            radiance += exitToDiffuseContribution(scene, tracer, si.p, si.ng, direction, si.materialIndex,
+                                                  mat, throughput, rng, -1);
             break;
         }
+        if (depth >= maxDepth) break;
 
         const Vec3 wo = -direction;
         const Frame frame(si.ns);

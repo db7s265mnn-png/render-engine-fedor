@@ -114,6 +114,69 @@ inline SampledSpectrum nextEventEstimationVolumeSpectralOnce(const SceneView& sc
 }
 
 template <typename Tracer>
+inline SampledSpectrum exitToDiffuseWalkOneSpectral(const SceneView& scene, const Tracer& tracer,
+                                                    Vec3 origin, Vec3 direction, int escapeMat, Rng& rng,
+                                                    const SampledWavelengths& waves, const RGBColorSpace& cs,
+                                                    int mediumIndex, int eyeBounceNee) {
+    for (int skip = 0; skip < kExitToDiffuseMaxSkips; ++skip) {
+        RayHit hit;
+        if (!tracer.intersect(origin, direction, kFloatMax, hit)) {
+            SampledSpectrum L = SampledSpectrum::zero(waves.n);
+            if (scene.domeLightIndex >= 0) {
+                const LightData& dome = scene.lights[scene.domeLightIndex];
+                const Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/true);
+                L += upsampleEmission(envL, waves, cs);
+            }
+            const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, 0.0f, true, false, false);
+            if (!isBlack(sunL)) L += upsampleEmission(sunL, waves, cs);
+            return L;
+        }
+        SurfaceInteraction si;
+        if (!buildSurfaceInteraction(scene, hit, origin, direction, si))
+            return SampledSpectrum::zero(waves.n);
+        if (si.lightIndex >= 0) {
+            const LightData& light = scene.lights[si.lightIndex];
+            const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
+            return upsampleEmission(areaLightEmission(scene, light, direction, lightN), waves, cs);
+        }
+        if (exitToDiffuseSkipSelf(escapeMat, si.materialIndex, skip)) {
+            origin = offsetRayOrigin(si.p, si.ng, direction);
+            continue;
+        }
+        Material dest = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
+        dest = evaluateTexturedMaterial(scene, dest, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth,
+                                        si.pRef, si.nRef, si.hasPref);
+        if (dest.opacity <= 1e-6f || (dest.opacity < 0.999f && rng.nextFloat() > dest.opacity)) {
+            origin = offsetRayOrigin(si.p, si.ng, direction);
+            continue;
+        }
+        const int destMedium =
+            mediumIndex >= 0
+                ? mediumIndex
+                : (si.instanceIndex >= 0 ? scene.instances[si.instanceIndex].mediumIndex : -1);
+        return nextEventEstimationSpectralOnce(scene, tracer, si, exitToDiffuseLambert(dest), Frame(si.ns),
+                                               -direction, rng, waves, cs, destMedium, eyeBounceNee);
+    }
+    return SampledSpectrum::zero(waves.n);
+}
+
+template <typename Tracer>
+inline SampledSpectrum exitToDiffuseWalkReflectAndRefractSpectral(
+    const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng, Vec3 incoming, int escapeMat,
+    const Material& dyingMat, Rng& rng, const SampledWavelengths& waves, const RGBColorSpace& cs,
+    int mediumIndex, int eyeBounceNee) {
+    const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
+    SampledSpectrum L =
+        exitToDiffuseWalkOneSpectral(scene, tracer, offsetRayOrigin(p, ng, refl), refl, escapeMat, rng,
+                                     waves, cs, mediumIndex, eyeBounceNee);
+    if (exitToDiffuseWantsRefractWalk(dyingMat)) {
+        L += exitToDiffuseWalkOneSpectral(scene, tracer, offsetRayOrigin(p, ng, incoming), incoming,
+                                          escapeMat, rng, waves, cs, mediumIndex, eyeBounceNee);
+    }
+    return L;
+}
+
+template <typename Tracer>
 class SpectralPathIntegrator final : public Integrator<Tracer> {
 public:
     const char* name() const override { return "Path Tracer"; }
@@ -344,16 +407,18 @@ public:
                 radiance += contrib;
                 break;
             }
-            if (depth >= maxDepth) {
-                if (exitToDiffuseShouldStart(mat, depth)) {
-                    exitEscapeMat = si.materialIndex;
-                    origin = offsetRayOrigin(si.p, si.ng, direction);
-                    ++exitEscapeSkips;
-                    ++passThrough;
-                    continue;
-                }
+            const bool exitNow = (depth >= maxDepth && exitToDiffuseShouldStart(mat, depth)) ||
+                                 (depth < maxDepth && exitToDiffuseShouldArmBounce(mat, depth, maxDepth));
+            if (exitNow) {
+                SampledSpectrum extra = exitToDiffuseWalkReflectAndRefractSpectral(
+                    scene, tracer, si.p, si.ng, direction, si.materialIndex, mat, rng, waves, filmCs,
+                    currentMedium, 1);
+                SampledSpectrum contrib = throughput * extra;
+                contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
+                radiance += contrib;
                 break;
             }
+            if (depth >= maxDepth) break;
 
             const Vec3 wo = -direction;
             const Frame frame(si.ns);

@@ -805,8 +805,16 @@ void testBsdf() {
         glass.ior = 1.5f;
         glass.exitToDiffuse = 1;
         check(materialWantsExitToDiffuse(glass), "flag enables exit");
-        check(!exitToDiffuseShouldStart(glass, 0), "camera hit does not start Exit to Diffuse");
+        check(!exitToDiffuseShouldStart(glass, 0), "arrival start still requires depth > 0");
         check(exitToDiffuseShouldStart(glass, 1), "bounce at max depth can start Exit to Diffuse");
+        check(exitToDiffuseShouldArmBounce(glass, 0, 1), "last bounce from camera glass arms both walks");
+        check(!exitToDiffuseShouldArmBounce(glass, 0, 8), "deeper maxDepth still BSDF on the camera hit");
+        check(exitToDiffuseWantsRefractWalk(glass), "glass fires the through walk");
+        Material mirror = glass;
+        mirror.transmission = 0.0f;
+        check(!exitToDiffuseWantsRefractWalk(mirror), "opaque mirror skips the through walk");
+        const Vec3 bounce = exitToDiffuseReflectDirection(Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 0.0f, 1.0f));
+        checkNear(bounce.z, 1.0f, 1e-5f, "reflect of -Z about +Z is +Z");
         check(exitToDiffuseSkipSelf(3, 3, 0), "same material is skipped");
         check(!exitToDiffuseSkipSelf(3, 4, 0), "other material is the destination");
         check(!exitToDiffuseSkipSelf(3, 3, kExitToDiffuseMaxSkips), "skip cap stops self-walk");
@@ -3398,8 +3406,97 @@ void testExitToDiffuse() {
     const double sumOn = renderSum(1, finOn);
     check(finOff && finOn, "exit-to-diffuse renders are finite");
     check(sumOn > sumOff * 1.5 && sumOn > 1.0,
-          "Exit to Diffuse skips the dying glass and lights the next material");
-    std::printf("  off=%.3f on=%.3f\n", sumOff, sumOn);
+          "Exit to Diffuse through-walk lights the next material behind glass");
+    std::printf("  through off=%.3f on=%.3f\n", sumOff, sumOn);
+
+    // Reflect walk: camera → mirror (depth 0) → card behind the camera.
+    // Flag off: last hit dies black. Flag on: reflect opacity walk Lamberts the card.
+    auto buildReflectScene = [](int exitFlag) {
+        auto scene = std::make_shared<Scene>();
+        auto makeQuad = [](float z, Vec3 n, float half) {
+            MeshPtr m = std::make_shared<Mesh>();
+            m->positions = {Vec3(-half, -0.4f, z), Vec3(half, -0.4f, z), Vec3(half, 2.8f, z),
+                            Vec3(-half, 2.8f, z)};
+            m->indices = {0, 1, 2, 0, 2, 3};
+            m->normals = {n, n, n, n};
+            m->validate();
+            return m;
+        };
+        Material mirror;
+        mirror.baseColor = Vec3(1.0f);
+        mirror.baseWeight = 0.0f;
+        mirror.metallic = 1.0f;
+        mirror.transmission = 0.0f;
+        mirror.roughness = 0.0f;
+        mirror.specular = 1.0f;
+        mirror.exitToDiffuse = exitFlag;
+        InstanceData mirrorInst;
+        mirrorInst.meshIndex = scene->addMesh(makeQuad(0.0f, Vec3(0.0f, 0.0f, 1.0f), 1.8f));
+        mirrorInst.materialIndex = scene->addMaterial(mirror);
+        scene->instances.push_back(mirrorInst);
+
+        Material cardMat;
+        cardMat.baseColor = Vec3(0.15f, 0.75f, 0.2f);
+        cardMat.baseWeight = 1.0f;
+        cardMat.roughness = 1.0f;
+        cardMat.specular = 0.0f;
+        cardMat.doubleSided = 1;
+        InstanceData cardInst;
+        cardInst.meshIndex = scene->addMesh(makeQuad(4.0f, Vec3(0.0f, 0.0f, -1.0f), 8.0f));
+        cardInst.materialIndex = scene->addMaterial(cardMat);
+        scene->instances.push_back(cardInst);
+
+        LightData light;
+        light.type = kLightPoint;
+        light.intensity = 80.0f;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.4f, 1.4f, 3.55f));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 48;
+        scene->settings.resolutionY = 36;
+        scene->settings.samplesPerPixel = 12;
+        scene->settings.maxDepth = 1;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.caustics = 0;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(0.0f, 1.1f, 3.2f), Vec3(0.0f, 1.1f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto renderReflectSum = [&](int exitFlag, bool& finiteOut) -> double {
+        RenderSession session;
+        session.setScene(buildReflectScene(exitFlag));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        }
+        return sum;
+    };
+
+    bool finROff = true, finROn = true;
+    const double sumROff = renderReflectSum(0, finROff);
+    const double sumROn = renderReflectSum(1, finROn);
+    check(finROff && finROn, "exit-to-diffuse reflect renders are finite");
+    check(sumROn > sumROff * 1.5 && sumROn > 1.0,
+          "Exit to Diffuse reflect-walk lights the card in the mirror");
+    std::printf("  reflect off=%.3f on=%.3f\n", sumROff, sumROn);
 }
 
 void testUndoHub() {

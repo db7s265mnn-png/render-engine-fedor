@@ -18,6 +18,18 @@
 
 namespace sol {
 
+__device__ inline void beginExitToDiffuseEscape(GpuPath& path, const Surf& si, const Material& mat) {
+    float weight = 1.0f;
+    const Vec3 dir = exitToDiffuseSampleEscapeDir(path.direction, si.ng, mat, path.rng.nextFloat(), weight);
+    if (weight != 1.0f) specMulS(path.throughputS, weight, path.nLambda);
+    path.exitEscapeMat = si.materialIndex;
+    path.hops = 0;
+    path.origin = offsetRay(si.p, si.ng, dir);
+    path.direction = dir;
+    ++path.hops;
+    path.queue = kQueueIntersectClosest;
+}
+
 __device__ inline void tryEnqueueExitToDiffuseNee(GpuPath& path, GpuShadow& shadow, const SceneView& scene,
                                                  const Surf& si, const Material& mat, const Frame& frame,
                                                  Vec3 wo) {
@@ -250,15 +262,14 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         terminatePath(pixel, path);
         return;
     }
+    const bool exitNow =
+        !path.lightPath && ((path.depth >= maxDepth && exitToDiffuseShouldStart(mat, path.depth)) ||
+                            (path.depth < maxDepth && exitToDiffuseShouldArmBounce(mat, path.depth, maxDepth)));
+    if (exitNow) {
+        beginExitToDiffuseEscape(path, si, mat);
+        return;
+    }
     if (path.depth >= maxDepth) {
-        if (!path.lightPath && exitToDiffuseShouldStart(mat, path.depth)) {
-            path.exitEscapeMat = si.materialIndex;
-            path.hops = 0;
-            path.origin = offsetRay(si.p, si.ng, path.direction);
-            ++path.hops;
-            path.queue = kQueueIntersectClosest;
-            return;
-        }
         terminatePath(pixel, path);
         return;
     }

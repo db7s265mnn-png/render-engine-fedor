@@ -141,11 +141,13 @@ struct Material {
     // Arnold Advanced → Internal Reflections (1 = on). When off, rays inside a
     // dielectric skip Fresnel reflections (TIR still reflects — nowhere else to go).
     float internalReflections = 1.0f;
-    // When Max Ray Depth is exhausted on this standard_surface (not the camera
-    // hit), skip this material as opacity — no IOR, no new Fresnel — until a
-    // different material. That surface gets Lambert + NEE × path throughput.
-    // A miss after the skip takes the dome even if it is hidden from the camera.
-    // Default off.
+    // When Max Ray Depth is exhausted on this standard_surface, fire both a
+    // reflection-direction and a transmission-direction opacity walk (no IOR,
+    // no new Fresnel). Same materialIndex is skipped; the first other material
+    // gets Lambert + NEE × path throughput. A miss takes the dome even if it
+    // is hidden from the camera. The flagged surface itself is never painted
+    // as Lambert (including the camera hit). Transmission ≈ 0 skips the
+    // through walk (mirrors). Default off.
     int exitToDiffuse = 0;
 
     // Separate dielectric coat (pbrt-style overlay, not mixed into the base lobes).
