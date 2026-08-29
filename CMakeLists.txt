@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.58 LANGUAGES CXX)
+project(Solstice VERSION 0.9.59 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -607,6 +607,7 @@ set(SOLSTICE_LIB_SOURCES
     src/io/materialx_bake.cpp
     src/io/materialx_compile.cpp
     src/render/framebuffer.cpp
+    src/render/bdpt_scratch.cpp
     src/render/rgb_spectrum_tables.cpp
     src/render/rgb_spectrum_tables_aces.cpp
     src/render/render_session.cpp
@@ -669,6 +670,7 @@ set(SOLSTICE_LIB_HEADERS
     src/render/photon_aim.h
     src/render/framebuffer.h
     src/render/bdpt_stats.h
+    src/render/bdpt_scratch.h
     src/render/render_device.h
     src/render/xpu_split.h
     src/render/pixel_oracle.h

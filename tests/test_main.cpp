@@ -40,6 +40,7 @@
 #include "render/film_tile.h"
 #include "render/framebuffer.h"
 #include "render/bdpt_stats.h"
+#include "render/bdpt_scratch.h"
 #include "render/integrator.h"
 #include "render/integrator_bdpt.h"
 #include "render/pixel_filter.h"
@@ -2988,6 +2989,15 @@ void testBdptTimersFormat() {
     check(text.find("KiB/pixel") != std::string::npos, "timer alloc footprint");
     check(text.find("casRetries") != std::string::npos, "timer CAS retries");
     check(text.find("parallel=") != std::string::npos, "timer parallel factor");
+    check(text.find("scratch") == std::string::npos, "no scratch line when scratchVerts=0");
+
+    meta.scratchVerts = 50;
+    meta.scratchThreads = 33;
+    meta.scratchBytes = 50ull * (2 * 528 + 2 * 20 + 2 * 36);
+    const std::string scratchText = formatBdptPassStats(stats, meta);
+    check(scratchText.find("scratch 50 verts") != std::string::npos, "timer scratch reuse line");
+    check(scratchText.find("no per-pixel malloc") != std::string::npos, "timer scratch no malloc");
+    check(scratchText.find("KiB/thread") != std::string::npos, "timer scratch per-thread footprint");
 
     Framebuffer fb;
     fb.resize(2, 2);
@@ -3000,6 +3010,44 @@ void testBdptTimersFormat() {
     fb.setSplatDiag(nullptr, nullptr);
     fb.addSplat(0, 0, Vec3(1.0f, 0.0f, 0.0f));
     check(dep.load() == 1, "deposit counter disabled with nullptr");
+}
+
+void testBdptScratchReuse() {
+    std::printf("bdpt-scratch\n");
+    BdptScratchPool pool;
+    pool.ensureThreads(4, bdpt::kMaxVerts);
+    check(pool.threadSlots() == 4, "scratch pool has caller+workers slots");
+    BdptScratch* a = pool.get(0);
+    BdptScratch* b = pool.get(1);
+    check(a != nullptr && b != nullptr && a != b, "scratch slots are distinct");
+    check(int(a->eye.size()) == bdpt::kMaxVerts, "eye scratch sized to kMaxVerts");
+    check(int(a->light.size()) == bdpt::kMaxVerts, "light scratch sized to kMaxVerts");
+    check(a->eye.size() == a->eyeBeta.size() && a->eye.size() == a->eyeWave.size(),
+          "six scratch arrays match");
+    const bdpt::Vert* eyePtr = a->eye.data();
+    const SampledSpectrum* betaPtr = a->eyeBeta.data();
+    pool.ensureThreads(4, bdpt::kMaxVerts);
+    check(pool.get(0)->eye.data() == eyePtr, "second ensure keeps eye pointer");
+    check(pool.get(0)->eyeBeta.data() == betaPtr, "second ensure keeps beta pointer");
+    pool.ensureThreads(4, 8);  // smaller request must not shrink
+    check(int(pool.get(0)->eye.size()) == bdpt::kMaxVerts, "scratch never shrinks");
+    check(pool.get(0)->eye.data() == eyePtr, "smaller ensure does not reallocate");
+
+    pool.get(1)->eye[0].pdfFwd = 42.0f;
+    check(pool.get(0)->eye[0].pdfFwd != 42.0f, "thread slots do not share Vert storage");
+
+    const size_t vertBytes = size_t(bdpt::kMaxVerts) * sizeof(bdpt::Vert);
+    check(vertBytes > 16384, "kMaxVerts Vert array is above the 16 KiB LFH line");
+    check(bdptScratchBytes(bdpt::kMaxVerts) ==
+              2 * vertBytes + 2 * size_t(bdpt::kMaxVerts) * sizeof(SampledSpectrum) +
+                  2 * size_t(bdpt::kMaxVerts) * sizeof(SampledWavelengths),
+          "scratch byte helper matches six arrays");
+
+    BdptScratch& tls = bdptThreadScratch();
+    tls.ensure(bdpt::kMaxVerts);
+    const bdpt::Vert* tlsPtr = tls.eye.data();
+    tls.ensure(bdpt::kMaxVerts);
+    check(tls.eye.data() == tlsPtr, "thread-local fallback pointer is stable");
 }
 
 // Chromatic dispersion + thin-film iridescence sanity.
@@ -7993,6 +8041,7 @@ int main() {
         registerBuiltinNodes();
         testBdptShadersAndSss();
         testBdptTimersFormat();
+        testBdptScratchReuse();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -8044,6 +8093,7 @@ int main() {
     testRefractionSparkleClamp();
     testSplatAccumulationPrecision();
     testBdptTimersFormat();
+    testBdptScratchReuse();
     testDispersionAndThinFilm();
     testIntegratorSwitchStress();
     testInstanceTransform();

@@ -18,6 +18,7 @@
 #include "render/integrator_bdpt.h"
 #include "render/integrator_bdpt_spectral.h"
 #include "render/bdpt_stats.h"
+#include "render/bdpt_scratch.h"
 #include "render/integrator_mnee.h"
 #include "render/integrator_spectral.h"
 #include "render/photon_map.h"
@@ -315,7 +316,9 @@ public:
             if (useSpectralBdpt)
                 logInfo(std::string("Integrator: BDPT (hero λ=") +
                         std::to_string(kMaxSpectrumSamples) + ")" +
-                        (useGuiding ? " + OpenPGL guiding" : ""));
+                        (useGuiding ? " + OpenPGL guiding" : "") +
+                        " scratch " + std::to_string(bdpt::kMaxVerts) + " verts × " +
+                        std::to_string(pool_->threadCount() + 1) + " threads");
             else if (useSpectralPt)
                 logInfo(std::string("Integrator: Path Tracer (hero λ=") +
                         std::to_string(kMaxSpectrumSamples) + ")" +
@@ -388,6 +391,10 @@ public:
         BdptPassStats bdptStatsStorage;
         BdptPassStats* bdptStats =
             (settings.bdptTimers && useSpectralBdpt && !hasVolumes) ? &bdptStatsStorage : nullptr;
+        if (useSpectralBdpt && !hasVolumes) {
+            // ThreadPool: caller is threadId 0, workers are 1..N.
+            bdptScratchPool_.ensureThreads(pool_->threadCount() + 1, bdpt::kMaxVerts);
+        }
         struct SplatDiagGuard {
             Framebuffer* fb = nullptr;
             ~SplatDiagGuard() {
@@ -499,6 +506,8 @@ public:
                 ctx.splatFb = splatFbFor(disp);
                 ctx.photons = photonPtr;
                 ctx.bdptStats = bdptStats;
+                ctx.bdptScratch =
+                    (useSpectralBdpt && !hasVolumes) ? bdptScratchPool_.get(threadId) : nullptr;
 #if SOLSTICE_HAVE_OPENPGL
                 PathGuiding::ThreadState* guidingPtr = nullptr;
                 if (useGuiding) {
@@ -523,7 +532,6 @@ public:
                 }
                 if (guidingPtr) guidingPtr->endPath();
 #else
-                (void)threadId;
                 (void)useGuiding;
                 Vec3 radiance(0.0f);
                 if (useSpectralBdpt && !hasVolumes) {
@@ -741,10 +749,10 @@ public:
             meta.maxVerts = std::clamp(settings.maxDepth + 1, 2, bdpt::kMaxVerts);
             meta.poolThreads = pool_->threadCount();
             meta.vertBytes = sizeof(bdpt::Vert);
-            meta.allocBytesPerPixel =
-                2 * size_t(meta.maxVerts) * sizeof(bdpt::Vert) +
-                2 * size_t(meta.maxVerts) * sizeof(SampledSpectrum) +
-                2 * size_t(meta.maxVerts) * sizeof(SampledWavelengths);
+            meta.scratchVerts = bdpt::kMaxVerts;
+            meta.scratchThreads = pool_->threadCount() + 1;
+            meta.scratchBytes = bdptScratchBytes(bdpt::kMaxVerts);
+            meta.allocBytesPerPixel = meta.scratchBytes;
             meta.wallNs = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                        std::chrono::steady_clock::now() - bdptWall0)
                                        .count());
@@ -808,6 +816,7 @@ private:
     SceneView view_;
     PolynomialOpticsCamera polyOptics_;
     std::unique_ptr<ThreadPool> pool_;
+    BdptScratchPool bdptScratchPool_;
     int threadCount_ = 0;
     int lastCompletedSamples_ = 1;
     CausticPhotonMap photonMap_;

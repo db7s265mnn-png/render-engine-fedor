@@ -37,6 +37,9 @@ struct BdptPassMeta {
     int poolThreads = 0;
     size_t vertBytes = 0;
     size_t allocBytesPerPixel = 0;
+    int scratchVerts = 0;     // kMaxVerts when per-thread scratch is on
+    int scratchThreads = 0;   // pool workers + caller
+    size_t scratchBytes = 0;  // one thread's six arrays
     uint64_t wallNs = 0;
 };
 
@@ -85,6 +88,7 @@ inline std::string formatBdptPassStats(const BdptPassStats& s, const BdptPassMet
     const double threadMs = bdptNsToMs(total);
     const double parallel = wallMs > 1e-6 ? threadMs / wallMs : 0.0;
     const double allocKiB = double(meta.allocBytesPerPixel) / 1024.0;
+    const double scratchKiB = double(meta.scratchBytes) / 1024.0;
 
     std::string out;
     out.reserve(900);
@@ -97,9 +101,17 @@ inline std::string formatBdptPassStats(const BdptPassStats& s, const BdptPassMet
                   static_cast<unsigned long long>(pixels), wallMs, threadMs, parallel);
     out += line;
 
-    std::snprintf(line, sizeof(line),
-                  "  alloc    %8.1f ms  %5.1f%%   (%d verts, Vert=%zu B, %.1f KiB/pixel)\n",
-                  bdptNsToMs(alloc), pct(alloc), meta.maxVerts, meta.vertBytes, allocKiB);
+    if (meta.scratchVerts > 0) {
+        std::snprintf(line, sizeof(line),
+                      "  alloc    %8.1f ms  %5.1f%%   (scratch %d verts × %d threads, Vert=%zu B, "
+                      "%.1f KiB/thread, no per-pixel malloc)\n",
+                      bdptNsToMs(alloc), pct(alloc), meta.scratchVerts, meta.scratchThreads,
+                      meta.vertBytes, scratchKiB);
+    } else {
+        std::snprintf(line, sizeof(line),
+                      "  alloc    %8.1f ms  %5.1f%%   (%d verts, Vert=%zu B, %.1f KiB/pixel)\n",
+                      bdptNsToMs(alloc), pct(alloc), meta.maxVerts, meta.vertBytes, allocKiB);
+    }
     out += line;
     std::snprintf(line, sizeof(line), "  walk     %8.1f ms  %5.1f%%\n", bdptNsToMs(walk), pct(walk));
     out += line;

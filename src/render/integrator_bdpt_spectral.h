@@ -7,11 +7,11 @@
 #pragma once
 
 #include <algorithm>
-#include <vector>
 
 #include "render/integrator_base.h"
 #include "render/integrator_bdpt.h"
 #include "render/bdpt_stats.h"
+#include "render/bdpt_scratch.h"
 #include "render/spectral_common.h"
 #include "render/sss_spectral.h"
 
@@ -416,7 +416,8 @@ inline Vec3 traceRadianceBdptSpectral(
     PathGuiding::ThreadState* guiding,
 #endif
     Framebuffer* splatFb, DispersionContext* dispersion, const CausticPhotonMap* photons,
-    SampledSpectrum* outSpectrum = nullptr, BdptPassStats* stats = nullptr) {
+    SampledSpectrum* outSpectrum = nullptr, BdptPassStats* stats = nullptr,
+    BdptScratch* scratch = nullptr) {
     using namespace bdpt;
     const RenderSettingsData& settings = scene.settings;
     const RGBColorSpace& filmCs = pathColorSpace(settings);
@@ -432,27 +433,19 @@ inline Vec3 traceRadianceBdptSpectral(
 
     BdptPhaseTimer totalTimer(stats ? &stats->nsTotal : nullptr);
 
-    std::vector<Vert> eyeStorage;
-    std::vector<Vert> lightStorage;
-    Vert* eye = nullptr;
-    Vert* light = nullptr;
-    std::vector<SampledSpectrum> eyeBeta;
-    std::vector<SampledSpectrum> lightBeta;
-    SampledWavelengths lightWaves = waves;
-    SampledWavelengths eyeWaves = waves;
-    std::vector<SampledWavelengths> lightWavePath;
-    std::vector<SampledWavelengths> eyeWavePath;
+    if (!scratch) scratch = &bdptThreadScratch();
     {
         BdptPhaseTimer allocTimer(stats ? &stats->nsAlloc : nullptr);
-        eyeStorage.resize(static_cast<size_t>(maxVerts));
-        lightStorage.resize(static_cast<size_t>(maxVerts));
-        eye = eyeStorage.data();
-        light = lightStorage.data();
-        eyeBeta.resize(static_cast<size_t>(maxVerts));
-        lightBeta.resize(static_cast<size_t>(maxVerts));
-        lightWavePath.resize(static_cast<size_t>(maxVerts));
-        eyeWavePath.resize(static_cast<size_t>(maxVerts));
+        scratch->ensure(kMaxVerts);
     }
+    Vert* eye = scratch->eye.data();
+    Vert* light = scratch->light.data();
+    SampledSpectrum* eyeBeta = scratch->eyeBeta.data();
+    SampledSpectrum* lightBeta = scratch->lightBeta.data();
+    SampledWavelengths* lightWavePath = scratch->lightWave.data();
+    SampledWavelengths* eyeWavePath = scratch->eyeWave.data();
+    SampledWavelengths lightWaves = waves;
+    SampledWavelengths eyeWaves = waves;
     lightWavePath[0] = lightWaves;
     eyeWavePath[0] = eyeWaves;
 
@@ -483,8 +476,8 @@ inline Vec3 traceRadianceBdptSpectral(
                 cfg.stats = stats;
                 const bool inf = lightIsInfinite(scene.lights[light[0].lightIndex]);
                 const Vec3 o = inf ? light[0].p : offsetRayOrigin(light[0].p, light[0].ng, emitDir);
-                nLight = spectral_bdpt::randomWalk(scene, tracer, rng, light, lightBeta.data(),
-                                                   lightWavePath.data(), nLight, o, emitDir, pdfDirSa,
+                nLight = spectral_bdpt::randomWalk(scene, tracer, rng, light, lightBeta,
+                                                   lightWavePath, nLight, o, emitDir, pdfDirSa,
                                                    maxVerts, cfg, lightWaves, heroIdx);
                 correctInfiniteLightSubpathPdfs(scene, light, nLight, emitDir);
             }
@@ -511,7 +504,7 @@ inline Vec3 traceRadianceBdptSpectral(
             const Vec3 dc = transformVector(camProj.worldToCam, direction);
             camPdfSa = cameraPdfOmega(camProj, srMax(1e-4f, -dc.z));
         }
-        nEye = spectral_bdpt::randomWalk(scene, tracer, rng, eye, eyeBeta.data(), eyeWavePath.data(), 1,
+        nEye = spectral_bdpt::randomWalk(scene, tracer, rng, eye, eyeBeta, eyeWavePath, 1,
                                          origin, direction, camPdfSa, maxVerts, eyeCfg, eyeWaves,
                                          heroIdx);
     }
@@ -1019,11 +1012,12 @@ public:
 #if SOLSTICE_HAVE_OPENPGL
         const Vec3 rgb = traceRadianceBdptSpectral(
             *ctx.scene, *ctx.tracer, ctx.origin, ctx.direction, *ctx.rng, waves, heroIdx,
-            ctx.guiding, ctx.splatFb, ctx.dispersion, ctx.photons, &radiance, ctx.bdptStats);
+            ctx.guiding, ctx.splatFb, ctx.dispersion, ctx.photons, &radiance, ctx.bdptStats,
+            ctx.bdptScratch);
 #else
         const Vec3 rgb = traceRadianceBdptSpectral(
             *ctx.scene, *ctx.tracer, ctx.origin, ctx.direction, *ctx.rng, waves, heroIdx,
-            ctx.splatFb, ctx.dispersion, ctx.photons, &radiance, ctx.bdptStats);
+            ctx.splatFb, ctx.dispersion, ctx.photons, &radiance, ctx.bdptStats, ctx.bdptScratch);
 #endif
         return rgb;
     }
