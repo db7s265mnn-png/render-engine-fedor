@@ -3,7 +3,6 @@
 // CPU / Embree only — included from embree_device.cpp and the integrators.
 #pragma once
 
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -23,8 +22,25 @@ struct CausticPhoton {
     Vec3 power{0.0f};
     Vec3 n{0.0f};
     float lambdaNm = 0.0f;   // hero λ used for Abbe Snell (0 = no spectral IOR)
-    float lambdaPdf = 0.0f;  // visible-wavelength PDF at lambdaNm
 };
+
+// Film CMF of one λ, same luminance as `beta`. Only for paths that hit η(λ).
+// Abbe=0 keeps `beta` — a spike here would rainbow constant-η glass.
+inline Vec3 photonDispersedPower(Vec3 beta, float lambdaNm,
+                                 const RGBColorSpace& cs = colorSpaceSrgb()) {
+    const float y = luminance(beta);
+    if (!(y > 1e-12f) || !isFinite(beta)) return beta;
+    SampledWavelengths w;
+    w.n = 1;
+    w.lambda[0] = lambdaNm;
+    w.pdf[0] = SampledWavelengths::visibleWavelengthPdf(lambdaNm);
+    if (w.pdf[0] <= 0.0f) return beta;
+    Vec3 c = spectrumToRgb(SampledSpectrum::constant(1, 1.0f), w, cs);
+    c = vmax(Vec3(0.0f), c);
+    const float cy = luminance(c);
+    if (!(cy > 1e-8f) || !isFinite(c)) return beta;
+    return c * (y / cy);
+}
 
 // Flat hash-grid photon map. Built once per progressive pass from lights that
 // Contribute to Caustics, tracing only through materials that Contribute to
@@ -182,15 +198,11 @@ private:
         if (!lightContributesCaustics(l)) return;
         if (l.type == kLightDome || l.type == kLightDistant) return;
 
-        // Hero λ bends Snell (Abbe). Flux is the 0.9.64 RGB estimator:
-        // lightRadiance() already applies Normalize / area. Seeding from
-        // emittedRadiance() left a raw `area` factor — tiny normalized lights
-        // deposited ~0 power, so the map looked empty.
-        SampledWavelengths waves =
-            SampledWavelengths::sampleVisible(kMaxSpectrumSamples, rng.nextFloat());
-        const int heroPick =
-            std::clamp(int(rng.nextFloat() * float(waves.n)), 0, std::max(0, waves.n - 1));
-        waves.promoteHero(heroPick);
+        // One visible λ: Abbe Snell + (if η varied) CMF tint. Flux is the
+        // 0.9.64 RGB estimator — lightRadiance() already applies Normalize.
+        const SampledWavelengths waves = SampledWavelengths::sampleVisible(1, rng.nextFloat());
+        const float lambdaNm = waves.lambda[0];
+        const RGBColorSpace& filmCs = pathColorSpace(scene.settings);
 
         Vec3 p, n, beta;
         Vec3 dir;
@@ -234,6 +246,7 @@ private:
         }
 
         bool causticChain = false;
+        bool dispersed = false;
         Vec3 o = offsetRayOrigin(p, n, dir);
         Vec3 d = dir;
 
@@ -271,10 +284,11 @@ private:
 
             if (causticLink) {
                 causticChain = true;
+                if (dielectricEtaVaries(mat)) dispersed = true;
                 const Frame frame(si.ns);
                 const Vec3 woLocal = frame.toLocal(-d);
                 Material matHero = mat;
-                matHero.ior = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, waves.lambda[0]);
+                matHero.ior = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, lambdaNm);
                 const BsdfSample bs =
                     bsdfSampleLocal(matHero, woLocal, rng.nextFloat(), rng.nextFloat(),
                                     rng.nextFloat(), rng.nextFloat());
@@ -298,9 +312,8 @@ private:
                 ph.p = si.p;
                 ph.wi = -d;
                 ph.n = si.ns;
-                ph.lambdaNm = waves.lambda[0];
-                ph.lambdaPdf = waves.pdf[0];
-                ph.power = beta;
+                ph.lambdaNm = lambdaNm;
+                ph.power = dispersed ? photonDispersedPower(beta, lambdaNm, filmCs) : beta;
                 if (isFinite(ph.power) && !isBlack(ph.power)) photons_.push_back(ph);
                 break;
             }

@@ -2752,6 +2752,13 @@ void testPhotonCaustics() {
         check(spectralAbsoluteIor(1.5f, 30.0f, 465.0f) >
                   spectralAbsoluteIor(1.5f, 30.0f, 630.0f) + 0.01f,
               "photon Abbe IOR is higher in the blue");
+        const Vec3 white(1.0f);
+        const Vec3 pB = photonDispersedPower(white, 465.0f);
+        const Vec3 pR = photonDispersedPower(white, 630.0f);
+        check(pB.z > pR.z && pR.x > pB.x, "dispersed photon power is blue vs red");
+        check(std::fabs(luminance(pB) - 1.0f) < 0.05f && std::fabs(luminance(pR) - 1.0f) < 0.05f,
+              "dispersed photon tint keeps luminance");
+        check(photonDispersedPower(white, 0.0f) == white, "invalid λ leaves RGB flux alone");
     }
 }
 
@@ -2861,7 +2868,8 @@ void testPhotonDispersion() {
     const double sumOn = render(20.0f, chromaOn, sepOn, finOn);
     check(finOff && finOn, "photon dispersion renders are finite");
     check(sumOn > sumOff * 0.8 && sumOn < sumOff * 1.3, "photon dispersion keeps caustic energy");
-    check(chromaOn > chromaOff || sepOn > sepOff, "Abbe splits photon caustics by colour");
+    check(chromaOn > chromaOff * 1.15, "Abbe tints photon caustics, not only shifts them");
+    check(sepOn > sepOff, "Abbe splits photon caustics by colour");
     std::printf("  off=%.1f on=%.1f chromaOff=%.1f chromaOn=%.1f sepOff=%.2f sepOn=%.2f\n", sumOff,
                 sumOn, chromaOff, chromaOn, sepOff, sepOn);
 }
