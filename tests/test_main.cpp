@@ -827,7 +827,9 @@ void testBsdf() {
         flaggedOpaque.exitToDiffuse = 1;
         flaggedOpaque.transmission = 0.0f;
         check(exitToDiffuseSkipDielectricDest(flaggedOpaque), "flagged dest is never Lambert");
-        check(!exitToDiffuseSkipDielectricDest(mirror), "opaque mirror stays dest");
+        Material destMirror = mirror;
+        destMirror.exitToDiffuse = 0;
+        check(!exitToDiffuseSkipDielectricDest(destMirror), "opaque unflagged mirror stays dest");
         const Material lamb = exitToDiffuseLambert(glass);
         check(lamb.transmission <= 1e-6f && lamb.specular <= 1e-6f && lamb.metallic <= 1e-6f,
               "exit material is Lambert");
@@ -3713,11 +3715,6 @@ void testExitToDiffuse() {
         frontInst.meshIndex = scene->addMesh(makeQuad(1.2f));
         frontInst.materialIndex = glassIdx;
         scene->instances.push_back(frontInst);
-        InstanceData backInst;
-        backInst.meshIndex = scene->addMesh(makeQuad(0.8f));
-        backInst.materialIndex = glassIdx;
-        scene->instances.push_back(backInst);
-
         Material liquid;
         liquid.baseColor = Vec3(0.02f, 0.03f, 0.04f);
         liquid.baseWeight = 1.0f;
@@ -3727,9 +3724,14 @@ void testExitToDiffuse() {
         liquid.roughness = 0.0f;
         liquid.specular = 1.0f;
         InstanceData liquidInst;
-        liquidInst.meshIndex = scene->addMesh(makeQuad(0.4f));
+        liquidInst.meshIndex = scene->addMesh(makeQuad(0.9f));
         liquidInst.materialIndex = scene->addMaterial(liquid);
         scene->instances.push_back(liquidInst);
+
+        InstanceData backInst;
+        backInst.meshIndex = scene->addMesh(makeQuad(0.6f));
+        backInst.materialIndex = glassIdx;
+        scene->instances.push_back(backInst);
 
         Material cardMat;
         cardMat.baseColor = Vec3(0.85f, 0.15f, 0.1f);
