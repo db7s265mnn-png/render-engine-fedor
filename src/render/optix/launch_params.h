@@ -66,9 +66,6 @@ struct alignas(16) LaunchParams {
     int workSlot = -1;                   // >=0: live count is workCounts[slot] on device
     int compactLaunch = 0;               // unused (Iray pool = full W×H, no host count)
     int batchSamples = 1;                // spp folded in this wavefront (GPU regen)
-    // 1 = path_tail only drains kQueueExitToDiffuse (MNEE leftover PT must not
-    // grow extra bounces). 0 = normal megakernel tail plus ETD.
-    int pathTailExitOnly = 0;
 
     int width = 0;
     int height = 0;

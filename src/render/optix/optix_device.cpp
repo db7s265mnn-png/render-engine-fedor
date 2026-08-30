@@ -56,6 +56,8 @@ extern "C" const unsigned char solsticeOptixPathTailIr[];
 extern "C" const unsigned long long solsticeOptixPathTailIrSize;
 extern "C" const unsigned char solsticeOptixMneeIr[];
 extern "C" const unsigned long long solsticeOptixMneeIrSize;
+extern "C" const unsigned char solsticeOptixEtdIr[];
+extern "C" const unsigned long long solsticeOptixEtdIrSize;
 extern "C" const unsigned char solsticeOptixHitIr[];
 extern "C" const unsigned long long solsticeOptixHitIrSize;
 
@@ -216,6 +218,7 @@ enum RaygenId : int {
     kRgShadeVolume,
     kRgPathTail,
     kRgMnee,
+    kRgEtd,
     kRgCount
 };
 
@@ -230,6 +233,7 @@ enum ModuleId : int {
     kModShadeVolume,
     kModPathTail,
     kModMnee,
+    kModEtd,
     kModHit,
     kModCount
 };
@@ -797,7 +801,7 @@ public:
                     msg << "  caustics=Iray LT aim n=" << nAim << " mix=" << launchParams.photonAimMix
                         << (launchParams.photonAimMix >= 1.0f - 1e-5f ? " aimed-only" : "");
                     if (gpuEngine == kGpuCausticsAimedLtMnee)
-                        msg << "  menu=Aimed LT+MNEE  camMNEE etdTail";
+                        msg << "  menu=Aimed LT+MNEE  camMNEE etd";
                     else
                         msg << "  menu=Aimed LT  path_tail";
                 }
@@ -872,11 +876,12 @@ private:
         static const char* kNames[kRgCount] = {
             "init_from_camera", "init_from_light", "intersect_closest", "intersect_shadow",
             "shade_surface",    "shade_background", "shade_shadow",     "shade_volume",
-            "path_tail",        "mnee",
+            "path_tail",        "mnee",              "etd",
         };
         OptixPipeline pipe = pipeline_;
         if (raygenIndex == kRgPathTail) pipe = pipelineTail_;
         else if (raygenIndex == kRgMnee) pipe = pipelineMnee_;
+        else if (raygenIndex == kRgEtd) pipe = pipelineEtd_;
         if (!pipe) {
             throw std::runtime_error(std::string("OptiX pipeline is null [") + kNames[raygenIndex] + "]");
         }
@@ -902,7 +907,6 @@ private:
         lp.workItems = nullptr;
         lp.workCount = 0;
         lp.workSlot = -1;
-        lp.pathTailExitOnly = 0;
         uploadLaunch(lp);
         auto bounceAndTail = [&](bool lightPass) {
             // MNEE is a separate pipeline per bounce. The PT megakernel must not
@@ -935,14 +939,14 @@ private:
                 }
             }
             if (cancel.load(std::memory_order_relaxed)) return;
-            // Exit to Diffuse hops do not increment depth. MNEE uses
-            // wave=maxDepth and used to skip this megakernel, so the card
-            // never shaded. Drain ETD here; when MNEE is on, only that queue.
-            lp.pathTailExitOnly = gpuMnee ? 1 : 0;
-            uploadLaunch(lp);
-            launchKernel(kRgPathTail, launchW, launchH);
+            // Dedicated ETD pipeline (both CPU walks). Not path_tail: that
+            // megakernel plus extra traces hung cicc / optixModuleCreate.
+            launchKernel(kRgEtd, launchW, launchH);
             ++launches;
-            lp.pathTailExitOnly = 0;
+            if (!gpuMnee) {
+                launchKernel(kRgPathTail, launchW, launchH);
+                ++launches;
+            }
         };
 
         launchKernel(kRgInit, launchW, launchH);
@@ -1148,6 +1152,7 @@ private:
             solsticeOptixShadeVolumeIr,
             solsticeOptixPathTailIr,
             solsticeOptixMneeIr,
+            solsticeOptixEtdIr,
             solsticeOptixHitIr,
         };
         const unsigned long long irSize[kModCount] = {
@@ -1161,6 +1166,7 @@ private:
             solsticeOptixShadeVolumeIrSize,
             solsticeOptixPathTailIrSize,
             solsticeOptixMneeIrSize,
+            solsticeOptixEtdIrSize,
             solsticeOptixHitIrSize,
         };
         for (int i = 0; i < kModCount; ++i) loadModule(ir[i], irSize[i], modules_[i]);
@@ -1170,7 +1176,7 @@ private:
             "__raygen__init_from_camera",     "__raygen__init_from_light",   "__raygen__intersect_closest",
             "__raygen__intersect_shadow",     "__raygen__shade_surface",     "__raygen__shade_background",
             "__raygen__shade_shadow",         "__raygen__shade_volume",      "__raygen__path_tail",
-            "__raygen__mnee",
+            "__raygen__mnee",                 "__raygen__etd",
         };
         for (int i = 0; i < kRgCount; ++i) {
             OptixProgramGroupDesc raygenDesc{};
@@ -1212,6 +1218,8 @@ private:
                                            hitGroups_[0], hitGroups_[1]};
         OptixProgramGroup groupsMnee[5] = {raygenGroups_[kRgMnee], missGroups_[0], missGroups_[1],
                                            hitGroups_[0], hitGroups_[1]};
+        OptixProgramGroup groupsEtd[5] = {raygenGroups_[kRgEtd], missGroups_[0], missGroups_[1],
+                                          hitGroups_[0], hitGroups_[1]};
 
         OptixPipelineLinkOptions linkOptions{};
         linkOptions.maxTraceDepth = 1;
@@ -1227,6 +1235,10 @@ private:
         OPTIX_CHECK(optixPipelineCreate(context_, &pipelineOptions, &linkOptions, groupsMnee,
                                         unsigned(sizeof(groupsMnee) / sizeof(groupsMnee[0])), log, &logSize,
                                         &pipelineMnee_));
+        logSize = sizeof(log);
+        OPTIX_CHECK(optixPipelineCreate(context_, &pipelineOptions, &linkOptions, groupsEtd,
+                                        unsigned(sizeof(groupsEtd) / sizeof(groupsEtd[0])), log, &logSize,
+                                        &pipelineEtd_));
 
         auto setStack = [&](OptixPipeline pipe, OptixProgramGroup* groups, int n, unsigned floor,
                             const char* label) {
@@ -1253,6 +1265,7 @@ private:
         setStack(pipeline_, groupsWf, int(sizeof(groupsWf) / sizeof(groupsWf[0])), 1024u, "wavefront");
         setStack(pipelineTail_, groupsTail, int(sizeof(groupsTail) / sizeof(groupsTail[0])), 8192u, "path_tail");
         setStack(pipelineMnee_, groupsMnee, int(sizeof(groupsMnee) / sizeof(groupsMnee[0])), 16384u, "mnee");
+        setStack(pipelineEtd_, groupsEtd, int(sizeof(groupsEtd) / sizeof(groupsEtd[0])), 8192u, "etd");
 
         RayGenRecord raygenRecords[kRgCount]{};
         for (int i = 0; i < kRgCount; ++i) {
@@ -1349,6 +1362,7 @@ private:
         if (pipeline_) optixPipelineDestroy(pipeline_);
         if (pipelineTail_) optixPipelineDestroy(pipelineTail_);
         if (pipelineMnee_) optixPipelineDestroy(pipelineMnee_);
+        if (pipelineEtd_) optixPipelineDestroy(pipelineEtd_);
         for (OptixProgramGroup& group : raygenGroups_) {
             if (group) optixProgramGroupDestroy(group);
             group = nullptr;
@@ -1369,6 +1383,7 @@ private:
         pipeline_ = nullptr;
         pipelineTail_ = nullptr;
         pipelineMnee_ = nullptr;
+        pipelineEtd_ = nullptr;
         context_ = nullptr;
         initialized_ = false;
     }
@@ -1394,6 +1409,7 @@ private:
     OptixPipeline pipeline_ = nullptr;
     OptixPipeline pipelineTail_ = nullptr;
     OptixPipeline pipelineMnee_ = nullptr;
+    OptixPipeline pipelineEtd_ = nullptr;
     OptixShaderBindingTable sbt_{};
     OptixShaderBindingTable sbts_[kRgCount]{};
 

@@ -19,8 +19,7 @@
 namespace sol {
 
 __device__ inline void beginExitToDiffuseEscape(GpuPath& path, const Surf& si, const Material& mat) {
-    // Stash the dying vertex. path_tail fires both CPU walks — shade cannot
-    // optixTrace, and a one-continuation *2 is not the same at low spp.
+    // Job only. Both walks run in the dedicated ETD pipeline (optix_etd.cu).
     path.exitEscapeMat = si.materialIndex;
     path.exitWantsRefract = exitToDiffuseWantsRefractWalk(mat) ? 1 : 0;
     path.exitP = si.p;

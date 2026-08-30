@@ -18,8 +18,7 @@ enum PathQueue : int {
     kQueueShadeSurface = 2,
     kQueueShadeBackground = 3,
     kQueueShadeVolume = 4,
-    // Armed Exit to Diffuse: path_tail fires both CPU walks (shade cannot
-    // optixTrace, and the hops do not increment depth).
+    // Armed Exit to Diffuse: optix_etd.cu fires both CPU walks.
     kQueueExitToDiffuse = 5,
 };
 
