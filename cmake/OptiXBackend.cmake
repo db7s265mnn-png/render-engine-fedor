@@ -294,7 +294,7 @@ solstice_optix_kernel(shade_surface
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
-solstice_optix_kernel(shade_background)
+solstice_optix_kernel(shade_background
     ${_solstice_optix_dir}/optix_shade_background.cu
     solsticeOptixShadeBackgroundIr
     LIGHTS
@@ -349,7 +349,7 @@ solstice_optix_kernel(path_tail
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
-solstice_optix_kernel(mnee)
+solstice_optix_kernel(mnee
     ${_solstice_optix_dir}/optix_mnee.cu
     solsticeOptixMneeIr
     LIGHTS
