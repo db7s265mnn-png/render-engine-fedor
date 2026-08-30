@@ -1,7 +1,7 @@
 // Shared Exit to Diffuse walk (Embree + the dedicated OptiX ETD pipeline).
-// Skip-self, opacity, dest maps. Does not flip dest ng/ns (through-glass
-// onto a backfacing card matches CPU). Caller runs dest NEE / miss / area
-// light and applies clampDirect to the walk sum.
+// Skip-self, other dielectrics / flagged hits, opacity, dest maps. Does not
+// flip dest ng/ns. Caller runs dest NEE / miss / area light and applies
+// clampDirect to the walk sum.
 //
 // Do not include shading.h / integrator.h / spectral_common.h here — OptiX
 // etd.cu traces from this TU; those headers hang cicc / optixModuleCreate.
@@ -63,7 +63,7 @@ SR_INL SR_HD EtdWalkKind exitToDiffuseWalkFind(Ctx& ctx, Vec3 origin, Vec3 direc
             continue;
         }
         destMat = ctx.evalDestMaps(hit);
-        if (ctx.skipOpacity(destMat)) {
+        if (ctx.skipOpacity(destMat) || exitToDiffuseSkipDielectricDest(destMat)) {
             origin = offsetRayOrigin(hit.p, hit.ng, direction);
             continue;
         }

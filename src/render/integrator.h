@@ -1370,11 +1370,11 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
-        // Exit to Diffuse: skip the dying material (opacity, no IOR) until another
-        // material, then Lambert + NEE × existing throughput. The flagged surface
-        // is never painted as Lambert. Reflect and refract walks both fire.
+        // Exit to Diffuse: skip the dying material and other dielectrics
+        // (opacity, no IOR) until an opaque dest, then Lambert + NEE.
         if (exitEscapeMat >= 0) {
-            if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips)) {
+            if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips) ||
+                exitToDiffuseSkipDielectricDest(mat)) {
                 origin = offsetRayOrigin(si.p, si.ng, direction);
                 ++exitEscapeSkips;
                 ++passThrough;

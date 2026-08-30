@@ -723,7 +723,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         }
 
         if (exitEscapeMat >= 0) {
-            if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips)) {
+            if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips) ||
+                exitToDiffuseSkipDielectricDest(mat)) {
                 origin = offsetRayOrigin(si.p, si.ng, direction);
                 ++exitEscapeSkips;
                 ++passThrough;

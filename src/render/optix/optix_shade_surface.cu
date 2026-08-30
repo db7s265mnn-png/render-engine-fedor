@@ -250,7 +250,8 @@ __device__ inline void shadeSurfacePixel(int pixel) {
 
     const int maxDepth = srMax(1, scene.settings.maxDepth);
     if (path.exitEscapeMat >= 0) {
-        if (exitToDiffuseSkipSelf(path.exitEscapeMat, si.materialIndex, path.hops)) {
+        if (exitToDiffuseSkipSelf(path.exitEscapeMat, si.materialIndex, path.hops) ||
+            exitToDiffuseSkipDielectricDest(mat)) {
             path.origin = offsetRay(si.p, si.ng, path.direction);
             ++path.hops;
             path.queue = kQueueIntersectClosest;

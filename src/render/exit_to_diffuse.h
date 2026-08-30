@@ -69,6 +69,13 @@ SR_INL SR_HD bool exitToDiffuseSkipSelf(int escapeMaterialIndex, int hitMaterial
            skips < kExitToDiffuseMaxSkips;
 }
 
+// Through-walk dest is an opaque surface. Water / a second pane / another
+// flagged dielectric is skipped as opacity (no IOR), same cap as skip-self.
+// Mirrors stay dest: no transmission and no flag.
+SR_INL SR_HD bool exitToDiffuseSkipDielectricDest(const Material& dest) {
+    return dest.transmission > 1e-4f || materialWantsExitToDiffuse(dest);
+}
+
 // Destination Lambert: base_color × base. Glass with base ≈ 0 uses
 // transmission_color so a coloured dielectric does not exit as black or chalk.
 SR_INL SR_HD Material exitToDiffuseLambert(const Material& mat) {

@@ -818,6 +818,16 @@ void testBsdf() {
         check(exitToDiffuseSkipSelf(3, 3, 0), "same material is skipped");
         check(!exitToDiffuseSkipSelf(3, 4, 0), "other material is the destination");
         check(!exitToDiffuseSkipSelf(3, 3, kExitToDiffuseMaxSkips), "skip cap stops self-walk");
+        check(exitToDiffuseSkipDielectricDest(glass), "transmissive dest is not Lambert");
+        Material liquidDest = glass;
+        liquidDest.exitToDiffuse = 0;
+        liquidDest.ior = 1.33f;
+        check(exitToDiffuseSkipDielectricDest(liquidDest), "unflagged water is still skipped");
+        Material flaggedOpaque{};
+        flaggedOpaque.exitToDiffuse = 1;
+        flaggedOpaque.transmission = 0.0f;
+        check(exitToDiffuseSkipDielectricDest(flaggedOpaque), "flagged dest is never Lambert");
+        check(!exitToDiffuseSkipDielectricDest(mirror), "opaque mirror stays dest");
         const Material lamb = exitToDiffuseLambert(glass);
         check(lamb.transmission <= 1e-6f && lamb.specular <= 1e-6f && lamb.metallic <= 1e-6f,
               "exit material is Lambert");
@@ -3678,6 +3688,110 @@ void testExitToDiffuse() {
     check(sumROn > sumROff * 1.5 && sumROn > 1.0,
           "Exit to Diffuse reflect-walk lights the card in the mirror");
     std::printf("  reflect off=%.3f on=%.3f\n", sumROff, sumROn);
+
+    // Through + water: camera → glass → dark liquid (other material) → red card.
+    // Flag on: skip dielectrics, Lambert the card. Old dest-on-liquid would stay dark.
+    auto buildLiquidScene = [](int exitFlag) {
+        auto scene = std::make_shared<Scene>();
+        auto makeQuad = [](float z) {
+            MeshPtr m = std::make_shared<Mesh>();
+            m->positions = {Vec3(-1.6f, 0, z), Vec3(1.6f, 0, z), Vec3(1.6f, 2.2f, z), Vec3(-1.6f, 2.2f, z)};
+            m->indices = {0, 1, 2, 0, 2, 3};
+            m->normals = {Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1)};
+            m->validate();
+            return m;
+        };
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.roughness = 0.0f;
+        glass.specular = 1.0f;
+        glass.exitToDiffuse = exitFlag;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData frontInst;
+        frontInst.meshIndex = scene->addMesh(makeQuad(1.2f));
+        frontInst.materialIndex = glassIdx;
+        scene->instances.push_back(frontInst);
+        InstanceData backInst;
+        backInst.meshIndex = scene->addMesh(makeQuad(0.8f));
+        backInst.materialIndex = glassIdx;
+        scene->instances.push_back(backInst);
+
+        Material liquid;
+        liquid.baseColor = Vec3(0.02f, 0.03f, 0.04f);
+        liquid.baseWeight = 1.0f;
+        liquid.transmission = 1.0f;
+        liquid.transmissionColor = Vec3(0.02f, 0.04f, 0.05f);
+        liquid.ior = 1.33f;
+        liquid.roughness = 0.0f;
+        liquid.specular = 1.0f;
+        InstanceData liquidInst;
+        liquidInst.meshIndex = scene->addMesh(makeQuad(0.4f));
+        liquidInst.materialIndex = scene->addMaterial(liquid);
+        scene->instances.push_back(liquidInst);
+
+        Material cardMat;
+        cardMat.baseColor = Vec3(0.85f, 0.15f, 0.1f);
+        cardMat.baseWeight = 1.0f;
+        cardMat.roughness = 1.0f;
+        cardMat.specular = 0.0f;
+        InstanceData cardInst;
+        cardInst.meshIndex = scene->addMesh(makeQuad(0.0f));
+        cardInst.materialIndex = scene->addMaterial(cardMat);
+        scene->instances.push_back(cardInst);
+
+        LightData light;
+        light.type = kLightPoint;
+        light.intensity = 60.0f;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.7f, 1.6f, 0.55f));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 48;
+        scene->settings.resolutionY = 36;
+        scene->settings.samplesPerPixel = 12;
+        scene->settings.maxDepth = 1;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.caustics = 0;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(0.0f, 1.1f, 3.2f), Vec3(0.0f, 1.1f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto renderLiquidSum = [&](int exitFlag, bool& finiteOut) -> double {
+        RenderSession session;
+        session.setScene(buildLiquidScene(exitFlag));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        }
+        return sum;
+    };
+
+    bool finLOff = true, finLOn = true;
+    const double sumLOff = renderLiquidSum(0, finLOff);
+    const double sumLOn = renderLiquidSum(1, finLOn);
+    check(finLOff && finLOn, "exit-to-diffuse liquid renders are finite");
+    check(sumLOn > sumLOff * 1.5 && sumLOn > 1000.0,
+          "Exit to Diffuse through-walk skips water and lights the card");
+    std::printf("  liquid off=%.3f on=%.3f\n", sumLOff, sumLOn);
 }
 
 void testUndoHub() {
