@@ -24,6 +24,7 @@ __device__ inline void beginExitToDiffuseEscape(GpuPath& path, const Surf& si, c
     path.exitWantsRefract = exitToDiffuseWantsRefractWalk(mat) ? 1 : 0;
     path.exitP = si.p;
     path.exitNg = si.ng;
+    path.exitNs = si.ns;
     path.queue = kQueueExitToDiffuse;
 }
 
@@ -58,7 +59,7 @@ __device__ inline void tryEnqueueExitToDiffuseNee(GpuPath& path, GpuShadow& shad
     const LightData& lightNee = scene.lights[lightIndex];
     enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS, path.mediumIndex,
                            lightNee.shadowEnable, scene.settings.clampDirect,
-                           exitToDiffuseEyeBounceNee());
+                           exitToDiffuseDestShadowNee());
 }
 
 __device__ inline void shadeSurfacePixel(int pixel) {

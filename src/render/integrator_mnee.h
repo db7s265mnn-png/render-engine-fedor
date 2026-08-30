@@ -732,7 +732,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             }
             const Vec3 nee =
                 nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), Frame(si.ns),
-                                    -direction, rng, guiding, -1, exitToDiffuseEyeBounceNee());
+                                    -direction, rng, guiding, -1, exitToDiffuseDestShadowNee());
             Vec3 contrib = throughput * nee;
             contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;
@@ -741,8 +741,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
         const bool exitNow = (depth >= maxDepth && exitToDiffuseShouldStart(mat, depth)) ||
                              (depth < maxDepth && exitToDiffuseShouldArmBounce(mat, depth, maxDepth));
         if (exitNow) {
-            radiance += exitToDiffuseContribution(scene, tracer, si.p, si.ng, direction, si.materialIndex,
-                                                  mat, throughput, rng, -1);
+            radiance += exitToDiffuseContribution(scene, tracer, si.p, si.ng, si.ns, direction,
+                                                  si.materialIndex, mat, throughput, rng, -1);
             break;
         }
         if (depth >= maxDepth) break;

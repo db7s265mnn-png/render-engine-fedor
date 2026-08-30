@@ -18,7 +18,7 @@ enum PathQueue : int {
     kQueueShadeSurface = 2,
     kQueueShadeBackground = 3,
     kQueueShadeVolume = 4,
-    // Armed Exit to Diffuse: optix_etd.cu fires both CPU walks.
+    // Armed Exit to Diffuse: through dest + dying reflection in optix_etd.cu.
     kQueueExitToDiffuse = 5,
 };
 
@@ -79,6 +79,7 @@ struct GpuPath {
     int exitWantsRefract = 0;
     Vec3 exitP{0.0f};
     Vec3 exitNg{0.0f, 0.0f, 1.0f};
+    Vec3 exitNs{0.0f, 0.0f, 1.0f};
     int rayKind = 0;  // RayShadeKind: incoming type for ray_switch_shader (Arnold)
     // MCMC / ERPT: stored SampleLe so mutations respawn without a new light pick.
     Vec3 mcmcOrigin{0.0f};
@@ -105,8 +106,8 @@ struct GpuShadow {
     int splatPixel = -1;  // >=0: unoccluded contrib atomicAdds RGB to that film pixel (no .w)
     int mneeCaster = -1;  // instanceIndex of a delta glass blocker; -1 = none
     // 1 = camera NEE from depth>0: Iray Fresnel-continue through contributing glass.
+    // 2 = Exit to Diffuse dest: dielectrics open (no Fresnel stack).
     // 0 = primary NEE or LT camera splat (glass stays opaque; SDS on the floor).
-    // Stored here because shade increments path.depth after enqueueing the shadow.
     int eyeBounceNee = 0;
     // Camera NEE baked at the vertex: throughput × illuminant(Le) × albedo(f) × geom.
     // shade_shadow must add this as-is — live path throughput has already stepped.

@@ -87,8 +87,8 @@ inline Vec3 exitToDiffuseEscapeFromVertex(const SceneView& scene, const Tracer& 
                                           Rng& rng, int eyeBounceNee) {
     if (v.type != VType::Surface || !materialWantsExitToDiffuse(v.mat) || v.materialIndex < 0)
         return Vec3(0.0f);
-    return exitToDiffuseWalkReflectAndRefract(scene, tracer, v.p, v.ng, -v.wo, v.materialIndex, v.mat, rng,
-                                              v.mediumIndex, eyeBounceNee);
+    return exitToDiffuseWalkReflectAndRefract(scene, tracer, v.p, v.ng, v.ns, -v.wo, v.materialIndex, v.mat,
+                                              rng, v.mediumIndex, eyeBounceNee);
 }
 
 // Path Tracer Russian roulette on a BDPT subpath. The vertex already on the
@@ -1409,7 +1409,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
     if (nEye == maxVerts && nEye >= 2) {
         const Vert& last = eye[nEye - 1];
         const Vec3 extra =
-            exitToDiffuseEscapeFromVertex(scene, tracer, last, rng, exitToDiffuseEyeBounceNee());
+            exitToDiffuseEscapeFromVertex(scene, tracer, last, rng, exitToDiffuseDestShadowNee());
         if (!isBlack(extra) && isFinite(extra)) {
             Vec3 c = last.beta * extra;
             c = clampContribution(c, settings.clampDirect);

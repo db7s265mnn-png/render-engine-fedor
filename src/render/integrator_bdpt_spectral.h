@@ -983,8 +983,8 @@ inline Vec3 traceRadianceBdptSpectral(
             last.materialIndex >= 0) {
             const SampledWavelengths& wE = eyeWavePath[nEye - 1];
             SampledSpectrum extra = exitToDiffuseWalkReflectAndRefractSpectral(
-                scene, tracer, last.p, last.ng, -last.wo, last.materialIndex, last.mat, rng, wE, filmCs,
-                last.mediumIndex, exitToDiffuseEyeBounceNee());
+                scene, tracer, last.p, last.ng, last.ns, -last.wo, last.materialIndex, last.mat, rng, wE,
+                filmCs, last.mediumIndex, exitToDiffuseDestShadowNee());
             if (spectrumMaxComponent(extra) > 0.0f) {
                 extra = clampSpectrumIndirect(extra, settings.clampDirect);
                 addFilm(eyeBeta[nEye - 1] * extra, wE);

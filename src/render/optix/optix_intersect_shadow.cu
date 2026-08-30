@@ -45,7 +45,7 @@ __device__ inline void intersectShadowPixel(int pixel) {
         }
 
         const int eyeBounceNee =
-            (!path.lightPath && shadow.splatPixel < 0 && shadow.eyeBounceNee) ? 1 : 0;
+            (!path.lightPath && shadow.splatPixel < 0) ? shadow.eyeBounceNee : 0;
         const float nDotWo = -dot(si.ns, dir);
         const Material mat = gpuMaterialForShadow(scene, si.materialIndex);
         const Material matCau = gpuMaterialForCausticSlot(scene, si.materialIndex);

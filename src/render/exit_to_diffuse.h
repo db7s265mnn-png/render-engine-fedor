@@ -30,6 +30,17 @@ SR_INL SR_HD bool exitToDiffuseWantsRefractWalk(const Material& mat) {
 // blacks out the walk when the light is on the camera side of the pane.
 SR_INL SR_HD int exitToDiffuseEyeBounceNee() { return 1; }
 
+// Dest-shadow mode: dielectric / flagged hits are fully open (same as the
+// opacity walk). Regular NEE still uses 0 or 1. shadowBlockFraction reads 2.
+SR_INL SR_HD int exitToDiffuseDestShadowNee() { return 2; }
+
+// Force bsdfSampleLocal onto reflection / TIR, not the transmission lobe.
+// Through dest is a separate walk.
+SR_INL SR_HD void exitToDiffuseDyingReflectU(const Material& mat, float& uLobe, float& uChoice) {
+    uChoice = 0.0f;
+    uLobe = exitToDiffuseWantsRefractWalk(mat) ? 0.999f : 0.49f;
+}
+
 // Same offset as GPU optix_wavefront.cuh offsetRay. Lives here so the shared
 // ETD walk can include it without render/integrator.h (MaterialX).
 SR_INL SR_HD Vec3 offsetRayOrigin(Vec3 p, Vec3 n, Vec3 dir) {

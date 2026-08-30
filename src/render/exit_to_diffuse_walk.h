@@ -1,7 +1,8 @@
 // Shared Exit to Diffuse walk (Embree + the dedicated OptiX ETD pipeline).
 // Skip-self, other dielectrics / flagged hits, opacity, dest maps. Does not
-// flip dest ng/ns. Caller runs dest NEE / miss / area light and applies
-// clampDirect to the walk sum.
+// flip dest ng/ns. Through is dest Lambert. Reflection is dying BSDF × dest.
+// Dest shadows use exitToDiffuseDestShadowNee (dielectrics open). Caller
+// applies clampDirect to the walk sum.
 //
 // Do not include shading.h / integrator.h / spectral_common.h here — OptiX
 // etd.cu traces from this TU; those headers hang cicc / optixModuleCreate.

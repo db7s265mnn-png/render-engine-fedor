@@ -147,16 +147,30 @@ inline SampledSpectrum exitToDiffuseWalkOneSpectral(const SceneView& scene, cons
 
 template <typename Tracer>
 inline SampledSpectrum exitToDiffuseWalkReflectAndRefractSpectral(
-    const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng, Vec3 incoming, int escapeMat,
+    const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng, Vec3 ns, Vec3 incoming, int escapeMat,
     const Material& dyingMat, Rng& rng, const SampledWavelengths& waves, const RGBColorSpace& cs,
     int mediumIndex, int eyeBounceNee) {
-    const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
-    SampledSpectrum L =
-        exitToDiffuseWalkOneSpectral(scene, tracer, offsetRayOrigin(p, ng, refl), refl, escapeMat, rng,
-                                     waves, cs, mediumIndex, eyeBounceNee);
+    SampledSpectrum L = SampledSpectrum::zero(waves.n);
     if (exitToDiffuseWantsRefractWalk(dyingMat)) {
         L += exitToDiffuseWalkOneSpectral(scene, tracer, offsetRayOrigin(p, ng, incoming), incoming,
                                           escapeMat, rng, waves, cs, mediumIndex, eyeBounceNee);
+    }
+    const Vec3 n = lengthSquared(ns) > 1e-12f ? ns : ng;
+    const Frame frame(n);
+    const Vec3 woLocal = frame.toLocal(-incoming);
+    float uLobe = 0.999f, uChoice = 0.0f;
+    exitToDiffuseDyingReflectU(dyingMat, uLobe, uChoice);
+    const BsdfSampleSpectral rs =
+        bsdfSampleSpectral(dyingMat, woLocal, uLobe, rng.nextFloat(), rng.nextFloat(), uChoice, waves,
+                           dyingMat.ior, 0, cs);
+    if (rs.valid && !rs.transmitted && spectrumMaxComponent(rs.weight) > 0.0f) {
+        const Vec3 wi = frame.toWorld(rs.wi);
+        L += rs.weight * exitToDiffuseWalkOneSpectral(scene, tracer, offsetRayOrigin(p, ng, wi), wi,
+                                                      escapeMat, rng, waves, cs, mediumIndex, eyeBounceNee);
+    } else if (!exitToDiffuseWantsRefractWalk(dyingMat)) {
+        const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
+        L += exitToDiffuseWalkOneSpectral(scene, tracer, offsetRayOrigin(p, ng, refl), refl, escapeMat, rng,
+                                          waves, cs, mediumIndex, eyeBounceNee);
     }
     return L;
 }
@@ -397,7 +411,7 @@ public:
                     throughput * nextEventEstimationSpectralOnce(
                                      scene, tracer, si, exitToDiffuseLambert(mat), Frame(si.ns),
                                      -direction, rng, waves, filmCs, currentMedium,
-                                     exitToDiffuseEyeBounceNee());
+                                     exitToDiffuseDestShadowNee());
                 contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                 radiance += contrib;
                 break;
@@ -406,8 +420,8 @@ public:
                                  (depth < maxDepth && exitToDiffuseShouldArmBounce(mat, depth, maxDepth));
             if (exitNow) {
                 SampledSpectrum extra = exitToDiffuseWalkReflectAndRefractSpectral(
-                    scene, tracer, si.p, si.ng, direction, si.materialIndex, mat, rng, waves, filmCs,
-                    currentMedium, exitToDiffuseEyeBounceNee());
+                    scene, tracer, si.p, si.ng, si.ns, direction, si.materialIndex, mat, rng, waves, filmCs,
+                    currentMedium, exitToDiffuseDestShadowNee());
                 SampledSpectrum contrib = throughput * extra;
                 contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                 radiance += contrib;

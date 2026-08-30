@@ -133,9 +133,11 @@ SR_INL SR_HD float fresnelDielectric(float cosThetaI, float eta) {
 //
 // eyeBounceNee: 1 = camera/BDPT NEE after a bounce (Fresnel continue along the
 // straight shadow ray, biased vs Snell). 0 = primary NEE or LT splat / BDPT t=1.
+// 2 = Exit to Diffuse dest NEE: dielectrics are open (opacity walk, no Fresnel).
 SR_INL SR_HD float shadowBlockFraction(const Material& matShadow, const Material& matCaustic,
                                        int causticsOn, int eyeBounceNee, float nDotWo) {
     if (matShadow.transmission <= 1e-3f) return 1.0f;
+    if (eyeBounceNee >= 2) return 0.0f;
     if (causticsOn == 0 || matCaustic.contributeCaustics == 0)
         return saturatef(matShadow.shadowOpacity);
     if (eyeBounceNee == 0) return 1.0f;

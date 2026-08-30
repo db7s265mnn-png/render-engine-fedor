@@ -853,6 +853,11 @@ void testBsdf() {
         const Material floorLamb = exitToDiffuseLambert(floorDest);
         check(eyePathNeeConnectable(floorLamb, woN), "unflagged destination still NEE-connectable");
         check(exitToDiffuseEyeBounceNee() == 1, "dest NEE is a bounce so glass stays open");
+        check(exitToDiffuseDestShadowNee() == 2, "dest shadow mode is 2");
+        check(shadowBlockFraction(glass, glass, 1, 2, 1.0f) <= 1e-5f,
+              "ETD dest shadow opens contributing glass");
+        check(shadowBlockFraction(floorDest, floorDest, 1, 2, 1.0f) >= 0.999f,
+              "ETD dest shadow still blocks opaque");
         check(!exitToDiffuseSkipOpacity(floorDest, 0.0f), "opaque dest is not skipped");
         Material cutout{};
         cutout.opacity = 0.0f;

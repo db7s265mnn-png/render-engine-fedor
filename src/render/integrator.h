@@ -1023,29 +1023,42 @@ inline Vec3 exitToDiffuseWalkOne(const SceneView& scene, const Tracer& tracer, V
                                -direction, rng, destMedium, eyeBounceNee);
 }
 
-// Reflect walk always. Through walk (incoming direction) only when the dying
-// material transmits — mirrors do not x-ray.
+// Through: dest Lambert. Reflection: dying BSDF (TIR) × dest/env along sampled wi.
 template <typename Tracer>
 inline Vec3 exitToDiffuseWalkReflectAndRefract(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng,
-                                               Vec3 incoming, int escapeMat, const Material& dyingMat,
+                                               Vec3 ns, Vec3 incoming, int escapeMat, const Material& dyingMat,
                                                Rng& rng, int mediumIndex, int eyeBounceNee) {
-    const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
-    Vec3 L = exitToDiffuseWalkOne(scene, tracer, offsetRayOrigin(p, ng, refl), refl, escapeMat, rng,
-                                  mediumIndex, eyeBounceNee);
+    Vec3 L(0.0f);
     if (exitToDiffuseWantsRefractWalk(dyingMat)) {
         L += exitToDiffuseWalkOne(scene, tracer, offsetRayOrigin(p, ng, incoming), incoming, escapeMat, rng,
+                                  mediumIndex, eyeBounceNee);
+    }
+    const Vec3 n = lengthSquared(ns) > 1e-12f ? ns : ng;
+    const Frame frame(n);
+    const Vec3 woLocal = frame.toLocal(-incoming);
+    float uLobe = 0.999f, uChoice = 0.0f;
+    exitToDiffuseDyingReflectU(dyingMat, uLobe, uChoice);
+    const BsdfSample rs =
+        bsdfSampleLocal(dyingMat, woLocal, uLobe, rng.nextFloat(), rng.nextFloat(), uChoice);
+    if (rs.pdf > 0.0f && !rs.transmitted && !isBlack(rs.weight)) {
+        const Vec3 wi = frame.toWorld(rs.wi);
+        L += rs.weight * exitToDiffuseWalkOne(scene, tracer, offsetRayOrigin(p, ng, wi), wi, escapeMat, rng,
+                                              mediumIndex, eyeBounceNee);
+    } else if (!exitToDiffuseWantsRefractWalk(dyingMat)) {
+        const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
+        L += exitToDiffuseWalkOne(scene, tracer, offsetRayOrigin(p, ng, refl), refl, escapeMat, rng,
                                   mediumIndex, eyeBounceNee);
     }
     return L;
 }
 
 template <typename Tracer>
-inline Vec3 exitToDiffuseContribution(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng,
+inline Vec3 exitToDiffuseContribution(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng, Vec3 ns,
                                       Vec3 incoming, int escapeMat, const Material& dyingMat,
                                       Vec3 throughput, Rng& rng, int mediumIndex) {
     const Vec3 extra =
-        exitToDiffuseWalkReflectAndRefract(scene, tracer, p, ng, incoming, escapeMat, dyingMat, rng,
-                                           mediumIndex, exitToDiffuseEyeBounceNee());
+        exitToDiffuseWalkReflectAndRefract(scene, tracer, p, ng, ns, incoming, escapeMat, dyingMat, rng,
+                                           mediumIndex, exitToDiffuseDestShadowNee());
     return clampContribution(throughput * extra, scene.settings.clampDirect);
 }
 #endif
@@ -1384,7 +1397,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             const Frame frameExit(si.ns);
             const Vec3 nee =
                 nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), frameExit, woExit, rng,
-                                    guiding, currentMedium, exitToDiffuseEyeBounceNee());
+                                    guiding, currentMedium, exitToDiffuseDestShadowNee());
             Vec3 contrib = throughput * nee;
             contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;
@@ -1394,8 +1407,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                              (depth < maxDepth && exitToDiffuseShouldArmBounce(mat, depth, maxDepth));
         if (exitNow) {
 #if !defined(__CUDACC__)
-            radiance += exitToDiffuseContribution(scene, tracer, si.p, si.ng, direction, si.materialIndex,
-                                                  mat, throughput, rng, currentMedium);
+            radiance += exitToDiffuseContribution(scene, tracer, si.p, si.ng, si.ns, direction,
+                                                  si.materialIndex, mat, throughput, rng, currentMedium);
             break;
 #else
             float escW = 1.0f;

@@ -113,7 +113,7 @@ __device__ inline void etdEnqueueDestNee(GpuPath& path, GpuShadow& shadow, const
     if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
     const LightData& lightNee = scene.lights[lightIndex];
     enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS, destMedium,
-                           lightNee.shadowEnable, clampValue, exitToDiffuseEyeBounceNee());
+                           lightNee.shadowEnable, clampValue, exitToDiffuseDestShadowNee());
 }
 
 __device__ inline void etdSettleShadow(int pixel) {
@@ -174,6 +174,14 @@ __device__ inline void etdClampWalkExtra(GpuPath& path, const float* snap, float
     for (int i = 0; i < n; ++i) path.radianceS[i] = snap[i] + extra[i];
 }
 
+__device__ inline void etdScaleWalkDelta(GpuPath& path, const float* snap, const float* weight) {
+    const int n = path.nLambda;
+    for (int i = 0; i < n; ++i) {
+        const float extra = path.radianceS[i] - snap[i];
+        path.radianceS[i] = snap[i] + extra * weight[i];
+    }
+}
+
 extern "C" __global__ void __raygen__etd() {
     int x = 0, y = 0;
     const int pixel = wavefrontPixel(x, y);
@@ -182,20 +190,43 @@ extern "C" __global__ void __raygen__etd() {
     GpuPath& path = launchParams().paths[pixel];
     if (path.queue != kQueueExitToDiffuse || path.exitEscapeMat < 0) return;
 
+    const LaunchParams& params = launchParams();
+    const SceneView& scene = params.scene;
     const int escapeMat = path.exitEscapeMat;
     const Vec3 p = path.exitP;
     const Vec3 ng = path.exitNg;
     const Vec3 incoming = path.direction;
     const int wantsRefract = path.exitWantsRefract;
-    const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
 
     float snap[kMaxSpectrumSamples];
     const int n = path.nLambda;
     for (int i = 0; i < n; ++i) snap[i] = path.radianceS[i];
 
-    etdWalk(pixel, offsetRayOrigin(p, ng, refl), refl, escapeMat);
     if (wantsRefract) etdWalk(pixel, offsetRayOrigin(p, ng, incoming), incoming, escapeMat);
-    etdClampWalkExtra(path, snap, launchParams().scene.settings.clampDirect);
+
+    Material dying = defaultMaterial();
+    if (escapeMat >= 0 && escapeMat < scene.materialCount && scene.materials)
+        dying = materialForRay(scene, escapeMat, RayShadeKind::Camera);
+    Vec3 ns = path.exitNs;
+    dying = evaluateSurfaceMaps(scene, dying, Vec2(0.0f), ns);
+    const Vec3 nSh = lengthSquared(ns) > 1e-12f ? ns : ng;
+    const Frame frame(nSh);
+    const Vec3 woLocal = frame.toLocal(-incoming);
+    float uLobe = 0.999f, uChoice = 0.0f;
+    exitToDiffuseDyingReflectU(dying, uLobe, uChoice);
+    const GpuBsdfSampleS rs = bsdfSampleSpectralGpu(dying, woLocal, uLobe, path.rng.nextFloat(),
+                                                    path.rng.nextFloat(), uChoice, path, dying.ior);
+    if (rs.valid && !rs.transmitted) {
+        const Vec3 wi = frame.toWorld(rs.wi);
+        float snapR[kMaxSpectrumSamples];
+        for (int i = 0; i < n; ++i) snapR[i] = path.radianceS[i];
+        etdWalk(pixel, offsetRayOrigin(p, ng, wi), wi, escapeMat);
+        etdScaleWalkDelta(path, snapR, rs.weight);
+    } else if (!wantsRefract) {
+        const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
+        etdWalk(pixel, offsetRayOrigin(p, ng, refl), refl, escapeMat);
+    }
+    etdClampWalkExtra(path, snap, scene.settings.clampDirect);
 
     path.exitEscapeMat = -1;
     path.exitWantsRefract = 0;
