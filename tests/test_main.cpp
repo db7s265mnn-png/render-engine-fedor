@@ -841,6 +841,16 @@ void testBsdf() {
         const Material floorLamb = exitToDiffuseLambert(floorDest);
         check(eyePathNeeConnectable(floorLamb, woN), "unflagged destination still NEE-connectable");
         check(exitToDiffuseEyeBounceNee() == 1, "dest NEE is a bounce so glass stays open");
+        check(!exitToDiffuseSkipOpacity(floorDest, 0.0f), "opaque dest is not skipped");
+        Material cutout{};
+        cutout.opacity = 0.0f;
+        check(exitToDiffuseSkipOpacity(cutout, 0.0f), "zero opacity is skipped");
+        Vec3 destNs(0.0f, 0.0f, 1.0f);
+        SceneView emptyMaps{};
+        const Material mapped = evaluateSurfaceMaps(emptyMaps, floorDest, Vec2(0.0f), destNs);
+        checkNear(mapped.baseColor.x, 0.75f, 1e-5f, "untextured dest maps keep base_color");
+        checkNear(destNs.z, 1.0f, 1e-5f, "untextured dest maps do not flip ns");
+        check(exitToDiffuseDestMedium(emptyMaps, 3, -1) == 3, "walk medium wins over missing instance");
         RenderSettingsData gpuNee{};
         check(gpuEyeBounceNee(gpuNee, 0, 0, 1, kLightPoint) == 0,
               "primary NEE still opaques glass — ETD must not use path.depth");

@@ -8,7 +8,9 @@
 
 #include "core/rng.h"
 #include "render/exit_to_diffuse.h"
+#include "render/exit_to_diffuse_walk.h"
 #include "render/lights.h"
+#include "render/surface_maps.h"
 #include "render/shading.h"
 #include "render/volume.h"
 #include "scene/types.h"
@@ -346,12 +348,6 @@ SR_INL SR_HD bool buildSurfaceInteraction(const SceneView& scene, const RayHit& 
     // Keep the shading normal on the same side as the geometric normal.
     if (dot(si.ns, si.ng) < 0.0f) si.ng = -si.ng;
     return true;
-}
-
-SR_INL SR_HD Vec3 offsetRayOrigin(Vec3 p, Vec3 n, Vec3 dir) {
-    const float scale = 1.0f + srMax(fabsf(p.x), srMax(fabsf(p.y), fabsf(p.z)));
-    const Vec3 offset = n * (kRayEpsilon * scale);
-    return dot(dir, n) > 0.0f ? p + offset : p - offset;
 }
 
 #if !defined(__CUDACC__)
@@ -974,45 +970,57 @@ SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& trac
 
 #if !defined(__CUDACC__)
 template <typename Tracer>
+struct EtdCpuCtx {
+    const SceneView& scene;
+    const Tracer& tracer;
+    Rng& rng;
+    SurfaceInteraction lastSi{};
+    bool invalid = false;
+
+    bool intersect(Vec3 o, Vec3 d, float tMax, EtdHit& h) {
+        RayHit hit;
+        if (!tracer.intersect(o, d, tMax, hit)) return false;
+        if (!buildSurfaceInteraction(scene, hit, o, d, lastSi)) {
+            invalid = true;
+            return false;
+        }
+        etdHitFromSurfLike(h, lastSi);
+        return true;
+    }
+    Material evalDestMaps(EtdHit& h) {
+        Material dest = materialForRay(scene, h.materialIndex, RayShadeKind::Camera);
+        dest = evaluateSurfaceMaps(scene, dest, h.uv, h.ns);
+        lastSi.ns = h.ns;
+        return dest;
+    }
+    bool skipOpacity(const Material& dest) { return exitToDiffuseSkipOpacity(dest, rng.nextFloat()); }
+};
+
+template <typename Tracer>
 inline Vec3 exitToDiffuseWalkOne(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
                                  int escapeMat, Rng& rng, int mediumIndex, int eyeBounceNee) {
-    for (int skip = 0; skip < kExitToDiffuseMaxSkips; ++skip) {
-        RayHit hit;
-        if (!tracer.intersect(origin, direction, kFloatMax, hit)) {
-            Vec3 L(0.0f);
-            if (scene.domeLightIndex >= 0) {
-                const LightData& dome = scene.lights[scene.domeLightIndex];
-                L += domeRadiance(scene, dome, direction, /*nearestTexel=*/true);
-            }
-            L += cameraSunDiscRadiance(scene, origin, direction, 0.0f, true, false, false);
-            return L;
+    EtdCpuCtx<Tracer> ctx{scene, tracer, rng};
+    EtdHit destHit;
+    Material destMat;
+    const EtdWalkKind kind = exitToDiffuseWalkFind(ctx, origin, direction, escapeMat, destHit, destMat);
+    if (kind == EtdWalkKind::Miss) {
+        Vec3 L(0.0f);
+        if (scene.domeLightIndex >= 0) {
+            const LightData& dome = scene.lights[scene.domeLightIndex];
+            L += domeRadiance(scene, dome, direction, /*nearestTexel=*/true);
         }
-        SurfaceInteraction si;
-        if (!buildSurfaceInteraction(scene, hit, origin, direction, si)) return Vec3(0.0f);
-        if (si.lightIndex >= 0) {
-            const LightData& light = scene.lights[si.lightIndex];
-            const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
-            return areaLightEmission(scene, light, direction, lightN);
-        }
-        if (exitToDiffuseSkipSelf(escapeMat, si.materialIndex, skip)) {
-            origin = offsetRayOrigin(si.p, si.ng, direction);
-            continue;
-        }
-        Material dest = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
-        dest = evaluateTexturedMaterial(scene, dest, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth,
-                                        si.pRef, si.nRef, si.hasPref);
-        if (dest.opacity <= 1e-6f || (dest.opacity < 0.999f && rng.nextFloat() > dest.opacity)) {
-            origin = offsetRayOrigin(si.p, si.ng, direction);
-            continue;
-        }
-        const int destMedium =
-            mediumIndex >= 0
-                ? mediumIndex
-                : (si.instanceIndex >= 0 ? scene.instances[si.instanceIndex].mediumIndex : -1);
-        return nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(dest), Frame(si.ns), -direction,
-                                   rng, destMedium, eyeBounceNee);
+        L += cameraSunDiscRadiance(scene, origin, direction, 0.0f, true, false, false);
+        return L;
     }
-    return Vec3(0.0f);
+    if (kind == EtdWalkKind::AreaLight) {
+        const LightData& light = scene.lights[destHit.lightIndex];
+        const Vec3 lightN = light.type == kLightSphere ? destHit.ng : areaLightNormal(light);
+        return areaLightEmission(scene, light, direction, lightN);
+    }
+    if (kind != EtdWalkKind::Dest) return Vec3(0.0f);
+    const int destMedium = exitToDiffuseDestMedium(scene, mediumIndex, destHit.instanceIndex);
+    return nextEventEstimation(scene, tracer, ctx.lastSi, exitToDiffuseLambert(destMat), Frame(ctx.lastSi.ns),
+                               -direction, rng, destMedium, eyeBounceNee);
 }
 
 // Reflect walk always. Through walk (incoming direction) only when the dying

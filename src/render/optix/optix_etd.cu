@@ -1,22 +1,55 @@
 // Dedicated Exit to Diffuse pipeline. Both CPU walks + Lambert NEE live here.
 // shade_surface only arms GpuPath (exitP / exitNg / incoming / escapeMat).
-// Do not include shade_surface.cu or optix_mnee.cuh — that mix hangs cicc.
+// Walk control flow is render/exit_to_diffuse_walk.h (same skip/opacity/maps
+// as Embree). Do not include shade_surface.cu or optix_mnee.cuh — that mix
+// hangs cicc.
 #define SOLSTICE_OPTIX_ETD_KERNEL
 #include "render/exit_to_diffuse.h"
+#include "render/exit_to_diffuse_walk.h"
 #include "render/lights.h"
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_spectral.cuh"
 #include "render/optix/optix_trace.cuh"
 #include "render/optix/optix_volume.cuh"
+#include "render/surface_maps.h"
 #define SOLSTICE_OPTIX_OPS_ONLY
 #include "render/optix/optix_intersect_shadow.cu"
 
 namespace sol {
 
-__device__ inline void etdAddMiss(GpuPath& path) {
+struct EtdGpuCtx {
+    int pixel = -1;
+    Surf last{};
+    bool invalid = false;
+
+    SR_INL SR_HD bool intersect(Vec3 o, Vec3 d, float tMax, EtdHit& h) {
+        const LaunchParams& params = launchParams();
+        GpuPath& path = params.paths[pixel];
+        path.origin = o;
+        path.direction = d;
+        traceClosest(pixel, o, d, tMax);
+        if (!params.hits[pixel].didHit) return false;
+        if (!buildSurf(params.scene, params.hits[pixel], o, d, last)) {
+            invalid = true;
+            return false;
+        }
+        etdHitFromSurfLike(h, last);
+        return true;
+    }
+    SR_INL SR_HD Material evalDestMaps(EtdHit& h) {
+        const SceneView& scene = launchParams().scene;
+        Material dest = materialForRay(scene, h.materialIndex, RayShadeKind::Camera);
+        dest = evaluateSurfaceMaps(scene, dest, h.uv, h.ns);
+        last.ns = h.ns;
+        return dest;
+    }
+    SR_INL SR_HD bool skipOpacity(const Material& dest) {
+        return exitToDiffuseSkipOpacity(dest, launchParams().paths[pixel].rng.nextFloat());
+    }
+};
+
+__device__ inline void etdAddMiss(GpuPath& path, float clampValue) {
     const SceneView& scene = launchParams().scene;
-    const float clampValue = pathContributionClamp(scene.settings, path.depth, path.specularBounce != 0,
-                                                   path.causticSuffix != 0);
     if (scene.domeLightIndex >= 0 && scene.lights) {
         const LightData& dome = scene.lights[scene.domeLightIndex];
         const Vec3 envL = domeRadiance(scene, dome, path.direction, /*nearestTexel=*/true);
@@ -37,7 +70,7 @@ __device__ inline void etdAddMiss(GpuPath& path) {
     if (!isBlack(sunL)) addPathEmissionRgb(path, sunL, 1.0f, clampValue);
 }
 
-__device__ inline void etdAddAreaLight(GpuPath& path, const Surf& si) {
+__device__ inline void etdAddAreaLight(GpuPath& path, const Surf& si, float clampValue) {
     const SceneView& scene = launchParams().scene;
     if (si.lightIndex < 0 || si.lightIndex >= scene.lightCount || !scene.lights) return;
     const LightData& light = scene.lights[si.lightIndex];
@@ -47,13 +80,12 @@ __device__ inline void etdAddAreaLight(GpuPath& path, const Surf& si) {
     float Le[kMaxSpectrumSamples];
     specLightEmission(light, path, Le);
     const float rgbScale = length(emitted) / srMax(1e-6f, length(light.emittedRadiance()));
-    addPathRadianceS(path, Le, rgbScale,
-                     pathContributionClamp(scene.settings, path.depth, path.specularBounce != 0,
-                                           path.causticSuffix != 0));
+    addPathRadianceS(path, Le, rgbScale, clampValue);
 }
 
 __device__ inline void etdEnqueueDestNee(GpuPath& path, GpuShadow& shadow, const Surf& si,
-                                         const Material& mat, const Frame& frame, Vec3 wo) {
+                                         const Material& mat, const Frame& frame, Vec3 wo, int destMedium,
+                                         float clampValue) {
     const SceneView& scene = launchParams().scene;
     if (path.lightPath || scene.lightCount <= 0) return;
     const Material lambert = exitToDiffuseLambert(mat);
@@ -80,11 +112,8 @@ __device__ inline void etdEnqueueDestNee(GpuPath& path, GpuShadow& shadow, const
     float tMax = 1.0e8f;
     if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
     const LightData& lightNee = scene.lights[lightIndex];
-    enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS, path.mediumIndex,
-                           lightNee.shadowEnable,
-                           pathContributionClamp(scene.settings, path.depth, path.specularBounce != 0,
-                                                 path.causticSuffix != 0),
-                           exitToDiffuseEyeBounceNee());
+    enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS, destMedium,
+                           lightNee.shadowEnable, clampValue, exitToDiffuseEyeBounceNee());
 }
 
 __device__ inline void etdSettleShadow(int pixel) {
@@ -117,39 +146,32 @@ __device__ inline void etdWalk(int pixel, Vec3 origin, Vec3 direction, int escap
     GpuPath& path = params.paths[pixel];
     GpuShadow& shadow = params.shadows[pixel];
     const SceneView& scene = params.scene;
-    for (int skip = 0; skip < kExitToDiffuseMaxSkips; ++skip) {
-        path.origin = origin;
-        path.direction = direction;
-        traceClosest(pixel, origin, direction, kFloatMax);
-        if (!params.hits[pixel].didHit) {
-            etdAddMiss(path);
-            return;
-        }
-        Surf si;
-        if (!buildSurf(scene, params.hits[pixel], origin, direction, si)) return;
-        if (si.lightIndex >= 0) {
-            etdAddAreaLight(path, si);
-            return;
-        }
-        if (exitToDiffuseSkipSelf(escapeMat, si.materialIndex, skip)) {
-            origin = offsetRay(si.p, si.ng, direction);
-            continue;
-        }
-        if (si.materialIndex < 0 || si.materialIndex >= scene.materialCount || !scene.materials) return;
-        Material matSrc = materialForRay(scene, si.materialIndex, RayShadeKind(path.rayKind));
-        Material mat = optixpt::evaluateMaps(scene, matSrc, si.uv, si.ns);
-        if (mat.transmission <= 0.0f && mat.doubleSided && dot(si.ns, -direction) < 0.0f) {
-            si.ns = -si.ns;
-            si.ng = -si.ng;
-        }
-        if (mat.opacity <= 1e-6f || (mat.opacity < 0.999f && path.rng.nextFloat() > mat.opacity)) {
-            origin = offsetRay(si.p, si.ng, direction);
-            continue;
-        }
-        etdEnqueueDestNee(path, shadow, si, mat, Frame(si.ns), -direction);
-        etdSettleShadow(pixel);
+    EtdGpuCtx ctx;
+    ctx.pixel = pixel;
+    EtdHit destHit;
+    Material destMat;
+    const EtdWalkKind kind = exitToDiffuseWalkFind(ctx, origin, direction, escapeMat, destHit, destMat);
+    // Walk pieces stay unclamped; __raygen__etd applies clampDirect to the sum.
+    if (kind == EtdWalkKind::Miss) {
+        etdAddMiss(path, 0.0f);
         return;
     }
+    if (kind == EtdWalkKind::AreaLight) {
+        etdAddAreaLight(path, ctx.last, 0.0f);
+        return;
+    }
+    if (kind != EtdWalkKind::Dest) return;
+    const int destMedium = exitToDiffuseDestMedium(scene, path.mediumIndex, destHit.instanceIndex);
+    etdEnqueueDestNee(path, shadow, ctx.last, destMat, Frame(ctx.last.ns), -direction, destMedium, 0.0f);
+    etdSettleShadow(pixel);
+}
+
+__device__ inline void etdClampWalkExtra(GpuPath& path, const float* snap, float clampDirect) {
+    const int n = path.nLambda;
+    float extra[kMaxSpectrumSamples];
+    for (int i = 0; i < n; ++i) extra[i] = path.radianceS[i] - snap[i];
+    specClampIndirect(extra, n, clampDirect);
+    for (int i = 0; i < n; ++i) path.radianceS[i] = snap[i] + extra[i];
 }
 
 extern "C" __global__ void __raygen__etd() {
@@ -166,8 +188,15 @@ extern "C" __global__ void __raygen__etd() {
     const Vec3 incoming = path.direction;
     const int wantsRefract = path.exitWantsRefract;
     const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
-    etdWalk(pixel, offsetRay(p, ng, refl), refl, escapeMat);
-    if (wantsRefract) etdWalk(pixel, offsetRay(p, ng, incoming), incoming, escapeMat);
+
+    float snap[kMaxSpectrumSamples];
+    const int n = path.nLambda;
+    for (int i = 0; i < n; ++i) snap[i] = path.radianceS[i];
+
+    etdWalk(pixel, offsetRayOrigin(p, ng, refl), refl, escapeMat);
+    if (wantsRefract) etdWalk(pixel, offsetRayOrigin(p, ng, incoming), incoming, escapeMat);
+    etdClampWalkExtra(path, snap, launchParams().scene.settings.clampDirect);
+
     path.exitEscapeMat = -1;
     path.exitWantsRefract = 0;
     path.queue = kQueueDead;

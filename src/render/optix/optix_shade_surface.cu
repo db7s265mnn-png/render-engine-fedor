@@ -57,9 +57,7 @@ __device__ inline void tryEnqueueExitToDiffuseNee(GpuPath& path, GpuShadow& shad
     if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
     const LightData& lightNee = scene.lights[lightIndex];
     enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS, path.mediumIndex,
-                           lightNee.shadowEnable,
-                           pathContributionClamp(scene.settings, path.depth, path.specularBounce != 0,
-                                                 path.causticSuffix != 0),
+                           lightNee.shadowEnable, scene.settings.clampDirect,
                            exitToDiffuseEyeBounceNee());
 }
 

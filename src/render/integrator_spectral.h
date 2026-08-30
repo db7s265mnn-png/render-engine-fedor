@@ -118,46 +118,31 @@ inline SampledSpectrum exitToDiffuseWalkOneSpectral(const SceneView& scene, cons
                                                     Vec3 origin, Vec3 direction, int escapeMat, Rng& rng,
                                                     const SampledWavelengths& waves, const RGBColorSpace& cs,
                                                     int mediumIndex, int eyeBounceNee) {
-    for (int skip = 0; skip < kExitToDiffuseMaxSkips; ++skip) {
-        RayHit hit;
-        if (!tracer.intersect(origin, direction, kFloatMax, hit)) {
-            SampledSpectrum L = SampledSpectrum::zero(waves.n);
-            if (scene.domeLightIndex >= 0) {
-                const LightData& dome = scene.lights[scene.domeLightIndex];
-                const Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/true);
-                L += upsampleEmission(envL, waves, cs);
-            }
-            const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, 0.0f, true, false, false);
-            if (!isBlack(sunL)) L += upsampleEmission(sunL, waves, cs);
-            return L;
+    EtdCpuCtx<Tracer> ctx{scene, tracer, rng};
+    EtdHit destHit;
+    Material destMat;
+    const EtdWalkKind kind = exitToDiffuseWalkFind(ctx, origin, direction, escapeMat, destHit, destMat);
+    if (kind == EtdWalkKind::Miss) {
+        SampledSpectrum L = SampledSpectrum::zero(waves.n);
+        if (scene.domeLightIndex >= 0) {
+            const LightData& dome = scene.lights[scene.domeLightIndex];
+            const Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/true);
+            L += upsampleEmission(envL, waves, cs);
         }
-        SurfaceInteraction si;
-        if (!buildSurfaceInteraction(scene, hit, origin, direction, si))
-            return SampledSpectrum::zero(waves.n);
-        if (si.lightIndex >= 0) {
-            const LightData& light = scene.lights[si.lightIndex];
-            const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
-            return upsampleEmission(areaLightEmission(scene, light, direction, lightN), waves, cs);
-        }
-        if (exitToDiffuseSkipSelf(escapeMat, si.materialIndex, skip)) {
-            origin = offsetRayOrigin(si.p, si.ng, direction);
-            continue;
-        }
-        Material dest = materialForRay(scene, si.materialIndex, RayShadeKind::Camera);
-        dest = evaluateTexturedMaterial(scene, dest, si.uv, si.ns, si.pObject, si.nObject, si.uvFilterWidth,
-                                        si.pRef, si.nRef, si.hasPref);
-        if (dest.opacity <= 1e-6f || (dest.opacity < 0.999f && rng.nextFloat() > dest.opacity)) {
-            origin = offsetRayOrigin(si.p, si.ng, direction);
-            continue;
-        }
-        const int destMedium =
-            mediumIndex >= 0
-                ? mediumIndex
-                : (si.instanceIndex >= 0 ? scene.instances[si.instanceIndex].mediumIndex : -1);
-        return nextEventEstimationSpectralOnce(scene, tracer, si, exitToDiffuseLambert(dest), Frame(si.ns),
-                                               -direction, rng, waves, cs, destMedium, eyeBounceNee);
+        const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, 0.0f, true, false, false);
+        if (!isBlack(sunL)) L += upsampleEmission(sunL, waves, cs);
+        return L;
     }
-    return SampledSpectrum::zero(waves.n);
+    if (kind == EtdWalkKind::AreaLight) {
+        const LightData& light = scene.lights[destHit.lightIndex];
+        const Vec3 lightN = light.type == kLightSphere ? destHit.ng : areaLightNormal(light);
+        return upsampleEmission(areaLightEmission(scene, light, direction, lightN), waves, cs);
+    }
+    if (kind != EtdWalkKind::Dest) return SampledSpectrum::zero(waves.n);
+    const int destMedium = exitToDiffuseDestMedium(scene, mediumIndex, destHit.instanceIndex);
+    return nextEventEstimationSpectralOnce(scene, tracer, ctx.lastSi, exitToDiffuseLambert(destMat),
+                                           Frame(ctx.lastSi.ns), -direction, rng, waves, cs, destMedium,
+                                           eyeBounceNee);
 }
 
 template <typename Tracer>
@@ -412,7 +397,7 @@ public:
                                      scene, tracer, si, exitToDiffuseLambert(mat), Frame(si.ns),
                                      -direction, rng, waves, filmCs, currentMedium,
                                      exitToDiffuseEyeBounceNee());
-                contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
+                contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                 radiance += contrib;
                 break;
             }
@@ -423,7 +408,7 @@ public:
                     scene, tracer, si.p, si.ng, direction, si.materialIndex, mat, rng, waves, filmCs,
                     currentMedium, exitToDiffuseEyeBounceNee());
                 SampledSpectrum contrib = throughput * extra;
-                contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
+                contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
                 radiance += contrib;
                 break;
             }

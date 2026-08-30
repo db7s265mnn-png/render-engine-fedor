@@ -30,6 +30,18 @@ SR_INL SR_HD bool exitToDiffuseWantsRefractWalk(const Material& mat) {
 // blacks out the walk when the light is on the camera side of the pane.
 SR_INL SR_HD int exitToDiffuseEyeBounceNee() { return 1; }
 
+// Same offset as GPU optix_wavefront.cuh offsetRay. Lives here so the shared
+// ETD walk can include it without render/integrator.h (MaterialX).
+SR_INL SR_HD Vec3 offsetRayOrigin(Vec3 p, Vec3 n, Vec3 dir) {
+    const float scale = 1.0f + srMax(fabsf(p.x), srMax(fabsf(p.y), fabsf(p.z)));
+    const Vec3 offset = n * (kRayEpsilon * scale);
+    return dot(dir, n) > 0.0f ? p + offset : p - offset;
+}
+
+SR_INL SR_HD bool exitToDiffuseSkipOpacity(const Material& dest, float u) {
+    return dest.opacity <= 1e-6f || (dest.opacity < 0.999f && u > dest.opacity);
+}
+
 // Mirror of the incoming ray about Ng facing the ray (no Snell).
 SR_INL SR_HD Vec3 exitToDiffuseReflectDirection(Vec3 direction, Vec3 ng) {
     const Vec3 n = faceforward(ng, -direction);

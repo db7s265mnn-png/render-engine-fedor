@@ -290,10 +290,11 @@ solstice_optix_kernel(shade_surface
             ${_solstice_optix_dir}/optix_light_emit.cuh
             ${_solstice_optix_dir}/optix_light_trace.cuh
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/surface_maps.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
-solstice_optix_kernel(shade_background
+solstice_optix_kernel(shade_background)
     ${_solstice_optix_dir}/optix_shade_background.cu
     solsticeOptixShadeBackgroundIr
     LIGHTS
@@ -344,10 +345,11 @@ solstice_optix_kernel(path_tail
             ${_solstice_optix_dir}/optix_light_emit.cuh
             ${_solstice_optix_dir}/optix_light_trace.cuh
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/surface_maps.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
-solstice_optix_kernel(mnee
+solstice_optix_kernel(mnee)
     ${_solstice_optix_dir}/optix_mnee.cu
     solsticeOptixMneeIr
     LIGHTS
@@ -360,7 +362,8 @@ solstice_optix_kernel(mnee
             ${_solstice_optix_dir}/optix_spectral.cuh
             ${_solstice_optix_dir}/optix_spectral_film.cuh
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
-            ${CMAKE_SOURCE_DIR}/src/render/shading_bsdf.h)
+            ${CMAKE_SOURCE_DIR}/src/render/shading_bsdf.h
+            ${CMAKE_SOURCE_DIR}/src/render/surface_maps.h)
 
 solstice_optix_kernel(etd
     ${_solstice_optix_dir}/optix_etd.cu
@@ -376,6 +379,8 @@ solstice_optix_kernel(etd
             ${_solstice_optix_dir}/optix_volume.cuh
             ${_solstice_optix_dir}/optix_intersect_shadow.cu
             ${CMAKE_SOURCE_DIR}/src/render/exit_to_diffuse.h
+            ${CMAKE_SOURCE_DIR}/src/render/exit_to_diffuse_walk.h
+            ${CMAKE_SOURCE_DIR}/src/render/surface_maps.h
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
             ${CMAKE_SOURCE_DIR}/src/render/shading_bsdf.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
