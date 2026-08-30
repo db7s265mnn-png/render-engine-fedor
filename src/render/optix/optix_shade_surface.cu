@@ -25,6 +25,7 @@ __device__ inline void beginExitToDiffuseEscape(GpuPath& path, const Surf& si, c
     path.exitP = si.p;
     path.exitNg = si.ng;
     path.exitNs = si.ns;
+    path.exitUv = si.uv;
     path.queue = kQueueExitToDiffuse;
 }
 

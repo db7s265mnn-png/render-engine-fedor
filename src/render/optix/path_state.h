@@ -80,6 +80,7 @@ struct GpuPath {
     Vec3 exitP{0.0f};
     Vec3 exitNg{0.0f, 0.0f, 1.0f};
     Vec3 exitNs{0.0f, 0.0f, 1.0f};
+    Vec2 exitUv{0.0f, 0.0f};
     int rayKind = 0;  // RayShadeKind: incoming type for ray_switch_shader (Arnold)
     // MCMC / ERPT: stored SampleLe so mutations respawn without a new light pick.
     Vec3 mcmcOrigin{0.0f};

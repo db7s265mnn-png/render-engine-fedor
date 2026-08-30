@@ -858,6 +858,11 @@ void testBsdf() {
               "ETD dest shadow opens contributing glass");
         check(shadowBlockFraction(floorDest, floorDest, 1, 2, 1.0f) >= 0.999f,
               "ETD dest shadow still blocks opaque");
+        float dyingLobe = 0.0f, dyingChoice = 1.0f;
+        exitToDiffuseDyingReflectU(glass, dyingLobe, dyingChoice);
+        check(dyingChoice == 0.0f && dyingLobe > 0.99f, "dying glass samples reflection/TIR");
+        exitToDiffuseDyingReflectU(mirror, dyingLobe, dyingChoice);
+        check(dyingChoice == 0.0f && dyingLobe < 0.5f, "dying mirror uses the reflection lobe");
         check(!exitToDiffuseSkipOpacity(floorDest, 0.0f), "opaque dest is not skipped");
         Material cutout{};
         cutout.opacity = 0.0f;

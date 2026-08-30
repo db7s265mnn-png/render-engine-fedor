@@ -15,8 +15,8 @@ SR_INL SR_HD bool exitToDiffuseShouldStart(const Material& mat, int depth) {
 }
 
 // Last bounce from a flagged surface — including the camera hit when
-// maxDepth == 1. Replaces BSDF with reflect + refract opacity walks; does
-// not Lambert this surface.
+// maxDepth == 1. Through dest is Lambert. Reflection is dying BSDF (TIR)
+// × dest. Does not Lambert this surface.
 SR_INL SR_HD bool exitToDiffuseShouldArmBounce(const Material& mat, int depth, int maxDepth) {
     return materialWantsExitToDiffuse(mat) && depth + 1 >= maxDepth;
 }

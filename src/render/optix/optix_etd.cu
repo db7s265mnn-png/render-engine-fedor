@@ -208,7 +208,7 @@ extern "C" __global__ void __raygen__etd() {
     if (escapeMat >= 0 && escapeMat < scene.materialCount && scene.materials)
         dying = materialForRay(scene, escapeMat, RayShadeKind::Camera);
     Vec3 ns = path.exitNs;
-    dying = evaluateSurfaceMaps(scene, dying, Vec2(0.0f), ns);
+    dying = evaluateSurfaceMaps(scene, dying, path.exitUv, ns);
     const Vec3 nSh = lengthSquared(ns) > 1e-12f ? ns : ng;
     const Frame frame(nSh);
     const Vec3 woLocal = frame.toLocal(-incoming);
