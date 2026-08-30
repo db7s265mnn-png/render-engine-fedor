@@ -15,6 +15,7 @@ __device__ inline void shadeVolumePixel(int pixel) {
     shadow.queue = kShadowIdle;
     shadow.splatPixel = -1;
     shadow.specContrib = 0;
+    shadow.eyeBounceNee = 0;
 
     const MediumData* med = getMedium(scene, path.mediumIndex);
     if (!med) {
@@ -53,7 +54,8 @@ __device__ inline void shadeVolumePixel(int pixel) {
         if (!isBlack(med->emission) && !path.lightPath)
             addPathEmissionRgb(path, med->emission, 1.0f, 0.0f);
         const bool skipCameraSds =
-            !path.lightPath && params.splatInvLightPaths > 0.0f && path.causticSuffix;
+            gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
+                             params.splatInvLightPaths);
         if (!path.lightPath && !skipCameraSds && scene.lightCount > 0) {
             float selectPdf = 0.0f;
             const int lightIndex = sampleLightIndex(scene, p, path.rng.nextFloat(), selectPdf);
@@ -71,7 +73,9 @@ __device__ inline void shadeVolumePixel(int pixel) {
                 if (ls.distance < 1.0e7f) tSh = ls.distance * (1.0f - 1e-3f);
                 enqueueOrAddVertexNeeS(path, shadow, p, ls.wi, tSh, neeS, path.mediumIndex,
                                        scene.lights[lightIndex].shadowEnable,
-                                       pathContributionClamp(scene.settings, path.depth, false, false));
+                                       pathContributionClamp(scene.settings, path.depth, false, false),
+                                       gpuEyeBounceNee(scene.settings, path.depth, path.throughGlass, 1,
+                                                       scene.lights[lightIndex].type));
             }
         }
 
@@ -81,8 +85,10 @@ __device__ inline void shadeVolumePixel(int pixel) {
         path.direction = wi;
         path.bsdfPdf = phasePdf;
         path.specularBounce = 0;
+        path.transmittedBounce = 0;
         path.sawNonSpecular = 1;
         path.causticSuffix = 0;
+        path.rayKind = int(RayShadeKind::Volume);
         ++path.depth;
         ++path.volumeScatters;
         if (path.depth >= srMax(1, scene.settings.maxDepth)) {

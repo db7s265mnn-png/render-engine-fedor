@@ -7,7 +7,10 @@
 #pragma once
 
 #include "core/rng.h"
+#include "render/exit_to_diffuse.h"
+#include "render/exit_to_diffuse_walk.h"
 #include "render/lights.h"
+#include "render/surface_maps.h"
 #include "render/shading.h"
 #include "render/volume.h"
 #include "scene/types.h"
@@ -51,82 +54,24 @@ struct SurfaceInteraction {
     int lightIndex = -1;
 };
 
-SR_INL SR_HD Material defaultMaterial() {
-    Material m;
-    m.baseColor = Vec3(0.7f, 0.7f, 0.7f);
-    m.roughness = 0.5f;
-    return m;
-}
-
-// Incoming ray classification for MaterialX ray_switch_shader — matches Arnold
-// aiRaySwitch: the *incoming* ray type selects which surfaceshader port is
-// evaluated for that hit (camera rays → camera port, specular transmission
-// rays → specular_transmission, etc.). Unconnected ports fall back to the
-// base/camera material (-1 in RaySwitchTable).
-enum class RayShadeKind : int {
-    Camera = 0,
-    Shadow,
-    DiffuseReflection,
-    SpecularReflection,
-    DiffuseTransmission,
-    SpecularTransmission,
-    Sss,
-    // Solstice-only convenience for photon / MNEE / BDPT light-tracing through
-    // glass. Never used for camera or other eye-path ray types.
-    Caustics
-};
-
-SR_INL SR_HD int raySwitchSlot(const RaySwitchTable& t, RayShadeKind kind) {
-    switch (kind) {
-        case RayShadeKind::Camera: return t.camera;
-        case RayShadeKind::Shadow: return t.shadow;
-        case RayShadeKind::DiffuseReflection: return t.diffuseReflection;
-        case RayShadeKind::SpecularReflection: return t.specularReflection;
-        case RayShadeKind::DiffuseTransmission: return t.diffuseTransmission;
-        case RayShadeKind::SpecularTransmission: return t.specularTransmission;
-        case RayShadeKind::Sss: return t.sss;
-        case RayShadeKind::Caustics: return t.caustics;
-    }
-    return -1;
-}
-
-// Resolve the Material POD for a hit given the incoming ray kind. `baseIndex` is
-// InstanceData::materialIndex (owns the RaySwitchTable).
-SR_INL SR_HD Material materialForRay(const SceneView& scene, int baseIndex, RayShadeKind kind) {
-    if (baseIndex < 0 || baseIndex >= scene.materialCount) return defaultMaterial();
-    const Material& base = scene.materials[baseIndex];
-    const int slot = raySwitchSlot(base.raySwitch, kind);
-    if (slot < 0 || slot >= scene.materialCount) return base;
-    return scene.materials[slot];
-}
-
 SR_INL SR_HD Material materialForRay(const SceneView& scene, const SurfaceInteraction& si,
                                      RayShadeKind kind) {
     return materialForRay(scene, si.materialIndex, kind);
 }
 
-// Photon / MNEE / BDPT light-path glass: prefer Solstice `caustics` port, else
-// Arnold `specular_transmission`, else the camera/base material.
-SR_INL SR_HD Material materialForCausticTransport(const SceneView& scene, int baseIndex) {
-    if (baseIndex < 0 || baseIndex >= scene.materialCount) return defaultMaterial();
-    const Material& base = scene.materials[baseIndex];
-    if (base.raySwitch.caustics >= 0) return materialForRay(scene, baseIndex, RayShadeKind::Caustics);
-    if (base.raySwitch.specularTransmission >= 0)
-        return materialForRay(scene, baseIndex, RayShadeKind::SpecularTransmission);
-    return base;
+// Solstice `sss` port (Arnold AI_RAY_SUBSURFACE). Unconnected → incoming shader.
+SR_INL Material sssBodyMaterial(const SceneView& scene, const SurfaceInteraction& si,
+                                const Material& incoming) {
+    if (si.materialIndex < 0 || si.materialIndex >= scene.materialCount || !scene.materials)
+        return incoming;
+    if (raySwitchSlot(scene.materials[si.materialIndex].raySwitch, RayShadeKind::Sss) < 0)
+        return incoming;
+    Vec3 ns = si.ns;
+    return evaluateTexturedMaterial(scene, materialForRay(scene, si.materialIndex, RayShadeKind::Sss),
+                                    si.uv, ns, si.pObject, si.nObject, si.uvFilterWidth, si.pRef, si.nRef,
+                                    si.hasPref);
 }
 
-// Tag the *next* ray after a BSDF sample (Arnold ray type for the child ray).
-SR_INL SR_HD RayShadeKind nextRayShadeKind(const BsdfSample& bs, const LobeWeights& lw) {
-    if (bs.transmitted) {
-        if (bs.specular || isNearSpecularLobe(lw)) return RayShadeKind::SpecularTransmission;
-        return RayShadeKind::DiffuseTransmission;
-    }
-    if (bs.specular || isNearSpecularLobe(lw)) return RayShadeKind::SpecularReflection;
-    return RayShadeKind::DiffuseReflection;
-}
-
-// Chiang et al. 2016: map artist multiple-scattering albedo A → single-scattering α.
 SR_INL SR_HD float chiangSingleScatterAlbedo(float A) {
     A = saturatef(A);
     return 1.0f - expf(-5.09406f * A + 2.61188f * A * A - 4.31805f * A * A * A);
@@ -403,12 +348,6 @@ SR_INL SR_HD bool buildSurfaceInteraction(const SceneView& scene, const RayHit& 
     // Keep the shading normal on the same side as the geometric normal.
     if (dot(si.ns, si.ng) < 0.0f) si.ng = -si.ng;
     return true;
-}
-
-SR_INL SR_HD Vec3 offsetRayOrigin(Vec3 p, Vec3 n, Vec3 dir) {
-    const float scale = 1.0f + srMax(fabsf(p.x), srMax(fabsf(p.y), fabsf(p.z)));
-    const Vec3 offset = n * (kRayEpsilon * scale);
-    return dot(dir, n) > 0.0f ? p + offset : p - offset;
 }
 
 #if !defined(__CUDACC__)
@@ -827,14 +766,18 @@ SR_INL SR_HD float lightTraceSplatClamp(const RenderSettingsData& settings) {
 }
 
 // Multi-hit shadow visibility (Embree filter-function style): opaque surfaces
-// block fully; transmissive surfaces attenuate by Material::shadowOpacity when
-// refractive caustics are enabled (MaterialX / Arnold fake-caustics control).
+// block fully. Transmissive: shadowOpacity when caustics are off (or the material
+// does not contribute). Iray Photoreal (Keller 2017): contributing glass stays
+// opaque for primary NEE and light-tracing camera connections; eye NEE after a
+// bounce uses Fresnel transmittance along the straight shadow ray.
 // VDB: SDF level sets are hard occluders (tested against the field, not the AABB
 // proxy). Fog AABBs are skipped here — soft Tr is applied via ratio tracking
 // (shadowTransmittanceFogVolumes, PBRT §11.2.1 / VolPath §14.2.2).
+//
+// eyeBounceNee: 1 = camera/BDPT NEE from depth>0 (or BDPT s=1 with t>2).
 template <typename Tracer>
 SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 dir,
-                                    float tMax) {
+                                    float tMax, int eyeBounceNee = 0) {
 #if !defined(__CUDACC__)
     // Field-based SDF cast / self shadow (works from inside the AABB too).
     if (shadowOccludedBySdfVolumes(scene, origin, dir, tMax)) return 0.0f;
@@ -871,19 +814,9 @@ SR_INL SR_HD float shadowVisibility(const SceneView& scene, const Tracer& tracer
         }
 
         Material mat = materialForRay(scene, si.materialIndex, RayShadeKind::Shadow);
-        // Opaque-glass when caustics estimators own transport (caustics / specular_transmission slot).
         const Material matCau = materialForCausticTransport(scene, si.materialIndex);
-
-        float block = 1.0f;
-        if (mat.transmission > 1e-3f) {
-            // Caustics ON + material contributes: shadow rays treat glass as opaque —
-            // transmitted light is delivered by MNEE / BDPT LT / photon gather.
-            // Caustics OFF, or material Contribute to Caustics off: fake with shadow_opacity.
-            if (scene.settings.caustics == 0 || !materialContributesCaustics(matCau))
-                block = saturatef(mat.shadowOpacity);
-            else
-                block = 1.0f;
-        }
+        const float nDotWo = -dot(si.ns, dir);
+        const float block = shadowBlockFraction(mat, matCau, scene.settings.caustics, eyeBounceNee, nDotWo);
         visibility *= (1.0f - block);
         if (block >= 0.999f || visibility <= 1e-5f) return 0.0f;
 
@@ -899,11 +832,12 @@ template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& tracer,
                                           const SurfaceInteraction& si, const Material& mat,
                                           const Frame& frame, Vec3 wo, Rng& rng, Guiding* guiding,
-                                          int mediumIndex = -1) {
+                                          int mediumIndex = -1, int eyeBounceNee = 0) {
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
     const Vec3 woLocal = frame.toLocal(wo);
+    if (!eyePathNeeConnectable(mat, woLocal)) return result;
     float selectPdf = 0.0f;
     const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
     if (lightIndex < 0 || selectPdf <= 0.0f) return result;
@@ -932,7 +866,7 @@ SR_INL SR_HD Vec3 nextEventEstimationOnce(const SceneView& scene, const Tracer& 
     if (scene.lights[lightIndex].shadowEnable) {
         shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
         if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-        visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax);
+        visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax, eyeBounceNee);
         if (visibility <= 1e-5f) return result;
     }
 
@@ -969,7 +903,7 @@ SR_INL SR_HD float volumeScatterPdf(Vec3 woVol, Vec3 wi, const MediumData& med, 
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
                                                 Vec3 woVol, const MediumData& med, Rng& rng,
-                                                Guiding* guiding) {
+                                                Guiding* guiding, int eyeBounceNee = 0) {
     Vec3 result(0.0f);
     if (scene.lightCount <= 0) return result;
 
@@ -990,7 +924,7 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
     float tShadow = 1.0e8f;
     if (scene.lights[li].shadowEnable) {
         if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
-        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
+        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow, eyeBounceNee);
         if (vis <= 1e-5f) return result;
     }
 
@@ -1007,30 +941,127 @@ SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tr
 
 template <typename Tracer>
 SR_INL SR_HD Vec3 nextEventEstimationVolumeOnce(const SceneView& scene, const Tracer& tracer, Vec3 origin,
-                                                Vec3 woVol, const MediumData& med, Rng& rng) {
+                                                Vec3 woVol, const MediumData& med, Rng& rng,
+                                                int eyeBounceNee = 0) {
     return nextEventEstimationVolumeOnce<Tracer, NullGuiding>(scene, tracer, origin, woVol, med, rng,
-                                                              nullptr);
+                                                              nullptr, eyeBounceNee);
 }
 
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
                                       const Material& mat, const Frame& frame, Vec3 wo, Rng& rng,
-                                      Guiding* guiding, int mediumIndex = -1) {
+                                      Guiding* guiding, int mediumIndex = -1, int eyeBounceNee = 0) {
     (void)scene.settings.lightSamples;
     const int n = 1;  // pbrt-v4: one light sample per vertex, MIS with BSDF
     Vec3 sum(0.0f);
     for (int i = 0; i < n; ++i)
-        sum += nextEventEstimationOnce(scene, tracer, si, mat, frame, wo, rng, guiding, mediumIndex);
+        sum += nextEventEstimationOnce(scene, tracer, si, mat, frame, wo, rng, guiding, mediumIndex,
+                                       eyeBounceNee);
     return sum * (1.0f / float(n));
 }
 
 template <typename Tracer>
 SR_INL SR_HD Vec3 nextEventEstimation(const SceneView& scene, const Tracer& tracer, const SurfaceInteraction& si,
                                       const Material& mat, const Frame& frame, Vec3 wo, Rng& rng,
-                                      int mediumIndex = -1) {
+                                      int mediumIndex = -1, int eyeBounceNee = 0) {
     return nextEventEstimation<Tracer, NullGuiding>(scene, tracer, si, mat, frame, wo, rng, nullptr,
-                                                    mediumIndex);
+                                                    mediumIndex, eyeBounceNee);
 }
+
+#if !defined(__CUDACC__)
+template <typename Tracer>
+struct EtdCpuCtx {
+    const SceneView& scene;
+    const Tracer& tracer;
+    Rng& rng;
+    SurfaceInteraction lastSi{};
+    bool invalid = false;
+
+    bool intersect(Vec3 o, Vec3 d, float tMax, EtdHit& h) {
+        RayHit hit;
+        if (!tracer.intersect(o, d, tMax, hit)) return false;
+        if (!buildSurfaceInteraction(scene, hit, o, d, lastSi)) {
+            invalid = true;
+            return false;
+        }
+        etdHitFromSurfLike(h, lastSi);
+        return true;
+    }
+    Material evalDestMaps(EtdHit& h) {
+        Material dest = materialForRay(scene, h.materialIndex, RayShadeKind::Camera);
+        dest = evaluateSurfaceMaps(scene, dest, h.uv, h.ns);
+        lastSi.ns = h.ns;
+        return dest;
+    }
+    bool skipOpacity(const Material& dest) { return exitToDiffuseSkipOpacity(dest, rng.nextFloat()); }
+};
+
+template <typename Tracer>
+inline Vec3 exitToDiffuseWalkOne(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
+                                 int escapeMat, Rng& rng, int mediumIndex, int eyeBounceNee) {
+    EtdCpuCtx<Tracer> ctx{scene, tracer, rng};
+    EtdHit destHit;
+    Material destMat;
+    const EtdWalkKind kind = exitToDiffuseWalkFind(ctx, origin, direction, escapeMat, destHit, destMat);
+    if (kind == EtdWalkKind::Miss) {
+        Vec3 L(0.0f);
+        if (scene.domeLightIndex >= 0) {
+            const LightData& dome = scene.lights[scene.domeLightIndex];
+            L += domeRadiance(scene, dome, direction, /*nearestTexel=*/true);
+        }
+        L += cameraSunDiscRadiance(scene, origin, direction, 0.0f, true, false, false);
+        return L;
+    }
+    if (kind == EtdWalkKind::AreaLight) {
+        const LightData& light = scene.lights[destHit.lightIndex];
+        const Vec3 lightN = light.type == kLightSphere ? destHit.ng : areaLightNormal(light);
+        return areaLightEmission(scene, light, direction, lightN);
+    }
+    if (kind != EtdWalkKind::Dest) return Vec3(0.0f);
+    const int destMedium = exitToDiffuseDestMedium(scene, mediumIndex, destHit.instanceIndex);
+    return nextEventEstimation(scene, tracer, ctx.lastSi, exitToDiffuseLambert(destMat), Frame(ctx.lastSi.ns),
+                               -direction, rng, destMedium, eyeBounceNee);
+}
+
+// Through: dest Lambert. Reflection: dying BSDF (TIR) × dest/env along sampled wi.
+template <typename Tracer>
+inline Vec3 exitToDiffuseWalkReflectAndRefract(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng,
+                                               Vec3 ns, Vec3 incoming, int escapeMat, const Material& dyingMat,
+                                               Rng& rng, int mediumIndex, int eyeBounceNee) {
+    Vec3 L(0.0f);
+    if (exitToDiffuseWantsRefractWalk(dyingMat)) {
+        L += exitToDiffuseWalkOne(scene, tracer, offsetRayOrigin(p, ng, incoming), incoming, escapeMat, rng,
+                                  mediumIndex, eyeBounceNee);
+    }
+    const Vec3 n = lengthSquared(ns) > 1e-12f ? ns : ng;
+    const Frame frame(n);
+    const Vec3 woLocal = frame.toLocal(-incoming);
+    float uLobe = 0.999f, uChoice = 0.0f;
+    exitToDiffuseDyingReflectU(dyingMat, uLobe, uChoice);
+    const BsdfSample rs =
+        bsdfSampleLocal(dyingMat, woLocal, uLobe, rng.nextFloat(), rng.nextFloat(), uChoice);
+    if (rs.pdf > 0.0f && !rs.transmitted && !isBlack(rs.weight)) {
+        const Vec3 wi = frame.toWorld(rs.wi);
+        L += rs.weight * exitToDiffuseWalkOne(scene, tracer, offsetRayOrigin(p, ng, wi), wi, escapeMat, rng,
+                                              mediumIndex, eyeBounceNee);
+    } else if (!exitToDiffuseWantsRefractWalk(dyingMat)) {
+        const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
+        L += exitToDiffuseWalkOne(scene, tracer, offsetRayOrigin(p, ng, refl), refl, escapeMat, rng,
+                                  mediumIndex, eyeBounceNee);
+    }
+    return L;
+}
+
+template <typename Tracer>
+inline Vec3 exitToDiffuseContribution(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng, Vec3 ns,
+                                      Vec3 incoming, int escapeMat, const Material& dyingMat,
+                                      Vec3 throughput, Rng& rng, int mediumIndex) {
+    const Vec3 extra =
+        exitToDiffuseWalkReflectAndRefract(scene, tracer, p, ng, ns, incoming, escapeMat, dyingMat, rng,
+                                           mediumIndex, exitToDiffuseDestShadowNee());
+    return clampContribution(throughput * extra, scene.settings.clampDirect);
+}
+#endif
 
 template <typename Tracer, typename Guiding>
 SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Vec3 origin, Vec3 direction,
@@ -1047,6 +1078,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
     bool causticSuffix = false;
     int depth = 0;
     int passThrough = 0;
+    int exitEscapeMat = -1;
+    int exitEscapeSkips = 0;
     int volumeScatterCount = 0;
     // Last volume scatter (for MIS vs HG×sun volume NEE). Cleared on surface BSDF.
     bool volumePhaseMis = false;
@@ -1112,7 +1145,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 if (scene.lightCount > 0 && depth < maxDepth) {
                     const Vec3 volDirect =
                         nextEventEstimationVolumeOnce(scene, tracer, origin, woVol, medWalk, rng,
-                                                      guiding);
+                                                      guiding, depth > 0 ? 1 : 0);
                     radiance += clampContribution(throughput * volDirect, settings.clampDirect);
 #if !defined(__CUDACC__)
                     if (guiding && guiding->active()) guiding->addScattered(volDirect);
@@ -1169,7 +1202,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
 #endif
                 specularBounce = false;
                 sawNonSpecular = true;
-                rayKind = RayShadeKind::DiffuseReflection;
+                rayKind = RayShadeKind::Volume;
                 ++depth;
                 ++volumeScatterCount;
                 if (depth >= settings.rrStartDepth) {
@@ -1198,11 +1231,12 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             // Wireframe diagnostic: empty background (no env).
             if (settings.integrator == kIntegratorWireframe) break;
             if (scene.domeLightIndex >= 0) {
-                if (!suppressCausticLight) {
+                if (!suppressCausticLight || exitEscapeMat >= 0) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
-                if (!(causticSuffix && !lightContributesCaustics(dome))) {
-                const bool primary = depth == 0 && passThrough == 0;
-                if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
+                if (exitEscapeMat >= 0 || !(causticSuffix && !lightContributesCaustics(dome))) {
+                const bool primary = depth == 0 && passThrough == 0 && exitEscapeMat < 0;
+                if (exitEscapeMat >= 0 ||
+                    !(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
                     Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
                         if (!isBlack(envL)) {
                         float weight = 1.0f;
@@ -1231,8 +1265,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 }
                 }
             }
-            if (!suppressCausticLight) {
-                const bool primarySun = depth == 0 && passThrough == 0;
+            if (!suppressCausticLight || exitEscapeMat >= 0) {
+                const bool primarySun = depth == 0 && passThrough == 0 && exitEscapeMat < 0;
                 if (!(primarySun && !settings.envVisibleCamera)) {
                     const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, bsdfPdf,
                                                             specularBounce, primarySun, causticSuffix,
@@ -1349,6 +1383,47 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             break;
         }
 
+        // Exit to Diffuse: skip the dying material and other dielectrics
+        // (opacity, no IOR) until an opaque dest, then Lambert + NEE.
+        if (exitEscapeMat >= 0) {
+            if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips) ||
+                exitToDiffuseSkipDielectricDest(mat)) {
+                origin = offsetRayOrigin(si.p, si.ng, direction);
+                ++exitEscapeSkips;
+                ++passThrough;
+                continue;
+            }
+            const Vec3 woExit = -direction;
+            const Frame frameExit(si.ns);
+            const Vec3 nee =
+                nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), frameExit, woExit, rng,
+                                    guiding, currentMedium, exitToDiffuseDestShadowNee());
+            Vec3 contrib = throughput * nee;
+            contrib = clampContribution(contrib, settings.clampDirect);
+            radiance += contrib;
+            break;
+        }
+        const bool exitNow = (depth >= maxDepth && exitToDiffuseShouldStart(mat, depth)) ||
+                             (depth < maxDepth && exitToDiffuseShouldArmBounce(mat, depth, maxDepth));
+        if (exitNow) {
+#if !defined(__CUDACC__)
+            radiance += exitToDiffuseContribution(scene, tracer, si.p, si.ng, si.ns, direction,
+                                                  si.materialIndex, mat, throughput, rng, currentMedium);
+            break;
+#else
+            float escW = 1.0f;
+            const Vec3 escDir =
+                exitToDiffuseSampleEscapeDir(direction, si.ng, mat, rng.nextFloat(), escW);
+            throughput = throughput * escW;
+            exitEscapeMat = si.materialIndex;
+            exitEscapeSkips = 0;
+            origin = offsetRayOrigin(si.p, si.ng, escDir);
+            direction = escDir;
+            ++exitEscapeSkips;
+            ++passThrough;
+            continue;
+#endif
+        }
         if (depth >= maxDepth) break;
 
         const Vec3 wo = -direction;
@@ -1385,7 +1460,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             if (pSpec > 0.0f) {
                     const Vec3 nee =
                     nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding,
-                                        currentMedium);
+                                        currentMedium, depth > 0 ? 1 : 0);
                 Vec3 contrib = throughput * nee;
                 if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
                 radiance += contrib;
@@ -1421,7 +1496,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             }
             if (pSpec > 0.0f && pSpec < 0.999f) throughput /= (1.0f - pSpec);
 
-            const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
+            const Material sssBody = sssBodyMaterial(scene, si, mat);
+            const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, sssBody, rng);
             if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
             Material lambert = sssExitLambertMaterial();
             SurfaceInteraction ssSi = si;
@@ -1432,7 +1508,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
             // NEE at SSS exit (lightSamples is handled inside nextEventEstimation).
             const Vec3 nee =
                 nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding,
-                                    currentMedium);
+                                    currentMedium, depth > 0 ? 1 : 0);
             Vec3 contrib = throughput * walk.pathWeight * nee;
             if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;
@@ -1454,6 +1530,8 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
                 direction = wiWorld;
                 bsdfPdf = ssBs.pdf;
                 specularBounce = false;
+                rayKind = RayShadeKind::DiffuseReflection;
+                sawNonSpecular = true;
                 ++depth;
                 continue;
             }
@@ -1476,7 +1554,7 @@ SR_INL SR_HD Vec3 traceRadiance(const SceneView& scene, const Tracer& tracer, Ve
         // NEE on diffuse after a caustic-disabled specular/transmission bounce is suppressed.
         if (!(suppressCausticLight && !specularBounce)) {
             const Vec3 nee = nextEventEstimation(scene, tracer, si, mat, frame, wo, rng, guiding,
-                                                 currentMedium);
+                                                 currentMedium, depth > 0 ? 1 : 0);
             Vec3 contrib = throughput * nee;
             if (depth > 0 && !specularBounce)
                 contrib = clampContribution(contrib, settings.clampDirect);

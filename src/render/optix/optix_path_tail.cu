@@ -1,5 +1,7 @@
 // Iray-style tail megakernel: remaining live paths finish in one launch.
 // Includes optixTrace + shade (split wavefront kernels stay separate TUs).
+// Exit to Diffuse walks live in optix_etd.cu — do not add them here
+// (optixTrace + BSDF in this TU already hangs cicc / optixModuleCreate).
 #define SOLSTICE_OPTIX_OPS_ONLY
 #include "render/optix/optix_intersect_closest.cu"
 #include "render/optix/optix_intersect_shadow.cu"
@@ -29,10 +31,13 @@ extern "C" __global__ void __raygen__path_tail() {
     const LaunchParams& params = launchParams();
     GpuPath& path = params.paths[pixel];
     GpuShadow& shadow = params.shadows[pixel];
+    if (path.queue == kQueueExitToDiffuse) return;
     const int maxDepth = params.scene.settings.maxDepth > 0 ? params.scene.settings.maxDepth : 1;
     const int batch = params.batchSamples > 1 ? params.batchSamples : 1;
-    const int cap = batch * (maxDepth + 18);
+    const int mcmcK = params.mcmcMutations > 0 ? params.mcmcMutations : 0;
+    const int cap = batch * (maxDepth + 18) * (1 + mcmcK);
     for (int i = 0; i < cap; ++i) {
+        if (path.queue == kQueueExitToDiffuse) return;
         if (path.queue == kQueueDead && shadow.queue == kShadowIdle) break;
         tailAdvance(pixel);
     }

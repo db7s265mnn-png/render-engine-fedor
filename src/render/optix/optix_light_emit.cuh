@@ -27,7 +27,45 @@ __device__ inline float gpuLightTraceSplatClamp(const RenderSettingsData& settin
     return settings.clampIndirect * float(w) * float(h);
 }
 
+__device__ inline void gpuPhotonAimState(const GpuPhotonCluster*& clusters, int& n, float& mix) {
+    const LaunchParams& p = launchParams();
+    clusters = p.photonClusters;
+    n = p.photonClusterCount;
+    mix = p.photonAimMix;
+    if (!clusters || n <= 0 || mix <= 0.0f) {
+        clusters = nullptr;
+        n = 0;
+        mix = 0.0f;
+        return;
+    }
+    if (n > kMaxGpuPhotonClusters) n = kMaxGpuPhotonClusters;
+    mix = saturatef(mix);
+}
+
+// Infinite-light disk: mixture of the scene disk and caster projections.
+__device__ inline Vec3 gpuSampleLeDisk(const SceneView& scene, Vec3 axis, Rng& rng, float& pdfPos) {
+    const float r = sceneRadius(scene);
+    const Vec3 center = scene.worldBounds.valid() ? scene.worldBounds.center() : Vec3(0.0f);
+    const Frame wFrame(axis);
+    const GpuPhotonCluster* clusters = nullptr;
+    int n = 0;
+    float mix = 0.0f;
+    gpuPhotonAimState(clusters, n, mix);
+    Vec3 pDisk;
+    if (gpuPhotonAimSelect(mix, rng.nextFloat())) {
+        const int ci = gpuPickPhotonCluster(clusters, n, rng.nextFloat());
+        pDisk = gpuClusterDiskPoint(clusters[ci], center, axis, sampleConcentricDisk(rng.nextFloat(), rng.nextFloat()));
+    } else {
+        const Vec2 cd = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
+        pDisk = center + wFrame.toWorld(Vec3(cd.x, cd.y, 0.0f)) * r;
+    }
+    pdfPos = gpuPhotonAimMixtureDiskPdf(pDisk, center, axis, r, mix, clusters, n);
+    return pDisk;
+}
+
 // Device copy of bdpt::startLightPath (pbrt SampleLe). Returns RGB beta = Le / pdfs.
+// Direction / disk pdf is photon aiming when mix is 1 (GPU default), else the
+// uniform+aim mixture. Do not use the sampled technique's pdf alone.
 __device__ inline GpuLightEmit gpuSampleLe(const SceneView& scene, Rng& rng) {
     GpuLightEmit out;
     float selectPdf = 0.0f;
@@ -36,10 +74,12 @@ __device__ inline GpuLightEmit gpuSampleLe(const SceneView& scene, Rng& rng) {
     const LightData& l = scene.lights[li];
     out.lightIndex = li;
 
+    const GpuPhotonCluster* clusters = nullptr;
+    int nAim = 0;
+    float mix = 0.0f;
+    gpuPhotonAimState(clusters, nAim, mix);
+
     if (l.type == kLightDistant || l.type == kLightDome) {
-        const float r = sceneRadius(scene);
-        const float pdfPos = 1.0f / (kPi * r * r);
-        const Vec3 center = scene.worldBounds.valid() ? scene.worldBounds.center() : Vec3(0.0f);
         out.infinite = 1;
         if (l.type == kLightDistant) {
             const Vec3 axis = normalize(lightAxisZ(l));
@@ -60,9 +100,9 @@ __device__ inline GpuLightEmit gpuSampleLe(const SceneView& scene, Rng& rng) {
                     sampleUniformCone(rng.nextFloat(), rng.nextFloat(), cosThetaMax)));
                 pdfDirSa = 1.0f / omega;
             }
-            const Frame wFrame(axis);
-            const Vec2 cd = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
-            const Vec3 pDisk = center + wFrame.toWorld(Vec3(cd.x, cd.y, 0.0f)) * r;
+            float pdfPos = 0.0f;
+            const Vec3 pDisk = gpuSampleLeDisk(scene, axis, rng, pdfPos);
+            const float r = sceneRadius(scene);
             out.origin = pDisk + axis * r;
             out.dir = emitDir;
             out.n = -emitDir;
@@ -84,9 +124,9 @@ __device__ inline GpuLightEmit gpuSampleLe(const SceneView& scene, Rng& rng) {
         if (pdfDir <= 0.0f) return out;
         const Vec3 wi = normalize(transformVector(l.xform, wiLocal));
         const Vec3 emitDir = -wi;
-        const Frame wFrame(wi);
-        const Vec2 cd = sampleConcentricDisk(rng.nextFloat(), rng.nextFloat());
-        const Vec3 pDisk = center + wFrame.toWorld(Vec3(cd.x, cd.y, 0.0f)) * r;
+        float pdfPos = 0.0f;
+        const Vec3 pDisk = gpuSampleLeDisk(scene, wi, rng, pdfPos);
+        const float r = sceneRadius(scene);
         out.origin = pDisk + wi * r;
         out.dir = emitDir;
         out.n = -emitDir;
@@ -101,9 +141,21 @@ __device__ inline GpuLightEmit gpuSampleLe(const SceneView& scene, Rng& rng) {
     if (l.type == kLightPoint) {
         out.origin = lightOrigin(l);
         out.n = Vec3(0.0f, 1.0f, 0.0f);
-        out.dir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
-        const float pdfDirSa = kInv4Pi;
+        bool aimed = false;
+        if (gpuPhotonAimSelect(mix, rng.nextFloat())) {
+            const int ci = gpuPickPhotonCluster(clusters, nAim, rng.nextFloat());
+            aimed = gpuSamplePhotonAimDir(out.origin, clusters[ci], rng.nextFloat(), rng.nextFloat(),
+                                          out.dir);
+            if (aimed && gpuAimConePdf(out.origin, out.dir, clusters, nAim) <= 0.0f) aimed = false;
+        }
+        if (!aimed) {
+            if (gpuPhotonAimOnly(mix)) return out;
+            out.dir = sampleUniformSphere(rng.nextFloat(), rng.nextFloat());
+        }
+        const float pdfDirSa =
+            gpuPhotonAimDirPdf(out.origin, out.dir, mix, clusters, nAim, kInv4Pi);
         const float pdfFwd = selectPdf;
+        if (pdfDirSa <= 0.0f) return out;
         out.betaRgb = l.emittedRadiance() / srMax(1e-12f, pdfFwd * pdfDirSa);
         out.ok = !isBlack(out.betaRgb);
         return out;
@@ -132,10 +184,34 @@ __device__ inline GpuLightEmit gpuSampleLe(const SceneView& scene, Rng& rng) {
     const float pdfFwd = selectPdf / area;
     Vec3 nEmit = out.n;
     if (l.twoSided && rng.nextFloat() < 0.5f) nEmit = -nEmit;
-    const Frame frame(nEmit);
-    const Vec3 local = sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat());
-    out.dir = normalize(frame.toWorld(local));
-    const float pdfDirSa = fabsf(dot(nEmit, out.dir)) * kInvPi * (l.twoSided ? 0.5f : 1.0f);
+
+    bool aimed = false;
+    if (gpuPhotonAimSelect(mix, rng.nextFloat())) {
+        const int ci = gpuPickPhotonCluster(clusters, nAim, rng.nextFloat());
+        Vec3 aimDir;
+        if (gpuSamplePhotonAimDir(out.origin, clusters[ci], rng.nextFloat(), rng.nextFloat(), aimDir) &&
+            gpuAimConePdf(out.origin, aimDir, clusters, nAim) > 0.0f) {
+            const float cosN = dot(out.n, aimDir);
+            if (l.twoSided) {
+                if (fabsf(cosN) > 1e-4f) {
+                    out.dir = aimDir;
+                    aimed = true;
+                }
+            } else if (cosN > 1e-4f) {
+                out.dir = aimDir;
+                aimed = true;
+            }
+        }
+    }
+    if (!aimed) {
+        if (gpuPhotonAimOnly(mix)) return out;
+        const Frame frame(nEmit);
+        const Vec3 local = sampleCosineHemisphere(rng.nextFloat(), rng.nextFloat());
+        out.dir = normalize(frame.toWorld(local));
+    }
+    const float cosinePdf = fabsf(dot(nEmit, out.dir)) * kInvPi * (l.twoSided ? 0.5f : 1.0f);
+    const float pdfDirSa =
+        gpuPhotonAimDirPdf(out.origin, out.dir, mix, clusters, nAim, cosinePdf);
     if (pdfDirSa <= 0.0f) return out;
     out.betaRgb = lightRadiance(l) * fabsf(dot(out.n, out.dir)) / srMax(1e-12f, pdfFwd * pdfDirSa);
     out.ok = !isBlack(out.betaRgb);

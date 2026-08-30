@@ -17,8 +17,12 @@
 #include "render/integrator_base.h"
 #include "render/integrator_bdpt.h"
 #include "render/integrator_bdpt_spectral.h"
+#include "render/bdpt_stats.h"
+#include "render/bdpt_scratch.h"
 #include "render/integrator_mnee.h"
 #include "render/integrator_spectral.h"
+#include "render/integrator_aimed_lt.h"
+#include "render/photon_aim.h"
 #include "render/photon_map.h"
 #include "render/render_device.h"
 #include "solstice_config.h"
@@ -275,7 +279,16 @@ public:
             !diagnosticIntegrator && !hasVolumes && causticsUsePhotonMap(settings, &scene);
         const bool useMnee =
             !diagnosticIntegrator && !hasVolumes && causticsUseMnee(settings, &scene);
-        const bool causticSpecialized = usePhoton || useMnee;
+        const bool useAimedLt =
+            !diagnosticIntegrator && !hasVolumes && causticsUseAimedLt(settings);
+        GpuPhotonCluster aimClusters[kMaxGpuPhotonClusters];
+        int nAim = 0;
+        if (useAimedLt) nAim = fillPhotonAimClusters(scene, aimClusters, kMaxGpuPhotonClusters);
+        scene.photonAimClusters = nAim > 0 ? aimClusters : nullptr;
+        scene.photonAimClusterCount = nAim;
+        // Photon stays on the spectral Path Tracer (λ-tagged map + gatherSpectral).
+        // MNEE still uses the RGB PathMnee kernel.
+        const bool causticSpecialized = useMnee;
         const bool useSpectralBdpt = wantBdpt && !hasVolumes && !diagnosticIntegrator;
         const bool useSpectralPt = !diagnosticIntegrator && !(pathTracer && causticSpecialized) &&
                                    (pathTracer || (wantBdpt && hasVolumes));
@@ -314,7 +327,9 @@ public:
             if (useSpectralBdpt)
                 logInfo(std::string("Integrator: BDPT (hero λ=") +
                         std::to_string(kMaxSpectrumSamples) + ")" +
-                        (useGuiding ? " + OpenPGL guiding" : ""));
+                        (useGuiding ? " + OpenPGL guiding" : "") +
+                        " scratch " + std::to_string(bdpt::bdptSessionVerts(settings.maxDepth)) + " verts × " +
+                        std::to_string(pool_->threadCount() + 1) + " threads");
             else if (useSpectralPt)
                 logInfo(std::string("Integrator: Path Tracer (hero λ=") +
                         std::to_string(kMaxSpectrumSamples) + ")" +
@@ -327,6 +342,14 @@ public:
             else if (useBdpt && hasVolumes)
                 logInfo("BDPT skipped: scene has VDB volumes — using Path Tracer "
                         "(no light subpath from sky/sun; fog walk is PT-only)");
+            else if (useAimedLt && useBdpt)
+                logInfo(std::string("Caustics: BDPT Aimed LT") +
+                        (settings.causticsEngine == kCausticsEngineAimedLtMnee ? " + MNEE" : "") +
+                        " nAim=" + std::to_string(scene.photonAimClusterCount));
+            else if (useAimedLt)
+                logInfo(std::string("Caustics: Path Tracer Aimed LT") +
+                        (settings.causticsEngine == kCausticsEngineAimedLtMnee ? " + MNEE" : "") +
+                        " nAim=" + std::to_string(scene.photonAimClusterCount));
             else if (useMnee)
                 logInfo(std::string("Caustics: MNEE (manifold next-event, refractive)") +
                         (settings.causticsEngine == kCausticsEngineAuto ? " [MNEE+Photon→delta]" : "") +
@@ -363,6 +386,12 @@ public:
                 const int d = std::clamp(settings.samplingDebug, 0, 4);
                 logInfo(std::string("Diagnostic: Sampling Debug = ") + kDiagNames[d]);
             }
+            if (settings.bdptTimers) {
+                if (useSpectralBdpt)
+                    logInfo("Diagnostic: BDPT Timers (one summary per sample in the log)");
+                else
+                    logInfo("Diagnostic: BDPT Timers on, but this pass is not CPU BDPT — no timer log");
+            }
         }
 
         const int dispersionMode = settings.dispersionMode;
@@ -377,6 +406,25 @@ public:
                                        : defaultFilterRadius(pixelFilter);
         const int filterBorder = filterPixelBorder(filterRadius);
         const bool trivialBox = isTrivialBoxFilter(pixelFilter, filterRadius);
+
+        BdptPassStats bdptStatsStorage;
+        BdptPassStats* bdptStats =
+            (settings.bdptTimers && useSpectralBdpt && !hasVolumes) ? &bdptStatsStorage : nullptr;
+        if ((useSpectralBdpt && !hasVolumes) || useAimedLt) {
+            // ThreadPool: caller is threadId 0, workers are 1..N.
+            bdptScratchPool_.ensureThreads(pool_->threadCount() + 1,
+                                           bdpt::bdptSessionVerts(settings.maxDepth), true);
+        }
+        struct SplatDiagGuard {
+            Framebuffer* fb = nullptr;
+            ~SplatDiagGuard() {
+                if (fb) fb->setSplatDiag(nullptr, nullptr);
+            }
+        } splatDiagGuard;
+        if (bdptStats) {
+            fb.setSplatDiag(&bdptStats->casRetries, &bdptStats->splatDeposits);
+            splatDiagGuard.fb = &fb;
+        }
 
         struct PixelEval {
             Vec3 radiance;
@@ -477,6 +525,10 @@ public:
                 ctx.dispersion = disp;
                 ctx.splatFb = splatFbFor(disp);
                 ctx.photons = photonPtr;
+                ctx.bdptStats = bdptStats;
+                ctx.bdptScratch = ((useSpectralBdpt && !hasVolumes) || useAimedLt)
+                                      ? bdptScratchPool_.get(threadId)
+                                      : nullptr;
 #if SOLSTICE_HAVE_OPENPGL
                 PathGuiding::ThreadState* guidingPtr = nullptr;
                 if (useGuiding) {
@@ -494,14 +546,16 @@ public:
                     radiance = integ.Li(ctx);
                 } else if (useBdptPath) {
                     radiance = BdptIntegrator<EmbreeTracer>{}.Li(ctx);
-                } else if (useMnee || usePhoton) {
+                } else if (useMnee) {
                     radiance = PathMneeIntegrator<EmbreeTracer>{}.Li(ctx);
                 } else {
                     radiance = PathIntegrator<EmbreeTracer>{}.Li(ctx);
                 }
+                if (useAimedLt && !useSpectralBdpt && ctx.splatFb)
+                    bdpt::splatAimedLightTrace(scene, tracer, *ctx.rng, ctx.splatFb, ctx.dispersion,
+                                               ctx.bdptScratch);
                 if (guidingPtr) guidingPtr->endPath();
 #else
-                (void)threadId;
                 (void)useGuiding;
                 Vec3 radiance(0.0f);
                 if (useSpectralBdpt && !hasVolumes) {
@@ -512,11 +566,14 @@ public:
                     radiance = integ.Li(ctx);
                 } else if (useBdptPath) {
                     radiance = BdptIntegrator<EmbreeTracer>{}.Li(ctx);
-                } else if (useMnee || usePhoton) {
+                } else if (useMnee) {
                     radiance = PathMneeIntegrator<EmbreeTracer>{}.Li(ctx);
                 } else {
                     radiance = PathIntegrator<EmbreeTracer>{}.Li(ctx);
                 }
+                if (useAimedLt && !useSpectralBdpt && ctx.splatFb)
+                    bdpt::splatAimedLightTrace(scene, tracer, *ctx.rng, ctx.splatFb, ctx.dispersion,
+                                               ctx.bdptScratch);
 #endif
                 return radiance;
             };
@@ -625,6 +682,7 @@ public:
             }
         };
 
+        const auto bdptWall0 = std::chrono::steady_clock::now();
         if (samplingEngine == kSamplingEngineProgressive) {
             // True progressive: one work item = one scanline (no FilmTile / no buckets).
             // Non-box filters use a 1-row FilmTile with border so neighbours stay local.
@@ -711,6 +769,23 @@ public:
             });
         }
 
+        if (bdptStats) {
+            BdptPassMeta meta;
+            meta.spp = sampleIndex + 1;
+            meta.maxDepth = settings.maxDepth;
+            meta.maxVerts = std::clamp(settings.maxDepth + 1, 2, bdpt::kMaxVerts);
+            meta.poolThreads = pool_->threadCount();
+            meta.vertBytes = sizeof(bdpt::Vert);
+            meta.scratchVerts = meta.maxVerts;
+            meta.scratchThreads = pool_->threadCount() + 1;
+            meta.scratchBytes = bdptScratchBytes(meta.maxVerts);
+            meta.allocBytesPerPixel = meta.scratchBytes;
+            meta.wallNs = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() - bdptWall0)
+                                       .count());
+            logBdptPassStats(*bdptStats, meta);
+        }
+
 #if SOLSTICE_HAVE_OPENPGL
         if (useGuiding) {
             if (opt.skipGuidingCommit) guidingNeedsCommit_ = true;
@@ -768,6 +843,7 @@ private:
     SceneView view_;
     PolynomialOpticsCamera polyOptics_;
     std::unique_ptr<ThreadPool> pool_;
+    BdptScratchPool bdptScratchPool_;
     int threadCount_ = 0;
     int lastCompletedSamples_ = 1;
     CausticPhotonMap photonMap_;

@@ -522,6 +522,17 @@ public:
             sanitizeProc(evaluated.material.displacementProc);
             sanitizeProc(evaluated.material.specularColorProc);
             sanitizeProc(evaluated.material.transmissionColorProc);
+            for (Material& branch : evaluated.raySwitchBranches) {
+                sanitizeProc(branch.baseColorProc);
+                sanitizeProc(branch.roughnessProc);
+                sanitizeProc(branch.metallicProc);
+                sanitizeProc(branch.opacityProc);
+                sanitizeProc(branch.emissionProc);
+                sanitizeProc(branch.normalProc);
+                sanitizeProc(branch.subsurfaceProc);
+                sanitizeProc(branch.specularColorProc);
+                sanitizeProc(branch.transmissionColorProc);
+            }
 
             const QString pattern = stringValue("pattern", "*");
             for (StagePrim& prim : stage.prims) {
@@ -1080,6 +1091,9 @@ public:
                              "Relative stderr of luminance: at 128 spp a pixel with ~30% sample noise "
                              "is still above 0.01, so Variance will not stop it. Raise to 0.05 to see "
                              "adaptive stop, or watch the overlay skip %. Sampling Debug forces off.\n"
+                             "GPU Aimed LT ignores Variance skip: SDS shares the "
+                             "camera film weight, so freezing camera spawn would let the caustic grow "
+                             "with remaining samples.\n"
                              "Used when Pixel Oracle is Variance. Uniform ignores this."));
         addParameter(Parameter::makeInt("lightsamples", "Light Samples", 2, 1, 16)
                          .withGroup("Sampling")
@@ -1112,10 +1126,10 @@ public:
                                       "Default 10; ~100 is a soft look. 0 disables (unbiased)."));
         addParameter(Parameter::makeFloat("clamp", "Indirect Clamp", 10.0, 0.0, 1000000.0, false)
                          .withGroup("Sampling")
-                         .withTooltip("Caps BDPT light-tracing splat contributions in linear pixel "
+                         .withTooltip("Caps light-tracing splat contributions in linear pixel "
                                       "radiance (Arnold Indirect Clamp). Raw LT deposits carry "
                                       "camera PDF — they are scaled to radiance before clamping.\n"
-                                      "Affects BDPT light-tracing caustics. 0 disables."));
+                                      "Affects BDPT t=1 and CPU Aimed LT splats. 0 disables."));
 
         // --- Engine -------------------------------------------------------------------
         // OptiX is optional at compile time — label the menu so artists know when
@@ -1138,8 +1152,9 @@ public:
                                                            "(no 1:1 wait). Mixture is independent films plus "
                                                            "a ~12 Hz GPU snapshot. Set "
                                                            "XPU Schedule when this device is selected.\n"
-                                                           "XPU is Path Tracer only. BDPT, "
-                                                           "wireframe, AO stay CPU (Embree).\n"
+                                                           "XPU is Path Tracer, Direct Lighting, Ambient "
+                                                           "Occlusion, and Wireframe. BDPT stays CPU-only "
+                                                           "and is hidden while GPU/XPU is selected.\n"
                                                            "If OptiX cannot start, GPU/XPU stop with an "
                                                            "error — they do not switch to Embree.")
                                           : QStringLiteral("This executable was built without OptiX/CUDA. "
@@ -1166,8 +1181,8 @@ public:
                          .withGroup("Engine")
                          .withTooltip("Path Tracer: unidirectional hero-λ (pbrt-v4). Caustics Engine "
                                       "picks BSDF/NEE (book default), MNEE, or Photon.\n"
-                                      "BDPT: bidirectional + light-tracing (pbrt) "
-                                      "(CPU only — GPU/XPU stop with an error).\n"
+                                      "BDPT: bidirectional + light-tracing (pbrt). CPU only — hidden "
+                                      "on GPU/XPU (the CPU choice is restored when you switch back).\n"
                                       "Wireframe: triangle edges with screen-space thickness "
                                       "(see Wireframe Thickness).\n"
                                       "The log reports which caustics mode is active."));
@@ -1175,6 +1190,8 @@ public:
         // v3: drop PT Spectral / BDPT Spectral; Wireframe index 6 → 4.
         addParameter(Parameter::makeBool("_integrator_menu_v2", "", true));
         addParameter(Parameter::makeBool("_integrator_menu_v3", "", true));
+        addParameter(Parameter::makeInt("_integrator_cpu", "", 0));
+        addParameter(Parameter::makeInt("_integrator_gpu", "", 0));
         addParameter(Parameter::makeInt("threads", "CPU Threads", 0, 0, 256, false)
                          .withGroup("Engine")
                          .withTooltip("0 uses every available core"));
@@ -1192,7 +1209,8 @@ public:
                          "dispersionmode", "Dispersion Mode",
                          {"Hero (default)", "Optimized", "Spectral RGB ×3", "Fake tint"}, 0)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==0&&causticsengine!=0")
+                         .withVisibleWhen("integrator==0&&causticsengine!=0&&backend==0||"
+                                          "integrator==0&&causticsengine!=0&&backend==2")
                          .withTooltip(
                              "RGB-only (MNEE / Photon). Path Tracer / BDPT use pbrt η(λ).\n"
                              "Hero: one random RGB channel per sample; masks the whole path "
@@ -1204,7 +1222,8 @@ public:
                              "Fake tint: no ray bending — chromatic transmission tint only."));
         addParameter(Parameter::makeInt("dispersionmaxiface", "Dispersion Max Interfaces", 2, 1, 16)
                          .withGroup("Engine")
-                         .withVisibleWhen("integrator==0&&causticsengine!=0&&dispersionmode==1")
+                         .withVisibleWhen("integrator==0&&causticsengine!=0&&dispersionmode==1&&backend==0||"
+                                          "integrator==0&&causticsengine!=0&&dispersionmode==1&&backend==2")
                          .withTooltip("Optimized mode only: how many dispersing glass interfaces "
                                       "may change IOR (enter+exit of one pane ≈ 2)."));
         addParameter(Parameter::makeBool("pathguiding", "Indirect Guides (OpenPGL)", false)
@@ -1229,10 +1248,14 @@ public:
                          .withGroup("Depth")
                          .withTooltip("Max path bounces after the camera (surfaces + volume scatters).\n"
                                       "Dense fog / clouds with deep multiple scattering need 1000+.\n"
+                                      "BDPT eye and light subpaths use this depth (capped at 4096).\n"
                                       "Also raise Russian Roulette Depth, or RR will kill deep paths early."));
         addParameter(Parameter::makeInt("rrdepth", "Russian Roulette Depth", 3, 1, 4096)
                          .withGroup("Depth")
                          .withTooltip("Start Russian roulette after this depth.\n"
+                                      "Path Tracer and BDPT use the same test.\n"
+                                      "BDPT only stops growing the subpath; vertices already "
+                                      "walked still connect.\n"
                                       "For deep volume multiple scattering, set near Max Ray Depth."));
 
         // --- Caustics -----------------------------------------------------------------
@@ -1241,17 +1264,27 @@ public:
                          .withVisibleWhen("integrator==0||integrator==1")
                          .withTooltip("Enable caustic light transport (light focused through glass "
                                       "and off mirrors).\n"
-                                      "Engine picks the estimator (pbrt PT/BDPT, MNEE, Photon).\n"
+                                      "Engine picks the estimator: CPU has pbrt / MNEE / Photon / "
+                                      "Aimed LT; GPU has Aimed LT / Aimed LT + MNEE.\n"
                                       "Per-light and per-material Contribute to Caustics can disable "
                                       "individual sources or casters.\n"
                                       "Off: glass casts dark shadows (soften with shadow_opacity)."));
+        // Same "Caustics Engine" row on every device. GPU (backend==1) swaps this
+        // menu's items in the parameter panel to the two OptiX estimators and
+        // writes causticsenginegpu — otherwise GPU hid this row and the second
+        // menu was easy to miss. XPU shows both rows.
         addParameter(Parameter::makeMenu("causticsengine", "Caustics Engine",
                                          {"Path / BDPT (pbrt)", "MNEE (manifolds)", "MNEE+Photon",
-                                          "Photon / VCM"},
+                                          "Photon / VCM", "Aimed LT", "Aimed LT + MNEE"},
                                          0)
                          .withGroup("Caustics")
-                         .withVisibleWhen("integrator==0||integrator==1")
-                         .withTooltip("Path / BDPT (pbrt, default): Path Tracer BSDF+NEE and BDPT "
+                         .withVisibleWhen("integrator==0&&backend==0||integrator==0&&backend==1||"
+                                          "integrator==0&&backend==2||integrator==1&&backend==0||"
+                                          "integrator==1&&backend==1||integrator==1&&backend==2")
+                         .withTooltip("CPU / Embree (and the CPU half of XPU).\n"
+                                      "When Render Device is GPU this same menu shows the two "
+                                      "OptiX engines: Aimed LT and Aimed LT + MNEE.\n"
+                                      "Path / BDPT (pbrt, default): Path Tracer BSDF+NEE and BDPT "
                                       "Veach MIS with light-tracing splats — same as pbrt-v4. "
                                       "No MNEE, no photon map. SDS from small lights is noisy.\n"
                                       "MNEE: manifold next-event — best for near-delta glass + "
@@ -1261,7 +1294,36 @@ public:
                                       "Photon / VCM. When Photon is active, MNEE / LT / eye-path "
                                       "BSDF caustics are turned off (no stacking).\n"
                                       "Photon / VCM: caustic-only photon map — rough glass and "
-                                      "black bases through refraction."));
+                                      "black bases through refraction.\n"
+                                      "Aimed LT: Keller 2017 caster-AABB light tracing (aimed-only). "
+                                      "PT gains LT splats; BDPT aims the existing t=1 subpath. "
+                                      "No MNEE, no photon map. SDS on directly visible receivers.\n"
+                                      "Aimed LT + MNEE: the same aimed LT, plus CPU MNEE after the "
+                                      "eye has gone through contributing glass (not on open floor)."));
+        addParameter(Parameter::makeMenu("causticsenginegpu", "Caustics Engine (GPU)",
+                                         {"Aimed LT", "Aimed LT + MNEE"}, 0)
+                         .withGroup("Caustics")
+                         .withVisibleWhen("integrator==0&&backend==2||integrator==1&&backend==2")
+                         .withTooltip("OptiX half of XPU (Render Device = GPU uses the Caustics "
+                                      "Engine menu above for these same two items).\n"
+                                      "Both items: aimed-only light tracing at caster AABBs "
+                                      "(same number of camera and light paths, no uniform "
+                                      "SampleLe mix).\n"
+                                      "Aimed LT (default): SDS on directly visible receivers. "
+                                      "Eye NEE after a bounce Fresnel-continues through glass "
+                                      "(Keller 2017). Camera and light paths finish in path_tail "
+                                      "— no per-bounce MNEE pipeline or stream sync. TIR stays "
+                                      "blocked (pick Aimed LT + MNEE for Newton).\n"
+                                      "Aimed LT + MNEE: the same floor caustic (LT). In pixels "
+                                      "where the camera already refracted through contributing "
+                                      "glass, the eye path is CPU Path Tracer: Fresnel NEE "
+                                      "through glass and BSDF when the suffix would otherwise "
+                                      "be killed for LT. MNEE peeks only on TIR / fully blocked "
+                                      "interfaces — Newton does not replace that NEE (a tessellated "
+                                      "mesh rarely converges, and opaque NEE made the interior "
+                                      "blacker). Light tracing still skips the MNEE wavefront. "
+                                      "Not a copy of floor pixels and not fake mesh emission.\n"
+                                      "Photon / VCM stays CPU-only."));
         // Hidden migration: v2 Automatic/MNEE/Photon → MNEE/MNEE+Photon/Photon.
         // v3 inserts pbrt as index 0 and shifts the rest +1.
         addParameter(Parameter::makeBool("_caustics_engine_menu_v2", "", true));
@@ -1276,12 +1338,18 @@ public:
                                       "Raise to tighten further; the caustic on the floor is not capped."));
         addParameter(Parameter::makeInt("photoncount", "Photon Count", 100000, 1000, 5000000, false)
                          .withGroup("Caustics")
-                         .withVisibleWhen("caustics==1&&causticsengine==2||caustics==1&&causticsengine==3")
+                         .withVisibleWhen("caustics==1&&causticsengine==2&&backend==0||"
+                                          "caustics==1&&causticsengine==3&&backend==0||"
+                                          "caustics==1&&causticsengine==2&&backend==2||"
+                                          "caustics==1&&causticsengine==3&&backend==2")
                          .withTooltip("Photons emitted per progressive pass when Caustics Engine "
                                       "is Photon / VCM or MNEE+Photon (Auto→Photon)."));
         addParameter(Parameter::makeFloat("photonradius", "Photon Radius", 0.08, 0.001, 10.0, false)
                          .withGroup("Caustics")
-                         .withVisibleWhen("caustics==1&&causticsengine==2||caustics==1&&causticsengine==3")
+                         .withVisibleWhen("caustics==1&&causticsengine==2&&backend==0||"
+                                          "caustics==1&&causticsengine==3&&backend==0||"
+                                          "caustics==1&&causticsengine==2&&backend==2||"
+                                          "caustics==1&&causticsengine==3&&backend==2")
                          .withTooltip("Initial gather radius (scene units) for the caustic photon "
                                       "map. Shrinks as samples accumulate."));
 
@@ -1373,6 +1441,20 @@ public:
                                       "Bucket ID: color by Bucket Size tiles (threading only).\n"
                                       "Pixel Hash: RGB from the per-pixel seed hash.\n"
                                       "Tip: set View to Raw for a clearer diagnostic."));
+        // Empty label → a horizontal rule in the parameter panel, so the timer
+        // checkbox sits in its own block under Sampling Debug.
+        addParameter(Parameter::makeLabel("diag_bdpt_sep", QString()).withGroup("Diagnostic"));
+        addParameter(Parameter::makeLabel("diag_bdpt_head",
+                                          "CPU BDPT — one aggregated summary per sample in the log. "
+                                          "Does not change the image.")
+                         .withGroup("Diagnostic"));
+        addParameter(Parameter::makeBool("bdpttimers", "BDPT Timers", false)
+                         .withGroup("Diagnostic")
+                         .withTooltip("CPU BDPT only. Each sample writes one summary to the log:\n"
+                                      "alloc / walk / SSS / connect / splat thread-ms, "
+                                      "mean nEye/nLight, (s,t) pairs, shadow rays, splat CAS retries.\n"
+                                      "Compare Max Ray Depth 29 vs 30 (and 4 vs 32 threads) with 8 spp.\n"
+                                      "Off: no extra clocks. Does not change the image."));
     }
 
     void cook(CookContext&, const std::vector<StagePtr>&, Stage& stage) override {
@@ -1395,6 +1477,10 @@ public:
             settings.xpuSchedule = std::clamp(sched, 0, 1);
         }
         settings.integrator = std::clamp(intValue("integrator", 0), 0, 4);
+        if (renderDeviceUsesGpu(settings.backend) && settings.integrator == kIntegratorBdpt) {
+            settings.integrator = kIntegratorPathTracer;
+            setParameterValue("integrator", kIntegratorPathTracer, false);
+        }
         settings.maxDepth = std::clamp(intValue("maxdepth", 8), 1, 4096);
         settings.rrStartDepth = std::clamp(intValue("rrdepth", 3), 1, 4096);
         settings.lightSamples = std::max(1, intValue("lightsamples", 2));
@@ -1418,7 +1504,8 @@ public:
         settings.pathGuiding = boolValue("pathguiding", false) ? 1 : 0;
         settings.volumeSimilarity = boolValue("volumesimilarity", false) ? 1 : 0;
         settings.caustics = boolValue("caustics", true) ? 1 : 0;
-        settings.causticsEngine = std::clamp(intValue("causticsengine", 0), 0, 3);
+        settings.causticsEngine = std::clamp(intValue("causticsengine", 0), 0, 5);
+        settings.causticsEngineGpu = std::clamp(intValue("causticsenginegpu", 0), 0, 1);
         settings.causticClamp = float(floatValue("causticclamp", 0.0));
         settings.dispersionMode = intValue("dispersionmode", 0);
         settings.dispersionMaxInterfaces = std::max(1, intValue("dispersionmaxiface", 2));
@@ -1444,6 +1531,7 @@ public:
         settings.filterRadius = float(floatValue("filterradius", 0.5));
         settings.envVisibleCamera = boolValue("envvisible", true) ? 1 : 0;
         settings.samplingDebug = std::clamp(intValue("samplingdebug", 0), 0, 4);
+        settings.bdptTimers = boolValue("bdpttimers", false) ? 1 : 0;
         settings.enableTxCache = boolValue("enabletxcache", true) ? 1 : 0;
         settings.ocioUseEnv = boolValue("ociousenv", true) ? 1 : 0;
         {

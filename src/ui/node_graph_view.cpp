@@ -24,6 +24,7 @@
 #include <cmath>
 
 #include "nodes/node_registry.h"
+#include "app/undo_hub.h"
 #include "ui/connection_item.h"
 #include "ui/graph_view_nav.h"
 #include "ui/node_item.h"
@@ -358,8 +359,13 @@ void NodeGraphView::frameAll() {
     centerOn(bounds.center());
 }
 
+void NodeGraphView::rebuild() {
+    if (graphScene_) graphScene_->rebuild();
+}
+
 void NodeGraphView::createNodeOfType(const QString& typeName) {
     if (!graph_) return;
+    const QJsonObject before = graph_->toJson();
     Node* node = graph_->createNode(typeName, QString(), lastScenePosition_);
     if (!node) return;
 
@@ -374,10 +380,12 @@ void NodeGraphView::createNodeOfType(const QString& typeName) {
     graph_->setDisplayNode(node);
     emit displayNodeRequested(node);
     emit statusMessage("Created " + node->name());
+    if (undoHub_) undoHub_->pushGraphSnapshot(before, graph_->toJson(), QStringLiteral("Create node"));
 }
 
 void NodeGraphView::deleteSelectedNodes() {
     if (!graph_) return;
+    const QJsonObject before = graph_->toJson();
     QList<Node*> toRemove;
     for (QGraphicsItem* item : graphScene_->selectedItems()) {
         if (auto* nodeItem = qgraphicsitem_cast<NodeItem*>(item)) toRemove << nodeItem->node();
@@ -385,6 +393,7 @@ void NodeGraphView::deleteSelectedNodes() {
     for (Node* node : toRemove) graph_->removeNode(node);
     graphScene_->rebuild();
     emit nodeSelected(selectedNode());
+    if (undoHub_) undoHub_->pushGraphSnapshot(before, graph_->toJson(), QStringLiteral("Delete nodes"));
 }
 
 namespace {
@@ -440,6 +449,7 @@ void NodeGraphView::pasteNodes() {
     if (viewport()->rect().contains(viewPos)) origin = mapToScene(viewPos);
 
     QString error;
+    const QJsonObject before = graph_->toJson();
     const QList<Node*> created = graph_->pasteNodesFromClipboardJson(doc.object(), origin, error);
     if (created.isEmpty()) {
         emit statusMessage(error.isEmpty() ? "Paste failed" : error);
@@ -457,6 +467,7 @@ void NodeGraphView::pasteNodes() {
                                .arg(created.size())
                                .arg(created.size() == 1 ? "" : "s"));
     }
+    if (undoHub_) undoHub_->pushGraphSnapshot(before, graph_->toJson(), QStringLiteral("Paste nodes"));
 }
 
 void NodeGraphView::toggleDisplayFlagOnSelection() {
@@ -481,11 +492,18 @@ void NodeGraphView::layoutSelectionVertically() {
         if (auto* nodeItem = qgraphicsitem_cast<NodeItem*>(item)) items << nodeItem;
     }
     if (items.size() < 2) return;
+    QHash<QString, QPointF> oldPos;
+    for (NodeItem* item : items) oldPos.insert(item->node()->name(), item->node()->position());
     std::sort(items.begin(), items.end(),
               [](NodeItem* a, NodeItem* b) { return a->pos().y() < b->pos().y(); });
     const QPointF start = items.first()->pos();
     for (int i = 0; i < items.size(); ++i) items[i]->setPos(start.x(), start.y() + i * 90.0);
     graphScene_->updateConnections();
+    if (undoHub_) {
+        QHash<QString, QPointF> newPos;
+        for (NodeItem* item : items) newPos.insert(item->node()->name(), item->node()->position());
+        undoHub_->pushNodePositions(oldPos, newPos);
+    }
 }
 
 NodeItem* NodeGraphView::nodeItemAt(QPoint viewPosition) const {
@@ -630,6 +648,10 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
                     graphScene_->refreshAllNodeItems();
                     return;
                 case NodeItem::Hit::Output:
+                    if (graph_) {
+                        pendingGraphJson_ = graph_->toJson();
+                        pendingWireUndo_ = true;
+                    }
                     dragSource_ = item;
                     dragDestination_ = nullptr;
                     dragInputIndex_ = -1;
@@ -643,6 +665,8 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
                     if (index >= 0) {
                         Node* existing = item->node()->input(index);
                         if (existing && graph_) {
+                            pendingGraphJson_ = graph_->toJson();
+                            pendingWireUndo_ = true;
                             graph_->disconnectInput(item->node(), index);
                             graphScene_->updateConnections();
                             dragSource_ = graphScene_->itemForNode(existing);
@@ -658,6 +682,10 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
                         dragSource_ = nullptr;
                         snapTarget_ = nullptr;
                         snapInputIndex_ = -1;
+                        if (graph_) {
+                            pendingGraphJson_ = graph_->toJson();
+                            pendingWireUndo_ = true;
+                        }
                         dragWire_ = graphScene_->addPath(QPainterPath(), QPen(theme::wireActive(), 1.8));
                         event->accept();
                     }
@@ -669,6 +697,14 @@ void NodeGraphView::mousePressEvent(QMouseEvent* event) {
     }
 
     QGraphicsView::mousePressEvent(event);
+    if (event->button() == Qt::LeftButton && graph_ && !dragWire_) {
+        pendingMovePos_.clear();
+        for (QGraphicsItem* item : graphScene_->selectedItems()) {
+            if (auto* nodeItem = qgraphicsitem_cast<NodeItem*>(item))
+                pendingMovePos_.insert(nodeItem->node()->name(), nodeItem->node()->position());
+        }
+        pendingMoveUndo_ = !pendingMovePos_.isEmpty();
+    }
 }
 
 void NodeGraphView::mouseMoveEvent(QMouseEvent* event) {
@@ -764,9 +800,20 @@ void NodeGraphView::mouseReleaseEvent(QMouseEvent* event) {
         snapInputIndex_ = -1;
         dragInputIndex_ = -1;
         event->accept();
+        if (undoHub_ && pendingWireUndo_ && graph_)
+            undoHub_->pushGraphSnapshot(pendingGraphJson_, graph_->toJson(), QStringLiteral("Connect"));
+        pendingWireUndo_ = false;
         return;
     }
     QGraphicsView::mouseReleaseEvent(event);
+    if (pendingMoveUndo_ && undoHub_ && graph_) {
+        QHash<QString, QPointF> now;
+        for (auto it = pendingMovePos_.constBegin(); it != pendingMovePos_.constEnd(); ++it) {
+            if (Node* n = graph_->findNode(it.key())) now.insert(it.key(), n->position());
+        }
+        undoHub_->pushNodePositions(pendingMovePos_, now);
+    }
+    pendingMoveUndo_ = false;
 }
 
 void NodeGraphView::keyPressEvent(QKeyEvent* event) {

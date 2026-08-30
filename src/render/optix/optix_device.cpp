@@ -54,6 +54,10 @@ extern "C" const unsigned char solsticeOptixShadeVolumeIr[];
 extern "C" const unsigned long long solsticeOptixShadeVolumeIrSize;
 extern "C" const unsigned char solsticeOptixPathTailIr[];
 extern "C" const unsigned long long solsticeOptixPathTailIrSize;
+extern "C" const unsigned char solsticeOptixMneeIr[];
+extern "C" const unsigned long long solsticeOptixMneeIrSize;
+extern "C" const unsigned char solsticeOptixEtdIr[];
+extern "C" const unsigned long long solsticeOptixEtdIrSize;
 extern "C" const unsigned char solsticeOptixHitIr[];
 extern "C" const unsigned long long solsticeOptixHitIrSize;
 
@@ -213,6 +217,8 @@ enum RaygenId : int {
     kRgShadeShadow,
     kRgShadeVolume,
     kRgPathTail,
+    kRgMnee,
+    kRgEtd,
     kRgCount
 };
 
@@ -226,6 +232,8 @@ enum ModuleId : int {
     kModShadeShadow,
     kModShadeVolume,
     kModPathTail,
+    kModMnee,
+    kModEtd,
     kModHit,
     kModCount
 };
@@ -318,6 +326,7 @@ public:
                     continue;
                 }
                 DeviceBuffer positions, normals, uvs, indices, restPositions, restNormals;
+                DeviceBuffer triEdgeMask, wireIndices, wirePositions;
                 positions.upload(mesh->positions);
                 indices.upload(mesh->indices);
                 if (mesh->normals.size() == mesh->positions.size()) normals.upload(mesh->normals);
@@ -326,6 +335,11 @@ public:
                     restPositions.upload(mesh->restPositions);
                 if (mesh->restNormals.size() == mesh->positions.size() && !mesh->restNormals.empty())
                     restNormals.upload(mesh->restNormals);
+                if (mesh->triEdgeMask.size() == mesh->indices.size() / 3)
+                    triEdgeMask.upload(mesh->triEdgeMask);
+                if (!mesh->wireIndices.empty() && (mesh->wireIndices.size() % 2) == 0)
+                    wireIndices.upload(mesh->wireIndices);
+                if (!mesh->wirePositions.empty()) wirePositions.upload(mesh->wirePositions);
 
                 view.positions = positions.as<const Vec3>();
                 view.normals = normals.as<const Vec3>();
@@ -333,8 +347,20 @@ public:
                 view.indices = indices.as<const uint32_t>();
                 view.restPositions = restPositions.as<const Vec3>();
                 view.restNormals = restNormals.as<const Vec3>();
+                view.triEdgeMask = triEdgeMask.as<const uint8_t>();
+                view.wireIndices = wireIndices.as<const uint32_t>();
+                view.wirePositions = wirePositions.as<const Vec3>();
                 view.triangleCount = uint32_t(mesh->indices.size() / 3);
                 view.vertexCount = uint32_t(mesh->positions.size());
+                if (!mesh->wireIndices.empty() && (mesh->wireIndices.size() % 2) == 0 &&
+                    !mesh->wirePositions.empty()) {
+                    view.wireEdgeCount = uint32_t(mesh->wireIndices.size() / 2);
+                    view.wireVertexCount = uint32_t(mesh->wirePositions.size());
+                }
+                if (mesh->bounds.valid()) {
+                    view.boundsLo = mesh->bounds.lo;
+                    view.boundsHi = mesh->bounds.hi;
+                }
                 meshViews.push_back(view);
 
                 gasHandles_[i] = buildTriangleGas(positions, indices, view.vertexCount, view.triangleCount);
@@ -345,6 +371,9 @@ public:
                 geometryBuffers_.push_back(std::move(uvs));
                 geometryBuffers_.push_back(std::move(restPositions));
                 geometryBuffers_.push_back(std::move(restNormals));
+                geometryBuffers_.push_back(std::move(triEdgeMask));
+                geometryBuffers_.push_back(std::move(wireIndices));
+                geometryBuffers_.push_back(std::move(wirePositions));
             }
 
             // Top level instance acceleration structure.
@@ -491,6 +520,8 @@ public:
             envViewBuffer_.upload(envViews);
 
             deviceScene_ = hostView;
+            deviceScene_.photonAimClusters = nullptr;
+            deviceScene_.photonAimClusterCount = 0;
             deviceScene_.meshes = meshViewBuffer_.as<const MeshView>();
             deviceScene_.instances = instanceBuffer_.as<const InstanceData>();
             deviceScene_.materials = materialBuffer_.as<const Material>();
@@ -560,8 +591,8 @@ public:
         if (cancel.load(std::memory_order_relaxed)) return;
         try {
             CUDA_CHECK(cudaSetDevice(0));
-            if (scene_->settings.integrator != kIntegratorPathTracer && !warnedNonPath_) {
-                logWarning("GPU (OptiX) is Path Tracer only. Other integrators are rejected by the session.");
+            if (scene_->settings.integrator == kIntegratorBdpt && !warnedNonPath_) {
+                logWarning("GPU (OptiX) does not run BDPT. Switch Integrator to Path Tracer.");
                 warnedNonPath_ = true;
             }
             const int width = fb.width();
@@ -582,14 +613,17 @@ public:
             }
             if (pathBuffer_.size() != pixelCount * sizeof(GpuPath) ||
                 hitBuffer_.size() != pixelCount * sizeof(GpuHit) ||
-                shadowBuffer_.size() != pixelCount * sizeof(GpuShadow)) {
+                shadowBuffer_.size() != pixelCount * sizeof(GpuShadow) ||
+                mneeJobBuffer_.size() != pixelCount * sizeof(GpuMneeJob)) {
                 destroyGraph();
                 pathBuffer_.alloc(pixelCount * sizeof(GpuPath));
                 hitBuffer_.alloc(pixelCount * sizeof(GpuHit));
                 shadowBuffer_.alloc(pixelCount * sizeof(GpuShadow));
+                mneeJobBuffer_.alloc(pixelCount * sizeof(GpuMneeJob));
                 CUDA_CHECK(cudaMemsetAsync(pathBuffer_.as<void>(), 0, pathBuffer_.size(), stream_));
                 CUDA_CHECK(cudaMemsetAsync(hitBuffer_.as<void>(), 0, hitBuffer_.size(), stream_));
                 CUDA_CHECK(cudaMemsetAsync(shadowBuffer_.as<void>(), 0, shadowBuffer_.size(), stream_));
+                CUDA_CHECK(cudaMemsetAsync(mneeJobBuffer_.as<void>(), 0, mneeJobBuffer_.size(), stream_));
             }
             accumWidth_ = width;
             accumHeight_ = height;
@@ -624,13 +658,10 @@ public:
             launchParams.accumBuffer = accumBuffer_.as<Vec4>();
             launchParams.lumSq = lumSqBuffer_.as<float>();
             launchParams.skipMask = nullptr;
-            if (scene_->settings.noiseThreshold > 0.0f && fb.skipMask().size() == pixelCount) {
-                skipMaskBuffer_.upload(fb.skipMask());
-                launchParams.skipMask = skipMaskBuffer_.as<unsigned char>();
-            }
             launchParams.paths = pathBuffer_.as<GpuPath>();
             launchParams.hits = hitBuffer_.as<GpuHit>();
             launchParams.shadows = shadowBuffer_.as<GpuShadow>();
+            launchParams.mneeJobs = mneeJobBuffer_.as<GpuMneeJob>();
             launchParams.qIntersect = nullptr;
             launchParams.qIntersectNext = nullptr;
             launchParams.qVolume = nullptr;
@@ -661,17 +692,50 @@ public:
             fillSpectralLaunch(launchParams);
             launchParams.camProj = buildCameraProj(launchParams.scene);
             if (launchParams.scene.camera.opticalModel != 0) launchParams.camProj.valid = false;
-            const bool gpuCaustics = launchParams.scene.settings.caustics != 0 &&
+            const bool skipLightTrace =
+                scene_->settings.integrator == kIntegratorDirectLighting ||
+                scene_->settings.integrator == kIntegratorAmbientOcclusion ||
+                scene_->settings.integrator == kIntegratorWireframe;
+            const bool gpuCaustics = !skipLightTrace && launchParams.scene.settings.caustics != 0 &&
                                      launchParams.scene.lightCount > 0 && launchParams.camProj.valid;
             const int lightSlots = srMax(1, launchW * launchH);
+            const int gpuEngine = launchParams.scene.settings.causticsEngineGpu;
+            // Iray 2017: one camera path and one light path per slot. Cone MCMC
+            // reused SampleLe beta on a different direction (biased filaments).
+            launchParams.mcmcMutations = 0;
             launchParams.splatInvLightPaths = gpuCaustics ? 1.0f / float(lightSlots) : 0.0f;
+            // LT SDS shares accum.rgb with camera w. Skip freezes w while light
+            // paths keep atomicAdd-ing RGB → mean grows with remaining spp.
+            if (launchParams.splatInvLightPaths <= 0.0f && scene_->settings.noiseThreshold > 0.0f &&
+                fb.skipMask().size() == pixelCount) {
+                skipMaskBuffer_.upload(fb.skipMask());
+                launchParams.skipMask = skipMaskBuffer_.as<unsigned char>();
+            }
+            GpuPhotonCluster hostClusters[kMaxGpuPhotonClusters];
+            int nAim = 0;
+            if (gpuCaustics && scene_) {
+                const SceneView hostView = scene_->view();
+                nAim = fillPhotonAimClusters(hostView, hostClusters, kMaxGpuPhotonClusters);
+            }
+            if (nAim > 0) {
+                photonClusterBuffer_.upload(hostClusters, size_t(nAim));
+                launchParams.photonClusters = photonClusterBuffer_.as<const GpuPhotonCluster>();
+                launchParams.photonClusterCount = nAim;
+                launchParams.photonAimMix = kGpuPhotonAimMix;
+            } else {
+                launchParams.photonClusters = nullptr;
+                launchParams.photonClusterCount = 0;
+                launchParams.photonAimMix = 0.0f;
+            }
             launchParams.traversable = static_cast<unsigned long long>(iasHandle_);
             launchParams.volumes = volumeViewBuffer_.as<const GpuVolumeGrid>();
             launchParams.volumeCount = gpuVolumeCount_;
 
             if (!launchParamsBuffer_.valid()) launchParamsBuffer_.alloc(sizeof(LaunchParams));
 
-            const int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
+            int maxDepth = scene_->settings.maxDepth > 0 ? scene_->settings.maxDepth : 1;
+            if (scene_->settings.integrator == kIntegratorDirectLighting) maxDepth = 1;
+            launchParams.scene.settings.maxDepth = maxDepth;
 
             const auto wall0 = std::chrono::steady_clock::now();
             CUDA_CHECK(cudaEventRecord(gpuStartEvent_, stream_));
@@ -733,6 +797,14 @@ public:
                 msg << "OptiX GPU " << lastGpuSampleMs_ << " ms  wall " << wallMs << " ms  " << deviceName_
                     << "  " << width << "x" << height << "  batch=" << batch
                     << "  wavefront=" << launches << " launches";
+                if (gpuCaustics) {
+                    msg << "  caustics=Iray LT aim n=" << nAim << " mix=" << launchParams.photonAimMix
+                        << (launchParams.photonAimMix >= 1.0f - 1e-5f ? " aimed-only" : "");
+                    if (gpuEngine == kGpuCausticsAimedLtMnee)
+                        msg << "  menu=Aimed LT+MNEE  camMNEE etd";
+                    else
+                        msg << "  menu=Aimed LT  path_tail";
+                }
                 logInfo(msg.str());
             }
 
@@ -804,9 +876,15 @@ private:
         static const char* kNames[kRgCount] = {
             "init_from_camera", "init_from_light", "intersect_closest", "intersect_shadow",
             "shade_surface",    "shade_background", "shade_shadow",     "shade_volume",
-            "path_tail",
+            "path_tail",        "mnee",              "etd",
         };
-        const OptixPipeline pipe = (raygenIndex == kRgPathTail) ? pipelineTail_ : pipeline_;
+        OptixPipeline pipe = pipeline_;
+        if (raygenIndex == kRgPathTail) pipe = pipelineTail_;
+        else if (raygenIndex == kRgMnee) pipe = pipelineMnee_;
+        else if (raygenIndex == kRgEtd) pipe = pipelineEtd_;
+        if (!pipe) {
+            throw std::runtime_error(std::string("OptiX pipeline is null [") + kNames[raygenIndex] + "]");
+        }
         const OptixResult result =
             optixLaunch(pipe, stream_, launchParamsBuffer_.device(), sizeof(LaunchParams),
                         &sbts_[raygenIndex], width, height, 1);
@@ -830,9 +908,13 @@ private:
         lp.workCount = 0;
         lp.workSlot = -1;
         uploadLaunch(lp);
-        auto bounceAndTail = [&]() {
-            constexpr int kWavefrontBounces = 3;
-            const int wave = std::max(1, std::min(maxDepth, kWavefrontBounces));
+        auto bounceAndTail = [&](bool lightPass) {
+            // MNEE is a separate pipeline per bounce. The PT megakernel must not
+            // grow leftover eye bounces after Newton. Light paths never consume
+            // MNEE; they stay on the PT schedule (3 waves + full path_tail).
+            const bool gpuMnee = !lightPass && gpuEyePathMneeEnabled(lp.scene.settings);
+            const int wave =
+                gpuMnee ? std::max(1, maxDepth) : std::max(1, std::min(maxDepth, 3));
             for (int iter = 0; iter < wave; ++iter) {
                 if (cancel.load(std::memory_order_relaxed)) return;
                 launchKernel(kRgIntersectClosest, launchW, launchH);
@@ -842,20 +924,39 @@ private:
                 launchKernel(kRgIntersectShadow, launchW, launchH);
                 launchKernel(kRgShadeShadow, launchW, launchH);
                 launches += 6;
+                if (gpuMnee) {
+                    launchKernel(kRgMnee, launchW, launchH);
+                    // Drain MNEE before the next wavefront pipeline. A device
+                    // fault here used to show up as 7900 "query command list
+                    // event" on the following optixLaunch.
+                    const cudaError_t mneeErr = cudaStreamSynchronize(stream_);
+                    if (mneeErr != cudaSuccess) {
+                        throw std::runtime_error(std::string("CUDA error after MNEE: ") +
+                                                 cudaGetErrorString(mneeErr));
+                    }
+                    launchKernel(kRgShadeShadow, launchW, launchH);
+                    launches += 2;
+                }
             }
             if (cancel.load(std::memory_order_relaxed)) return;
-            launchKernel(kRgPathTail, launchW, launchH);
+            // Dedicated ETD pipeline (both CPU walks). Not path_tail: that
+            // megakernel plus extra traces hung cicc / optixModuleCreate.
+            launchKernel(kRgEtd, launchW, launchH);
             ++launches;
+            if (!gpuMnee) {
+                launchKernel(kRgPathTail, launchW, launchH);
+                ++launches;
+            }
         };
 
         launchKernel(kRgInit, launchW, launchH);
         ++launches;
-        bounceAndTail();
+        bounceAndTail(false);
         if (cancel.load(std::memory_order_relaxed)) return;
         if (lp.splatInvLightPaths > 0.0f) {
             launchKernel(kRgInitFromLight, launchW, launchH);
             ++launches;
-            bounceAndTail();
+            bounceAndTail(true);
         }
     }
 
@@ -1050,6 +1151,8 @@ private:
             solsticeOptixShadeShadowIr,
             solsticeOptixShadeVolumeIr,
             solsticeOptixPathTailIr,
+            solsticeOptixMneeIr,
+            solsticeOptixEtdIr,
             solsticeOptixHitIr,
         };
         const unsigned long long irSize[kModCount] = {
@@ -1062,6 +1165,8 @@ private:
             solsticeOptixShadeShadowIrSize,
             solsticeOptixShadeVolumeIrSize,
             solsticeOptixPathTailIrSize,
+            solsticeOptixMneeIrSize,
+            solsticeOptixEtdIrSize,
             solsticeOptixHitIrSize,
         };
         for (int i = 0; i < kModCount; ++i) loadModule(ir[i], irSize[i], modules_[i]);
@@ -1071,6 +1176,7 @@ private:
             "__raygen__init_from_camera",     "__raygen__init_from_light",   "__raygen__intersect_closest",
             "__raygen__intersect_shadow",     "__raygen__shade_surface",     "__raygen__shade_background",
             "__raygen__shade_shadow",         "__raygen__shade_volume",      "__raygen__path_tail",
+            "__raygen__mnee",                 "__raygen__etd",
         };
         for (int i = 0; i < kRgCount; ++i) {
             OptixProgramGroupDesc raygenDesc{};
@@ -1110,6 +1216,10 @@ private:
         groupsWf[kRgPathTail + 3] = hitGroups_[1];
         OptixProgramGroup groupsTail[5] = {raygenGroups_[kRgPathTail], missGroups_[0], missGroups_[1],
                                            hitGroups_[0], hitGroups_[1]};
+        OptixProgramGroup groupsMnee[5] = {raygenGroups_[kRgMnee], missGroups_[0], missGroups_[1],
+                                           hitGroups_[0], hitGroups_[1]};
+        OptixProgramGroup groupsEtd[5] = {raygenGroups_[kRgEtd], missGroups_[0], missGroups_[1],
+                                          hitGroups_[0], hitGroups_[1]};
 
         OptixPipelineLinkOptions linkOptions{};
         linkOptions.maxTraceDepth = 1;
@@ -1121,8 +1231,17 @@ private:
         OPTIX_CHECK(optixPipelineCreate(context_, &pipelineOptions, &linkOptions, groupsTail,
                                         unsigned(sizeof(groupsTail) / sizeof(groupsTail[0])), log, &logSize,
                                         &pipelineTail_));
+        logSize = sizeof(log);
+        OPTIX_CHECK(optixPipelineCreate(context_, &pipelineOptions, &linkOptions, groupsMnee,
+                                        unsigned(sizeof(groupsMnee) / sizeof(groupsMnee[0])), log, &logSize,
+                                        &pipelineMnee_));
+        logSize = sizeof(log);
+        OPTIX_CHECK(optixPipelineCreate(context_, &pipelineOptions, &linkOptions, groupsEtd,
+                                        unsigned(sizeof(groupsEtd) / sizeof(groupsEtd[0])), log, &logSize,
+                                        &pipelineEtd_));
 
-        auto setStack = [&](OptixPipeline pipe, OptixProgramGroup* groups, int n, unsigned floor) {
+        auto setStack = [&](OptixPipeline pipe, OptixProgramGroup* groups, int n, unsigned floor,
+                            const char* label) {
             OptixStackSizes stackSizes{};
             for (int i = 0; i < n; ++i) {
                 OPTIX_CHECK(optixUtilAccumulateStackSizes(groups[i], &stackSizes, pipe));
@@ -1137,11 +1256,16 @@ private:
             constexpr unsigned int kTraversableGraphDepth = 2;
             OPTIX_CHECK(optixPipelineSetStackSize(pipe, directCallableFromTraversal, directCallableFromState,
                                                   continuationStack, kTraversableGraphDepth));
+            logInfo(std::string("OptiX stack ") + label + " css=" + std::to_string(continuationStack) +
+                    " cssFromTrav=" + std::to_string(directCallableFromTraversal) +
+                    " cssFromState=" + std::to_string(directCallableFromState));
         };
         // IAS→GAS is two traversables. Depth 1 is OPTIX_ERROR_INVALID_VALUE (7001)
         // with ALLOW_SINGLE_LEVEL_INSTANCING.
-        setStack(pipeline_, groupsWf, int(sizeof(groupsWf) / sizeof(groupsWf[0])), 1024u);
-        setStack(pipelineTail_, groupsTail, int(sizeof(groupsTail) / sizeof(groupsTail[0])), 8192u);
+        setStack(pipeline_, groupsWf, int(sizeof(groupsWf) / sizeof(groupsWf[0])), 1024u, "wavefront");
+        setStack(pipelineTail_, groupsTail, int(sizeof(groupsTail) / sizeof(groupsTail[0])), 8192u, "path_tail");
+        setStack(pipelineMnee_, groupsMnee, int(sizeof(groupsMnee) / sizeof(groupsMnee[0])), 16384u, "mnee");
+        setStack(pipelineEtd_, groupsEtd, int(sizeof(groupsEtd) / sizeof(groupsEtd[0])), 8192u, "etd");
 
         RayGenRecord raygenRecords[kRgCount]{};
         for (int i = 0; i < kRgCount; ++i) {
@@ -1191,6 +1315,7 @@ private:
         volumeViewBuffer_.free();
         volumeDensityBuffers_.clear();
         gpuVolumeCount_ = 0;
+        photonClusterBuffer_.free();
         iasHandle_ = 0;
         destroyGraph();
         deviceScene_ = SceneView();
@@ -1222,6 +1347,7 @@ private:
         pathBuffer_.free();
         hitBuffer_.free();
         shadowBuffer_.free();
+        mneeJobBuffer_.free();
         qIntersect_.free();
         qIntersectNext_.free();
         qVolume_.free();
@@ -1235,6 +1361,8 @@ private:
         hitRecordBuffer_.free();
         if (pipeline_) optixPipelineDestroy(pipeline_);
         if (pipelineTail_) optixPipelineDestroy(pipelineTail_);
+        if (pipelineMnee_) optixPipelineDestroy(pipelineMnee_);
+        if (pipelineEtd_) optixPipelineDestroy(pipelineEtd_);
         for (OptixProgramGroup& group : raygenGroups_) {
             if (group) optixProgramGroupDestroy(group);
             group = nullptr;
@@ -1254,6 +1382,8 @@ private:
         if (context_) optixDeviceContextDestroy(context_);
         pipeline_ = nullptr;
         pipelineTail_ = nullptr;
+        pipelineMnee_ = nullptr;
+        pipelineEtd_ = nullptr;
         context_ = nullptr;
         initialized_ = false;
     }
@@ -1278,6 +1408,8 @@ private:
     OptixProgramGroup hitGroups_[2] = {nullptr, nullptr};
     OptixPipeline pipeline_ = nullptr;
     OptixPipeline pipelineTail_ = nullptr;
+    OptixPipeline pipelineMnee_ = nullptr;
+    OptixPipeline pipelineEtd_ = nullptr;
     OptixShaderBindingTable sbt_{};
     OptixShaderBindingTable sbts_[kRgCount]{};
 
@@ -1291,7 +1423,7 @@ private:
 
     DeviceBuffer raygenRecordBuffer_, missRecordBuffer_, hitRecordBuffer_;
     DeviceBuffer launchParamsBuffer_, accumBuffer_, lumSqBuffer_, skipMaskBuffer_;
-    DeviceBuffer pathBuffer_, hitBuffer_, shadowBuffer_;
+    DeviceBuffer pathBuffer_, hitBuffer_, shadowBuffer_, mneeJobBuffer_;
     DeviceBuffer qIntersect_, qIntersectNext_, qVolume_, qSurface_, qBackground_, qShadow_, workCounts_;
     DeviceBuffer jakobAlbedoScale_, jakobAlbedoCoeffs_, jakobIllumScale_, jakobIllumCoeffs_;
     DeviceBuffer jakobAcesAlbedoScale_, jakobAcesAlbedoCoeffs_, jakobAcesIllumScale_, jakobAcesIllumCoeffs_;
@@ -1303,6 +1435,7 @@ private:
     DeviceBuffer volumeViewBuffer_;
     DeviceBuffer lightBvhBuffer_;
     DeviceBuffer infiniteLightIndexBuffer_;
+    DeviceBuffer photonClusterBuffer_;
     std::vector<DeviceBuffer> volumeDensityBuffers_;
     int gpuVolumeCount_ = 0;
     DeviceBuffer instanceDescBuffer_;

@@ -5,6 +5,7 @@
 #include <QGraphicsScene>
 #include <QGraphicsView>
 #include <QHash>
+#include <QJsonObject>
 #include <QList>
 #include <QMetaObject>
 
@@ -18,6 +19,7 @@ namespace sol {
 
 class NodeItem;
 class ConnectionItem;
+class UndoHub;
 
 class NodeGraphScene : public QGraphicsScene {
     Q_OBJECT
@@ -79,6 +81,8 @@ public:
     void scheduleFrameAll();
     // Select a node in the graph. When centerOnSelection is false, pan/zoom stay put.
     void selectNode(Node* node, bool centerOnSelection = true);
+    void setUndoHub(UndoHub* hub) { undoHub_ = hub; }
+    void rebuild();
 
 signals:
     void nodeSelected(sol::Node* node);
@@ -120,6 +124,12 @@ private:
     qreal zoomFactorFromWheel(const QWheelEvent* event) const;
 
     void disconnectGraph();
+
+    UndoHub* undoHub_ = nullptr;
+    QJsonObject pendingGraphJson_;
+    bool pendingWireUndo_ = false;
+    QHash<QString, QPointF> pendingMovePos_;
+    bool pendingMoveUndo_ = false;
 
     NodeGraph* graph_ = nullptr;
     NodeGraphScene* graphScene_ = nullptr;

@@ -15,6 +15,8 @@ class QPushButton;
 
 namespace sol {
 
+class UndoHub;
+
 class ParameterPanel : public QWidget {
     Q_OBJECT
 
@@ -31,6 +33,7 @@ public:
     bool showingMaterialX() const { return materialXMode_; }
     void refresh();
     void setFocusPickActive(bool active);
+    void setUndoHub(UndoHub* hub) { undoHub_ = hub; }
 
 signals:
     void parameterEdited(sol::Node* node, const QString& parameterName);
@@ -49,6 +52,7 @@ private:
     void rebuildLop();
     void rebuildMaterialX();
     QWidget* createEditor(Parameter& parameter);
+    void applyRenderDeviceChange(int newBackend);
 
     Node* node_ = nullptr;
     bool materialXMode_ = false;
@@ -59,6 +63,7 @@ private:
     bool updating_ = false;
     bool focusPickActive_ = false;
     QPushButton* focusPickButton_ = nullptr;
+    UndoHub* undoHub_ = nullptr;
     // Last open parameter folder per node type (Houdini-style tabs survive rebuild).
     QHash<QString, QString> lastFolderByType_;
 };

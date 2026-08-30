@@ -1,9 +1,12 @@
 // Cycles analogue: __raygen__kernel_optix_integrator_intersect_shadow
-// Walks closest hits like Embree shadowVisibility: volume proxies skip, lights
-// pass, transmissive surfaces use shadowOpacity when caustics are off.
+// Walks closest hits like Embree shadowVisibility. Iray Photoreal / CPU PT:
+// eye NEE after a bounce Fresnel-continues through contributing glass. LT
+// camera splats and primary NEE keep that glass opaque (SDS on the floor).
+// MNEE peek still records a delta caster when block >= 0.999 (TIR).
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_trace.cuh"
 #include "render/optix/optix_work.cuh"
+#include "render/shading_bsdf.h"
 #include "render/spectrum_device.h"
 
 namespace sol {
@@ -13,6 +16,7 @@ __device__ inline void intersectShadowPixel(int pixel) {
     GpuShadow& shadow = params.shadows[pixel];
     GpuPath& path = params.paths[pixel];
     const SceneView& scene = params.scene;
+    shadow.mneeCaster = -1;
 
     float vis = 1.0f;
     Vec3 o = shadow.origin;
@@ -40,10 +44,20 @@ __device__ inline void intersectShadowPixel(int pixel) {
             }
         }
 
-        const float block = gpuShadowBlock(scene, si.materialIndex);
+        const int eyeBounceNee =
+            (!path.lightPath && shadow.splatPixel < 0) ? shadow.eyeBounceNee : 0;
+        const float nDotWo = -dot(si.ns, dir);
+        const Material mat = gpuMaterialForShadow(scene, si.materialIndex);
+        const Material matCau = gpuMaterialForCausticSlot(scene, si.materialIndex);
+        const float block =
+            shadowBlockFraction(mat, matCau, scene.settings.caustics, eyeBounceNee, nDotWo);
         vis *= (1.0f - block);
         if (block >= 0.999f || vis <= 1e-5f) {
             vis = 0.0f;
+            if (!path.lightPath && shadow.splatPixel < 0) {
+                const Material caster = gpuMaterialForCausticSlot(scene, si.materialIndex);
+                if (isDeltaCausticCaster(caster)) shadow.mneeCaster = si.instanceIndex;
+            }
             break;
         }
         o = offsetRay(si.p, si.ng, dir);
@@ -55,6 +69,7 @@ __device__ inline void intersectShadowPixel(int pixel) {
         shadow.contrib = shadow.contrib * vis;
         if (shadow.specContrib && path.nLambda > 0) specMulS(shadow.contribS, vis, path.nLambda);
     }
+    if (!shadow.occluded) shadow.mneeCaster = -1;
     shadow.queue = kShadowShade;
 }
 

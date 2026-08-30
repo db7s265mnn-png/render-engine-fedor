@@ -64,7 +64,9 @@ __device__ inline void addRadiance(int pixel, Vec3 c) {
 }
 
 // Light-trace splat onto another pixel. Does not bump accum.w (camera spp owns
-// the divisor). Concurrent wavefront slots can land on the same dest.
+// the divisor) and does not write lumSq. Concurrent wavefront slots can land on
+// the same dest. Variance skip that freezes camera spawn therefore leaves SDS
+// growing in rgb while w is frozen — skip is off while splatInvLightPaths > 0.
 __device__ inline void addSplatRadiance(int destPixel, Vec3 c) {
     if (!isFinite(c)) return;
     const LaunchParams& p = launchParams();
@@ -89,6 +91,7 @@ __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, f
         shadow.queue = kShadowIdle;
         shadow.splatPixel = -1;
         shadow.specContrib = 0;
+        shadow.eyeBounceNee = 0;
         return;
     }
     shadow.origin = origin;
@@ -100,6 +103,8 @@ __device__ inline void enqueueShadow(GpuShadow& shadow, Vec3 origin, Vec3 dir, f
     shadow.volumeTr = 1;
     shadow.mediumIndex = mediumIndex;
     shadow.splatPixel = splatPixel;
+    shadow.mneeCaster = -1;
+    shadow.eyeBounceNee = 0;  // LT splat: contributing glass stays opaque
     shadow.queue = kShadowTrace;
 }
 

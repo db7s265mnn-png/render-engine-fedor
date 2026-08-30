@@ -2,8 +2,13 @@
 //
 // The model is a trimmed down "principled" surface: Lambert / Oren–Nayar diffuse,
 // anisotropic GGX microfacet reflection (Smith + Heitz VNDF), Charlie sheen
-// (Estevez–Kulla), and a rough dielectric transmission lobe (Walter et al. 2007).
-// Perfectly smooth lobes degrade to delta distributions.
+// (Estevez–Kulla), and a rough dielectric transmission lobe (Walter et al. 2007 /
+// pbrt-v4 DielectricBxDF). Perfectly smooth lobes degrade to delta distributions.
+//
+// Dielectric convention (pbrt): the microfacet normal wm is FaceForward'ed to +z.
+// Fresnel always takes the stored outside relative IOR; a negative wo·wm flips
+// the interface (glass→air, including TIR). Sample, RGB eval, and spectral eval
+// share evalDielectricGgx so they cannot drift.
 //
 // This header must NOT include render/procedural.h. OptiX shade kernels that
 // pull the MaterialX graph interpreter compile as megakernels; maps/procedurals
@@ -99,7 +104,8 @@ SR_INL SR_HD Vec3 specularFresnel(const Material& mat, Vec3 f0, float cosTheta) 
     return fresnelSchlick(f0, cosTheta);
 }
 
-// Exact Fresnel for dielectrics. eta is the relative IOR (transmitted/incident).
+// pbrt FrDielectric: eta is the stored outside relative IOR (η_t/η_i on the
+// material, typically > 1). A negative cosThetaI flips the interface (glass→air).
 SR_INL SR_HD float fresnelDielectric(float cosThetaI, float eta) {
     cosThetaI = clampf(cosThetaI, -1.0f, 1.0f);
     if (cosThetaI < 0.0f) {
@@ -113,6 +119,34 @@ SR_INL SR_HD float fresnelDielectric(float cosThetaI, float eta) {
     const float rParl = (eta * cosThetaI - cosThetaT) / (eta * cosThetaI + cosThetaT);
     const float rPerp = (cosThetaI - eta * cosThetaT) / (cosThetaI + eta * cosThetaT);
     return 0.5f * (rParl * rParl + rPerp * rPerp);
+}
+
+// Iray Photoreal (Keller et al. 2017, arXiv:1705.01263): NEE visibility may
+// partially evaluate transmissive materials instead of treating delta glass as a
+// hard occluder. Light-tracing camera connections and primary (depth-0) NEE stay
+// opaque so SDS lands only on directly visible receivers — NVIDIA: "The caustic
+// sampler only improves on directly visible caustics. Caustics seen through
+// mirrors or windows are currently not improved."
+//
+// Returns occlusion in [0,1] (1 = fully blocked). η² is a radiance measure
+// conversion, not opacity — it is not applied here.
+//
+// eyeBounceNee: 1 = camera/BDPT NEE after a bounce (Fresnel continue along the
+// straight shadow ray, biased vs Snell). 0 = primary NEE or LT splat / BDPT t=1.
+// 2 = Exit to Diffuse dest NEE: dielectrics are open (opacity walk, no Fresnel).
+SR_INL SR_HD float shadowBlockFraction(const Material& matShadow, const Material& matCaustic,
+                                       int causticsOn, int eyeBounceNee, float nDotWo) {
+    if (matShadow.transmission <= 1e-3f) return 1.0f;
+    if (eyeBounceNee >= 2) return 0.0f;
+    if (causticsOn == 0 || matCaustic.contributeCaustics == 0)
+        return saturatef(matShadow.shadowOpacity);
+    if (eyeBounceNee == 0) return 1.0f;
+
+    const float F = fresnelDielectric(nDotWo, srMax(1.0001f, matShadow.ior));
+    const float tint = srMax(0.0f, luminance(matShadow.transmissionColor));
+    const float T = (1.0f - F) * saturatef(matShadow.transmission) *
+                    (1.0f - saturatef(matShadow.metallic)) * tint;
+    return saturatef(1.0f - T);
 }
 
 // Rotate wo/wi in the tangent plane for specular_rotation (turns in [0,1] = 0–360°).
@@ -341,6 +375,46 @@ SR_INL SR_HD bool isPhotonCausticCasterLobe(const LobeWeights& lw) {
     return lw.transmission > 0.25f;
 }
 
+// Delta transmissive caster (CPU MNEE / GPU eye-path MNEE). Rough glass is not
+// a Newton manifold — light tracing continues through it instead.
+SR_INL SR_HD bool isDeltaCausticCaster(const Material& m) {
+    if (m.contributeCaustics == 0) return false;
+    const LobeWeights lw = computeLobes(m);
+    return lw.delta && lw.transmission > 0.25f && lw.diffuse < 1e-3f;
+}
+
+// SDS / through-glass bookkeeping: delta and near-spec transmissive casters
+// (roughness 0 and 0.1) share one family. Newton MNEE still uses only
+// isDeltaCausticCaster — roughness 0.1 is not a manifold.
+SR_INL SR_HD bool isTransmissiveCausticCaster(const Material& m) {
+    if (m.contributeCaustics == 0) return false;
+    const LobeWeights lw = computeLobes(m);
+    if (lw.diffuse >= 1e-3f || lw.transmission <= 0.25f) return false;
+    return lw.delta || isNearSpecularLobe(lw);
+}
+
+// Eye-path NEE / BDPT s=1 / vertex connections. Delta and near-specular lobes
+// (α ≤ kCausticAlpha, roughness ≲ 0.22, including glass 0.1) are not connectable:
+// evaluating GGX toward a light is the camera-port glow. BSDF sampling still
+// runs so the slightly-rough look remains. Frosted glass (α > kCausticAlpha)
+// stays connectable.
+SR_INL SR_HD bool eyePathNeeConnectable(const Material& mat, Vec3 woLocal) {
+    const LobeWeights lw = computeLobes(mat, woLocal);
+    if (lw.delta && lw.diffuse < 1e-4f) return false;
+    if (isNearSpecularLobe(lw)) return false;
+    return true;
+}
+
+// Light-trace vertex that may connect to the camera. Casters (delta, near-spec,
+// or transmissive glass including roughness 0.1) are not connectable: do not
+// splat from them and do not kill the path — continue the SDS chain.
+SR_INL SR_HD bool lightTraceConnectable(const Material& mat, Vec3 woLocal) {
+    if (!eyePathNeeConnectable(mat, woLocal)) return false;
+    const LobeWeights lw = computeLobes(mat, woLocal);
+    if (lw.transmission > 0.25f && lw.diffuse < 1e-3f) return false;
+    return true;
+}
+
 // Veach adjoint BSDF / pbrt: evaluate in the shading frame and spawn with ng.
 // Do not kill transport when ns and ng disagree about reflection vs transmission.
 SR_INL SR_HD bool shadingNormalConsistent(Vec3 ng, Vec3 ns, Vec3 wo, Vec3 wi) {
@@ -384,6 +458,67 @@ SR_INL SR_HD BsdfEval evalDielectricCoat(Vec3 wo, Vec3 wi, float alpha, float et
     return o;
 }
 
+// pbrt Refract(): etaAbs is the stored outside IOR. Negative wo·n flips n and η.
+SR_INL SR_HD bool refractDielectric(Vec3 wo, Vec3 n, float etaAbs, float& etap, Vec3& wt) {
+    float cosThetaI = dot(n, wo);
+    float eta = etaAbs;
+    Vec3 nn = n;
+    if (cosThetaI < 0.0f) {
+        eta = 1.0f / eta;
+        cosThetaI = -cosThetaI;
+        nn = -n;
+    }
+    etap = eta;
+    const float sin2ThetaI = srMax(0.0f, 1.0f - cosThetaI * cosThetaI);
+    const float sin2ThetaT = sin2ThetaI / (eta * eta);
+    if (sin2ThetaT >= 1.0f) return false;
+    const float cosThetaT = sqrtf(srMax(0.0f, 1.0f - sin2ThetaT));
+    wt = normalize(wo * (-1.0f / eta) + nn * (cosThetaI / eta - cosThetaT));
+    return true;
+}
+
+// pbrt DielectricBxDF GGX f + pdf (one lobe, no mixture weight).
+// wm is FaceForward'ed to +z. Fresnel always takes etaAbs; signed wo·wm flips
+// air→glass vs glass→air (and TIR). f is un-tinted; pdf is P(wi | dielectric).
+struct DielectricGgxEval {
+    float f = 0.0f;
+    float pdf = 0.0f;
+};
+
+SR_INL SR_HD DielectricGgxEval evalDielectricGgx(Vec3 wo, Vec3 wi, float ax, float ay, float etaAbs,
+                                                bool allowInternalReflections) {
+    DielectricGgxEval out;
+    if (fabsf(wo.z) < 1e-6f || fabsf(wi.z) < 1e-6f) return out;
+    const bool reflecting = wo.z * wi.z > 0.0f;
+    const float etap = reflecting ? 1.0f : (wo.z > 0.0f ? etaAbs : 1.0f / etaAbs);
+    Vec3 h = reflecting ? (wo + wi) : -(wo + wi * etap);
+    if (lengthSquared(h) <= 0.0f) return out;
+    h = normalize(h);
+    if (h.z < 0.0f) h = -h;
+    const float dotOH = dot(wo, h);
+    const float dotIH = dot(wi, h);
+    // pbrt: discard back-facing microfacets (wm must face both wo and wi).
+    if (dotOH * wo.z < 0.0f || dotIH * wi.z < 0.0f) return out;
+
+    const float fr = fresnelDielectric(dotOH, etaAbs);
+    const float d = ggxD(h, ax, ay);
+    const float g = smithG2(wo, wi, ax, ay);
+    if (reflecting) {
+        if (!allowInternalReflections && wo.z < 0.0f && fr < 1.0f - 1e-5f) return out;
+        out.f = d * g * fr / (4.0f * fabsf(wo.z) * fabsf(wi.z));
+        out.pdf = fr * ggxVndfPdf(wo, h, ax, ay) / (4.0f * srMax(1e-6f, absDot(wo, h)));
+        return out;
+    }
+    const float sqrtDenom = dotOH + etap * dotIH;
+    if (fabsf(sqrtDenom) <= 1e-6f) return out;
+    const float factor = fabsf(dotIH * dotOH / (wo.z * wi.z));
+    out.f = (1.0f - fr) * d * g * factor * (etap * etap) / (sqrtDenom * sqrtDenom);
+    const float dwhDwi = fabsf(etap * etap * dotIH) / (sqrtDenom * sqrtDenom);
+    const float reflectProb = (!allowInternalReflections && wo.z < 0.0f) ? 0.0f : fr;
+    out.pdf = (1.0f - reflectProb) * ggxVndfPdf(wo, h, ax, ay) * dwhDwi;
+    return out;
+}
+
 // Evaluate the BSDF for a pair of directions expressed in the local shading
 // frame (z = shading normal). Delta lobes return zero.
 SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
@@ -413,6 +548,13 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
             }
         }
         if (!lw.delta) {
+            const bool allowIR = wo.z > 0.0f || mat.internalReflections > 0.5f;
+            if (tw > 0.0f) {
+                const DielectricGgxEval mf =
+                    evalDielectricGgx(woS, wiS, lw.ax, lw.ay, lw.eta, allowIR);
+                out.f += Vec3(mf.f * tw);
+                out.pdf += lw.transmission * mf.pdf;
+            }
             Vec3 h = woS + wiS;
             if (lengthSquared(h) > 0.0f) {
                 h = normalize(h);
@@ -420,22 +562,6 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
                 const float d = ggxD(h, lw.ax, lw.ay);
                 const float g = smithG2(woS, wiS, lw.ax, lw.ay);
                 const float cosOH = absDot(woS, h);
-                // Inside the medium: skip dielectric reflection when Internal Reflections
-                // is off (Arnold Advanced). TIR still contributes — nowhere else to go.
-                bool allowDielectricReflect = wo.z > 0.0f || mat.internalReflections > 0.5f;
-                if (!allowDielectricReflect && tw > 0.0f) {
-                    const float eta = lw.eta > 0.0f ? 1.0f / lw.eta : 1.0f;
-                    const float cosHI = absDot(woS, h);
-                    const float sin2 = srMax(0.0f, 1.0f - cosHI * cosHI);
-                    allowDielectricReflect = (sin2 / (eta * eta)) >= 1.0f;
-                }
-                if (tw > 0.0f && allowDielectricReflect) {
-                    const float fr = fresnelDielectric(dot(woS, h), lw.eta);
-                    const float specF = d * g * fr / (4.0f * fabsf(wo.z) * fabsf(wi.z));
-                    out.f += Vec3(specF * tw);
-                    out.pdf += lw.transmission * fr * ggxVndfPdf(woS, h, lw.ax, lw.ay) /
-                               (4.0f * srMax(1e-6f, cosOH));
-                }
                 // Skip the opaque specular lobe entirely when the artist set Specular to 0
                 // (and the surface is not metal) — including grazing-angle Fresnel.
                 const bool hasOpaqueSpec =
@@ -458,36 +584,10 @@ SR_INL SR_HD BsdfEval bsdfEvalLocal(const Material& mat, Vec3 wo, Vec3 wi) {
             }
         }
     } else if (!lw.delta && lw.transmission > 0.0f) {
-        // Refraction: build the generalized half vector.
-        const float eta = wo.z > 0.0f ? lw.eta : 1.0f / lw.eta;
-        Vec3 h = -(woS + wiS * eta);
-        if (lengthSquared(h) > 0.0f) {
-            h = normalize(h);
-            if (h.z < 0.0f) h = -h;
-            const float dotOH = dot(woS, h);
-            const float dotIH = dot(wiS, h);
-            if (dotOH * wo.z > 0.0f) {
-                const float sqrtDenom = dotOH + eta * dotIH;
-                if (fabsf(sqrtDenom) > 1e-6f) {
-                    const float fr = fresnelDielectric(dotOH, lw.eta);
-                    const float d = ggxD(h, lw.ax, lw.ay);
-                    const float g = smithG2(woS, wiS, lw.ax, lw.ay);
-                    const float factor = fabsf(dotIH * dotOH / (wo.z * wi.z));
-                    // PBRT radiance-mode transmission: include η² so f matches the
-                    // PDF jacobian below (was missing → rough glass too dark).
-                    const float ft =
-                        (1.0f - fr) * d * g * factor * (eta * eta) / (sqrtDenom * sqrtDenom);
-                    out.f += lw.transmissionTint * (ft * tw);
-                    const float dwhDwi = fabsf(eta * eta * dotIH) / (sqrtDenom * sqrtDenom);
-                    // When Internal Reflections is off from inside we always sample
-                    // refraction (except TIR), so drop the (1-fr) from the PDF.
-                    const float reflectProb =
-                        (wo.z < 0.0f && mat.internalReflections <= 0.5f) ? 0.0f : fr;
-                    out.pdf +=
-                        lw.transmission * (1.0f - reflectProb) * ggxVndfPdf(woS, h, lw.ax, lw.ay) * dwhDwi;
-                }
-            }
-        }
+        const bool allowIR = wo.z > 0.0f || mat.internalReflections > 0.5f;
+        const DielectricGgxEval mf = evalDielectricGgx(woS, wiS, lw.ax, lw.ay, lw.eta, allowIR);
+        out.f += lw.transmissionTint * (mf.f * tw);
+        out.pdf += lw.transmission * mf.pdf;
     }
     const float pCoat = coatPickProb(mat, wo);
     if (pCoat > 0.0f && wo.z > 0.0f) {
@@ -600,29 +700,20 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
 
     // Dielectric transmission lobe.
     if (lw.transmission <= 1e-5f) return s;
-    const float eta = wo.z > 0.0f ? lw.eta : 1.0f / lw.eta;
     const Vec3 woS = rotateForAnisotropy(wo, mat.specularRotation);
     Vec3 hS;
     if (lw.delta) {
-        hS = Vec3(0.0f, 0.0f, woS.z > 0.0f ? 1.0f : -1.0f);
+        hS = Vec3(0.0f, 0.0f, 1.0f);  // pbrt: wm = +z, signed wo·wm flips Fresnel
     } else {
         const Vec3 woUpS = woS.z > 0.0f ? woS : -woS;
         hS = sampleGgxVndf(woUpS, lw.ax, lw.ay, u1, u2);
-        if (woS.z < 0.0f) hS = -hS;
     }
-    // h is flipped onto wo's side, so cosThetaI is positive and the Fresnel term
-    // must use the side-relative eta — passing lw.eta here would evaluate the
-    // air→glass interface for rays leaving the medium and never reach TIR.
-    const float dotOH = dot(woS, hS);
-    const float fr = fresnelDielectric(dotOH, eta);
+    const float fr = fresnelDielectric(dot(woS, hS), lw.eta);
 
     // Inside + Internal Reflections off: skip Fresnel reflection. TIR still
     // reflects — refraction is impossible (Arnold keeps critical-angle TIR).
     const bool allowInternalReflect = mat.internalReflections > 0.5f || wo.z > 0.0f;
-    const float cosThetaI = dotOH;
-    const float sin2ThetaI = srMax(0.0f, 1.0f - cosThetaI * cosThetaI);
-    const float sin2ThetaT = sin2ThetaI / (eta * eta);
-    const bool tir = sin2ThetaT >= 1.0f;
+    const bool tir = fr >= 1.0f - 1e-5f;
     const bool chooseReflect = tir || (allowInternalReflect && uChoice < fr);
 
     if (chooseReflect) {
@@ -644,9 +735,9 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
         return s;
     }
 
-    // Refract wo about h (h is always on the same side as wo, so cosThetaI > 0).
-    const float cosThetaT = sqrtf(srMax(0.0f, 1.0f - sin2ThetaT));
-    const Vec3 wiS = normalize(-woS * (1.0f / eta) + hS * (cosThetaI / eta - cosThetaT));
+    float etap = 1.0f;
+    Vec3 wiS;
+    if (!refractDielectric(woS, hS, lw.eta, etap, wiS)) return s;
     const Vec3 wiN = unrotateForAnisotropy(wiS, mat.specularRotation);
     if (wiN.z * wo.z >= 0.0f) return s;
     s.wi = wiN;
@@ -658,7 +749,7 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
         // 1/eta^2 is the radiance compression when crossing the interface.
         // Normally Fresnel cancels with the reflect/refract choice. When Internal
         // Reflections is off from inside we always refract, so multiply by (1-fr).
-        float scale = tw / (eta * eta * srMax(1e-4f, lw.transmission));
+        float scale = tw / (etap * etap * srMax(1e-4f, lw.transmission));
         if (!allowInternalReflect && wo.z < 0.0f) scale *= (1.0f - fr);
         s.weight = lw.transmissionTint * scale;
         return s;
@@ -668,6 +759,16 @@ SR_INL SR_HD BsdfSample bsdfSampleLocal(const Material& mat, Vec3 wo, float uLob
     s.pdf = e.pdf;
     s.weight = e.f * (fabsf(wiN.z) / e.pdf);
     return s;
+}
+
+// Tag the *next* ray after a BSDF sample (Arnold ray type for the child ray).
+SR_INL SR_HD RayShadeKind nextRayShadeKind(const BsdfSample& bs, const LobeWeights& lw) {
+    if (bs.transmitted) {
+        if (bs.specular || isNearSpecularLobe(lw)) return RayShadeKind::SpecularTransmission;
+        return RayShadeKind::DiffuseTransmission;
+    }
+    if (bs.specular || isNearSpecularLobe(lw)) return RayShadeKind::SpecularReflection;
+    return RayShadeKind::DiffuseReflection;
 }
 
 }  // namespace sol

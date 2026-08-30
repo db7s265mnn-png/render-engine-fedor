@@ -19,9 +19,24 @@ struct RaySwitchTable {
     int specularReflection = -1;
     int diffuseTransmission = -1;
     int specularTransmission = -1;
+    int volume = -1;  // Arnold volume rays
     int sss = -1;
     // Solstice extension: light-side caustic transport only (not camera rays).
     int caustics = -1;
+};
+
+// Incoming ray type — matches Arnold aiRaySwitch / ray_switch_shader.
+// Unconnected ports fall back to camera/base (-1 in RaySwitchTable).
+enum class RayShadeKind : int {
+    Camera = 0,
+    Shadow,
+    DiffuseReflection,
+    SpecularReflection,
+    DiffuseTransmission,
+    SpecularTransmission,
+    Volume,
+    Sss,
+    Caustics
 };
 
 // ---------------------------------------------------------------------------
@@ -88,8 +103,10 @@ struct Material {
     int specularColorProc = -1;
     int transmissionColorProc = -1;
     // Fake shadow control for transmissive surfaces when render-settings caustics
-    // are OFF: 1 = fully opaque shadow, 0 = fully open. With caustics ON shadow
-    // rays treat glass as opaque and light arrives via MNEE / BDPT instead.
+    // are OFF (or Contribute to Caustics is off): 1 = fully opaque, 0 = fully open.
+    // With caustics ON: primary NEE and LT camera splats still treat contributing
+    // glass as opaque (Iray caustic sampler — SDS on directly visible receivers).
+    // Eye NEE after a bounce uses Fresnel transmittance (Keller 2017).
     float shadowOpacity = 1.0f;
 
     // MaterialX normalmap.scale / bump.scale (tangent XY strength).
@@ -124,6 +141,14 @@ struct Material {
     // Arnold Advanced → Internal Reflections (1 = on). When off, rays inside a
     // dielectric skip Fresnel reflections (TIR still reflects — nowhere else to go).
     float internalReflections = 1.0f;
+    // When Max Ray Depth is exhausted on this standard_surface, fire both a
+    // reflection-direction and a transmission-direction opacity walk (no IOR,
+    // no new Fresnel). Same materialIndex is skipped; the first other material
+    // gets Lambert + NEE × path throughput. A miss takes the dome even if it
+    // is hidden from the camera. The flagged surface itself is never painted
+    // as Lambert (including the camera hit). Transmission ≈ 0 skips the
+    // through walk (mirrors). Default off.
+    int exitToDiffuse = 0;
 
     // Separate dielectric coat (pbrt-style overlay, not mixed into the base lobes).
     // thickness is an optical depth in the coat medium (Beer–Lambert); 0 = clear.
@@ -463,7 +488,28 @@ enum CausticsEngine : int {
     // Caustic-only photon map gather (VCM-style density estimation) — better for
     // rough glass and caustics seen through thick refractive bases.
     kCausticsEnginePhoton = 3,
+    // CPU Aimed LT (Keller 2017 caster AABBs). Same idea as GpuCausticsEngine,
+    // but on Embree PT/BDPT. Appended so older 0..3 scene files stay put.
+    kCausticsEngineAimedLt = 4,
+    kCausticsEngineAimedLtMnee = 5,
 };
+
+struct GpuPhotonCluster;
+
+// OptiX-only caustic estimators (Render Device = GPU, or the GPU half of XPU).
+// CPU Embree uses CausticsEngine 0..5; these GPU indices stay 0..1.
+enum GpuCausticsEngine : int {
+    // Aimed-only light tracing (caster AABBs). SDS splats stay on directly
+    // visible receivers. No MNEE wavefront — camera and light paths finish
+    // in path_tail (same cheap schedule as GPU PT).
+    kGpuCausticsAimedLt = 0,
+    // Same aimed LT on directly visible receivers (floor). Glass pixels run
+    // the CPU Path Tracer eye path (Fresnel NEE + BSDF). MNEE peeks only when
+    // an interface fully blocks (TIR). Menu index stays 1.
+    kGpuCausticsAimedLtMnee = 1,
+};
+
+constexpr int kGpuMcmcMutations = 4;
 
 // How the image is scheduled / written (Render Settings → Sampling Type).
 enum SamplingEngine : int {
@@ -591,6 +637,8 @@ struct RenderSettingsData {
     int caustics = 1;
     // Which estimator carries caustics when enabled (see CausticsEngine).
     int causticsEngine = kCausticsEnginePbrt;  // pbrt PT/BDPT (default)
+    // OptiX menu (see GpuCausticsEngine). Ignored by Embree.
+    int causticsEngineGpu = kGpuCausticsAimedLt;
     // Firefly cap for paths that look through glass/mirrors at a light (SDS) and for
     // BDPT near-specular NEE/connections. Those never converge with more samples when
     // the light is small; a safety floor of 10 is always applied when this is left at 0
@@ -624,6 +672,9 @@ struct RenderSettingsData {
 
     // Sampling / seed diagnostics (skip light transport; write debug RGB).
     int samplingDebug = 0;        // SamplingDebug enum
+    // CPU BDPT: one aggregated timer block per sample in the log (alloc / walk /
+    // connect / splat + path counts). Off has no clocks in the integrator.
+    int bdptTimers = 0;
 
     // Texture TX cache: convert source textures to .tx mipmaps (maketx → ACEScg).
     int enableTxCache = 1;
@@ -633,6 +684,59 @@ struct RenderSettingsData {
     int ocioUseEnv = 1;
     char ocioConfigPath[512] = "";
 };
+
+// GPU light tracing deposits SDS into the same accum.rgb that display divides
+// by camera `w`. Variance skip freezes `w` while LT still splats — unbounded mean.
+SR_INL SR_HD bool causticsUseAimedLt(const RenderSettingsData& s) {
+    return s.caustics != 0 &&
+           (s.causticsEngine == kCausticsEngineAimedLt || s.causticsEngine == kCausticsEngineAimedLtMnee);
+}
+
+// Aimed LT family partition on the eye path (these two engines only).
+// Skip LDS camera SDS that light tracing owns. Aimed LT + MNEE keeps the
+// through-glass suffix (MNEE / Fresnel NEE), matching GPU Aimed LT + MNEE.
+SR_INL SR_HD bool cpuAimedSkipCameraSds(const RenderSettingsData& s, int causticSuffix, int throughGlass) {
+    if (!causticsUseAimedLt(s) || causticSuffix == 0) return false;
+    if (s.causticsEngine == kCausticsEngineAimedLtMnee && throughGlass) return false;
+    return true;
+}
+
+SR_INL SR_HD bool gpuLightTraceSkipUnsafe(const RenderSettingsData& s) {
+    return s.caustics != 0 && renderDeviceUsesGpu(s.backend);
+}
+
+SR_INL SR_HD bool gpuRefractionMneeEnabled(const RenderSettingsData& s) {
+    return s.caustics != 0 && s.causticsEngineGpu == kGpuCausticsAimedLtMnee;
+}
+
+// Dedicated MNEE OptiX pipeline (Newton + per-bounce sync). Aimed LT skips it
+// so caustics use path_tail. Light tracing never needs it (jobs ignore lightPath).
+SR_INL SR_HD bool gpuEyePathMneeEnabled(const RenderSettingsData& s) {
+    return gpuRefractionMneeEnabled(s);
+}
+
+// Aimed LT + MNEE: LT owns floor-first SDS. After the eye path has refracted
+// through contributing glass those are glass pixels — keep BSDF / env.
+SR_INL SR_HD bool gpuSkipCameraSds(const RenderSettingsData& s, int lightPath, int causticSuffix,
+                                   int throughGlass, float splatInv) {
+    if (lightPath || splatInv <= 0.0f || causticSuffix == 0) return false;
+    if (gpuRefractionMneeEnabled(s) && throughGlass) return false;
+    return true;
+}
+
+// Shadow-ray glass opacity for NEE. 1 = Fresnel-continue (Keller / CPU PT).
+// 0 = opaque (primary NEE and LT splats). Depth>0 always Fresnel: that is what
+// makes CPU Path Tracer glass bright. MNEE peek still fires on TIR
+// (block >= 0.999). Do not opaque through-glass finite NEE — Newton on a
+// tessellated mesh misses and the interior goes black.
+SR_INL SR_HD int gpuEyeBounceNee(const RenderSettingsData& s, int depth, int throughGlass,
+                                 int connectable, int lightType) {
+    (void)s;
+    (void)throughGlass;
+    (void)connectable;
+    (void)lightType;
+    return depth > 0 ? 1 : 0;
+}
 
 // SDS / near-specular firefly cap. `causticClamp` tightens further; when left at 0
 // a safety floor of 10 still applies — otherwise clamp(..., 0) is a no-op.
@@ -701,6 +805,54 @@ struct SceneView {
     // Precomputed total-power sums used for the infinite-vs-finite split decision.
     float infiniteLightPower               = 0.f;
     float finiteLightPower                 = 0.f;
+
+    // CPU Aimed LT clusters (host pointers). Null unless causticsUseAimedLt.
+    // GPU uses LaunchParams::photonClusters — keep these null on the device copy.
+    const GpuPhotonCluster* photonAimClusters = nullptr;
+    int photonAimClusterCount = 0;
 };
+
+SR_INL SR_HD Material defaultMaterial() {
+    Material m;
+    m.baseColor = Vec3(0.7f, 0.7f, 0.7f);
+    m.roughness = 0.5f;
+    return m;
+}
+
+SR_INL SR_HD int raySwitchSlot(const RaySwitchTable& t, RayShadeKind kind) {
+    switch (kind) {
+        case RayShadeKind::Camera: return t.camera;
+        case RayShadeKind::Shadow: return t.shadow;
+        case RayShadeKind::DiffuseReflection: return t.diffuseReflection;
+        case RayShadeKind::SpecularReflection: return t.specularReflection;
+        case RayShadeKind::DiffuseTransmission: return t.diffuseTransmission;
+        case RayShadeKind::SpecularTransmission: return t.specularTransmission;
+        case RayShadeKind::Volume: return t.volume;
+        case RayShadeKind::Sss: return t.sss;
+        case RayShadeKind::Caustics: return t.caustics;
+    }
+    return -1;
+}
+
+// Resolve the Material POD for a hit given the incoming ray kind. `baseIndex` is
+// InstanceData::materialIndex (owns the RaySwitchTable).
+SR_INL SR_HD Material materialForRay(const SceneView& scene, int baseIndex, RayShadeKind kind) {
+    if (baseIndex < 0 || baseIndex >= scene.materialCount || !scene.materials) return defaultMaterial();
+    const Material& base = scene.materials[baseIndex];
+    const int slot = raySwitchSlot(base.raySwitch, kind);
+    if (slot < 0 || slot >= scene.materialCount) return base;
+    return scene.materials[slot];
+}
+
+// Photon / MNEE / BDPT light-path glass: prefer Solstice `caustics` port, else
+// Arnold `specular_transmission`, else the camera/base material.
+SR_INL SR_HD Material materialForCausticTransport(const SceneView& scene, int baseIndex) {
+    if (baseIndex < 0 || baseIndex >= scene.materialCount || !scene.materials) return defaultMaterial();
+    const Material& base = scene.materials[baseIndex];
+    if (base.raySwitch.caustics >= 0) return materialForRay(scene, baseIndex, RayShadeKind::Caustics);
+    if (base.raySwitch.specularTransmission >= 0)
+        return materialForRay(scene, baseIndex, RayShadeKind::SpecularTransmission);
+    return base;
+}
 
 }  // namespace sol

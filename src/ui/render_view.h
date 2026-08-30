@@ -16,6 +16,7 @@ class QToolButton;
 class QComboBox;
 class QAction;
 class QShowEvent;
+class QTimer;
 
 namespace sol {
 
@@ -91,6 +92,9 @@ public:
     void setTransformTarget(Node* node);
     Node* transformTarget() const { return transformTarget_; }
     bool isGizmoDragging() const { return mode_ == 4; }
+    Vec3 gizmoDragStartTranslate() const { return dragStartTranslate_; }
+    Vec3 gizmoDragStartRotate() const { return dragStartRotate_; }
+    Vec3 gizmoDragStartScale() const { return dragStartScale_; }
 
     // One-shot: next LMB on geometry sets camera DOF focus distance.
     bool focusPickActive() const { return focusPickActive_; }
@@ -128,7 +132,7 @@ public:
 
 signals:
     void cameraMoved();
-    // Alt+LMB / MMB / Alt+RMB drag (not wheel, not the TRS gizmo).
+    // Alt+LMB / MMB / Alt+RMB drag, mouse-wheel dolly (coalesced), and F/H framing.
     void cameraNavStarted();
     void cameraNavEnded();
     // Fired while dragging (values already written quietly — do not cook/IPR).
@@ -259,6 +263,8 @@ private:
     Vec3 pivotMarkerWorld_{0.0f};
     qint64 pivotMarkerUntilMs_ = 0;
     bool focusPickActive_ = false;
+    bool wheelNavActive_ = false;
+    QTimer* wheelNavTimer_ = nullptr;
 };
 
 }  // namespace sol

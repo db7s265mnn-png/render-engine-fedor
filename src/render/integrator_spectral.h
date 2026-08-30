@@ -29,11 +29,13 @@ inline SampledSpectrum nextEventEstimationSpectralOnce(const SceneView& scene, c
                                                        const SurfaceInteraction& si, const Material& mat,
                                                        const Frame& frame, Vec3 wo, Rng& rng,
                                                        const SampledWavelengths& waves,
-                                                       const RGBColorSpace& cs, int mediumIndex) {
+                                                       const RGBColorSpace& cs, int mediumIndex,
+                                                       int eyeBounceNee = 0) {
     SampledSpectrum result = SampledSpectrum::zero(waves.n);
     if (scene.lightCount <= 0) return result;
 
     const Vec3 woLocal = frame.toLocal(wo);
+    if (!eyePathNeeConnectable(mat, woLocal)) return result;
     float selectPdf = 0.0f;
     const int lightIndex = sampleLightIndex(scene, si.p, rng.nextFloat(), selectPdf);
     if (lightIndex < 0 || selectPdf <= 0.0f) return result;
@@ -52,7 +54,7 @@ inline SampledSpectrum nextEventEstimationSpectralOnce(const SceneView& scene, c
     if (scene.lights[lightIndex].shadowEnable) {
         shadowOrigin = offsetRayOrigin(si.p, si.ng, ls.wi);
         if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
-        visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax);
+        visibility = shadowVisibility(scene, tracer, shadowOrigin, ls.wi, tMax, eyeBounceNee);
         if (visibility <= 1e-5f) return result;
     }
 
@@ -77,7 +79,7 @@ template <typename Tracer>
 inline SampledSpectrum nextEventEstimationVolumeSpectralOnce(const SceneView& scene, const Tracer& tracer,
                                                              Vec3 origin, Vec3 woVol, const MediumData& med,
                                                              Rng& rng, const SampledWavelengths& waves,
-                                                             const RGBColorSpace& cs) {
+                                                             const RGBColorSpace& cs, int eyeBounceNee = 0) {
     SampledSpectrum result = SampledSpectrum::zero(waves.n);
     if (scene.lightCount <= 0) return result;
 
@@ -96,7 +98,7 @@ inline SampledSpectrum nextEventEstimationVolumeSpectralOnce(const SceneView& sc
     float tShadow = 1.0e8f;
     if (scene.lights[li].shadowEnable) {
         if (ls.distance < 1.0e7f) tShadow = ls.distance * (1.0f - 1e-3f);
-        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow);
+        vis = shadowVisibility(scene, tracer, origin, ls.wi, tShadow, eyeBounceNee);
         if (vis <= 1e-5f) return result;
     }
     const float misW = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, phasePdfL);
@@ -112,6 +114,68 @@ inline SampledSpectrum nextEventEstimationVolumeSpectralOnce(const SceneView& sc
 }
 
 template <typename Tracer>
+inline SampledSpectrum exitToDiffuseWalkOneSpectral(const SceneView& scene, const Tracer& tracer,
+                                                    Vec3 origin, Vec3 direction, int escapeMat, Rng& rng,
+                                                    const SampledWavelengths& waves, const RGBColorSpace& cs,
+                                                    int mediumIndex, int eyeBounceNee) {
+    EtdCpuCtx<Tracer> ctx{scene, tracer, rng};
+    EtdHit destHit;
+    Material destMat;
+    const EtdWalkKind kind = exitToDiffuseWalkFind(ctx, origin, direction, escapeMat, destHit, destMat);
+    if (kind == EtdWalkKind::Miss) {
+        SampledSpectrum L = SampledSpectrum::zero(waves.n);
+        if (scene.domeLightIndex >= 0) {
+            const LightData& dome = scene.lights[scene.domeLightIndex];
+            const Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/true);
+            L += upsampleEmission(envL, waves, cs);
+        }
+        const Vec3 sunL = cameraSunDiscRadiance(scene, origin, direction, 0.0f, true, false, false);
+        if (!isBlack(sunL)) L += upsampleEmission(sunL, waves, cs);
+        return L;
+    }
+    if (kind == EtdWalkKind::AreaLight) {
+        const LightData& light = scene.lights[destHit.lightIndex];
+        const Vec3 lightN = light.type == kLightSphere ? destHit.ng : areaLightNormal(light);
+        return upsampleEmission(areaLightEmission(scene, light, direction, lightN), waves, cs);
+    }
+    if (kind != EtdWalkKind::Dest) return SampledSpectrum::zero(waves.n);
+    const int destMedium = exitToDiffuseDestMedium(scene, mediumIndex, destHit.instanceIndex);
+    return nextEventEstimationSpectralOnce(scene, tracer, ctx.lastSi, exitToDiffuseLambert(destMat),
+                                           Frame(ctx.lastSi.ns), -direction, rng, waves, cs, destMedium,
+                                           eyeBounceNee);
+}
+
+template <typename Tracer>
+inline SampledSpectrum exitToDiffuseWalkReflectAndRefractSpectral(
+    const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng, Vec3 ns, Vec3 incoming, int escapeMat,
+    const Material& dyingMat, Rng& rng, const SampledWavelengths& waves, const RGBColorSpace& cs,
+    int mediumIndex, int eyeBounceNee) {
+    SampledSpectrum L = SampledSpectrum::zero(waves.n);
+    if (exitToDiffuseWantsRefractWalk(dyingMat)) {
+        L += exitToDiffuseWalkOneSpectral(scene, tracer, offsetRayOrigin(p, ng, incoming), incoming,
+                                          escapeMat, rng, waves, cs, mediumIndex, eyeBounceNee);
+    }
+    const Vec3 n = lengthSquared(ns) > 1e-12f ? ns : ng;
+    const Frame frame(n);
+    const Vec3 woLocal = frame.toLocal(-incoming);
+    float uLobe = 0.999f, uChoice = 0.0f;
+    exitToDiffuseDyingReflectU(dyingMat, uLobe, uChoice);
+    const BsdfSampleSpectral rs =
+        bsdfSampleSpectral(dyingMat, woLocal, uLobe, rng.nextFloat(), rng.nextFloat(), uChoice, waves,
+                           dyingMat.ior, 0, cs);
+    if (rs.valid && !rs.transmitted && spectrumMaxComponent(rs.weight) > 0.0f) {
+        const Vec3 wi = frame.toWorld(rs.wi);
+        L += rs.weight * exitToDiffuseWalkOneSpectral(scene, tracer, offsetRayOrigin(p, ng, wi), wi,
+                                                      escapeMat, rng, waves, cs, mediumIndex, eyeBounceNee);
+    } else if (!exitToDiffuseWantsRefractWalk(dyingMat)) {
+        const Vec3 refl = exitToDiffuseReflectDirection(incoming, ng);
+        L += exitToDiffuseWalkOneSpectral(scene, tracer, offsetRayOrigin(p, ng, refl), refl, escapeMat, rng,
+                                          waves, cs, mediumIndex, eyeBounceNee);
+    }
+    return L;
+}
+
+template <typename Tracer>
 class SpectralPathIntegrator final : public Integrator<Tracer> {
 public:
     const char* name() const override { return "Path Tracer"; }
@@ -122,6 +186,10 @@ public:
         Rng& rng = *ctx.rng;
         const RenderSettingsData& settings = scene.settings;
         const RGBColorSpace& filmCs = pathColorSpace(settings);
+        const CausticPhotonMap* photons = ctx.photons;
+        const bool photonEngine = photons != nullptr;
+        const bool photonCaustics = photonEngine && !photons->empty();
+        const float photonRadius = photonCaustics ? photons->gatherRadius(settings) : 0.0f;
 
         const int nLambda = kMaxSpectrumSamples;
         SampledWavelengths waves = SampledWavelengths::sampleVisible(nLambda, rng.nextFloat());
@@ -137,8 +205,11 @@ public:
         bool suppressCausticLight = false;
         bool sawNonSpecular = false;
         bool causticSuffix = false;
+        bool throughGlass = false;
         int depth = 0;
         int passThrough = 0;
+        int exitEscapeMat = -1;
+        int exitEscapeSkips = 0;
         int volumeScatterCount = 0;
         Vec3 origin = ctx.origin;
         Vec3 direction = ctx.direction;
@@ -174,7 +245,8 @@ public:
                     if (scene.lightCount > 0 && depth < maxDepth) {
                         SampledSpectrum contrib =
                             throughput * nextEventEstimationVolumeSpectralOnce(
-                                             scene, tracer, origin, woVol, medWalk, rng, waves, filmCs);
+                                             scene, tracer, origin, woVol, medWalk, rng, waves, filmCs,
+                                             depth > 0 ? 1 : 0);
                         contrib = clampPathContribution(contrib, settings, depth, false, false);
                         radiance += contrib;
                     }
@@ -185,6 +257,7 @@ public:
                     specularBounce = false;
                     sawNonSpecular = true;
                     causticSuffix = false;
+                    rayKind = RayShadeKind::Volume;
                     ++depth;
                     ++volumeScatterCount;
                     if (depth >= settings.rrStartDepth) {
@@ -203,11 +276,16 @@ public:
                 }
             }
             if (!didHit) {
-                if (!suppressCausticLight && scene.domeLightIndex >= 0) {
+                const bool exitEscaping = exitEscapeMat >= 0;
+                if ((exitEscaping ||
+                     (!suppressCausticLight &&
+                      !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0))) &&
+                    scene.domeLightIndex >= 0) {
                     const LightData& dome = scene.lights[scene.domeLightIndex];
-                    if (!(causticSuffix && !lightContributesCaustics(dome))) {
-                    const bool primary = depth == 0 && passThrough == 0;
-                    if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
+                    if (exitEscaping || !(causticSuffix && !lightContributesCaustics(dome))) {
+                    const bool primary = depth == 0 && passThrough == 0 && !exitEscaping;
+                    if (exitEscaping ||
+                        !(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
                         Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
                         if (!isBlack(envL)) {
                             float weight = 1.0f;
@@ -233,8 +311,10 @@ public:
                     }
                     }
                 }
-                if (!suppressCausticLight) {
-                    const bool primarySun = depth == 0 && passThrough == 0;
+                if (exitEscaping ||
+                    (!suppressCausticLight &&
+                     !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0))) {
+                    const bool primarySun = depth == 0 && passThrough == 0 && !exitEscaping;
                     if (!(primarySun && !settings.envVisibleCamera)) {
                         const Vec3 sunL =
                             cameraSunDiscRadiance(scene, origin, direction, bsdfPdf, specularBounce,
@@ -268,7 +348,12 @@ public:
 
             if (si.lightIndex >= 0) {
                 if (suppressCausticLight) break;
+                if (cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0)) break;
                 const LightData& light = scene.lights[si.lightIndex];
+                const bool finiteLight = light.type == kLightRect || light.type == kLightDisk ||
+                                         light.type == kLightSphere || light.type == kLightPoint;
+                if (photonEngine && causticSuffix && finiteLight && lightContributesCaustics(light))
+                    break;
                 if (causticSuffix && !lightContributesCaustics(light)) break;
                 const Vec3 lightN = light.type == kLightSphere ? si.ng : areaLightNormal(light);
                 Vec3 emitted = areaLightEmission(scene, light, direction, lightN);
@@ -314,6 +399,34 @@ public:
                 continue;
             }
 
+            if (exitEscapeMat >= 0) {
+                if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips) ||
+                    exitToDiffuseSkipDielectricDest(mat)) {
+                    origin = offsetRayOrigin(si.p, si.ng, direction);
+                    ++exitEscapeSkips;
+                    ++passThrough;
+                    continue;
+                }
+                SampledSpectrum contrib =
+                    throughput * nextEventEstimationSpectralOnce(
+                                     scene, tracer, si, exitToDiffuseLambert(mat), Frame(si.ns),
+                                     -direction, rng, waves, filmCs, currentMedium,
+                                     exitToDiffuseDestShadowNee());
+                contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                radiance += contrib;
+                break;
+            }
+            const bool exitNow = (depth >= maxDepth && exitToDiffuseShouldStart(mat, depth)) ||
+                                 (depth < maxDepth && exitToDiffuseShouldArmBounce(mat, depth, maxDepth));
+            if (exitNow) {
+                SampledSpectrum extra = exitToDiffuseWalkReflectAndRefractSpectral(
+                    scene, tracer, si.p, si.ng, si.ns, direction, si.materialIndex, mat, rng, waves, filmCs,
+                    currentMedium, exitToDiffuseDestShadowNee());
+                SampledSpectrum contrib = throughput * extra;
+                contrib = clampSpectrumIndirect(contrib, settings.clampDirect);
+                radiance += contrib;
+                break;
+            }
             if (depth >= maxDepth) break;
 
             const Vec3 wo = -direction;
@@ -331,7 +444,8 @@ public:
                 if (pSpec > 0.0f && !(suppressCausticLight && !specularBounce)) {
                     SampledSpectrum contrib =
                         throughput * nextEventEstimationSpectralOnce(scene, tracer, si, specMat, frame,
-                                                                     wo, rng, waves, filmCs, currentMedium);
+                                                                     wo, rng, waves, filmCs, currentMedium,
+                                                                     depth > 0 ? 1 : 0);
                     contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
                     radiance += contrib;
                 }
@@ -375,8 +489,9 @@ public:
                 }
                 if (pSpec > 0.0f && pSpec < 0.999f) throughput *= (1.0f / (1.0f - pSpec));
 
+                const Material sssBody = sssBodyMaterial(scene, si, mat);
                 const SssWalkResultSpectral walk =
-                    sampleSssRandomWalkSpectral(scene, tracer, si, wo, mat, rng, waves);
+                    sampleSssRandomWalkSpectral(scene, tracer, si, wo, sssBody, rng, waves);
                 if (!walk.escaped || !sssSpectrumWeightValid(walk.pathWeight)) break;
                 Material lambert = sssExitLambertMaterial();
                 SurfaceInteraction ssSi = si;
@@ -388,7 +503,8 @@ public:
                     SampledSpectrum contrib =
                         throughput * walk.pathWeight *
                         nextEventEstimationSpectralOnce(scene, tracer, ssSi, lambert, ssFrame,
-                                                        walk.exitWo, rng, waves, filmCs, currentMedium);
+                                                        walk.exitWo, rng, waves, filmCs, currentMedium,
+                                                        depth > 0 ? 1 : 0);
                     contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
                     radiance += contrib;
                 }
@@ -411,11 +527,22 @@ public:
                 break;
             }
 
-            if (!(suppressCausticLight && !specularBounce)) {
+            if (!(suppressCausticLight && !specularBounce) &&
+                !cpuAimedSkipCameraSds(settings, causticSuffix ? 1 : 0, throughGlass ? 1 : 0)) {
+                if (photonCaustics && eyePathNeeConnectable(mat, frame.toLocal(wo))) {
+                    SampledSpectrum g = photons->gatherSpectral(si.p, si.ns, wo, mat, photonRadius, waves,
+                                                               filmCs);
+                    if (spectrumMaxComponent(g) > 0.0f) {
+                        SampledSpectrum contrib = throughput * g;
+                        contrib = clampPathContribution(contrib, settings, depth, false, causticSuffix);
+                        radiance += contrib;
+                    }
+                }
                 // pbrt SampleLd: Illuminant(Le) × Albedo(f) × geom at this vertex.
                 SampledSpectrum contrib =
                     throughput * nextEventEstimationSpectralOnce(scene, tracer, si, mat, frame, wo, rng,
-                                                                 waves, filmCs, currentMedium);
+                                                                 waves, filmCs, currentMedium,
+                                                                 depth > 0 ? 1 : 0);
                 contrib = clampPathContribution(contrib, settings, depth, specularBounce, causticSuffix);
                 radiance += contrib;
             }
@@ -453,6 +580,7 @@ public:
                 currentMedium = entering ? inst.mediumIndex : -1;
             }
             const bool causticBounce = ss.specular || isNearSpecularLobe(lw);
+            if (ss.transmitted && materialContributesCaustics(mat)) throughGlass = true;
             if (settings.caustics == 0 && causticBounce && sawNonSpecular) suppressCausticLight = true;
             if (causticBounce && sawNonSpecular) causticSuffix = true;
             if (!causticBounce) {

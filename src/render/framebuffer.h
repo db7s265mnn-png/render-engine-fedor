@@ -83,9 +83,25 @@ public:
         for (int c = 0; c < 3; ++c) {
             const double add = c == 0 ? double(v.x) : (c == 1 ? double(v.y) : double(v.z));
             double cur = px[c].load(std::memory_order_relaxed);
-            while (!px[c].compare_exchange_weak(cur, cur + add, std::memory_order_relaxed)) {
+            if (splatCasRetries_) {
+                uint64_t fails = 0;
+                while (!px[c].compare_exchange_weak(cur, cur + add, std::memory_order_relaxed)) {
+                    ++fails;
+                }
+                if (fails) splatCasRetries_->fetch_add(fails, std::memory_order_relaxed);
+            } else {
+                while (!px[c].compare_exchange_weak(cur, cur + add, std::memory_order_relaxed)) {
+                }
             }
         }
+        if (splatDeposits_) splatDeposits_->fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // BDPT Timers diagnostic: count failed CAS and successful deposits. Pass
+    // nullptr to disable (the fast path).
+    void setSplatDiag(std::atomic<uint64_t>* casRetries, std::atomic<uint64_t>* deposits) {
+        splatCasRetries_ = casRetries;
+        splatDeposits_ = deposits;
     }
     void addSplatPath() { splatPaths_.fetch_add(1, std::memory_order_relaxed); }
     // Bulk form used by tests to reach counts that a per-pixel loop cannot.
@@ -133,6 +149,8 @@ private:
     int skipCount_ = 0;
     bool noiseDone_ = false;
     std::unique_ptr<std::atomic<double>[]> splat_;  // 3 doubles per pixel
+    std::atomic<uint64_t>* splatCasRetries_ = nullptr;
+    std::atomic<uint64_t>* splatDeposits_ = nullptr;
     std::atomic<int64_t> splatPaths_{0};
     std::atomic<int> samples_{0};
     std::atomic<bool> hasData_{false};

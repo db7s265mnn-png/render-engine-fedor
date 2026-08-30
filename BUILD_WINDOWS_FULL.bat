@@ -9,8 +9,9 @@ echo Output: C:\gz-full
 echo Close Grendizer_Render first or the linker cannot overwrite the exe (LNK1168).
 echo First full run builds OpenEXR/Alembic/OpenVDB/OCIO (cached after that).
 echo TinyUSDZ linking can sit with no new lines for a long time - wait.
-echo Keep %%LOCALAPPDATA%%\grendizer-deps
-echo Deleting C:\gz-full is OK - this script creates it again.
+echo Keep C:\gz-full and %%LOCALAPPDATA%%\grendizer-deps
+echo Deploy copies OpenColorIO + zlib1.dll next to the exe. Never zlib.dll (NVIDIA optixInit hangs).
+echo Do not delete C:\gz-full (MaterialX / TinyUSDZ / OpenPGL live in _deps).
 echo.
 
 where powershell >nul 2>&1

@@ -18,6 +18,8 @@ enum PathQueue : int {
     kQueueShadeSurface = 2,
     kQueueShadeBackground = 3,
     kQueueShadeVolume = 4,
+    // Armed Exit to Diffuse: through dest + dying reflection in optix_etd.cu.
+    kQueueExitToDiffuse = 5,
 };
 
 enum WorkSlot : int {
@@ -34,6 +36,7 @@ enum ShadowQueue : int {
     kShadowIdle = 0,
     kShadowTrace = 1,
     kShadowShade = 2,
+    kShadowMnee = 3,  // glass-blocked NEE; dedicated MNEE pipeline owns the slot
 };
 
 struct GpuHit {
@@ -60,6 +63,7 @@ struct GpuPath {
     int hops = 0;
     int queue = kQueueDead;
     int specularBounce = 1;
+    int transmittedBounce = 0;  // 1 = last BSDF sample was refraction (not mirror / TIR)
     int mediumIndex = -1;
     int volumeScatters = 0;
     int localSample = 0;  // 0 .. batchSamples-1 when regenerating into the next spp
@@ -68,6 +72,23 @@ struct GpuPath {
     int lightIndex = -1;  // SampleLe emitter for this light path
     int sawNonSpecular = 0;  // camera PT: had a diffuse/volume bounce
     int causticSuffix = 0;   // camera PT: spec after diffuse (SDS); skip if LT is on
+    // 1 = this camera path already refracted through a delta caustic caster.
+    // Aimed LT + MNEE: those pixels are the glass, not the floor — keep BSDF.
+    int throughGlass = 0;
+    int exitEscapeMat = -1;  // >=0: skip this materialIndex as opacity (reflect or through)
+    int exitWantsRefract = 0;
+    Vec3 exitP{0.0f};
+    Vec3 exitNg{0.0f, 0.0f, 1.0f};
+    Vec3 exitNs{0.0f, 0.0f, 1.0f};
+    Vec2 exitUv{0.0f, 0.0f};
+    int rayKind = 0;  // RayShadeKind: incoming type for ray_switch_shader (Arnold)
+    // MCMC / ERPT: stored SampleLe so mutations respawn without a new light pick.
+    Vec3 mcmcOrigin{0.0f};
+    Vec3 mcmcDir{0.0f, 0.0f, 1.0f};
+    Vec3 mcmcN{0.0f, 1.0f, 0.0f};
+    Vec3 mcmcBetaRgb{0.0f};
+    int mcmcInfinite = 0;
+    int mcmcRemain = 0;  // mutations left in this slot (not spp)
     // AoS: shade kernels touch many fields of one path. Iray's SoA win was in a
     // separate logic kernel that streamed one member across 1M slots — not here.
     // Packed flags would misalign the 4λ arrays; leave ints.
@@ -84,10 +105,43 @@ struct GpuShadow {
     int volumeTr = 0;     // 1 = multiply by GPU volume / homogeneous transmittance
     int mediumIndex = -1;  // current path medium for homogeneous Beer–Lambert on the shadow ray
     int splatPixel = -1;  // >=0: unoccluded contrib atomicAdds RGB to that film pixel (no .w)
+    int mneeCaster = -1;  // instanceIndex of a delta glass blocker; -1 = none
+    // 1 = camera NEE from depth>0: Iray Fresnel-continue through contributing glass.
+    // 2 = Exit to Diffuse dest: dielectrics open (no Fresnel stack).
+    // 0 = primary NEE or LT camera splat (glass stays opaque; SDS on the floor).
+    int eyeBounceNee = 0;
     // Camera NEE baked at the vertex: throughput × illuminant(Le) × albedo(f) × geom.
     // shade_shadow must add this as-is — live path throughput has already stepped.
     float contribS[kMaxSpectrumSamples]{};
     int specContrib = 0;  // 1 = shade_shadow uses contribS (not RGB contrib)
+    int diagnosticAo = 0;  // 1 = Ambient Occlusion visibility (white if unoccluded)
+};
+
+// Eye-path MNEE job filled at the NEE vertex (before BSDF steps throughput).
+// The Newton pipeline reads this after intersect_shadow peeks a glass blocker.
+struct GpuMneeJob {
+    Vec3 p{0.0f};
+    Vec3 ns{0.0f, 0.0f, 1.0f};
+    Vec3 ng{0.0f, 0.0f, 1.0f};
+    Vec3 wo{0.0f, 0.0f, 1.0f};
+    Vec2 uv{0.0f, 0.0f};
+    Vec3 y{0.0f};
+    Vec3 yN{0.0f, 1.0f, 0.0f};
+    Vec3 LeRgb{0.0f};
+    Vec3 wi{0.0f, 0.0f, 1.0f};
+    float distance = 0.0f;
+    float pdfArea = 0.0f;
+    float selectPdf = 0.0f;
+    float throughputS[kMaxSpectrumSamples]{};
+    int materialIndex = -1;
+    int lightIndex = -1;
+    int casterInstance = -1;
+    int armed = 0;
+    int pending = 0;
+    int distant = 0;
+    int clampDepth = 0;
+    int clampSpec = 0;
+    int clampCaustic = 0;
 };
 
 }  // namespace sol

@@ -14,7 +14,7 @@ extern "C" __global__ void __raygen__init_from_camera() {
     GpuHit& hit = params.hits[pixel];
     GpuShadow& shadow = params.shadows[pixel];
 
-    if (params.skipMask && params.skipMask[pixel]) {
+    if (params.skipMask && params.splatInvLightPaths <= 0.0f && params.skipMask[pixel]) {
         path.queue = kQueueDead;
         path.localSample = 0;
         hit = GpuHit{};

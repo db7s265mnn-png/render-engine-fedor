@@ -839,11 +839,6 @@ if (Test-Path -LiteralPath $cache) {
         $stale = $true
         $staleWhy = 'CMake generator changed'
     }
-    $errLog = Join-Path $BuildDir 'CMakeFiles\CMakeError.log'
-    if (Test-Path -LiteralPath $errLog) {
-        $stale = $true
-        $staleWhy = 'previous CMakeError.log'
-    }
     $oldNvcc = Select-String -Path $cache -Pattern '^CMAKE_CUDA_COMPILER:FILEPATH=(.+)$' | Select-Object -First 1
     if ($oldNvcc) {
         $oldNvccPath = $oldNvcc.Matches[0].Groups[1].Value.Replace('/', '\')
@@ -869,9 +864,19 @@ if (Test-Path -LiteralPath $cache) {
         }
     }
     if ($stale) {
-        Info "Clearing $BuildDir ($staleWhy)"
-        Remove-Item -LiteralPath $BuildDir -Recurse -Force
-        New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+        # Keep _deps so MaterialX / TinyUSDZ / OpenPGL git clones are not wiped
+        # when a new GitHub zip extracts to a different folder name.
+        Info "Resetting CMake cache in $BuildDir ($staleWhy). Keeping _deps."
+        foreach ($n in @(
+            'CMakeCache.txt', 'CMakeFiles', 'cmake_install.cmake',
+            'CTestTestfile.cmake', 'build.ninja', 'CMakeError.log',
+            'CMakeOutput.log', 'CMakeConfigureLog.yaml'
+        )) {
+            $p = Join-Path $BuildDir $n
+            if (Test-Path -LiteralPath $p) {
+                Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 
@@ -887,6 +892,26 @@ $featureFlags = @(
     '-DSOLSTICE_BUILD_TOOLS=OFF'
 )
 if ($script:FullBuild) {
+    function Ensure-GitDepSrc([string]$Url, [string]$Tag, [string]$Dest, [string]$Name) {
+        $cm = Join-Path $Dest 'CMakeLists.txt'
+        if (Test-Path -LiteralPath $cm) {
+            Info ($Name + ' source: ' + $Dest)
+            return
+        }
+        if (Test-Path -LiteralPath $Dest) {
+            Remove-Item -LiteralPath $Dest -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force -Path (Split-Path $Dest -Parent) | Out-Null
+        Info ("Cloning " + $Name + " " + $Tag + " (git, not GitHub tarball — CMake 4.x 403)")
+        & $Git clone --depth 1 --branch $Tag $Url $Dest
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $cm)) {
+            Fail ("git clone " + $Name + " " + $Tag + " failed. FULL needs " + $Name + ". Check github.com.")
+        }
+    }
+    $depsSrc = Join-Path $BuildDir '_deps'
+    Ensure-GitDepSrc 'https://github.com/AcademySoftwareFoundation/MaterialX.git' 'v1.39.4' (Join-Path $depsSrc 'materialx-src') 'MaterialX'
+    Ensure-GitDepSrc 'https://github.com/RenderKit/openpgl.git' 'v0.7.1' (Join-Path $depsSrc 'openpgl-src') 'OpenPGL'
+    Ensure-GitDepSrc 'https://github.com/lighttransport/tinyusdz.git' 'v0.9.4' (Join-Path $depsSrc 'tinyusdz-src') 'TinyUSDZ'
     $featureFlags += @(
         '-DSOLSTICE_ENABLE_ALEMBIC=ON',
         '-DSOLSTICE_ENABLE_OPENEXR=ON',
@@ -944,6 +969,26 @@ if (-not (Select-String -Path $Cfg -Pattern 'SOLSTICE_HAVE_OPTIX 1' -Quiet)) {
     Fail 'OptiX did not enable (SOLSTICE_HAVE_OPTIX != 1). Check nvcc and OptiX_ROOT in the cmake log.'
 }
 Info 'OptiX is compiled into this build (SOLSTICE_HAVE_OPTIX 1).'
+if ($script:FullBuild) {
+    # FULL must not ship an exe that silently dropped a feature (MaterialX
+    # was lost that way). OpenSubdiv stays off on Windows (MSVC climits).
+    $required = @(
+        @('SOLSTICE_HAVE_MATERIALX 1', 'MaterialX'),
+        @('SOLSTICE_HAVE_OPENPGL 1', 'OpenPGL'),
+        @('SOLSTICE_HAVE_TINYUSDZ 1', 'TinyUSDZ'),
+        @('SOLSTICE_HAVE_ALEMBIC 1', 'Alembic'),
+        @('SOLSTICE_HAVE_OPENEXR 1', 'OpenEXR'),
+        @('SOLSTICE_HAVE_OPENVDB 1', 'OpenVDB'),
+        @('SOLSTICE_HAVE_TIFF 1', 'libtiff'),
+        @('SOLSTICE_HAVE_OCIO 1', 'OpenColorIO')
+    )
+    foreach ($req in $required) {
+        if (-not (Select-String -Path $Cfg -Pattern $req[0] -Quiet)) {
+            Fail ($req[1] + ' did not enable (' + $req[0] + ' missing). FULL requires it — not a skip. See the cmake log.')
+        }
+        Info ($req[1] + ' is compiled into this build.')
+    }
+}
 
 function Find-RenderExe([string]$Dir) {
     $binRoot = Join-Path $Dir 'bin'
@@ -1050,12 +1095,39 @@ if ($script:DepsPrefix) {
         (Join-Path $script:DepsPrefix 'embree')
     )) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll', 'OpenColorIO*.dll')) {
+        foreach ($pat in @('embree*.dll', 'tbb*.dll', 'tbbmalloc*.dll', 'openvdb*.dll',
+                           'OpenColorIO*.dll', 'zlib1.dll', 'yaml-cpp*.dll', 'expat.dll', 'libexpat*.dll')) {
             Get-ChildItem -LiteralPath $dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
                 Copy-RuntimeFile $_.FullName $Bin
             }
         }
     }
+}
+
+# OpenColorIO_2_3.dll from current deps imports zlib1.dll. NVIDIA optixInit
+# hangs on zlib.dll (different file). Copy zlib1; delete zlib.dll.
+$ocioSub = Join-Path $Bin 'ocio'
+if (Test-Path -LiteralPath $ocioSub) {
+    Get-ChildItem -LiteralPath $ocioSub -Filter 'zlib1.dll' -ErrorAction SilentlyContinue | ForEach-Object {
+        Copy-RuntimeFile $_.FullName $Bin
+    }
+}
+foreach ($name in @('zlib.dll', 'zlibd.dll')) {
+    $p = Join-Path $Bin $name
+    if (Test-Path -LiteralPath $p) {
+        try {
+            Remove-Item -LiteralPath $p -Force -ErrorAction Stop
+            Info ("Deleted $name (NVIDIA optixInit hangs on zlib.dll)")
+        } catch {
+            Write-Host ("Warning: close Grendizer_Render and delete $p") -ForegroundColor Yellow
+        }
+    }
+}
+$ocioDll = Get-ChildItem -LiteralPath $Bin -Filter 'OpenColorIO*.dll' -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+$zlib1 = Join-Path $Bin 'zlib1.dll'
+if ($ocioDll -and -not (Test-Path -LiteralPath $zlib1)) {
+    Fail ("OpenColorIO is next to the exe but zlib1.dll is not. OpenColorIO_2_3.dll imports zlib1.dll. Not a skip.")
 }
 
 Write-Host ''

@@ -10,6 +10,9 @@
 
 #include "render/integrator_base.h"
 #include "render/integrator_bdpt.h"
+#include "render/integrator_spectral.h"
+#include "render/bdpt_stats.h"
+#include "render/bdpt_scratch.h"
 #include "render/spectral_common.h"
 #include "render/sss_spectral.h"
 
@@ -22,6 +25,20 @@ inline bool spectrumNearBlack(const SampledSpectrum& s) {
 inline bool spectrumIsFinite(const SampledSpectrum& s) {
     for (int i = 0; i < s.n; ++i)
         if (!srIsFinite(s.values[i])) return false;
+    return true;
+}
+
+// Same RR as spectral Path Tracer. Vertex already on the subpath stays.
+inline bool bdptRussianRouletteSpectral(SampledSpectrum& beta, Rng& rng, int bounceDepth,
+                                        int rrStartDepth, float* qOut = nullptr) {
+    if (bounceDepth < srMax(1, rrStartDepth)) {
+        if (qOut) *qOut = 1.0f;
+        return true;
+    }
+    const float q = clampf(spectrumMaxComponent(beta), 0.05f, 1.0f);
+    if (qOut) *qOut = q;
+    if (rng.nextFloat() > q) return false;
+    beta *= (1.0f / q);
     return true;
 }
 
@@ -40,6 +57,7 @@ namespace spectral_bdpt {
 struct WalkConfig {
     bool eyePath = false;
     const RGBColorSpace* colorSpace = nullptr;
+    BdptPassStats* stats = nullptr;
 #if SOLSTICE_HAVE_OPENPGL
     PathGuiding::ThreadState* guiding = nullptr;
 #endif
@@ -105,6 +123,15 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 origin = v.p;
                 dir = wi;
                 pdfSaFwd = phasePdf;
+                if (cfg.eyePath) rayKind = RayShadeKind::Volume;
+                float qRr = 1.0f;
+                if (!bdptRussianRouletteSpectral(beta, rng, count - 1, scene.settings.rrStartDepth,
+                                                 &qRr))
+                    break;
+#if SOLSTICE_HAVE_OPENPGL
+                if (cfg.eyePath && cfg.guiding && cfg.guiding->active())
+                    cfg.guiding->setRussianRoulette(qRr);
+#endif
                 continue;
             }
         }
@@ -177,13 +204,14 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
         v.wo = -dir;
         v.beta = spectrumToRgb(beta, waves, cs);
         v.mediumIndex = scene.instances[si.instanceIndex].mediumIndex;
+        v.materialIndex = si.materialIndex;
         v.pdfFwd = toAreaPdf(pdfSaFwd, prev.p, si.p, si.ns);
         {
             Material matHero = mat;
             matHero.ior = spectralAbsoluteIor(baseIor, mat.dispersionAbbe, heroLambda);
             const LobeWeights lw = computeLobes(matHero, Frame(si.ns).toLocal(-dir));
             v.delta = lw.delta && lw.diffuse < 1e-4f;
-            v.connectable = !v.delta;
+            v.connectable = eyePathNeeConnectable(matHero, Frame(si.ns).toLocal(-dir));
             v.nearSpec = v.delta || isNearSpecularLobe(lw) || isPhotonCausticCasterLobe(lw);
         }
         path[count] = v;
@@ -216,7 +244,7 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 beta *= 1.0f / pSpec;
                 cur.mat = specMat;
                 cur.delta = specLw.delta && specLw.diffuse < 1e-4f;
-                cur.connectable = !cur.delta;
+                cur.connectable = eyePathNeeConnectable(specMat, woLocal);
                 cur.nearSpec = cur.delta || isNearSpecularLobe(specLw) || isPhotonCausticCasterLobe(specLw);
                 cur.beta = spectrumToRgb(beta, waves, cs);
                 betaPath[count - 1] = beta;
@@ -239,8 +267,14 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
                 break;
             } else {
                 if (pSpec > 0.0f && pSpec < 0.999f) beta *= 1.0f / (1.0f - pSpec);
-                const SssWalkResultSpectral walk =
-                    sampleSssRandomWalkSpectral(scene, tracer, si, -dir, mat, rng, waves);
+                const Material sssBody = sssBodyMaterial(scene, si, mat);
+                SssWalkResultSpectral walk;
+                if (cfg.stats) {
+                    BdptPhaseTimer sssTimer(&cfg.stats->nsSss);
+                    walk = sampleSssRandomWalkSpectral(scene, tracer, si, -dir, sssBody, rng, waves);
+                } else {
+                    walk = sampleSssRandomWalkSpectral(scene, tracer, si, -dir, sssBody, rng, waves);
+                }
                 if (!walk.escaped || !sssSpectrumWeightValid(walk.pathWeight)) break;
                 cur.p = walk.exitP;
                 cur.ng = walk.exitN;
@@ -344,6 +378,15 @@ SR_INL int randomWalk(const SceneView& scene, const Tracer& tracer, Rng& rng, bd
         beta *= weight;
         if (!spectrumIsFinite(beta) || spectrumNearBlack(beta)) break;
         {
+            float qRr = 1.0f;
+            if (!bdptRussianRouletteSpectral(beta, rng, count - 1, scene.settings.rrStartDepth, &qRr))
+                break;
+#if SOLSTICE_HAVE_OPENPGL
+            if (cfg.eyePath && cfg.guiding && cfg.guiding->active())
+                cfg.guiding->setRussianRoulette(qRr);
+#endif
+        }
+        {
             const LobeWeights lwTerm = computeLobes(cur.mat, woLocal);
             if (shouldTerminateSecondaryWavelengths(bs, lwTerm, cur.mat) &&
                 !waves.secondaryTerminated())
@@ -375,7 +418,8 @@ inline Vec3 traceRadianceBdptSpectral(
     PathGuiding::ThreadState* guiding,
 #endif
     Framebuffer* splatFb, DispersionContext* dispersion, const CausticPhotonMap* photons,
-    SampledSpectrum* outSpectrum = nullptr) {
+    SampledSpectrum* outSpectrum = nullptr, BdptPassStats* stats = nullptr,
+    BdptScratch* scratch = nullptr) {
     using namespace bdpt;
     const RenderSettingsData& settings = scene.settings;
     const RGBColorSpace& filmCs = pathColorSpace(settings);
@@ -389,69 +433,83 @@ inline Vec3 traceRadianceBdptSpectral(
     const bool doSplats = splatFb != nullptr && camProj.valid;
     if (doSplats) splatFb->addSplatPath();
 
-    Vert eye[kMaxVerts];
-    Vert light[kMaxVerts];
-    SampledSpectrum eyeBeta[kMaxVerts];
-    SampledSpectrum lightBeta[kMaxVerts];
+    BdptPhaseTimer totalTimer(stats ? &stats->nsTotal : nullptr);
+
+    if (!scratch) scratch = &bdptThreadScratch();
+    {
+        BdptPhaseTimer allocTimer(stats ? &stats->nsAlloc : nullptr);
+        scratch->ensure(maxVerts);
+    }
+    Vert* eye = scratch->eye.data();
+    Vert* light = scratch->light.data();
+    SampledSpectrum* eyeBeta = scratch->eyeBeta.data();
+    SampledSpectrum* lightBeta = scratch->lightBeta.data();
+    SampledWavelengths* lightWavePath = scratch->lightWave.data();
+    SampledWavelengths* eyeWavePath = scratch->eyeWave.data();
     SampledWavelengths lightWaves = waves;
     SampledWavelengths eyeWaves = waves;
-    SampledWavelengths lightWavePath[kMaxVerts];
-    SampledWavelengths eyeWavePath[kMaxVerts];
     lightWavePath[0] = lightWaves;
     eyeWavePath[0] = eyeWaves;
 
     int nLight = 0;
+    int nEye = 0;
     bool lightOriginDelta = false;
-    if (scene.lightCount > 0) {
-        Vec3 emitDir;
-        float pdfDirSa = 0.0f;
-        if (startLightPath(scene, rng, light[0], emitDir, pdfDirSa)) {
-            nLight = 1;
-            if (light[0].lightIndex >= 0) {
-                lightBeta[0] = lightEmissionSpectrum(scene.lights[light[0].lightIndex], lightWaves, filmCs);
-                const float rgbLum = length(light[0].beta);
-                const Vec3 sRgb = spectrumToRgb(lightBeta[0], lightWaves, filmCs);
-                const float sLum = length(sRgb);
-                if (sLum > 1e-8f && rgbLum > 0.0f) lightBeta[0] *= rgbLum / sLum;
-            } else {
-                lightBeta[0] = upsampleEmission(light[0].beta, lightWaves, filmCs);
+    {
+        BdptPhaseTimer walkTimer(stats ? &stats->nsWalk : nullptr);
+        if (scene.lightCount > 0) {
+            Vec3 emitDir;
+            float pdfDirSa = 0.0f;
+            if (startLightPath(scene, rng, light[0], emitDir, pdfDirSa)) {
+                nLight = 1;
+                if (light[0].lightIndex >= 0) {
+                    lightBeta[0] =
+                        lightEmissionSpectrum(scene.lights[light[0].lightIndex], lightWaves, filmCs);
+                    const float rgbLum = length(light[0].beta);
+                    const Vec3 sRgb = spectrumToRgb(lightBeta[0], lightWaves, filmCs);
+                    const float sLum = length(sRgb);
+                    if (sLum > 1e-8f && rgbLum > 0.0f) lightBeta[0] *= rgbLum / sLum;
+                } else {
+                    lightBeta[0] = upsampleEmission(light[0].beta, lightWaves, filmCs);
+                }
+                light[0].beta = spectrumToRgb(lightBeta[0], lightWaves, filmCs);
+                lightOriginDelta = lightOriginIsDelta(scene, light[0]);
+                spectral_bdpt::WalkConfig cfg;
+                cfg.colorSpace = &filmCs;
+                cfg.stats = stats;
+                const bool inf = lightIsInfinite(scene.lights[light[0].lightIndex]);
+                const Vec3 o = inf ? light[0].p : offsetRayOrigin(light[0].p, light[0].ng, emitDir);
+                nLight = spectral_bdpt::randomWalk(scene, tracer, rng, light, lightBeta,
+                                                   lightWavePath, nLight, o, emitDir, pdfDirSa,
+                                                   maxVerts, cfg, lightWaves, heroIdx);
+                correctInfiniteLightSubpathPdfs(scene, light, nLight, emitDir);
             }
-            light[0].beta = spectrumToRgb(lightBeta[0], lightWaves, filmCs);
-            lightOriginDelta = lightOriginIsDelta(scene, light[0]);
-            spectral_bdpt::WalkConfig cfg;
-            cfg.colorSpace = &filmCs;
-            const bool inf = lightIsInfinite(scene.lights[light[0].lightIndex]);
-            const Vec3 o = inf ? light[0].p : offsetRayOrigin(light[0].p, light[0].ng, emitDir);
-            nLight = spectral_bdpt::randomWalk(scene, tracer, rng, light, lightBeta, lightWavePath,
-                                               nLight, o, emitDir, pdfDirSa, maxVerts, cfg,
-                                               lightWaves, heroIdx);
-            correctInfiniteLightSubpathPdfs(scene, light, nLight, emitDir);
         }
-    }
 
-    eye[0] = Vert{};
-    eye[0].type = VType::Camera;
-    eye[0].p = origin;
-    eye[0].ng = eye[0].ns = direction;
-    eye[0].wo = -direction;
-    eye[0].beta = Vec3(1.0f);
-    eye[0].pdfFwd = 1.0f;
-    eye[0].connectable = false;
-    eyeBeta[0] = SampledSpectrum::constant(waves.n, 1.0f);
-    spectral_bdpt::WalkConfig eyeCfg;
-    eyeCfg.eyePath = true;
-    eyeCfg.colorSpace = &filmCs;
+        eye[0] = Vert{};
+        eye[0].type = VType::Camera;
+        eye[0].p = origin;
+        eye[0].ng = eye[0].ns = direction;
+        eye[0].wo = -direction;
+        eye[0].beta = Vec3(1.0f);
+        eye[0].pdfFwd = 1.0f;
+        eye[0].connectable = false;
+        eyeBeta[0] = SampledSpectrum::constant(waves.n, 1.0f);
+        spectral_bdpt::WalkConfig eyeCfg;
+        eyeCfg.eyePath = true;
+        eyeCfg.colorSpace = &filmCs;
+        eyeCfg.stats = stats;
 #if SOLSTICE_HAVE_OPENPGL
-    eyeCfg.guiding = guiding;
+        eyeCfg.guiding = guiding;
 #endif
-    float camPdfSa = 1.0f;
-    if (camProj.valid) {
-        const Vec3 dc = transformVector(camProj.worldToCam, direction);
-        camPdfSa = cameraPdfOmega(camProj, srMax(1e-4f, -dc.z));
+        float camPdfSa = 1.0f;
+        if (camProj.valid) {
+            const Vec3 dc = transformVector(camProj.worldToCam, direction);
+            camPdfSa = cameraPdfOmega(camProj, srMax(1e-4f, -dc.z));
+        }
+        nEye = spectral_bdpt::randomWalk(scene, tracer, rng, eye, eyeBeta, eyeWavePath, 1,
+                                         origin, direction, camPdfSa, maxVerts, eyeCfg, eyeWaves,
+                                         heroIdx);
     }
-    const int nEye =
-        spectral_bdpt::randomWalk(scene, tracer, rng, eye, eyeBeta, eyeWavePath, 1, origin,
-                                  direction, camPdfSa, maxVerts, eyeCfg, eyeWaves, heroIdx);
 
     SampledSpectrum radiance = SampledSpectrum::zero(waves.n);
     Vec3 filmRgb(0.0f);
@@ -463,27 +521,31 @@ inline Vec3 traceRadianceBdptSpectral(
     };
 
     // Caustic photon gather.
-    if (photonCaustics) {
+    {
+        BdptPhaseTimer connectTimer(stats ? &stats->nsConnect : nullptr);
+        if (photonCaustics) {
         for (int t = 2; t <= nEye; ++t) {
             const Vert& E = eye[t - 1];
             if (E.type != VType::Surface || !E.connectable || E.nearSpec) continue;
-            const Vec3 gather = photons->gather(E.p, E.ns, E.wo, E.mat, photonRadius);
-            if (isBlack(gather) || !isFinite(gather)) continue;
             const SampledWavelengths& wE = eyeWavePath[t - 1];
-            SampledSpectrum c = eyeBeta[t - 1] * upsampleLightRadiance(gather, wE, filmCs);
+            const SampledSpectrum gather =
+                photons->gatherSpectral(E.p, E.ns, E.wo, E.mat, photonRadius, wE, filmCs);
+            if (spectrumMaxComponent(gather) <= 0.0f) continue;
+            SampledSpectrum c = eyeBeta[t - 1] * gather;
             if (t > 2) c = clampSpectrumIndirect(c, settings.clampDirect);
             addFilm(c, wE);
 #if SOLSTICE_HAVE_OPENPGL
             if (guiding && guiding->active() && E.guideSeg)
-                guiding->addScatteredAt(E.guideSeg,
-                                        spectrumToRgb(upsampleLightRadiance(gather, wE, filmCs), wE,
-                                                      filmCs));
+                guiding->addScatteredAt(E.guideSeg, spectrumToRgb(gather, wE, filmCs));
 #endif
+        }
         }
     }
 
     // t = 1 light-tracing splats.
-    if (doSplats && nLight >= 2) {
+    {
+        BdptPhaseTimer splatTimer(stats ? &stats->nsSplat : nullptr);
+        if (doSplats && nLight >= 2) {
         for (int s = 2; s <= nLight; ++s) {
             const Vert& v = light[s - 1];
             if (v.type != VType::Surface || !v.connectable) continue;
@@ -506,6 +568,7 @@ inline Vec3 traceRadianceBdptSpectral(
             const Vec3 toCam = normalize(camProj.camPos - v.p);
             const SampledWavelengths& wL = lightWavePath[s - 1];
             const SampledSpectrum f = vertBsdfFSpectral(v, v.wo, toCam, wL, filmCs);
+            if (stats) stats->shadows.fetch_add(1, std::memory_order_relaxed);
             if (spectrumNearBlack(f) ||
                 !connectionVisible(scene, tracer, v.p, v.ng, camProj.camPos, -1))
                 continue;
@@ -535,10 +598,13 @@ inline Vec3 traceRadianceBdptSpectral(
             const Vec3 rgb = spectrumToRgb(c, wL, filmCs);
             if (isFinite(rgb)) splatFb->addSplat(int(px), int(py), rgb);
         }
+        }
     }
 
     // s = 0: eye path emission and light hits.
-    for (int t = 2; t <= nEye; ++t) {
+    {
+        BdptPhaseTimer connectTimer(stats ? &stats->nsConnect : nullptr);
+        for (int t = 2; t <= nEye; ++t) {
         const Vert& v = eye[t - 1];
         if (v.type == VType::Surface) {
             if (v.mat.emissionStrength > 0.0f && !isBlack(v.mat.emissionColor)) {
@@ -625,7 +691,7 @@ inline Vec3 traceRadianceBdptSpectral(
         ov.eyeLastRev = pdfLightOrigin(scene, l, v.lightIndex, eye[t - 2].p);
         const Vec3 emitToPrev = normalize(eye[t - 2].p - v.p);
         ov.eyePrevRev =
-            toAreaPdf(pdfLightDirSa(l, lightN, emitToPrev), v.p, eye[t - 2].p,
+            toAreaPdf(pdfLightEmitDirSa(scene, l, v.p, lightN, emitToPrev), v.p, eye[t - 2].p,
                       eye[t - 2].type == VType::Surface ? eye[t - 2].ns : eye[t - 2].ng);
         const SampledWavelengths& wE = eyeWavePath[t - 1];
         SampledSpectrum c =
@@ -670,7 +736,8 @@ inline Vec3 traceRadianceBdptSpectral(
             float visibility = 1.0f;
             if (scene.lights[li].shadowEnable) {
                 const Vec3 o = offsetRayOrigin(E.p, E.ng, ls.wi);
-                visibility = shadowVisibility(scene, tracer, o, ls.wi, 1.0e8f);
+                if (stats) stats->shadows.fetch_add(1, std::memory_order_relaxed);
+                visibility = shadowVisibility(scene, tracer, o, ls.wi, 1.0e8f, t > 2 ? 1 : 0);
             }
             if (visibility <= 1e-5f) continue;
             const float bsdfPdf = ls.delta ? 0.0f : bsdfPdfSa(E, E.wo, ls.wi);
@@ -735,6 +802,7 @@ inline Vec3 traceRadianceBdptSpectral(
         if (l.shadowEnable) {
             const Vec3 o = offsetRayOrigin(E.p, E.ng, wi);
             RayHit shadowHit;
+            if (stats) stats->shadows.fetch_add(1, std::memory_order_relaxed);
             if (tracer.intersect(o, wi, dist * (1.0f - 1e-3f), shadowHit)) {
                 SurfaceInteraction blockerSi;
                 clearPath = false;
@@ -813,7 +881,7 @@ inline Vec3 traceRadianceBdptSpectral(
         ov.splatStrategy = doSplats;
         ov.lightOriginDelta = l.type == kLightPoint;
         ov.lightLastRev = toAreaPdf(bsdfPdfSa(E, E.wo, wi), E.p, Ls.p, Ls.ns);
-        ov.eyeLastRev = toAreaPdf(pdfLightDirSa(l, lightN, -wi), Ls.p, E.p, E.ns);
+        ov.eyeLastRev = toAreaPdf(pdfLightEmitDirSa(scene, l, Ls.p, lightN, -wi), Ls.p, E.p, E.ns);
         if (t >= 3)
             ov.eyePrevRev =
                 toAreaPdf(bsdfPdfSa(E, wi, normalize(eye[t - 2].p - E.p)), E.p,
@@ -872,6 +940,10 @@ inline Vec3 traceRadianceBdptSpectral(
             const SampledSpectrum fL = vertBsdfFSpectral(Lv, Lv.wo, -d, wConn, filmCs);
             if (spectrumNearBlack(fE) || spectrumNearBlack(fL)) continue;
             const float G = geometryTerm(E, Lv);
+            if (stats) {
+                stats->pairs.fetch_add(1, std::memory_order_relaxed);
+                stats->shadows.fetch_add(1, std::memory_order_relaxed);
+            }
             if (G <= 0.0f ||
                 !connectionVisible(scene, tracer, E.p, E.ng, Lv.p, -1))
                 continue;
@@ -905,6 +977,30 @@ inline Vec3 traceRadianceBdptSpectral(
         }
     }
 
+    if (nEye == maxVerts && nEye >= 2) {
+        const Vert& last = eye[nEye - 1];
+        if (last.type == VType::Surface && materialWantsExitToDiffuse(last.mat) &&
+            last.materialIndex >= 0) {
+            const SampledWavelengths& wE = eyeWavePath[nEye - 1];
+            SampledSpectrum extra = exitToDiffuseWalkReflectAndRefractSpectral(
+                scene, tracer, last.p, last.ng, last.ns, -last.wo, last.materialIndex, last.mat, rng, wE,
+                filmCs, last.mediumIndex, exitToDiffuseDestShadowNee());
+            if (spectrumMaxComponent(extra) > 0.0f) {
+                extra = clampSpectrumIndirect(extra, settings.clampDirect);
+                addFilm(eyeBeta[nEye - 1] * extra, wE);
+            }
+        }
+    }
+    }
+
+    if (stats) {
+        stats->pixels.fetch_add(1, std::memory_order_relaxed);
+        stats->nEyeSum.fetch_add(uint64_t(nEye < 0 ? 0 : nEye), std::memory_order_relaxed);
+        stats->nLightSum.fetch_add(uint64_t(nLight < 0 ? 0 : nLight), std::memory_order_relaxed);
+        bdptAtomicMax(stats->nEyeMax, uint64_t(nEye < 0 ? 0 : nEye));
+        bdptAtomicMax(stats->nLightMax, uint64_t(nLight < 0 ? 0 : nLight));
+    }
+
     if (!spectrumIsFinite(radiance)) {
         radiance = SampledSpectrum::zero(waves.n);
         filmRgb = Vec3(0.0f);
@@ -932,11 +1028,12 @@ public:
 #if SOLSTICE_HAVE_OPENPGL
         const Vec3 rgb = traceRadianceBdptSpectral(
             *ctx.scene, *ctx.tracer, ctx.origin, ctx.direction, *ctx.rng, waves, heroIdx,
-            ctx.guiding, ctx.splatFb, ctx.dispersion, ctx.photons, &radiance);
+            ctx.guiding, ctx.splatFb, ctx.dispersion, ctx.photons, &radiance, ctx.bdptStats,
+            ctx.bdptScratch);
 #else
         const Vec3 rgb = traceRadianceBdptSpectral(
             *ctx.scene, *ctx.tracer, ctx.origin, ctx.direction, *ctx.rng, waves, heroIdx,
-            ctx.splatFb, ctx.dispersion, ctx.photons, &radiance);
+            ctx.splatFb, ctx.dispersion, ctx.photons, &radiance, ctx.bdptStats, ctx.bdptScratch);
 #endif
         return rgb;
     }

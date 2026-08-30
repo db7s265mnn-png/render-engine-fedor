@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include <QCoreApplication>
 #include <QColor>
 #include <QDir>
 #include <QImage>
@@ -23,6 +24,8 @@
 #include <QVector3D>
 
 #include "app/default_scene.h"
+#include "app/integrator_device.h"
+#include "app/undo_hub.h"
 #include "core/image.h"
 #include "core/rng.h"
 #include "io/alembic_loader.h"
@@ -39,10 +42,15 @@
 #include "render/cpu/polynomial_optics.h"
 #include "render/film_tile.h"
 #include "render/framebuffer.h"
+#include "render/bdpt_stats.h"
+#include "render/bdpt_scratch.h"
 #include "render/integrator.h"
+#include "render/integrator_bdpt.h"
 #include "render/pixel_filter.h"
 #include "render/metal_spectra.h"
+#include "render/optix/path_state.h"
 #include "render/photon_map.h"
+#include "render/photon_aim.h"
 #include "render/physical_sky.h"
 #include "render/render_session.h"
 #include "render/shading.h"
@@ -420,6 +428,66 @@ void testBsdf() {
     }
     check(transmitted > 1000, "most glass samples refract at normal incidence");
 
+    {
+        Material deltaGlass;
+        deltaGlass.transmission = 1.0f;
+        deltaGlass.ior = 1.5f;
+        deltaGlass.roughness = 0.0f;
+        Material roughGlass = deltaGlass;
+        roughGlass.roughness = 0.1f;
+        Material floor;
+        floor.baseColor = Vec3(0.7f, 0.7f, 0.7f);
+        floor.roughness = 0.4f;
+        const Vec3 woN(0.0f, 0.0f, 1.0f);
+        check(isDeltaCausticCaster(deltaGlass), "smooth glass is a delta MNEE caster");
+        check(!isDeltaCausticCaster(roughGlass), "roughness 0.1 glass is not a delta MNEE caster");
+        check(isTransmissiveCausticCaster(deltaGlass), "delta glass is a transmissive SDS caster");
+        check(isTransmissiveCausticCaster(roughGlass),
+              "roughness 0.1 glass shares SDS throughGlass with delta");
+        check(!lightTraceConnectable(deltaGlass, woN), "delta glass is not an LT connectable");
+        check(!lightTraceConnectable(roughGlass, woN), "rough glass is not an LT connectable (continue, no splat)");
+        check(lightTraceConnectable(floor, woN), "Lambert floor is an LT connectable");
+        check(!eyePathNeeConnectable(deltaGlass, woN), "delta glass is not NEE-connectable");
+        check(!eyePathNeeConnectable(roughGlass, woN),
+              "roughness 0.1 glass is not NEE-connectable (no GGX glow)");
+        check(eyePathNeeConnectable(floor, woN), "Lambert is NEE-connectable");
+        Material frosted = deltaGlass;
+        frosted.roughness = 0.5f;
+        check(eyePathNeeConnectable(frosted, woN), "roughness 0.5 glass stays NEE-connectable");
+        check(!lightTraceConnectable(frosted, woN), "frosted glass is still not an LT splat vertex");
+        check(!isTransmissiveCausticCaster(frosted),
+              "roughness 0.5 glass is not a near-spec SDS caster");
+        Material noCau = deltaGlass;
+        noCau.contributeCaustics = 0;
+        check(!isDeltaCausticCaster(noCau), "contribute_caustics=0 is not an MNEE caster");
+
+        // Iray Photoreal: contributing glass is opaque for primary/LT shadows and
+        // Fresnel-open for eye NEE after a bounce (straight shadow ray, not Snell).
+        {
+            Material g;
+            g.transmission = 1.0f;
+            g.ior = 1.5f;
+            g.roughness = 0.0f;
+            g.contributeCaustics = 1;
+            g.transmissionColor = Vec3(1.0f);
+            const float Fenter = fresnelDielectric(1.0f, 1.5f);
+            check(shadowBlockFraction(g, g, 1, 0, 1.0f) > 0.999f,
+                  "primary NEE / LT splat: contributing glass is opaque");
+            const float bounceBlock = shadowBlockFraction(g, g, 1, 1, 1.0f);
+            checkNear(bounceBlock, Fenter, 1e-5f,
+                      "eye NEE after bounce: block equals dielectric Fresnel");
+            check(bounceBlock < 0.1f, "normal-incidence glass NEE is mostly open");
+            const float critCos = sqrtf(1.0f - 1.0f / (1.5f * 1.5f));
+            check(shadowBlockFraction(g, g, 1, 1, -(critCos - 0.05f)) > 0.999f,
+                  "TIR still fully blocks Iray glass NEE");
+            Material fake = g;
+            fake.contributeCaustics = 0;
+            fake.shadowOpacity = 0.25f;
+            checkNear(shadowBlockFraction(fake, fake, 1, 0, 1.0f), 0.25f, 1e-5f,
+                      "contribute off uses shadowOpacity even with caustics ON");
+        }
+    }
+
     // Specular = 0 must disable dielectric reflections completely.
     Material matte;
     matte.baseColor = Vec3(0.7f, 0.7f, 0.7f);
@@ -476,6 +544,70 @@ void testBsdf() {
     }
     const float measuredFr = float(reflected30) / float(trials30);
     checkNear(measuredFr, expectedFr, 0.008f, "interior Fresnel split uses the glass→air eta");
+
+    // pbrt FrDielectric: signed cos + stored outside η equals side-relative +cos.
+    {
+        const float c = std::cos(radians(30.0f));
+        checkNear(fresnelDielectric(-c, 1.5f), fresnelDielectric(c, 1.0f / 1.5f), 1e-6f,
+                  "FrDielectric(-cos, η) == FrDielectric(+cos, 1/η)");
+        const float pastCrit = std::cos(std::asin(1.0f / 1.5f) + 0.2f);
+        checkNear(fresnelDielectric(-pastCrit, 1.5f), 1.0f, 1e-5f,
+                  "signed-cos outside eta reports TIR from inside");
+    }
+
+    // Rough glass from inside past the critical angle: F is TIR (not air→glass ~0.04).
+    // Spectral f and the hero-λ pdf must use that same F, or the belly goes black.
+    {
+        Material gRough = glass;
+        gRough.roughness = 0.1f;
+        gRough.specular = 0.0f;
+        const Vec3 woTir = woBeyondCritical;
+        const Vec3 wiMirror(-woTir.x, -woTir.y, woTir.z);
+        const BsdfEval eRgb = bsdfEvalLocal(gRough, woTir, wiMirror);
+        check(eRgb.pdf > 0.0f && eRgb.f.x > 0.0f, "rough inside TIR eval is non-zero");
+        const float wMirror = eRgb.f.x * fabsf(wiMirror.z) / srMax(eRgb.pdf, 1e-12f);
+        check(wMirror > 0.5f, "rough inside TIR f/pdf is O(1), not air→glass F");
+        const LobeWeights lwR = computeLobes(gRough, woTir);
+        const DielectricGgxEval mf =
+            evalDielectricGgx(woTir, wiMirror, lwR.ax, lwR.ay, 1.5f, true);
+        checkNear(eRgb.pdf, lwR.transmission * mf.pdf, std::max(1e-5f, eRgb.pdf * 0.02f),
+                  "RGB eval pdf is dielectric GGX pdf at outside eta");
+
+        SampledWavelengths wv{};
+        wv.n = 4;
+        for (int i = 0; i < 4; ++i) {
+            wv.lambda[i] = 450.0f + 60.0f * float(i);
+            wv.pdf[i] = 1.0f;
+        }
+        const SampledSpectrum fS = bsdfEvalSpectralDielectric(gRough, woTir, wiMirror, wv, 1.5f);
+        for (int i = 0; i < wv.n; ++i) {
+            checkNear(fS.values[i], eRgb.f.x, std::max(1e-4f, eRgb.f.x * 0.05f),
+                      "spectral inside TIR f matches RGB (same outside-eta F)");
+        }
+
+        int nTir = 0;
+        int nDark = 0;
+        for (int i = 0; i < 1500; ++i) {
+            const float u1 = rng.nextFloat();
+            const float u2 = rng.nextFloat();
+            const BsdfSample s = bsdfSampleLocal(gRough, woTir, 0.99f, u1, u2, 0.0f);
+            if (s.pdf <= 0.0f || s.transmitted) continue;
+            const BsdfEval ev = bsdfEvalLocal(gRough, woTir, s.wi);
+            checkNear(ev.pdf, s.pdf, std::max(1e-4f, s.pdf * 0.02f),
+                      "rough inside TIR sample/eval pdf agree");
+            const BsdfSampleSpectral ss =
+                bsdfSampleSpectral(gRough, woTir, 0.99f, u1, u2, 0.0f, wv, 1.5f, 0);
+            if (!ss.valid || ss.transmitted || ss.pdf <= 0.0f) continue;
+            ++nTir;
+            const DielectricGgxEval mfS =
+                evalDielectricGgx(woTir, ss.wi, lwR.ax, lwR.ay, 1.5f, true);
+            checkNear(ss.pdf, lwR.transmission * mfS.pdf, std::max(1e-4f, ss.pdf * 0.05f),
+                      "spectral sample pdf is hero-λ dielectric F, not RGB eval");
+            if (ss.weight.values[0] < 0.2f) ++nDark;
+        }
+        check(nTir > 200, "rough inside TIR produces reflection samples");
+        check(nDark == 0, "spectral inside TIR weight is not the 0.04 double-swap");
+    }
 
     // Arnold Advanced → Internal Reflections: from inside, disable Fresnel
     // reflections (keep TIR). Exterior behaviour unchanged.
@@ -656,6 +788,95 @@ void testBsdf() {
         checkNear(average(bsdfEvalLocal(lamb, wo, wi).f), 0.8f * kInvPi, 1e-5f,
                   "Lambert is albedo/π when diffuse_roughness=0");
     }
+
+    // Exit to Diffuse destination Lambert: base × base_color (glass uses transmission tint).
+    {
+        Material def{};
+        check(def.exitToDiffuse == 0, "Exit to Diffuse defaults off");
+        check(!materialWantsExitToDiffuse(def), "default material does not want exit");
+
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.baseWeight = 0.8f;
+        glass.transmission = 1.0f;
+        glass.transmissionColor = Vec3(0.2f, 0.6f, 1.0f);
+        glass.roughness = 0.0f;
+        glass.specular = 1.0f;
+        glass.ior = 1.5f;
+        glass.exitToDiffuse = 1;
+        check(materialWantsExitToDiffuse(glass), "flag enables exit");
+        check(!exitToDiffuseShouldStart(glass, 0), "arrival start still requires depth > 0");
+        check(exitToDiffuseShouldStart(glass, 1), "bounce at max depth can start Exit to Diffuse");
+        check(exitToDiffuseShouldArmBounce(glass, 0, 1), "last bounce from camera glass arms both walks");
+        check(!exitToDiffuseShouldArmBounce(glass, 0, 8), "deeper maxDepth still BSDF on the camera hit");
+        check(exitToDiffuseWantsRefractWalk(glass), "glass fires the through walk");
+        Material mirror = glass;
+        mirror.transmission = 0.0f;
+        check(!exitToDiffuseWantsRefractWalk(mirror), "opaque mirror skips the through walk");
+        const Vec3 bounce = exitToDiffuseReflectDirection(Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 0.0f, 1.0f));
+        checkNear(bounce.z, 1.0f, 1e-5f, "reflect of -Z about +Z is +Z");
+        check(exitToDiffuseSkipSelf(3, 3, 0), "same material is skipped");
+        check(!exitToDiffuseSkipSelf(3, 4, 0), "other material is the destination");
+        check(!exitToDiffuseSkipSelf(3, 3, kExitToDiffuseMaxSkips), "skip cap stops self-walk");
+        check(exitToDiffuseSkipDielectricDest(glass), "transmissive dest is not Lambert");
+        Material liquidDest = glass;
+        liquidDest.exitToDiffuse = 0;
+        liquidDest.ior = 1.33f;
+        check(exitToDiffuseSkipDielectricDest(liquidDest), "unflagged water is still skipped");
+        Material flaggedOpaque{};
+        flaggedOpaque.exitToDiffuse = 1;
+        flaggedOpaque.transmission = 0.0f;
+        check(exitToDiffuseSkipDielectricDest(flaggedOpaque), "flagged dest is never Lambert");
+        Material destMirror = mirror;
+        destMirror.exitToDiffuse = 0;
+        check(!exitToDiffuseSkipDielectricDest(destMirror), "opaque unflagged mirror stays dest");
+        const Material lamb = exitToDiffuseLambert(glass);
+        check(lamb.transmission <= 1e-6f && lamb.specular <= 1e-6f && lamb.metallic <= 1e-6f,
+              "exit material is Lambert");
+        checkNear(lamb.baseColor.x, 0.16f, 1e-4f, "glass exit albedo includes transmission tint");
+        checkNear(lamb.baseColor.z, 0.8f, 1e-4f, "glass exit keeps the blue channel");
+        const Vec3 woN(0.0f, 0.0f, 1.0f);
+        check(!eyePathNeeConnectable(glass, woN), "smooth glass is not NEE-connectable");
+        check(eyePathNeeConnectable(lamb, woN), "exit Lambert is NEE-connectable");
+
+        Material pureGlass = glass;
+        pureGlass.baseWeight = 0.0f;
+        const Material lamb0 = exitToDiffuseLambert(pureGlass);
+        checkNear(lamb0.baseColor.y, 0.6f, 1e-4f, "base=0 glass exits as transmission_color");
+
+        // GPU used to require the flag on this hit — the floor behind glass
+        // never has it, so OptiX NEE was a no-op. Destination only needs Lambert.
+        Material floorDest{};
+        floorDest.baseColor = Vec3(0.75f);
+        floorDest.roughness = 0.9f;
+        check(!materialWantsExitToDiffuse(floorDest), "destination does not carry the flag");
+        const Material floorLamb = exitToDiffuseLambert(floorDest);
+        check(eyePathNeeConnectable(floorLamb, woN), "unflagged destination still NEE-connectable");
+        check(exitToDiffuseEyeBounceNee() == 1, "dest NEE is a bounce so glass stays open");
+        check(exitToDiffuseDestShadowNee() == 2, "dest shadow mode is 2");
+        check(shadowBlockFraction(glass, glass, 1, 2, 1.0f) <= 1e-5f,
+              "ETD dest shadow opens contributing glass");
+        check(shadowBlockFraction(floorDest, floorDest, 1, 2, 1.0f) >= 0.999f,
+              "ETD dest shadow still blocks opaque");
+        float dyingLobe = 0.0f, dyingChoice = 1.0f;
+        exitToDiffuseDyingReflectU(glass, dyingLobe, dyingChoice);
+        check(dyingChoice == 0.0f && dyingLobe > 0.99f, "dying glass samples reflection/TIR");
+        exitToDiffuseDyingReflectU(mirror, dyingLobe, dyingChoice);
+        check(dyingChoice == 0.0f && dyingLobe < 0.5f, "dying mirror uses the reflection lobe");
+        check(!exitToDiffuseSkipOpacity(floorDest, 0.0f), "opaque dest is not skipped");
+        Material cutout{};
+        cutout.opacity = 0.0f;
+        check(exitToDiffuseSkipOpacity(cutout, 0.0f), "zero opacity is skipped");
+        Vec3 destNs(0.0f, 0.0f, 1.0f);
+        SceneView emptyMaps{};
+        const Material mapped = evaluateSurfaceMaps(emptyMaps, floorDest, Vec2(0.0f), destNs);
+        checkNear(mapped.baseColor.x, 0.75f, 1e-5f, "untextured dest maps keep base_color");
+        checkNear(destNs.z, 1.0f, 1e-5f, "untextured dest maps do not flip ns");
+        check(exitToDiffuseDestMedium(emptyMaps, 3, -1) == 3, "walk medium wins over missing instance");
+        RenderSettingsData gpuNee{};
+        check(gpuEyeBounceNee(gpuNee, 0, 0, 1, kLightPoint) == 0,
+              "primary NEE still opaques glass — ETD must not use path.depth");
+    }
 }
 
 void testGlob() {
@@ -768,6 +989,49 @@ void testXpuDevice() {
     check(noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 8.0f, 8, 0.01f), "constant L² matches mean² → quiet");
     check(!noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 80.0f, 8, 0.01f), "high L² variance stays noisy");
     check(!noiseOraclePixelQuiet(1.0f, 1.0f, 1.0f, 8.0f, 8, 0.0f), "threshold 0 disables the oracle");
+    // GPU LT: SDS in rgb, camera L² only. Implied variance is largely negative.
+    check(!noiseOraclePixelQuiet(50.0f, 50.0f, 50.0f, 8.0f * 0.2f * 0.2f, 8, 0.01f),
+          "splat-inflated mean vs camera L² stays open");
+
+    {
+        RenderSettingsData s{};
+        s.caustics = 1;
+        s.backend = kBackendGpuOptix;
+        check(gpuLightTraceSkipUnsafe(s), "GPU caustics skip is unsafe");
+        s.backend = kBackendXpu;
+        check(gpuLightTraceSkipUnsafe(s), "XPU caustics skip is unsafe");
+        s.backend = kBackendCpuEmbree;
+        check(!gpuLightTraceSkipUnsafe(s), "CPU caustics skip is safe (separate splat plane)");
+        s.caustics = 0;
+        s.backend = kBackendGpuOptix;
+        check(!gpuLightTraceSkipUnsafe(s), "GPU PT skip is safe");
+        s.caustics = 1;
+        s.causticsEngineGpu = kGpuCausticsAimedLt;
+        check(kGpuCausticsAimedLtMnee == 1, "GPU MNEE menu index stays 1");
+        check(!gpuEyePathMneeEnabled(s), "Aimed LT skips the MNEE wavefront (path_tail)");
+        check(!gpuRefractionMneeEnabled(s), "Aimed LT does not enable refraction MNEE");
+        s.causticsEngineGpu = kGpuCausticsAimedLtMnee;
+        check(gpuEyePathMneeEnabled(s), "Aimed LT + MNEE still runs the MNEE pipeline");
+        check(gpuRefractionMneeEnabled(s), "Aimed LT + MNEE enables refraction-only eye MNEE");
+        check(gpuEyeBounceNee(s, 1, 1, 1, kLightRect) == 1,
+              "mode 2 through-glass NEE stays Fresnel like CPU PT");
+        check(gpuEyeBounceNee(s, 1, 1, 1, kLightDome) == 1, "mode 2 dome NEE stays Fresnel");
+        check(gpuEyeBounceNee(s, 1, 1, 1, kLightDistant) == 1, "mode 2 distant NEE stays Fresnel");
+        check(gpuEyeBounceNee(s, 1, 0, 1, kLightRect) == 1,
+              "mode 2 without throughGlass keeps Fresnel (LT owns floor SDS)");
+        check(gpuEyeBounceNee(s, 0, 0, 1, kLightRect) == 0, "primary NEE stays opaque");
+        check(!gpuSkipCameraSds(s, 0, 1, 1, 1.0f), "mode 2 throughGlass keeps eye BSDF");
+        check(gpuSkipCameraSds(s, 0, 1, 0, 1.0f), "mode 2 floor-first still skips SDS for LT");
+        s.causticsEngineGpu = kGpuCausticsAimedLt;
+        check(gpuEyeBounceNee(s, 1, 1, 1, kLightRect) == 1, "Aimed LT Fresnel-continues at depth>0");
+        check(gpuSkipCameraSds(s, 0, 1, 1, 1.0f), "Aimed LT still skips camera SDS");
+        s.caustics = 0;
+        s.causticsEngineGpu = kGpuCausticsAimedLt;
+        check(!gpuEyePathMneeEnabled(s), "caustics off disables GPU MNEE");
+        check(!gpuRefractionMneeEnabled(s), "caustics off disables refraction MNEE");
+        check(kShadowMnee != kShadowShade && kShadowMnee != kShadowIdle,
+              "MNEE shadow slot is distinct from shade/idle");
+    }
 
     {
         Framebuffer film;
@@ -785,6 +1049,30 @@ void testXpuDevice() {
         check(film.skipPixel(0, 0) && film.skipPixel(1, 1), "quiet constant film skips pixels");
         check(film.noiseOracleDone(), "constant 2x2 film converges");
         check(film.noiseOracleSkipCount() == 4, "constant 2x2 skip count is 4");
+    }
+
+    {
+        // GPU LT addSplatRadiance: SDS into accum.rgb, not w, not L².
+        Framebuffer film;
+        film.resize(2, 2);
+        const Vec3 cam(0.2f, 0.2f, 0.2f);
+        for (int s = 0; s < 8; ++s) {
+            for (int y = 0; y < 2; ++y) {
+                for (int x = 0; x < 2; ++x) {
+                    film.addSample(x, y, cam);
+                    film.addNoiseSample(x, y, cam);
+                }
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            film.data()[i].x += 50.0f;
+            film.data()[i].y += 50.0f;
+            film.data()[i].z += 50.0f;
+        }
+        film.refreshNoiseOracle(0.01f, 8, 64);
+        check(!film.skipPixel(0, 0) && !film.skipPixel(1, 1),
+              "GPU LT splat-inflated mean does not freeze camera w");
+        check(!film.noiseOracleDone(), "GPU LT film stays open");
     }
 
     // Uniform (threshold 0) never skips. Variance skips a constant block and
@@ -882,6 +1170,44 @@ void testXpuDevice() {
             check(!evaluateVisibleWhen(sched->visibleWhen, *settings), "XPU Schedule hidden on CPU");
             settings->setParameterValue("backend", 2);
             check(evaluateVisibleWhen(sched->visibleWhen, *settings), "XPU Schedule visible on XPU");
+        }
+        const Parameter* cpuCau = settings->findParameter(QLatin1String("causticsengine"));
+        const Parameter* gpuCau = settings->findParameter(QLatin1String("causticsenginegpu"));
+        check(cpuCau != nullptr, "CPU caustics engine parameter exists");
+        check(gpuCau != nullptr, "GPU caustics engine parameter exists");
+        if (cpuCau && gpuCau) {
+            check(cpuCau->menuItems.size() == 6, "CPU caustics menu has 6 engines");
+            check(cpuCau->menuItems[4] == QLatin1String("Aimed LT"), "CPU Aimed LT is index 4");
+            check(cpuCau->menuItems[5] == QLatin1String("Aimed LT + MNEE"),
+                  "CPU Aimed LT + MNEE is index 5");
+            check(gpuCau->menuItems.size() == 2, "GPU caustics menu has Aimed LT / MNEE");
+            check(gpuCau->menuItems[0] == QLatin1String("Aimed LT"), "GPU default label is Aimed LT");
+            check(gpuCau->menuItems[1] == QLatin1String("Aimed LT + MNEE"),
+                  "GPU second label is Aimed LT + MNEE");
+            settings->setParameterValue("integrator", 0);
+            settings->setParameterValue("backend", 0);
+            check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings), "CPU caustics engine visible on CPU");
+            check(!evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "separate GPU engine menu hidden on CPU");
+            settings->setParameterValue("backend", 1);
+            check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings),
+                  "Caustics Engine stays visible on GPU (items swap to Aimed LT / MNEE)");
+            check(!evaluateVisibleWhen(gpuCau->visibleWhen, *settings),
+                  "separate GPU engine menu hidden on GPU-only (same row as Caustics Engine)");
+            settings->setParameterValue("backend", 2);
+            check(evaluateVisibleWhen(cpuCau->visibleWhen, *settings), "CPU caustics engine visible on XPU");
+            check(evaluateVisibleWhen(gpuCau->visibleWhen, *settings), "GPU caustics engine visible on XPU");
+            settings->setParameterValue("causticsenginegpu", 1);
+            CookContext cauCtx;
+            StagePtr cauStage = graph.cookDisplay(cauCtx);
+            check(cauStage != nullptr, "GPU caustics cook produces a stage");
+            ScenePtr cauScene = cauStage->toScene();
+            check(cauScene->settings.causticsEngineGpu == kGpuCausticsAimedLtMnee,
+                  "causticsenginegpu 1 cooks to Aimed LT + MNEE");
+            settings->setParameterValue("causticsenginegpu", 0);
+            cauStage = graph.cookDisplay(cauCtx);
+            cauScene = cauStage->toScene();
+            check(cauScene->settings.causticsEngineGpu == kGpuCausticsAimedLt,
+                  "causticsenginegpu 0 cooks to Aimed LT");
         }
         settings->setParameterValue("backend", 2);
         settings->setParameterValue("xpuschedule", 0);
@@ -995,6 +1321,7 @@ void testRenderSettingsFolders() {
 
     check(groupOf("caustics") == QLatin1String("Caustics"), "caustics in Caustics");
     check(groupOf("causticsengine") == QLatin1String("Caustics"), "causticsengine in Caustics");
+    check(groupOf("causticsenginegpu") == QLatin1String("Caustics"), "causticsenginegpu in Caustics");
     check(groupOf("causticclamp") == QLatin1String("Caustics"), "causticclamp in Caustics");
     check(groupOf("photoncount") == QLatin1String("Caustics"), "photoncount in Caustics");
     check(groupOf("photonradius") == QLatin1String("Caustics"), "photonradius in Caustics");
@@ -1007,8 +1334,8 @@ void testRenderSettingsFolders() {
         }
         const QStringList causticsExpected{
             QStringLiteral("caustics"), QStringLiteral("causticsengine"),
-            QStringLiteral("causticclamp"), QStringLiteral("photoncount"),
-            QStringLiteral("photonradius")};
+            QStringLiteral("causticsenginegpu"), QStringLiteral("causticclamp"),
+            QStringLiteral("photoncount"), QStringLiteral("photonradius")};
         check(causticsOrder == causticsExpected, "caustics tab parameter order");
     }
 
@@ -1029,6 +1356,44 @@ void testRenderSettingsFolders() {
                                QStringLiteral("Displacement"), QStringLiteral("Film"),
                                QStringLiteral("Diagnostic")};
     check(groups == expected, "render settings tab order");
+
+    check(groupOf("samplingdebug") == QLatin1String("Diagnostic"), "samplingdebug in Diagnostic");
+    check(groupOf("bdpttimers") == QLatin1String("Diagnostic"), "bdpttimers in Diagnostic");
+    check(groupOf("diag_bdpt_sep") == QLatin1String("Diagnostic"), "diag_bdpt_sep in Diagnostic");
+    check(groupOf("diag_bdpt_head") == QLatin1String("Diagnostic"), "diag_bdpt_head in Diagnostic");
+    {
+        QStringList diagnosticOrder;
+        for (const Parameter& parameter : settings->parameters()) {
+            if (parameter.group != QLatin1String("Diagnostic")) continue;
+            if (parameter.name.startsWith(QLatin1Char('_'))) continue;
+            diagnosticOrder << parameter.name;
+        }
+        const QStringList diagnosticExpected{
+            QStringLiteral("samplingdebug"), QStringLiteral("diag_bdpt_sep"),
+            QStringLiteral("diag_bdpt_head"), QStringLiteral("bdpttimers")};
+        check(diagnosticOrder == diagnosticExpected, "diagnostic tab parameter order");
+    }
+    check(indexOf("diag_bdpt_sep") == indexOf("samplingdebug") + 1, "separator after samplingdebug");
+    check(indexOf("bdpttimers") == indexOf("diag_bdpt_head") + 1, "bdpttimers after CPU BDPT note");
+    settings->setParameterValue("backend", kBackendGpuOptix);
+    settings->setParameterValue("integrator", kIntegratorBdpt);
+    {
+        CookContext cookCtx;
+        StagePtr cooked = graph.cook(settings, cookCtx);
+        check(settings->intValue("integrator") == kIntegratorPathTracer,
+              "cook drops BDPT when the device uses GPU");
+        check(cooked && cooked->settings.integrator == kIntegratorPathTracer,
+              "cooked GPU settings store Path Tracer");
+        check(cooked && cooked->settings.backend == kBackendGpuOptix, "cooked backend stays GPU");
+    }
+    settings->setParameterValue("backend", kBackendCpuEmbree);
+    settings->setParameterValue("bdpttimers", true);
+    {
+        CookContext cookCtx;
+        StagePtr cooked = graph.cookDisplay(cookCtx);
+        check(cooked && cooked->settings.bdptTimers != 0, "cook copies BDPT Timers flag");
+    }
+    settings->setParameterValue("bdpttimers", false);
 
     // Older scene files omit noisethreshold / pixeloracle; ctor defaults must remain.
     {
@@ -2185,12 +2550,134 @@ void testBdptCausticThroughRefraction() {
     std::printf("  bdptOn=%.1f bdptOff=%.1f ptOn=%.1f ratio=%.3f\n", sumBdptOn, sumBdptOff, sumPtOn, ratio);
 }
 
+// GPU photon aiming: aimed-only SampleLe (mix=1), screen solid angle, clusters.
+void testPhotonAim() {
+    std::printf("photon-aim\n");
+
+    const Vec3 center(0.0f, 0.0f, 10.0f);
+    const float radius = 1.0f;
+    const float farOmega = gpuScreenSolidAngle(Vec3(0.0f, 0.0f, 0.0f), center, radius);
+    const float nearOmega = gpuScreenSolidAngle(Vec3(0.0f, 0.0f, 4.0f), center, radius);
+    check(nearOmega > farOmega * 1.5f, "closer camera → larger caster solid angle");
+    check(farOmega > 0.0f, "far solid angle positive");
+
+    GpuPhotonCluster cluster;
+    cluster.center = Vec3(0.0f, 0.0f, 0.0f);
+    cluster.radius = 1.0f;
+    cluster.weight = 1.0f;
+    const Vec3 planeC(0.0f, 0.0f, 0.0f);
+    const Vec3 planeN(0.0f, 1.0f, 0.0f);
+    const float sceneR = 10.0f;
+    const Vec3 aimedP = gpuClusterDiskPoint(cluster, planeC, planeN, Vec2(0.0f, 0.0f));
+    check(kGpuPhotonAimMix >= 1.0f, "GPU light trace is aimed-only (no uniform mix)");
+    const float mixPdf = gpuPhotonAimMixtureDiskPdf(aimedP, planeC, planeN, sceneR, kGpuPhotonAimMix,
+                                                    &cluster, 1);
+    const float uniPdf = 1.0f / (kPi * sceneR * sceneR);
+    const float aimDisk = gpuAimDiskPdf(aimedP, planeC, planeN, &cluster, 1);
+    check(mixPdf > uniPdf * 10.0f, "aimed disk pdf >> uniform scene-disk pdf");
+    check(aimDisk > 0.0f, "aimed point in cluster disk");
+    checkNear(mixPdf, aimDisk, 1e-6f, "mix=1 disk pdf is the aim disk pdf");
+
+    const Vec3 origin(0.0f, 0.0f, 0.0f);
+    GpuPhotonCluster coneC;
+    coneC.center = Vec3(0.0f, 0.0f, 8.0f);
+    coneC.radius = 1.0f;
+    coneC.weight = 1.0f;
+    const Vec3 aimDir = normalize(coneC.center - origin);
+    const float conePdf = gpuAimConePdf(origin, aimDir, &coneC, 1);
+    check(conePdf > 0.0f, "aimed cone pdf of aimed dir > 0");
+    const float missPdf = gpuAimConePdf(origin, Vec3(1.0f, 0.0f, 0.0f), &coneC, 1);
+    check(missPdf == 0.0f, "direction outside caster cone has aim pdf 0");
+    check(gpuPhotonAimDirPdf(origin, Vec3(1.0f, 0.0f, 0.0f), 1.0f, &coneC, 1, kInv4Pi) == 0.0f,
+          "aimed-only pdf has no uniform floor outside the cone");
+    check(gpuPhotonAimSelect(1.0f, 0.999f), "aimed-only always selects aim");
+    check(!gpuPhotonAimSelect(0.0f, 0.0f), "mix 0 never selects aim");
+    Vec3 sampledDir;
+    check(gpuSamplePhotonAimDir(origin, coneC, 0.25f, 0.4f, sampledDir), "sample cone toward cluster");
+    check(gpuAimConePdf(origin, sampledDir, &coneC, 1) > 0.0f, "sampled aim dir has positive cone pdf");
+
+    GpuPhotonCluster tiny;
+    tiny.center = Vec3(0.0f, 0.0f, 1000.0f);
+    tiny.radius = 1.0e-4f;
+    tiny.weight = 1.0f;
+    const float rawCos = gpuSphereCosThetaMax(origin, tiny.center, tiny.radius);
+    check(gpuUniformConePdf(rawCos) == 0.0f, "far tiny sphere subtends a degenerate cone in float32");
+    check(gpuAimConeCosThetaMax(origin, tiny.center, tiny.radius) < 1.0f,
+          "clamped aim cone cosMax stays below 1");
+    Vec3 farDir;
+    check(gpuSamplePhotonAimDir(origin, tiny, 0.25f, 0.4f, farDir), "sample far tiny caster");
+    const float farPdf = gpuAimConePdf(origin, farDir, &tiny, 1);
+    check(farPdf > 0.0f && srIsFinite(farPdf), "far tiny aim cone pdf is finite and > 0");
+    const float farDirPdf =
+        gpuPhotonAimDirPdf(origin, farDir, kGpuPhotonAimMix, &tiny, 1, kInv4Pi);
+    check(farDirPdf > 0.0f && srIsFinite(farDirPdf), "aimed-only pdf of far tiny sample > 0");
+    checkNear(farDirPdf, farPdf, 1e-6f, "mix=1 dir pdf is the aim cone pdf");
+
+    check(gpuPickPhotonCluster(&cluster, 1, 0.0f) == 0, "pick single cluster");
+    check(gpuPickPhotonCluster(&cluster, 1, 0.99f) == 0, "pick single cluster high u");
+
+    auto scene = std::make_shared<Scene>();
+    MeshPtr floor = std::make_shared<Mesh>();
+    floor->positions = {Vec3(-8, 0, -8), Vec3(8, 0, -8), Vec3(8, 0, 8), Vec3(-8, 0, 8)};
+    floor->indices = {0, 2, 1, 0, 3, 2};
+    floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+    floor->validate();
+    const int floorMesh = scene->addMesh(floor);
+    Material floorMat;
+    floorMat.baseColor = Vec3(0.75f);
+    floorMat.roughness = 0.9f;
+    floorMat.specular = 0.0f;
+    const int floorIdx = scene->addMaterial(floorMat);
+    InstanceData floorInst;
+    floorInst.meshIndex = floorMesh;
+    floorInst.materialIndex = floorIdx;
+    scene->instances.push_back(floorInst);
+
+    MeshPtr ball = makeSphereMesh(0.7f, 24, 16);
+    const int ballMesh = scene->addMesh(ball);
+    Material glass;
+    glass.baseColor = Vec3(1.0f);
+    glass.roughness = 0.0f;
+    glass.transmission = 1.0f;
+    glass.ior = 1.5f;
+    glass.specular = 1.0f;
+    const int glassIdx = scene->addMaterial(glass);
+    InstanceData ballInst;
+    ballInst.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+    ballInst.meshIndex = ballMesh;
+    ballInst.materialIndex = glassIdx;
+    scene->instances.push_back(ballInst);
+
+    scene->camera.cameraToWorld =
+        lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+    scene->cameraAuthored = true;
+    scene->finalize();
+
+    GpuPhotonCluster clusters[kMaxGpuPhotonClusters];
+    const int n = fillPhotonAimClusters(scene->view(), clusters, kMaxGpuPhotonClusters);
+    check(n == 1, "glass sphere is the only photon-aim cluster");
+    if (n == 1) {
+        check(clusters[0].radius < 2.0f, "cluster radius is the Buddha-sized sphere, not the ground");
+        check(std::fabs(clusters[0].weight - 1.0f) < 1e-4f, "single cluster weight is 1");
+        check(clusters[0].center.y > 0.3f, "cluster centered on the glass, not y=0 ground");
+    }
+
+    scene->materials[glassIdx].contributeCaustics = 0;
+    GpuPhotonCluster offClusters[kMaxGpuPhotonClusters];
+    const int nOff = fillPhotonAimClusters(scene->view(), offClusters, kMaxGpuPhotonClusters);
+    check(nOff == 0, "Contribute to Caustics off → no aim clusters");
+
+    std::printf("  solidAngle near/far=%.3f mixPdf/uni=%.1f clusters=%d\n", nearOmega / farOmega,
+                mixPdf / uniPdf, n);
+}
+
 // Photon / VCM caustic engine: must deliver more energy under glass than caustics
 // off, and material Contribute to Caustics off must kill that transport.
 void testPhotonCaustics() {
     std::printf("photon-caustics\n");
 
-    auto buildScene = [](int caustics, int engine, int matContribute) {
+    auto buildScene = [](int caustics, int engine, int matContribute, float lightW = 0.8f,
+                         float lightH = 0.8f) {
         auto scene = std::make_shared<Scene>();
         MeshPtr floor = std::make_shared<Mesh>();
         floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
@@ -2226,8 +2713,8 @@ void testPhotonCaustics() {
 
         LightData light;
         light.type = kLightRect;
-        light.width = 0.8f;
-        light.height = 0.8f;
+        light.width = lightW;
+        light.height = lightH;
         light.intensity = 60.0f;
         light.normalize = 1;
         light.visibleCamera = 0;
@@ -2255,9 +2742,10 @@ void testPhotonCaustics() {
         return scene;
     };
 
-    auto renderSum = [&](int caustics, int engine, int matContribute, bool& finiteOut) -> double {
+    auto renderSum = [&](int caustics, int engine, int matContribute, bool& finiteOut,
+                         float lightW = 0.8f, float lightH = 0.8f) -> double {
         RenderSession session;
-        session.setScene(buildScene(caustics, engine, matContribute));
+        session.setScene(buildScene(caustics, engine, matContribute, lightW, lightH));
         session.start();
         session.waitForCompletion();
         const Image img = session.linearImage();
@@ -2282,6 +2770,162 @@ void testPhotonCaustics() {
     check(sumMatOff < sumPhoton * 0.85, "material Contribute to Caustics off reduces caustics");
     check(sumMnee > sumOff * 1.1, "MNEE engine still adds caustic energy");
     std::printf("  photon=%.1f off=%.1f matOff=%.1f mnee=%.1f\n", sumPhoton, sumOff, sumMatOff, sumMnee);
+
+    // Normalize means authored intensity is flux, not radiance. A 5 cm card must
+    // still deposit the same caustic energy as the 80 cm one — 0.9.65 multiplied
+    // power by area and the map went dark on typical small lights.
+    bool finTiny = true, finTinyOff = true;
+    const double sumTiny = renderSum(1, kCausticsEnginePhoton, 1, finTiny, 0.05f, 0.05f);
+    const double sumTinyOff = renderSum(0, kCausticsEnginePhoton, 1, finTinyOff, 0.05f, 0.05f);
+    check(finTiny && finTinyOff, "tiny-light photon renders are finite");
+    check(sumTiny > sumTinyOff * 1.1, "tiny normalized light still deposits photon caustics");
+    check(sumTiny > sumPhoton * 0.5 && sumTiny < sumPhoton * 2.0,
+          "tiny normalized light keeps photon energy of the large card");
+    std::printf("  tiny=%.1f tinyOff=%.1f\n", sumTiny, sumTinyOff);
+
+    {
+        auto rgbAt = [](float lambdaNm) {
+            SampledWavelengths w;
+            w.n = 1;
+            w.lambda[0] = lambdaNm;
+            w.pdf[0] = SampledWavelengths::visibleWavelengthPdf(lambdaNm);
+            return spectrumToRgb(SampledSpectrum::constant(1, 1.0f), w);
+        };
+        const Vec3 rgbB = rgbAt(465.0f);
+        const Vec3 rgbR = rgbAt(630.0f);
+        check(rgbB.z > rgbR.z && rgbR.x > rgbB.x, "hero-λ film path is blue vs red");
+        check(spectralAbsoluteIor(1.5f, 30.0f, 465.0f) >
+                  spectralAbsoluteIor(1.5f, 30.0f, 630.0f) + 0.01f,
+              "photon Abbe IOR is higher in the blue");
+        const Vec3 white(1.0f);
+        const Vec3 pB = photonDispersedPower(white, 465.0f);
+        const Vec3 pR = photonDispersedPower(white, 630.0f);
+        check(pB.z > pR.z && pR.x > pB.x, "dispersed photon power is blue vs red");
+        check(photonDispersedPower(white, 0.0f) == white, "invalid λ leaves RGB flux alone");
+        Vec3 acc(0.0f);
+        constexpr int kMeanN = 512;
+        for (int i = 0; i < kMeanN; ++i) {
+            const float u = (float(i) + 0.5f) / float(kMeanN);
+            acc += photonDispersedPower(white, SampledWavelengths::sampleVisibleWavelength(u));
+        }
+        acc = acc / float(kMeanN);
+        check(std::fabs(acc.x - 1.0f) < 0.12f && std::fabs(acc.y - 1.0f) < 0.12f &&
+                  std::fabs(acc.z - 1.0f) < 0.12f,
+              "mean dispersed tint is white, not magenta");
+    }
+}
+
+void testPhotonDispersion() {
+    std::printf("photon-dispersion\n");
+
+    auto buildScene = [](float abbe) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+        floor->validate();
+        InstanceData floorInst;
+        floorInst.meshIndex = scene->addMesh(floor);
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.75f);
+        floorMat.roughness = 0.9f;
+        floorMat.specular = 0.0f;
+        floorInst.materialIndex = scene->addMaterial(floorMat);
+        scene->instances.push_back(floorInst);
+
+        MeshPtr ball = makeSphereMesh(0.7f, 48, 24);
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.roughness = 0.0f;
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.specular = 1.0f;
+        glass.dispersionAbbe = abbe;
+        InstanceData ballInst;
+        ballInst.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+        ballInst.meshIndex = scene->addMesh(ball);
+        ballInst.materialIndex = scene->addMaterial(glass);
+        scene->instances.push_back(ballInst);
+
+        LightData light;
+        light.type = kLightRect;
+        light.width = 0.8f;
+        light.height = 0.8f;
+        light.intensity = 60.0f;
+        light.normalize = 1;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.0f, 4.0f, 0.0f)) * Mat4::rotateX(-90.0f);
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 72;
+        scene->settings.resolutionY = 54;
+        scene->settings.samplesPerPixel = 16;
+        scene->settings.maxDepth = 8;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.caustics = 1;
+        scene->settings.causticsEngine = kCausticsEnginePhoton;
+        scene->settings.photonCount = 40000;
+        scene->settings.photonRadius = 0.15f;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto render = [&](float abbe, double& chroma, double& rbSep, bool& finite) -> double {
+        RenderSession session;
+        session.setScene(buildScene(abbe));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        chroma = 0.0;
+        finite = true;
+        double wR = 0.0, wB = 0.0, xR = 0.0, yR = 0.0, xB = 0.0, yB = 0.0;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finite = false;
+                sum += double(luminance(c));
+                const float mean = (c.x + c.y + c.z) / 3.0f;
+                chroma += double(std::fabs(c.x - mean) + std::fabs(c.y - mean) + std::fabs(c.z - mean));
+                const float eR = std::max(0.0f, c.x - c.y);
+                const float eB = std::max(0.0f, c.z - c.y);
+                xR += double(x) * double(eR);
+                yR += double(y) * double(eR);
+                wR += double(eR);
+                xB += double(x) * double(eB);
+                yB += double(y) * double(eB);
+                wB += double(eB);
+            }
+        }
+        rbSep = 0.0;
+        if (wR > 1e-6 && wB > 1e-6) {
+            const double dx = xR / wR - xB / wB;
+            const double dy = yR / wR - yB / wB;
+            rbSep = std::sqrt(dx * dx + dy * dy);
+        }
+        return sum;
+    };
+
+    double chromaOff = 0.0, chromaOn = 0.0, sepOff = 0.0, sepOn = 0.0;
+    bool finOff = true, finOn = true;
+    const double sumOff = render(0.0f, chromaOff, sepOff, finOff);
+    const double sumOn = render(20.0f, chromaOn, sepOn, finOn);
+    check(finOff && finOn, "photon dispersion renders are finite");
+    check(sumOn > sumOff * 0.8 && sumOn < sumOff * 1.3, "photon dispersion keeps caustic energy");
+    // Unbiased 1-λ film RGB averages white where wavelengths overlap, so
+    // image-wide chroma may fall. The split itself is the colour signal.
+    check(sepOn > sepOff * 1.5, "Abbe splits photon caustics by colour");
+    std::printf("  off=%.1f on=%.1f chromaOff=%.1f chromaOn=%.1f sepOff=%.2f sepOn=%.2f\n", sumOff,
+                sumOn, chromaOff, chromaOn, sepOff, sepOn);
 }
 
 // Rough (but still tightly focusing) glass must converge like smooth glass: the
@@ -2570,6 +3214,655 @@ void testSplatAccumulationPrecision() {
     deep.addSplatPaths(1);
     // 1e6 is below the float spacing at 1e13, so float accumulation loses every add.
     check(deep.resolvePixel(0, 0).x > 1.00005e13f, "large splat sums keep absorbing small adds");
+}
+
+void testBdptTimersFormat() {
+    std::printf("bdpt-timers\n");
+    check(RenderSettingsData{}.bdptTimers == 0, "BDPT timers default off");
+
+    BdptPassStats stats;
+    stats.pixels.store(10);
+    stats.nsTotal.store(10ull * 1000000000ull);
+    stats.nsAlloc.store(6ull * 1000000000ull);
+    stats.nsWalk.store(2ull * 1000000000ull);
+    stats.nsSss.store(500ull * 1000000ull);
+    stats.nsConnect.store(1ull * 1000000000ull);
+    stats.nsSplat.store(1ull * 1000000000ull);
+    stats.nEyeSum.store(250);
+    stats.nLightSum.store(80);
+    stats.nEyeMax.store(31);
+    stats.nLightMax.store(12);
+    stats.pairs.store(400);
+    stats.shadows.store(350);
+    stats.splatDeposits.store(40);
+    stats.casRetries.store(100);
+
+    BdptPassMeta meta;
+    meta.spp = 2;
+    meta.maxDepth = 30;
+    meta.maxVerts = 31;
+    meta.poolThreads = 32;
+    meta.vertBytes = 528;
+    meta.allocBytesPerPixel = 32736;
+    meta.wallNs = 5ull * 1000000000ull;
+
+    const std::string text = formatBdptPassStats(stats, meta);
+    check(text.find("BDPT timers") != std::string::npos, "timer header");
+    check(text.find("maxDepth=30") != std::string::npos, "timer maxDepth");
+    check(text.find("alloc") != std::string::npos, "timer alloc phase");
+    check(text.find("inside walk") != std::string::npos, "timer SSS nested in walk");
+    check(text.find("KiB/pixel") != std::string::npos, "timer alloc footprint");
+    check(text.find("casRetries") != std::string::npos, "timer CAS retries");
+    check(text.find("parallel=") != std::string::npos, "timer parallel factor");
+    check(text.find("scratch") == std::string::npos, "no scratch line when scratchVerts=0");
+
+    meta.scratchVerts = 31;
+    meta.scratchThreads = 33;
+    meta.scratchBytes = 31ull * (2 * 528 + 2 * 20 + 2 * 36);
+    const std::string scratchText = formatBdptPassStats(stats, meta);
+    check(scratchText.find("scratch 31 verts") != std::string::npos, "timer scratch reuse line");
+    check(scratchText.find("no per-pixel malloc") != std::string::npos, "timer scratch no malloc");
+    check(scratchText.find("KiB/thread") != std::string::npos, "timer scratch per-thread footprint");
+
+    Framebuffer fb;
+    fb.resize(2, 2);
+    std::atomic<uint64_t> cas{0};
+    std::atomic<uint64_t> dep{0};
+    fb.setSplatDiag(&cas, &dep);
+    fb.addSplat(0, 0, Vec3(1.0f, 0.0f, 0.0f));
+    check(dep.load() == 1, "splat deposit counter");
+    check(cas.load() == 0, "single-thread splat has no CAS retries");
+    fb.setSplatDiag(nullptr, nullptr);
+    fb.addSplat(0, 0, Vec3(1.0f, 0.0f, 0.0f));
+    check(dep.load() == 1, "deposit counter disabled with nullptr");
+}
+
+void testBdptScratchReuse() {
+    std::printf("bdpt-scratch\n");
+    check(bdpt::kMaxVerts == 4096, "BDPT vertex cap is 4096");
+    check(bdpt::bdptSessionVerts(30) == 31, "session verts are maxDepth+1");
+    check(bdpt::bdptSessionVerts(4096) == 4096, "session verts clamp to kMaxVerts");
+    check(bdpt::bdptSessionVerts(0) == 2, "session verts floor at 2");
+
+    BdptScratchPool pool;
+    pool.ensureThreads(4, 31);
+    check(pool.threadSlots() == 4, "scratch pool has caller+workers slots");
+    BdptScratch* a = pool.get(0);
+    BdptScratch* b = pool.get(1);
+    check(a != nullptr && b != nullptr && a != b, "scratch slots are distinct");
+    check(int(a->eye.size()) == 31, "eye scratch sized to session verts");
+    check(int(a->light.size()) == 31, "light scratch sized to session verts");
+    check(a->eye.size() != size_t(bdpt::kMaxVerts), "working depth does not allocate the 4096 cap");
+    check(a->eye.size() == a->eyeBeta.size() && a->eye.size() == a->eyeWave.size(),
+          "six scratch arrays match");
+    const bdpt::Vert* eyePtr = a->eye.data();
+    const SampledSpectrum* betaPtr = a->eyeBeta.data();
+    pool.ensureThreads(4, 31);
+    check(pool.get(0)->eye.data() == eyePtr, "second ensure keeps eye pointer");
+    check(pool.get(0)->eyeBeta.data() == betaPtr, "second ensure keeps beta pointer");
+    pool.ensureThreads(4, 8);  // grow-only path must not shrink
+    check(int(pool.get(0)->eye.size()) == 31, "ensure() never shrinks");
+    check(pool.get(0)->eye.data() == eyePtr, "smaller ensure does not reallocate");
+    pool.ensureThreads(4, 9, true);
+    check(int(pool.get(0)->eye.size()) == 9, "pass start shrinks to the new session depth");
+
+    pool.get(1)->eye[0].pdfFwd = 42.0f;
+    check(pool.get(0)->eye[0].pdfFwd != 42.0f, "thread slots do not share Vert storage");
+
+    const size_t vertBytes = size_t(31) * sizeof(bdpt::Vert);
+    check(bdptScratchBytes(31) == 2 * vertBytes + 2 * size_t(31) * sizeof(SampledSpectrum) +
+                                      2 * size_t(31) * sizeof(SampledWavelengths),
+          "scratch byte helper matches six arrays");
+
+    BdptScratch& tls = bdptThreadScratch();
+    tls.ensure(31);
+    const bdpt::Vert* tlsPtr = tls.eye.data();
+    tls.ensure(31);
+    check(tls.eye.data() == tlsPtr, "thread-local fallback pointer is stable");
+}
+
+void testIntegratorDeviceMemory() {
+    std::printf("integrator-device\n");
+    int cpu = 0, gpu = 0;
+    int next = switchIntegratorForBackend(kBackendCpuEmbree, kBackendGpuOptix, kIntegratorBdpt, cpu, gpu);
+    check(cpu == kIntegratorBdpt, "leaving CPU stores BDPT");
+    check(next == kIntegratorPathTracer, "GPU drops BDPT to Path Tracer");
+    next = switchIntegratorForBackend(kBackendGpuOptix, kBackendCpuEmbree, next, cpu, gpu);
+    check(next == kIntegratorBdpt, "CPU restores BDPT");
+
+    cpu = 0;
+    gpu = 0;
+    next = switchIntegratorForBackend(kBackendCpuEmbree, kBackendGpuOptix, kIntegratorWireframe, cpu, gpu);
+    check(next == kIntegratorWireframe, "GPU keeps Wireframe");
+    next = switchIntegratorForBackend(kBackendGpuOptix, kBackendXpu, kIntegratorAmbientOcclusion, cpu, gpu);
+    check(next == kIntegratorAmbientOcclusion, "XPU keeps Ambient Occlusion");
+    check(cpu == kIntegratorWireframe, "CPU memory is not overwritten on GPU↔XPU");
+
+    next = switchIntegratorForBackend(kBackendXpu, kBackendCpuEmbree, kIntegratorDirectLighting, cpu, gpu);
+    check(next == kIntegratorWireframe, "CPU restores the remembered CPU integrator");
+
+    check(clampIntegratorForBackend(kBackendGpuOptix, kIntegratorBdpt) == kIntegratorPathTracer,
+          "GPU clamp drops BDPT");
+    check(clampIntegratorForBackend(kBackendXpu, kIntegratorBdpt) == kIntegratorPathTracer,
+          "XPU clamp drops BDPT");
+    check(clampIntegratorForBackend(kBackendCpuEmbree, kIntegratorBdpt) == kIntegratorBdpt,
+          "CPU keeps BDPT");
+}
+
+void testAimedLtCpu() {
+    std::printf("aimed-lt-cpu\n");
+    RenderSettingsData s;
+    s.caustics = 1;
+    s.causticsEngine = kCausticsEnginePbrt;
+    check(!causticsUseAimedLt(s), "pbrt is not Aimed LT");
+    check(!causticsUseMnee(s), "pbrt does not use MNEE");
+    s.causticsEngine = kCausticsEngineAimedLt;
+    check(kCausticsEngineAimedLt == 4, "Aimed LT is engine 4");
+    check(causticsUseAimedLt(s), "Aimed LT flag");
+    check(!causticsUseMnee(s, nullptr), "Aimed LT does not run MNEE");
+    check(!causticsUsePhotonMap(s, nullptr), "Aimed LT does not run photons");
+    check(cpuAimedSkipCameraSds(s, 1, 0), "Aimed LT skips camera SDS");
+    check(!cpuAimedSkipCameraSds(s, 0, 0), "Aimed LT keeps non-SDS eye");
+    s.causticsEngine = kCausticsEngineAimedLtMnee;
+    check(kCausticsEngineAimedLtMnee == 5, "Aimed LT + MNEE is engine 5");
+    check(causticsUseMnee(s, nullptr), "Aimed LT + MNEE runs MNEE");
+    check(!causticsUsePhotonMap(s, nullptr), "Aimed LT + MNEE does not run photons");
+    check(!cpuAimedSkipCameraSds(s, 1, 1), "Aimed LT + MNEE keeps through-glass SDS");
+    check(cpuAimedSkipCameraSds(s, 1, 0), "Aimed LT + MNEE still skips floor-first SDS");
+    s.causticsEngine = kCausticsEngineMnee;
+    check(!causticsUseAimedLt(s), "classic MNEE is not Aimed LT");
+
+    registerBuiltinNodes();
+    NodeGraph graph;
+    Node* settings = graph.createNode("rendersettings", "rs_aim");
+    check(settings != nullptr, "aimed LT rendersettings");
+    if (settings) {
+        settings->setParameterValue("backend", 0);
+        settings->setParameterValue("causticsengine", 4);
+        CookContext ctx;
+        StagePtr stage = graph.cook(settings, ctx);
+        check(settings->intValue("causticsengine") == kCausticsEngineAimedLt, "cook keeps Aimed LT");
+        check(stage && stage->settings.causticsEngine == kCausticsEngineAimedLt,
+              "cooked settings store Aimed LT");
+        settings->setParameterValue("causticsengine", 5);
+        stage = graph.cook(settings, ctx);
+        check(stage && stage->settings.causticsEngine == kCausticsEngineAimedLtMnee,
+              "cooked settings store Aimed LT + MNEE");
+        settings->setParameterValue("causticsengine", 0);
+        stage = graph.cook(settings, ctx);
+        check(stage && stage->settings.causticsEngine == kCausticsEnginePbrt,
+              "pbrt engine still cooks as 0");
+    }
+
+    auto scene = std::make_shared<Scene>();
+    MeshPtr floor = std::make_shared<Mesh>();
+    floor->positions = {Vec3(-4, 0, -4), Vec3(4, 0, -4), Vec3(4, 0, 4), Vec3(-4, 0, 4)};
+    floor->indices = {0, 2, 1, 0, 3, 2};
+    floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+    floor->validate();
+    const int floorMesh = scene->addMesh(floor);
+    Material floorMat;
+    floorMat.roughness = 0.9f;
+    floorMat.specular = 0.0f;
+    InstanceData floorInst;
+    floorInst.meshIndex = floorMesh;
+    floorInst.materialIndex = scene->addMaterial(floorMat);
+    scene->instances.push_back(floorInst);
+    MeshPtr ball = makeSphereMesh(0.7f, 24, 12);
+    Material glass;
+    glass.transmission = 1.0f;
+    glass.ior = 1.5f;
+    glass.roughness = 0.0f;
+    glass.specular = 1.0f;
+    InstanceData ballInst;
+    ballInst.xform = Mat4::translate(Vec3(0.0f, 1.0f, 0.0f));
+    ballInst.meshIndex = scene->addMesh(ball);
+    ballInst.materialIndex = scene->addMaterial(glass);
+    scene->instances.push_back(ballInst);
+    LightData light;
+    light.type = kLightRect;
+    light.width = 0.8f;
+    light.height = 0.8f;
+    light.intensity = 60.0f;
+    light.normalize = 1;
+    light.xform = Mat4::translate(Vec3(0.0f, 4.0f, 0.0f)) * Mat4::rotateX(-90.0f);
+    light.xformInv = inverse(light.xform);
+    scene->lights.push_back(light);
+    scene->settings.caustics = 1;
+    scene->settings.causticsEngine = kCausticsEngineAimedLt;
+    scene->camera.cameraToWorld =
+        lookAtMatrix(Vec3(2.4f, 2.6f, 2.4f), Vec3(0.0f, 0.35f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+    scene->cameraAuthored = true;
+    scene->finalize();
+
+    SceneView view = scene->view();
+    GpuPhotonCluster clusters[kMaxGpuPhotonClusters];
+    const int n = fillPhotonAimClusters(view, clusters, kMaxGpuPhotonClusters);
+    check(n >= 1, "glass sphere is an aim cluster");
+    view.photonAimClusters = n > 0 ? clusters : nullptr;
+    view.photonAimClusterCount = n;
+    view.settings.caustics = 1;
+    view.settings.causticsEngine = kCausticsEngineAimedLt;
+
+    Rng rng(1, 2);
+    int ok = 0;
+    for (int i = 0; i < 48; ++i) {
+        bdpt::Vert v0;
+        Vec3 dir;
+        float pdf = 0.0f;
+        if (bdpt::startLightPath(view, rng, v0, dir, pdf) && pdf > 0.0f && isFinite(v0.beta) &&
+            !isBlack(v0.beta))
+            ++ok;
+    }
+    check(ok > 8, "aimed startLightPath produces finite light paths");
+
+    view.settings.causticsEngine = kCausticsEnginePbrt;
+    int okPbrt = 0;
+    Rng rngPbrt(3, 4);
+    for (int i = 0; i < 48; ++i) {
+        bdpt::Vert v0;
+        Vec3 dir;
+        float pdf = 0.0f;
+        if (bdpt::startLightPath(view, rngPbrt, v0, dir, pdf) && pdf > 0.0f) ++okPbrt;
+    }
+    check(okPbrt > 8, "pbrt startLightPath still works without aim clusters");
+}
+
+void testExitToDiffuse() {
+    std::printf("exit-to-diffuse\n");
+
+    bool catalogHas = false;
+    bool catalogDefaultOff = false;
+    for (const MaterialXNodeCatalogEntry& e : listMaterialXNodeCatalog()) {
+        if (e.category != QStringLiteral("standard_surface")) continue;
+        for (const MaterialXNodeInputDef& inp : e.inputsFor(e.type)) {
+            if (inp.name == QStringLiteral("exit_to_diffuse")) {
+                catalogHas = true;
+                catalogDefaultOff = inp.value == QStringLiteral("false") || inp.value == QStringLiteral("0");
+            }
+        }
+    }
+    check(catalogHas, "standard_surface catalog has exit_to_diffuse");
+    check(catalogDefaultOff, "exit_to_diffuse catalog default is false");
+
+    if (materialXAvailable()) {
+        auto bakeFlag = [](const char* value) -> int {
+            const QString xml = QStringLiteral(
+                                    "<?xml version=\"1.0\"?>\n"
+                                    "<materialx version=\"1.38\">\n"
+                                    "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+                                    "    <input name=\"exit_to_diffuse\" type=\"boolean\" value=\"%1\"/>\n"
+                                    "  </standard_surface>\n"
+                                    "  <surfacematerial name=\"surface\" type=\"material\">\n"
+                                    "    <input name=\"surfaceshader\" type=\"surfaceshader\" "
+                                    "nodename=\"ss\"/>\n"
+                                    "  </surfacematerial>\n"
+                                    "</materialx>\n")
+                                    .arg(QString::fromUtf8(value));
+            const MaterialXEvalResult eval = evaluateMaterialXDocument(xml, QString());
+            check(eval.ok, "exit_to_diffuse document evaluates");
+            return eval.material.exitToDiffuse;
+        };
+        check(bakeFlag("true") == 1, "exit_to_diffuse true bakes on");
+        check(bakeFlag("false") == 0, "exit_to_diffuse false bakes off");
+        const QString defXml = QStringLiteral(
+            "<?xml version=\"1.0\"?>\n"
+            "<materialx version=\"1.38\">\n"
+            "  <standard_surface name=\"ss\" type=\"surfaceshader\">\n"
+            "    <input name=\"base_color\" type=\"color3\" value=\"0.8, 0.8, 0.8\"/>\n"
+            "  </standard_surface>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"ss\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n");
+        const MaterialXEvalResult defEval = evaluateMaterialXDocument(defXml, QString());
+        check(defEval.ok && defEval.material.exitToDiffuse == 0, "omitted exit_to_diffuse stays off");
+    } else {
+        std::printf("  skip MaterialX bake\n");
+    }
+
+    auto buildScene = [](int exitFlag) {
+        auto scene = std::make_shared<Scene>();
+        // Camera → glass front (depth 0) → same-material back (depth 1 = maxDepth).
+        // Flag on glass: skip that material as opacity, Lambert+NEE the red card.
+        auto makeQuad = [](float z) {
+            MeshPtr m = std::make_shared<Mesh>();
+            m->positions = {Vec3(-1.6f, 0, z), Vec3(1.6f, 0, z), Vec3(1.6f, 2.2f, z), Vec3(-1.6f, 2.2f, z)};
+            m->indices = {0, 1, 2, 0, 2, 3};
+            m->normals = {Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1)};
+            m->validate();
+            return m;
+        };
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.roughness = 0.0f;
+        glass.specular = 1.0f;
+        glass.exitToDiffuse = exitFlag;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData frontInst;
+        frontInst.meshIndex = scene->addMesh(makeQuad(1.2f));
+        frontInst.materialIndex = glassIdx;
+        scene->instances.push_back(frontInst);
+        InstanceData backInst;
+        backInst.meshIndex = scene->addMesh(makeQuad(0.6f));
+        backInst.materialIndex = glassIdx;
+        scene->instances.push_back(backInst);
+
+        Material cardMat;
+        cardMat.baseColor = Vec3(0.85f, 0.15f, 0.1f);
+        cardMat.baseWeight = 1.0f;
+        cardMat.roughness = 1.0f;
+        cardMat.specular = 0.0f;
+        InstanceData cardInst;
+        cardInst.meshIndex = scene->addMesh(makeQuad(0.0f));
+        cardInst.materialIndex = scene->addMaterial(cardMat);
+        scene->instances.push_back(cardInst);
+
+        LightData light;
+        light.type = kLightPoint;
+        light.intensity = 60.0f;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.7f, 1.6f, 0.55f));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 48;
+        scene->settings.resolutionY = 36;
+        scene->settings.samplesPerPixel = 12;
+        scene->settings.maxDepth = 1;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.caustics = 0;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(0.0f, 1.1f, 3.2f), Vec3(0.0f, 1.1f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto renderSum = [&](int exitFlag, bool& finiteOut) -> double {
+        RenderSession session;
+        session.setScene(buildScene(exitFlag));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        }
+        return sum;
+    };
+
+    bool finOff = true, finOn = true;
+    const double sumOff = renderSum(0, finOff);
+    const double sumOn = renderSum(1, finOn);
+    check(finOff && finOn, "exit-to-diffuse renders are finite");
+    check(sumOn > sumOff * 1.5 && sumOn > 1.0,
+          "Exit to Diffuse through-walk lights the next material behind glass");
+    std::printf("  through off=%.3f on=%.3f\n", sumOff, sumOn);
+
+    // Reflect walk: camera → mirror (depth 0) → card behind the camera.
+    // Flag off: last hit dies black. Flag on: reflect opacity walk Lamberts the card.
+    auto buildReflectScene = [](int exitFlag) {
+        auto scene = std::make_shared<Scene>();
+        auto makeQuad = [](float z, Vec3 n, float half) {
+            MeshPtr m = std::make_shared<Mesh>();
+            m->positions = {Vec3(-half, -0.4f, z), Vec3(half, -0.4f, z), Vec3(half, 2.8f, z),
+                            Vec3(-half, 2.8f, z)};
+            m->indices = {0, 1, 2, 0, 2, 3};
+            m->normals = {n, n, n, n};
+            m->validate();
+            return m;
+        };
+        Material mirror;
+        mirror.baseColor = Vec3(1.0f);
+        mirror.baseWeight = 0.0f;
+        mirror.metallic = 1.0f;
+        mirror.transmission = 0.0f;
+        mirror.roughness = 0.0f;
+        mirror.specular = 1.0f;
+        mirror.exitToDiffuse = exitFlag;
+        InstanceData mirrorInst;
+        mirrorInst.meshIndex = scene->addMesh(makeQuad(0.0f, Vec3(0.0f, 0.0f, 1.0f), 1.8f));
+        mirrorInst.materialIndex = scene->addMaterial(mirror);
+        scene->instances.push_back(mirrorInst);
+
+        Material cardMat;
+        cardMat.baseColor = Vec3(0.15f, 0.75f, 0.2f);
+        cardMat.baseWeight = 1.0f;
+        cardMat.roughness = 1.0f;
+        cardMat.specular = 0.0f;
+        cardMat.doubleSided = 1;
+        InstanceData cardInst;
+        cardInst.meshIndex = scene->addMesh(makeQuad(4.0f, Vec3(0.0f, 0.0f, -1.0f), 8.0f));
+        cardInst.materialIndex = scene->addMaterial(cardMat);
+        scene->instances.push_back(cardInst);
+
+        LightData light;
+        light.type = kLightPoint;
+        light.intensity = 80.0f;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.4f, 1.4f, 3.55f));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 48;
+        scene->settings.resolutionY = 36;
+        scene->settings.samplesPerPixel = 12;
+        scene->settings.maxDepth = 1;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.caustics = 0;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(0.0f, 1.1f, 3.2f), Vec3(0.0f, 1.1f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto renderReflectSum = [&](int exitFlag, bool& finiteOut) -> double {
+        RenderSession session;
+        session.setScene(buildReflectScene(exitFlag));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        }
+        return sum;
+    };
+
+    bool finROff = true, finROn = true;
+    const double sumROff = renderReflectSum(0, finROff);
+    const double sumROn = renderReflectSum(1, finROn);
+    check(finROff && finROn, "exit-to-diffuse reflect renders are finite");
+    check(sumROn > sumROff * 1.5 && sumROn > 1.0,
+          "Exit to Diffuse reflect-walk lights the card in the mirror");
+    std::printf("  reflect off=%.3f on=%.3f\n", sumROff, sumROn);
+
+    // Through + water: camera → glass → dark liquid (other material) → red card.
+    // Flag on: skip dielectrics, Lambert the card. Old dest-on-liquid would stay dark.
+    auto buildLiquidScene = [](int exitFlag) {
+        auto scene = std::make_shared<Scene>();
+        auto makeQuad = [](float z) {
+            MeshPtr m = std::make_shared<Mesh>();
+            m->positions = {Vec3(-1.6f, 0, z), Vec3(1.6f, 0, z), Vec3(1.6f, 2.2f, z), Vec3(-1.6f, 2.2f, z)};
+            m->indices = {0, 1, 2, 0, 2, 3};
+            m->normals = {Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1), Vec3(0, 0, 1)};
+            m->validate();
+            return m;
+        };
+        Material glass;
+        glass.baseColor = Vec3(1.0f);
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.roughness = 0.0f;
+        glass.specular = 1.0f;
+        glass.exitToDiffuse = exitFlag;
+        const int glassIdx = scene->addMaterial(glass);
+        InstanceData frontInst;
+        frontInst.meshIndex = scene->addMesh(makeQuad(1.2f));
+        frontInst.materialIndex = glassIdx;
+        scene->instances.push_back(frontInst);
+        Material liquid;
+        liquid.baseColor = Vec3(0.02f, 0.03f, 0.04f);
+        liquid.baseWeight = 1.0f;
+        liquid.transmission = 1.0f;
+        liquid.transmissionColor = Vec3(0.02f, 0.04f, 0.05f);
+        liquid.ior = 1.33f;
+        liquid.roughness = 0.0f;
+        liquid.specular = 1.0f;
+        InstanceData liquidInst;
+        liquidInst.meshIndex = scene->addMesh(makeQuad(0.9f));
+        liquidInst.materialIndex = scene->addMaterial(liquid);
+        scene->instances.push_back(liquidInst);
+
+        InstanceData backInst;
+        backInst.meshIndex = scene->addMesh(makeQuad(0.6f));
+        backInst.materialIndex = glassIdx;
+        scene->instances.push_back(backInst);
+
+        Material cardMat;
+        cardMat.baseColor = Vec3(0.85f, 0.15f, 0.1f);
+        cardMat.baseWeight = 1.0f;
+        cardMat.roughness = 1.0f;
+        cardMat.specular = 0.0f;
+        InstanceData cardInst;
+        cardInst.meshIndex = scene->addMesh(makeQuad(0.0f));
+        cardInst.materialIndex = scene->addMaterial(cardMat);
+        scene->instances.push_back(cardInst);
+
+        LightData light;
+        light.type = kLightPoint;
+        light.intensity = 60.0f;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.7f, 1.6f, 0.55f));
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 48;
+        scene->settings.resolutionY = 36;
+        scene->settings.samplesPerPixel = 12;
+        scene->settings.maxDepth = 1;
+        scene->settings.integrator = kIntegratorPathTracer;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.caustics = 0;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
+        scene->settings.clampIndirect = 0.0f;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(0.0f, 1.1f, 3.2f), Vec3(0.0f, 1.1f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto renderLiquidSum = [&](int exitFlag, bool& finiteOut) -> double {
+        RenderSession session;
+        session.setScene(buildLiquidScene(exitFlag));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        }
+        return sum;
+    };
+
+    bool finLOff = true, finLOn = true;
+    const double sumLOff = renderLiquidSum(0, finLOff);
+    const double sumLOn = renderLiquidSum(1, finLOn);
+    check(finLOff && finLOn, "exit-to-diffuse liquid renders are finite");
+    check(sumLOn > sumLOff * 1.5 && sumLOn > 1000.0,
+          "Exit to Diffuse through-walk skips water and lights the card");
+    std::printf("  liquid off=%.3f on=%.3f\n", sumLOff, sumLOn);
+}
+
+void testUndoHub() {
+    std::printf("undo-hub\n");
+    registerBuiltinNodes();
+    NodeGraph graph;
+    Node* settings = graph.createNode("rendersettings", "rs1");
+    check(settings != nullptr, "undo test rendersettings");
+    if (!settings) return;
+
+    UndoHub hub;
+    hub.setGraph(&graph);
+    check(hub.stack().undoLimit() == 100, "undo limit is 100");
+
+    const int oldDepth = settings->intValue("maxdepth", 8);
+    settings->setParameterValue("maxdepth", 30);
+    hub.pushParameter(settings->name(), "maxdepth", oldDepth, 30);
+    check(settings->intValue("maxdepth") == 30, "parameter stays at the new value after push");
+    hub.undo();
+    check(settings->intValue("maxdepth") == oldDepth, "undo restores the old parameter");
+    hub.redo();
+    check(settings->intValue("maxdepth") == 30, "redo restores the new parameter");
+
+    const QJsonObject before = graph.toJson();
+    Node* grid = graph.createNode("grid", "grid1");
+    check(grid != nullptr, "create grid for graph undo");
+    hub.pushGraphSnapshot(before, graph.toJson(), "Create node");
+    check(graph.findNode("grid1") != nullptr, "created node is in the graph");
+    hub.undo();
+    check(graph.findNode("grid1") == nullptr, "undo removes the created node");
+    hub.redo();
+    check(graph.findNode("grid1") != nullptr, "redo restores the created node");
+    settings = graph.findNode("rs1");
+    check(settings != nullptr, "rendersettings survives graph undo/redo");
+    if (!settings) return;
+
+    const int samples0 = settings->intValue("samples", 128);
+    for (int i = 0; i < 110; ++i) {
+        hub.pushParameter(settings->name(), QStringLiteral("samples"), samples0 + i, samples0 + i + 1);
+    }
+    check(hub.stack().count() <= 100, "undo stack drops entries past 100");
+
+    OrbitCameraState camBefore;
+    OrbitCameraState camAfter;
+    camAfter.distance = 20.0f;
+    camAfter.yaw = 45.0f;
+    int cameraApplies = 0;
+    float lastDistance = 0.0f;
+    hub.setApplyCamera([&](const OrbitCameraState& s) {
+        ++cameraApplies;
+        lastDistance = s.distance;
+    });
+    hub.pushCamera(camBefore, camAfter);
+    hub.undo();
+    check(cameraApplies == 1, "camera undo applies the start view");
+    check(std::fabs(lastDistance - camBefore.distance) < 1e-5f, "camera undo restores distance");
+    hub.redo();
+    check(cameraApplies == 2, "camera redo applies the end view");
+    check(std::fabs(lastDistance - camAfter.distance) < 1e-5f, "camera redo restores distance");
 }
 
 // Chromatic dispersion + thin-film iridescence sanity.
@@ -5717,13 +7010,149 @@ void testMaterialXArnoldMapsAndConstants() {
 
 void testMaterialXRaySwitchCaustics() {
     std::printf("materialx-ray-switch-caustics\n");
+
+    // Incoming-ray tagging matches Arnold (child ray type after a BSDF sample).
+    {
+        BsdfSample specR{};
+        specR.specular = true;
+        specR.transmitted = false;
+        LobeWeights lw{};
+        lw.specular = 1.0f;
+        check(nextRayShadeKind(specR, lw) == RayShadeKind::SpecularReflection,
+              "specular bounce → SpecularReflection");
+        BsdfSample specT{};
+        specT.specular = true;
+        specT.transmitted = true;
+        check(nextRayShadeKind(specT, lw) == RayShadeKind::SpecularTransmission,
+              "specular transmit → SpecularTransmission");
+        BsdfSample diffR{};
+        diffR.specular = false;
+        diffR.transmitted = false;
+        LobeWeights dLw{};
+        dLw.diffuse = 1.0f;
+        check(nextRayShadeKind(diffR, dLw) == RayShadeKind::DiffuseReflection,
+              "diffuse bounce → DiffuseReflection");
+        BsdfSample diffT{};
+        diffT.specular = false;
+        diffT.transmitted = true;
+        check(nextRayShadeKind(diffT, dLw) == RayShadeKind::DiffuseTransmission,
+              "diffuse transmit → DiffuseTransmission");
+    }
+
 #if !SOLSTICE_HAVE_MATERIALX
     std::printf("  skip (no MaterialX)\n");
     return;
 #else
-    // Camera look = muddy glass (rough); caustics transport = sharp glass.
-    // Photon / MNEE / LT must pick RayShadeKind::Caustics, not the camera look.
-    const QString xml = QStringLiteral(
+    bool foundShader = false, foundColor = false, shaderHasVolume = false, colorHasVolume = false;
+    for (const MaterialXNodeCatalogEntry& e : listMaterialXNodeCatalog()) {
+        if (e.category == QStringLiteral("ray_switch_shader")) {
+            foundShader = true;
+            for (const MaterialXNodeInputDef& inp : e.inputsFor(e.type)) {
+                if (inp.name == QStringLiteral("volume")) shaderHasVolume = true;
+            }
+        }
+        if (e.category == QStringLiteral("ray_switch")) {
+            foundColor = true;
+            for (const MaterialXNodeInputDef& inp : e.inputsFor(e.type)) {
+                if (inp.name == QStringLiteral("volume")) colorHasVolume = true;
+            }
+        }
+    }
+    check(foundShader, "catalog contains ray_switch_shader");
+    check(foundColor, "catalog contains ray_switch");
+    check(shaderHasVolume, "ray_switch_shader has Arnold volume port");
+    check(colorHasVolume, "ray_switch has Arnold volume port");
+
+    auto ssXml = [](const char* name, float roughness, const char* color) {
+        return QStringLiteral(
+                   "  <standard_surface name=\"%1\" type=\"surfaceshader\">\n"
+                   "    <input name=\"base\" type=\"float\" value=\"1\"/>\n"
+                   "    <input name=\"base_color\" type=\"color3\" value=\"%2\"/>\n"
+                   "    <input name=\"specular\" type=\"float\" value=\"1\"/>\n"
+                   "    <input name=\"specular_roughness\" type=\"float\" value=\"%3\"/>\n"
+                   "    <input name=\"specular_IOR\" type=\"float\" value=\"1.5\"/>\n"
+                   "  </standard_surface>\n")
+            .arg(QString::fromUtf8(name), QString::fromUtf8(color))
+            .arg(roughness, 0, 'f', 3);
+    };
+
+    // Distinct shaders on every Arnold port (+ Solstice sss/caustics).
+    const QString allPortsXml =
+        QStringLiteral("<?xml version=\"1.0\"?>\n<materialx version=\"1.38\">\n") +
+        ssXml("ss_cam", 0.11f, "0.1, 0.1, 0.1") + ssXml("ss_sh", 0.21f, "0.2, 0.0, 0.0") +
+        ssXml("ss_dr", 0.31f, "0.0, 0.3, 0.0") + ssXml("ss_sr", 0.41f, "0.0, 0.0, 0.4") +
+        ssXml("ss_dt", 0.51f, "0.5, 0.0, 0.5") + ssXml("ss_st", 0.61f, "0.0, 0.6, 0.6") +
+        ssXml("ss_vol", 0.71f, "0.7, 0.7, 0.0") + ssXml("ss_sss", 0.81f, "0.8, 0.4, 0.2") +
+        ssXml("ss_cau", 0.00f, "1, 1, 1") +
+        QStringLiteral(
+            "  <ray_switch_shader name=\"rswitch\" type=\"surfaceshader\">\n"
+            "    <input name=\"camera\" type=\"surfaceshader\" nodename=\"ss_cam\"/>\n"
+            "    <input name=\"shadow\" type=\"surfaceshader\" nodename=\"ss_sh\"/>\n"
+            "    <input name=\"diffuse_reflection\" type=\"surfaceshader\" nodename=\"ss_dr\"/>\n"
+            "    <input name=\"specular_reflection\" type=\"surfaceshader\" nodename=\"ss_sr\"/>\n"
+            "    <input name=\"diffuse_transmission\" type=\"surfaceshader\" nodename=\"ss_dt\"/>\n"
+            "    <input name=\"specular_transmission\" type=\"surfaceshader\" nodename=\"ss_st\"/>\n"
+            "    <input name=\"volume\" type=\"surfaceshader\" nodename=\"ss_vol\"/>\n"
+            "    <input name=\"sss\" type=\"surfaceshader\" nodename=\"ss_sss\"/>\n"
+            "    <input name=\"caustics\" type=\"surfaceshader\" nodename=\"ss_cau\"/>\n"
+            "  </ray_switch_shader>\n"
+            "  <surfacematerial name=\"surface\" type=\"material\">\n"
+            "    <input name=\"surface\" type=\"surfaceshader\" nodename=\"rswitch\"/>\n"
+            "  </surfacematerial>\n"
+            "</materialx>\n");
+
+    MaterialXEvalResult eval = evaluateMaterialXDocument(allPortsXml, QString());
+    check(eval.ok, "ray_switch_shader evaluates with all ports");
+    if (!eval.ok) {
+        std::printf("  error: %s\n", eval.error.toUtf8().constData());
+        return;
+    }
+    check(std::fabs(eval.material.roughness - 0.11f) < 1e-4f, "camera branch roughness 0.11");
+    check(eval.raySwitchBranches.size() == 8, "eight non-camera branch materials");
+
+    Stage stage;
+    StagePrim prim;
+    prim.type = PrimType::Mesh;
+    prim.path = "/switch";
+    prim.mesh = makeSphereMesh(0.5f, 16, 8);
+    prim.material = eval.material;
+    prim.raySwitchBranches = eval.raySwitchBranches;
+    prim.materialAssigned = true;
+    stage.prims.push_back(prim);
+    ScenePtr scene = stage.toScene();
+    check(scene && scene->materials.size() >= 9, "scene has base + 8 branch materials");
+    if (!scene) return;
+    const int baseIdx = scene->instances.empty() ? -1 : scene->instances[0].materialIndex;
+    check(baseIdx >= 0, "instance material index");
+    SceneView view = scene->view();
+    const Material& baked = scene->materials[size_t(baseIdx)];
+    check(baked.raySwitch.shadow >= 0, "baked shadow slot");
+    check(baked.raySwitch.diffuseReflection >= 0, "baked diffuse_reflection slot");
+    check(baked.raySwitch.specularReflection >= 0, "baked specular_reflection slot");
+    check(baked.raySwitch.diffuseTransmission >= 0, "baked diffuse_transmission slot");
+    check(baked.raySwitch.specularTransmission >= 0, "baked specular_transmission slot");
+    check(baked.raySwitch.volume >= 0, "baked volume slot");
+    check(baked.raySwitch.sss >= 0, "baked sss slot");
+    check(baked.raySwitch.caustics >= 0, "baked caustics slot");
+
+    auto expectR = [&](RayShadeKind kind, float r, const char* label) {
+        const Material m = materialForRay(view, baseIdx, kind);
+        check(std::fabs(m.roughness - r) < 1e-4f, label);
+    };
+    expectR(RayShadeKind::Camera, 0.11f, "Camera → camera port");
+    expectR(RayShadeKind::Shadow, 0.21f, "Shadow → shadow port");
+    expectR(RayShadeKind::DiffuseReflection, 0.31f, "DiffuseReflection → diffuse_reflection");
+    expectR(RayShadeKind::SpecularReflection, 0.41f, "SpecularReflection → specular_reflection");
+    expectR(RayShadeKind::DiffuseTransmission, 0.51f, "DiffuseTransmission → diffuse_transmission");
+    expectR(RayShadeKind::SpecularTransmission, 0.61f, "SpecularTransmission → specular_transmission");
+    expectR(RayShadeKind::Volume, 0.71f, "Volume → volume port");
+    expectR(RayShadeKind::Sss, 0.81f, "Sss → sss port");
+    expectR(RayShadeKind::Caustics, 0.00f, "Caustics → caustics port");
+    const Material cau = materialForCausticTransport(view, baseIdx);
+    check(cau.roughness < 1e-5f, "caustic transport prefers caustics port");
+
+    // Unconnected ports fall back to camera/base (Arnold).
+    const QString fallbackXml = QStringLiteral(
         "<?xml version=\"1.0\"?>\n"
         "<materialx version=\"1.38\">\n"
         "  <standard_surface name=\"glass_camera\" type=\"surfaceshader\">\n"
@@ -5751,60 +7180,77 @@ void testMaterialXRaySwitchCaustics() {
         "  </surfacematerial>\n"
         "</materialx>\n");
 
-    MaterialXEvalResult eval = evaluateMaterialXDocument(xml, QString());
-    check(eval.ok, "ray_switch_shader evaluates");
-    if (!eval.ok) {
-        std::printf("  error: %s\n", eval.error.toUtf8().constData());
+    MaterialXEvalResult evalFb = evaluateMaterialXDocument(fallbackXml, QString());
+    check(evalFb.ok, "camera+caustics ray_switch evaluates");
+    if (!evalFb.ok) {
+        std::printf("  error: %s\n", evalFb.error.toUtf8().constData());
         return;
     }
-    check(std::fabs(eval.material.roughness - 0.12f) < 1e-4f, "camera branch roughness 0.12");
-    check(eval.material.transmission > 0.99f, "camera branch transmission");
-    check(eval.material.raySwitch.caustics == 0, "caustics slot is local index 0");
-    check(eval.raySwitchBranches.size() == 1, "one caustics branch material");
-    check(eval.raySwitchBranches[0].roughness < 1e-5f, "caustics branch roughness 0");
-    check(eval.raySwitchBranches[0].transmission > 0.99f, "caustics branch transmission");
+    check(std::fabs(evalFb.material.roughness - 0.12f) < 1e-4f, "camera branch roughness 0.12");
+    check(evalFb.material.transmission > 0.99f, "camera branch transmission");
+    check(evalFb.material.raySwitch.caustics == 0, "caustics slot is local index 0");
+    check(evalFb.raySwitchBranches.size() == 1, "one caustics branch material");
+    check(evalFb.raySwitchBranches[0].roughness < 1e-5f, "caustics branch roughness 0");
 
-    // Catalog must list Solstice ray_switch nodes even when MaterialX libs load.
-    bool foundShader = false, foundColor = false;
-    for (const MaterialXNodeCatalogEntry& e : listMaterialXNodeCatalog()) {
-        if (e.category == QStringLiteral("ray_switch_shader")) foundShader = true;
-        if (e.category == QStringLiteral("ray_switch")) foundColor = true;
-    }
-    check(foundShader, "catalog contains ray_switch_shader");
-    check(foundColor, "catalog contains ray_switch");
-
-    // Stage bake remaps local → scene-absolute indices; materialForRay picks slots.
-    Stage stage;
-    StagePrim prim;
-    prim.type = PrimType::Mesh;
-    prim.path = "/glass";
-    prim.mesh = makeSphereMesh(0.5f, 16, 8);
-    prim.material = eval.material;
-    prim.raySwitchBranches = eval.raySwitchBranches;
-    prim.materialAssigned = true;
-    stage.prims.push_back(prim);
-
-    ScenePtr scene = stage.toScene();
-    check(scene && scene->materials.size() >= 2, "scene has base + caustics materials");
-    if (!scene) return;
-    const int baseIdx = scene->instances.empty() ? -1 : scene->instances[0].materialIndex;
-    check(baseIdx >= 0, "instance material index");
-    const Material& base = scene->materials[size_t(baseIdx)];
-    check(base.raySwitch.caustics >= 0, "baked caustics slot is absolute");
-    check(std::fabs(base.roughness - 0.12f) < 1e-4f, "baked camera roughness");
-
-    SceneView view = scene->view();
-    const Material cam = materialForRay(view, baseIdx, RayShadeKind::Camera);
-    const Material specT = materialForRay(view, baseIdx, RayShadeKind::SpecularTransmission);
-    const Material cau = materialForCausticTransport(view, baseIdx);
+    Stage stageFb;
+    StagePrim primFb;
+    primFb.type = PrimType::Mesh;
+    primFb.path = "/glass";
+    primFb.mesh = makeSphereMesh(0.5f, 16, 8);
+    primFb.material = evalFb.material;
+    primFb.raySwitchBranches = evalFb.raySwitchBranches;
+    primFb.materialAssigned = true;
+    stageFb.prims.push_back(primFb);
+    ScenePtr sceneFb = stageFb.toScene();
+    check(sceneFb && sceneFb->materials.size() >= 2, "fallback scene has base + caustics");
+    if (!sceneFb) return;
+    const int fbIdx = sceneFb->instances.empty() ? -1 : sceneFb->instances[0].materialIndex;
+    check(fbIdx >= 0, "fallback instance material index");
+    SceneView viewFb = sceneFb->view();
+    const Material cam = materialForRay(viewFb, fbIdx, RayShadeKind::Camera);
+    const Material specT = materialForRay(viewFb, fbIdx, RayShadeKind::SpecularTransmission);
+    const Material vol = materialForRay(viewFb, fbIdx, RayShadeKind::Volume);
+    const Material sh = materialForRay(viewFb, fbIdx, RayShadeKind::Shadow);
+    const Material cauFb = materialForCausticTransport(viewFb, fbIdx);
     check(std::fabs(cam.roughness - 0.12f) < 1e-4f, "Camera ray → camera port roughness 0.12");
-    // Unconnected specular_transmission falls back to camera/base (Arnold-like).
     check(std::fabs(specT.roughness - 0.12f) < 1e-4f, "unconnected specular_transmission → camera");
-    check(cau.roughness < 1e-5f, "caustic transport → caustics port roughness 0");
-    check(std::fabs(cam.roughness - cau.roughness) > 0.05f,
-          "camera port must not equal caustics port");
-    std::printf("  cameraR=%.3f specTransR=%.3f causticTransportR=%.3f slot=%d\n", cam.roughness,
-                specT.roughness, cau.roughness, base.raySwitch.caustics);
+    check(std::fabs(vol.roughness - 0.12f) < 1e-4f, "unconnected volume → camera");
+    check(std::fabs(sh.roughness - 0.12f) < 1e-4f, "unconnected shadow → camera");
+    check(cauFb.roughness < 1e-5f, "caustic transport → caustics port roughness 0");
+    check(std::fabs(cam.roughness - cauFb.roughness) > 0.05f, "camera port must not equal caustics port");
+    std::printf("  cameraR=%.3f specTransR=%.3f volumeR=%.3f causticTransportR=%.3f\n", cam.roughness,
+                specT.roughness, vol.roughness, cauFb.roughness);
+
+    // Without surfacematerial, the first standard_surface must not steal the switch.
+    // Document order lists the GI shader first on purpose.
+    const QString noSurfXml = QStringLiteral(
+        "<?xml version=\"1.0\"?>\n"
+        "<materialx version=\"1.38\">\n"
+        "  <standard_surface name=\"gi_only\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" value=\"1, 0, 0\"/>\n"
+        "    <input name=\"specular_roughness\" type=\"float\" value=\"0.90\"/>\n"
+        "  </standard_surface>\n"
+        "  <standard_surface name=\"camera_look\" type=\"surfaceshader\">\n"
+        "    <input name=\"base_color\" type=\"color3\" value=\"0, 1, 0\"/>\n"
+        "    <input name=\"specular_roughness\" type=\"float\" value=\"0.20\"/>\n"
+        "  </standard_surface>\n"
+        "  <ray_switch_shader name=\"rswitch\" type=\"surfaceshader\">\n"
+        "    <input name=\"camera\" type=\"surfaceshader\" nodename=\"camera_look\"/>\n"
+        "    <input name=\"diffuse_reflection\" type=\"surfaceshader\" nodename=\"gi_only\"/>\n"
+        "  </ray_switch_shader>\n"
+        "</materialx>\n");
+    MaterialXEvalResult evalNs = evaluateMaterialXDocument(noSurfXml, QString());
+    check(evalNs.ok, "ray_switch_shader without surfacematerial evaluates");
+    if (!evalNs.ok) {
+        std::printf("  error: %s\n", evalNs.error.toUtf8().constData());
+        return;
+    }
+    check(std::fabs(evalNs.material.roughness - 0.20f) < 1e-4f,
+          "no surfacematerial: camera port wins over first standard_surface");
+    check(evalNs.material.raySwitch.diffuseReflection >= 0, "no surfacematerial: GI port cooked");
+    check(evalNs.raySwitchBranches.size() == 1, "no surfacematerial: one GI branch");
+    check(std::fabs(evalNs.raySwitchBranches[0].roughness - 0.90f) < 1e-4f,
+          "no surfacematerial: GI branch roughness 0.90");
 #endif
 }
 
@@ -6125,6 +7571,34 @@ void testTxMipmaps() {
 
 void testBdptShadersAndSss() {
     std::printf("bdpt-shaders-sss\n");
+    check(bdpt::kMaxVerts == 4096, "BDPT vertex cap is 4096");
+    {
+        Vec3 beta(0.25f, 0.25f, 0.25f);
+        Rng rngBefore(1u, 2u);
+        check(bdpt::bdptRussianRoulette(beta, rngBefore, 1, 3),
+              "BDPT RR does not run before rrStartDepth");
+        checkNear(beta.x, 0.25f, 1e-6f, "BDPT RR leaves beta unchanged before rrStart");
+
+        Vec3 glassBeta(1.0f, 1.0f, 1.0f);
+        Rng rngGlass(7u, 13u);
+        check(bdpt::bdptRussianRoulette(glassBeta, rngGlass, 30, 3),
+              "BDPT RR never kills throughput 1 (glass)");
+        checkNear(glassBeta.x, 1.0f, 1e-6f, "BDPT RR does not boost throughput 1");
+
+        double acc = 0.0;
+        int lives = 0;
+        const int nTrials = 20000;
+        for (int i = 0; i < nTrials; ++i) {
+            Vec3 t(0.25f, 0.25f, 0.25f);
+            Rng r(uint64_t(1000 + i), 7u);
+            if (bdpt::bdptRussianRoulette(t, r, 3, 3)) {
+                acc += double(t.x);
+                ++lives;
+            }
+        }
+        checkNear(float(acc / double(nTrials)), 0.25f, 0.02f, "BDPT RR is unbiased");
+        check(lives > nTrials / 6 && lives < nTrials / 3, "BDPT RR survival tracks q=0.25");
+    }
 
     auto makeBaseScene = []() {
         auto scene = std::make_shared<Scene>();
@@ -7330,7 +8804,9 @@ void testBinaryUsdLoad() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    QCoreApplication app(argc, argv);
+    (void)app;
     std::printf("Solstice tests\n");
     if (getenv("SOL_ONLY_WF")) {
         registerBuiltinNodes();
@@ -7367,7 +8843,9 @@ int main() {
     }
     if (getenv("SOL_ONLY_FOLDERS")) {
         registerBuiltinNodes();
+        testXpuDevice();
         testRenderSettingsFolders();
+        testIntegratorDeviceMemory();
         testSceneGraphFolders();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
@@ -7377,9 +8855,23 @@ int main() {
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
+    if (getenv("SOL_ONLY_PHOTON")) {
+        registerBuiltinNodes();
+        testPhotonAim();
+        testPhotonCaustics();
+        testPhotonDispersion();
+        std::printf("%d checks, %d failures\n", g_checks, g_failures);
+        return g_failures == 0 ? 0 : 1;
+    }
     if (getenv("SOL_ONLY_BDPT")) {
         registerBuiltinNodes();
         testBdptShadersAndSss();
+        testBdptTimersFormat();
+        testBdptScratchReuse();
+        testIntegratorDeviceMemory();
+        testAimedLtCpu();
+        testExitToDiffuse();
+        testUndoHub();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
         return g_failures == 0 ? 0 : 1;
     }
@@ -7425,10 +8917,18 @@ int main() {
     testBdptDistantSunCaustics();
     testCameraProjShared();
     testBdptCausticThroughRefraction();
+    testPhotonAim();
     testPhotonCaustics();
+    testPhotonDispersion();
     testRoughGlassCaustics();
     testRefractionSparkleClamp();
     testSplatAccumulationPrecision();
+    testBdptTimersFormat();
+    testBdptScratchReuse();
+    testIntegratorDeviceMemory();
+    testAimedLtCpu();
+    testExitToDiffuse();
+    testUndoHub();
     testDispersionAndThinFilm();
     testIntegratorSwitchStress();
     testInstanceTransform();

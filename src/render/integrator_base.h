@@ -26,6 +26,8 @@ struct IntegratorSampleContext {
     DispersionContext* dispersion = nullptr;
     Framebuffer* splatFb = nullptr;
     const CausticPhotonMap* photons = nullptr;
+    struct BdptPassStats* bdptStats = nullptr;
+    struct BdptScratch* bdptScratch = nullptr;
 #if !defined(__CUDACC__) && SOLSTICE_HAVE_OPENPGL
     PathGuiding::ThreadState* guiding = nullptr;
 #endif

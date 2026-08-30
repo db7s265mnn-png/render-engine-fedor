@@ -14,6 +14,7 @@
 #include "nodes/stage.h"
 #include "render/render_session.h"
 #include "scene/scene.h"
+#include "app/undo_hub.h"
 #include "ui/render_view.h"
 
 class QAction;
@@ -94,6 +95,10 @@ private:
     void applyCameraNodeToView(Node* camera);
     void applyLensFromCameraNode(const Node* camera, CameraData& out) const;
     void writeViewToCameraNode(Node* camera);
+    void captureOrbitCameraState(OrbitCameraState& out) const;
+    void applyOrbitCameraState(const OrbitCameraState& state);
+    void refreshAfterUndo();
+    void rebuildGraphAfterUndo();
     void selectDisplayNode();
     void startStillFrameRender(Node* renderSettings);
 
@@ -122,6 +127,11 @@ private:
     QAction* translateToolAction_ = nullptr;
     QAction* rotateToolAction_ = nullptr;
     QAction* scaleToolAction_ = nullptr;
+    QAction* undoAction_ = nullptr;
+    QAction* redoAction_ = nullptr;
+
+    UndoHub undoHub_;
+    OrbitCameraState cameraUndoStart_;
 
     std::atomic<bool> framePending_{false};
     bool cameraOverride_ = false;

@@ -385,6 +385,25 @@ void applyStandardSurface(const mx::NodePtr& ss, Material& material) {
         material.internalReflections = ir;
     }
 
+    // Exit to Diffuse (default off). Last hit at Max Ray Depth → Lambert + NEE.
+    {
+        float etd = 0.0f;
+        if (!resolveConnectedNode(ss, "exit_to_diffuse")) {
+            const std::string raw = inputValueString(ss, "exit_to_diffuse");
+            if (!raw.empty()) {
+                if (raw == "false" || raw == "0" || raw == "False" || raw == "FALSE")
+                    etd = 0.0f;
+                else if (raw == "true" || raw == "1" || raw == "True" || raw == "TRUE")
+                    etd = 1.0f;
+                else {
+                    float v = 0.0f;
+                    if (parseFloat(raw, v)) etd = v > 0.5f ? 1.0f : 0.0f;
+                }
+            }
+        }
+        material.exitToDiffuse = etd > 0.5f ? 1 : 0;
+    }
+
     setColor("emission_color", material.emissionColor);
     setFloat("emission", material.emissionStrength);
     setFloat("subsurface", material.subsurface);
@@ -689,6 +708,7 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"thin_film_thickness", "float", "0"},
          {"thin_film_IOR", "float", "1.4"},
          {"internal_reflections", "boolean", "true"},
+         {"exit_to_diffuse", "boolean", "false"},
          {"emission", "float", "0"},
          {"emission_color", "color3", "1, 1, 1"},
          {"normal", "vector3", {}},
@@ -732,8 +752,9 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"emission", "float", "0"},
          {"emission_color", "color3", "1, 1, 1"}});
     // Arnold-like ray switch (surfaceshader). Incoming ray type selects the port
-    // (camera / shadow / specular_transmission / …). Solstice `caustics` is only
-    // for photon / MNEE / BDPT light-tracing — never for camera rays.
+    // (camera / shadow / diffuse+specular reflection+transmission / volume).
+    // Unconnected ports use the camera shader. Solstice `sss` and `caustics` are
+    // extras: sss is AI_RAY_SUBSURFACE; caustics is photon / MNEE / BDPT light-tracing.
     add("ray_switch_shader", "surfaceshader", "PBR / Shading",
         {{"camera", "surfaceshader", {}},
          {"shadow", "surfaceshader", {}},
@@ -741,6 +762,7 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"specular_reflection", "surfaceshader", {}},
          {"diffuse_transmission", "surfaceshader", {}},
          {"specular_transmission", "surfaceshader", {}},
+         {"volume", "surfaceshader", {}},
          {"sss", "surfaceshader", {}},
          {"caustics", "surfaceshader", {}}});
     // Arnold ray_switch (color3) — UI catalog; per-ray color needs shade-time eval.
@@ -751,6 +773,7 @@ QVector<MaterialXNodeCatalogEntry> fallbackMaterialXCatalog() {
          {"specular_reflection", "color3", "0.8, 0.8, 0.8"},
          {"diffuse_transmission", "color3", "0.8, 0.8, 0.8"},
          {"specular_transmission", "color3", "0.8, 0.8, 0.8"},
+         {"volume", "color3", "0.8, 0.8, 0.8"},
          {"sss", "color3", "0.8, 0.8, 0.8"},
          {"caustics", "color3", "0.8, 0.8, 0.8"}});
 
@@ -996,6 +1019,16 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
 
         mx::NodePtr ss;
         if (surface) ss = resolveMaterialPort(surface, "surface", "surfaceshader");
+        // Prefer ray_switch_shader as the terminal (Arnold: one node, many ray ports).
+        // A leftover default standard_surface must not steal the assignment.
+        if (!ss) {
+            for (const mx::NodePtr& node : doc->getNodes()) {
+                if (node->getCategory() == "ray_switch_shader") {
+                    ss = node;
+                    break;
+                }
+            }
+        }
         if (!ss) {
             for (const mx::NodePtr& node : doc->getNodes()) {
                 if (node->getCategory() == "standard_surface") {
@@ -1020,6 +1053,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
                                     "specular_reflection",
                                     "diffuse_transmission",
                                     "specular_transmission",
+                                    "volume",
                                     "sss",
                                     "caustics"};
             mx::NodePtr cameraSs = resolveConnectedNode(switchNode, "camera");
@@ -1058,6 +1092,7 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
             addBranch("specular_reflection", result.material.raySwitch.specularReflection);
             addBranch("diffuse_transmission", result.material.raySwitch.diffuseTransmission);
             addBranch("specular_transmission", result.material.raySwitch.specularTransmission);
+            addBranch("volume", result.material.raySwitch.volume);
             addBranch("sss", result.material.raySwitch.sss);
             addBranch("caustics", result.material.raySwitch.caustics);
             ss = cameraSs;  // texture binds target the camera surface
@@ -1204,6 +1239,57 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         bindSlot("normal", result.normalTexture, result.material.normalProc, true);
         bindSlot("subsurface_color", result.subsurfaceTexture, result.material.subsurfaceProc);
 
+        // Branch maps live in the shared proceduralImages / procedurals pool so GPU
+        // bilinear *Tex and CPU procs both resolve after Stage remaps local indices.
+        if (switchNode) {
+            auto bindBranchMaps = [&](const mx::NodePtr& ssNode, Material& dst) {
+                auto bindImgOrProc = [&](const char* name, int& texIndex, int& procIndex, bool srgb) {
+                    mx::NodePtr connected = resolveConnectedNode(ssNode, name);
+                    if (!connected) return;
+                    const std::string cat = connected->getCategory();
+                    if ((cat == "image" || cat == "tiledimage") &&
+                        !materialXImageNeedsProceduralBind(connected)) {
+                        std::string texError;
+                        auto img = loadTextureFromImageNode(connected, searchDirectory, udimSet,
+                                                            texError, srgb);
+                        if (img) {
+                            texIndex = int(result.proceduralImages.size());
+                            result.proceduralImages.push_back(std::move(img));
+                        } else if (!texError.empty()) {
+                            logWarning("MaterialX: " + texError);
+                        }
+                        return;
+                    }
+                    compileProc(connected, procIndex, name, /*dataTextures=*/!srgb);
+                };
+                bindImgOrProc("base_color", dst.baseColorTex, dst.baseColorProc, true);
+                bindImgOrProc("specular_roughness", dst.roughnessTex, dst.roughnessProc, false);
+                bindImgOrProc("metalness", dst.metallicTex, dst.metallicProc, false);
+                bindImgOrProc("specular_color", dst.specularColorTex, dst.specularColorProc, true);
+                bindImgOrProc("transmission_color", dst.transmissionColorTex, dst.transmissionColorProc,
+                              true);
+                bindImgOrProc("opacity", dst.opacityTex, dst.opacityProc, true);
+                bindImgOrProc("emission_color", dst.emissionTex, dst.emissionProc, true);
+                bindImgOrProc("normal", dst.normalTex, dst.normalProc, false);
+                bindImgOrProc("subsurface_color", dst.subsurfaceTex, dst.subsurfaceProc, true);
+            };
+            auto bindIf = [&](const char* port, int slot) {
+                if (slot < 0) return;
+                mx::NodePtr n = resolveConnectedNode(switchNode, port);
+                if (!n || n->getCategory() != "standard_surface") return;
+                if (slot >= int(result.raySwitchBranches.size())) return;
+                bindBranchMaps(n, result.raySwitchBranches[size_t(slot)]);
+            };
+            bindIf("shadow", result.material.raySwitch.shadow);
+            bindIf("diffuse_reflection", result.material.raySwitch.diffuseReflection);
+            bindIf("specular_reflection", result.material.raySwitch.specularReflection);
+            bindIf("diffuse_transmission", result.material.raySwitch.diffuseTransmission);
+            bindIf("specular_transmission", result.material.raySwitch.specularTransmission);
+            bindIf("volume", result.material.raySwitch.volume);
+            bindIf("sss", result.material.raySwitch.sss);
+            bindIf("caustics", result.material.raySwitch.caustics);
+        }
+
         // surfacematerial.displacement / displacementshader → height/scale/zero/autobump.
         mx::NodePtr dispNode =
             surface ? resolveMaterialPort(surface, "displacement", "displacementshader") : nullptr;
@@ -1301,6 +1387,29 @@ MaterialXEvalResult evaluateMaterialXDocument(const QString& xml, const QString&
         sanitize(result.material.subsurfaceProc);
         sanitize(result.material.bumpProc);
         sanitize(result.material.displacementProc);
+        auto sanitizeTex = [&](int& idx) {
+            if (idx >= 0 && idx >= int(result.proceduralImages.size())) idx = -1;
+        };
+        for (Material& branch : result.raySwitchBranches) {
+            sanitize(branch.baseColorProc);
+            sanitize(branch.roughnessProc);
+            sanitize(branch.metallicProc);
+            sanitize(branch.specularColorProc);
+            sanitize(branch.transmissionColorProc);
+            sanitize(branch.opacityProc);
+            sanitize(branch.emissionProc);
+            sanitize(branch.normalProc);
+            sanitize(branch.subsurfaceProc);
+            sanitizeTex(branch.baseColorTex);
+            sanitizeTex(branch.roughnessTex);
+            sanitizeTex(branch.metallicTex);
+            sanitizeTex(branch.specularColorTex);
+            sanitizeTex(branch.transmissionColorTex);
+            sanitizeTex(branch.opacityTex);
+            sanitizeTex(branch.emissionTex);
+            sanitizeTex(branch.normalTex);
+            sanitizeTex(branch.subsurfaceTex);
+        }
 
         result.ok = true;
         return result;

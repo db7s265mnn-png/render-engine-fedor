@@ -8,7 +8,7 @@ if(WIN32)
     set(CMAKE_CUDA_COMPILER_ID_FLAGS "--allow-unsupported-compiler")
 endif()
 
-project(Solstice VERSION 0.9.36 LANGUAGES CXX)
+project(Solstice VERSION 0.9.75 LANGUAGES CXX)
 
 set(SOLSTICE_APP_DISPLAY_NAME "Grendizer_Render" CACHE STRING "User-visible application name")
 set(SOLSTICE_TX_TOOLS_ALPHA_NAME "Grendizer_TX_Tools_Alpha" CACHE STRING "TX Tools Alpha (Qt viewport) name")
@@ -319,10 +319,18 @@ if(SOLSTICE_ENABLE_OPTIX)
 endif()
 
 # MaterialX (https://github.com/AcademySoftwareFoundation/MaterialX)
+# CMake 4.x FetchContent of the GitHub *tarball* returns 403 (no User-Agent).
+# CI and this tree use git clone v1.39.4, then add_subdirectory / MakeAvailable.
 set(SOLSTICE_HAVE_MATERIALX_01 0)
 set(SOLSTICE_MATERIALX_LIBRARIES "" CACHE PATH "Path to MaterialX libraries/ (stdlib, pbrlib, bxdf)")
 if(SOLSTICE_ENABLE_MATERIALX)
     list(APPEND CMAKE_PREFIX_PATH "/tmp/mtlx-install")
+    if(DEFINED ENV{DEPS_PREFIX} AND EXISTS "$ENV{DEPS_PREFIX}")
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{DEPS_PREFIX}")
+    endif()
+    if(WIN32 AND DEFINED ENV{LOCALAPPDATA} AND EXISTS "$ENV{LOCALAPPDATA}/grendizer-deps")
+        list(APPEND CMAKE_PREFIX_PATH "$ENV{LOCALAPPDATA}/grendizer-deps")
+    endif()
     find_package(MaterialX CONFIG QUIET)
     if(NOT MaterialX_FOUND)
         include(FetchContent)
@@ -338,17 +346,37 @@ if(SOLSTICE_ENABLE_MATERIALX)
         set(MATERIALX_BUILD_RENDER OFF CACHE BOOL "" FORCE)
         set(MATERIALX_INSTALL_PYTHON OFF CACHE BOOL "" FORCE)
         set(MATERIALX_INSTALL_RESOURCES OFF CACHE BOOL "" FORCE)
-        if(EXISTS "/tmp/mtlx.tgz")
-            set(_solstice_mtlx_url "file:///tmp/mtlx.tgz")
-        else()
-            set(_solstice_mtlx_url
-                "https://github.com/AcademySoftwareFoundation/MaterialX/archive/refs/tags/v1.39.4.tar.gz")
+        set(_solstice_mtlx_src "${CMAKE_BINARY_DIR}/_deps/materialx-src")
+        if(EXISTS "${_solstice_mtlx_src}" AND NOT EXISTS "${_solstice_mtlx_src}/CMakeLists.txt")
+            file(REMOVE_RECURSE "${_solstice_mtlx_src}")
+            file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps/materialx-subbuild")
+            file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps/materialx-build")
         endif()
-        FetchContent_Declare(MaterialX
-            URL ${_solstice_mtlx_url}
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-        FetchContent_MakeAvailable(MaterialX)
-        set(MaterialX_FOUND TRUE)
+        set(_solstice_saved_automoc ${CMAKE_AUTOMOC})
+        set(CMAKE_AUTOMOC OFF)
+        if(EXISTS "${_solstice_mtlx_src}/CMakeLists.txt")
+            message(STATUS "MaterialX: ${_solstice_mtlx_src}")
+            add_subdirectory("${_solstice_mtlx_src}" "${CMAKE_BINARY_DIR}/_deps/materialx-build")
+            set(materialx_SOURCE_DIR "${_solstice_mtlx_src}")
+        elseif(EXISTS "/tmp/mtlx.tgz")
+            FetchContent_Declare(MaterialX
+                URL "file:///tmp/mtlx.tgz"
+                SOURCE_DIR "${_solstice_mtlx_src}"
+                DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+            FetchContent_MakeAvailable(MaterialX)
+        else()
+            message(STATUS "MaterialX: git clone v1.39.4")
+            FetchContent_Declare(MaterialX
+                GIT_REPOSITORY https://github.com/AcademySoftwareFoundation/MaterialX.git
+                GIT_TAG v1.39.4
+                GIT_SHALLOW TRUE
+                SOURCE_DIR "${_solstice_mtlx_src}")
+            FetchContent_MakeAvailable(MaterialX)
+        endif()
+        set(CMAKE_AUTOMOC ${_solstice_saved_automoc})
+        if(TARGET MaterialXCore OR TARGET MaterialX::MaterialXCore)
+            set(MaterialX_FOUND TRUE)
+        endif()
     endif()
     if(MaterialX_FOUND)
         set(SOLSTICE_HAVE_MATERIALX_01 1)
@@ -357,20 +385,31 @@ if(SOLSTICE_ENABLE_MATERIALX)
                 set(SOLSTICE_MATERIALX_LIBRARIES "${materialx_SOURCE_DIR}/libraries" CACHE PATH "" FORCE)
             elseif(EXISTS "/tmp/mtlx-src/libraries")
                 set(SOLSTICE_MATERIALX_LIBRARIES "/tmp/mtlx-src/libraries" CACHE PATH "" FORCE)
+            elseif(DEFINED ENV{DEPS_PREFIX} AND EXISTS "$ENV{DEPS_PREFIX}/libraries/stdlib")
+                set(SOLSTICE_MATERIALX_LIBRARIES "$ENV{DEPS_PREFIX}/libraries" CACHE PATH "" FORCE)
+            elseif(WIN32 AND DEFINED ENV{LOCALAPPDATA}
+                   AND EXISTS "$ENV{LOCALAPPDATA}/grendizer-deps/libraries/stdlib")
+                set(SOLSTICE_MATERIALX_LIBRARIES
+                    "$ENV{LOCALAPPDATA}/grendizer-deps/libraries" CACHE PATH "" FORCE)
             elseif(EXISTS "${CMAKE_PREFIX_PATH}/libraries/stdlib")
                 set(SOLSTICE_MATERIALX_LIBRARIES "${CMAKE_PREFIX_PATH}/libraries" CACHE PATH "" FORCE)
             endif()
         endif()
-        # Also expose libraries next to the runtime binary for shipped builds.
         if(SOLSTICE_MATERIALX_LIBRARIES AND EXISTS "${SOLSTICE_MATERIALX_LIBRARIES}")
             file(COPY "${SOLSTICE_MATERIALX_LIBRARIES}/"
                  DESTINATION "${CMAKE_BINARY_DIR}/bin/materialx/libraries")
-            # Multi-config generators (VS) put the exe under bin/Release.
             file(COPY "${SOLSTICE_MATERIALX_LIBRARIES}/"
                  DESTINATION "${CMAKE_BINARY_DIR}/bin/Release/materialx/libraries")
         endif()
     else()
-        message(WARNING "MaterialX not found - Material Network will be disabled")
+        if(WIN32)
+            message(FATAL_ERROR
+                "MaterialX v1.39.4 is required for Material Network. "
+                "git clone https://github.com/AcademySoftwareFoundation/MaterialX.git failed. "
+                "Fix github.com, delete ${CMAKE_BINARY_DIR}/_deps/materialx-subbuild, re-run FULL.")
+        else()
+            message(WARNING "MaterialX not found - Material Network will be disabled")
+        endif()
     endif()
 endif()
 
@@ -385,21 +424,24 @@ if(SOLSTICE_ENABLE_OPENPGL)
         set(TBB_STRICT OFF CACHE BOOL "" FORCE)
         set(_solstice_saved_build_shared ${BUILD_SHARED_LIBS})
         set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
-        if(EXISTS "/tmp/onetbb.tgz")
-            set(_solstice_tbb_url "file:///tmp/onetbb.tgz")
+        set(_solstice_onetbb_src "${CMAKE_BINARY_DIR}/_deps/onetbb-src")
+        if(EXISTS "${_solstice_onetbb_src}/CMakeLists.txt")
+            add_subdirectory("${_solstice_onetbb_src}" "${CMAKE_BINARY_DIR}/_deps/onetbb-build")
+        elseif(EXISTS "/tmp/onetbb.tgz")
+            FetchContent_Declare(onetbb
+                URL "file:///tmp/onetbb.tgz"
+                DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+            FetchContent_MakeAvailable(onetbb)
         else()
-            set(_solstice_tbb_url
-                "https://github.com/oneapi-src/oneTBB/archive/refs/tags/v2021.12.0.tar.gz")
+            FetchContent_Declare(onetbb
+                GIT_REPOSITORY https://github.com/oneapi-src/oneTBB.git
+                GIT_TAG v2021.12.0
+                GIT_SHALLOW TRUE
+                SOURCE_DIR "${_solstice_onetbb_src}")
+            FetchContent_MakeAvailable(onetbb)
         endif()
-        FetchContent_Declare(onetbb
-            URL ${_solstice_tbb_url}
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-        FetchContent_MakeAvailable(onetbb)
         set(BUILD_SHARED_LIBS ${_solstice_saved_build_shared} CACHE BOOL "" FORCE)
-        # OpenPGL's FindTBB cannot parse generator expressions on in-tree TBB
-        # alias targets — give it a concrete include root instead.
-        FetchContent_GetProperties(onetbb SOURCE_DIR _solstice_onetbb_src)
-        if(_solstice_onetbb_src)
+        if(EXISTS "${_solstice_onetbb_src}/include")
             set(TBB_INCLUDE_DIR "${_solstice_onetbb_src}/include" CACHE PATH "" FORCE)
             set(OPENPGL_TBB_ROOT "${_solstice_onetbb_src}" CACHE PATH "" FORCE)
             set(TBB_ROOT "${_solstice_onetbb_src}" CACHE PATH "" FORCE)
@@ -410,16 +452,22 @@ if(SOLSTICE_ENABLE_OPENPGL)
         set(OPENPGL_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
         set(OPENPGL_BUILD_CHECK_TOOL OFF CACHE BOOL "" FORCE)
         set(OPENPGL_ISA_AVX512 OFF CACHE BOOL "" FORCE)
-        if(EXISTS "/tmp/openpgl.tgz")
-            set(_solstice_openpgl_url "file:///tmp/openpgl.tgz")
+        if(EXISTS "${CMAKE_BINARY_DIR}/_deps/openpgl-src/CMakeLists.txt")
+            add_subdirectory("${CMAKE_BINARY_DIR}/_deps/openpgl-src"
+                             "${CMAKE_BINARY_DIR}/_deps/openpgl-build")
+        elseif(EXISTS "/tmp/openpgl.tgz")
+            FetchContent_Declare(openpgl
+                URL "file:///tmp/openpgl.tgz"
+                DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+            FetchContent_MakeAvailable(openpgl)
         else()
-            set(_solstice_openpgl_url
-                "https://github.com/RenderKit/openpgl/archive/refs/tags/v0.7.1.tar.gz")
+            FetchContent_Declare(openpgl
+                GIT_REPOSITORY https://github.com/RenderKit/openpgl.git
+                GIT_TAG v0.7.1
+                GIT_SHALLOW TRUE
+                SOURCE_DIR "${CMAKE_BINARY_DIR}/_deps/openpgl-src")
+            FetchContent_MakeAvailable(openpgl)
         endif()
-        FetchContent_Declare(openpgl
-            URL ${_solstice_openpgl_url}
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-        FetchContent_MakeAvailable(openpgl)
         if(TARGET openpgl)
             set(SOLSTICE_HAVE_OPENPGL_01 1)
         else()
@@ -494,15 +542,7 @@ if(SOLSTICE_ENABLE_TINYUSDZ)
     set(TINYUSDZ_WITH_PYTHON OFF CACHE BOOL "" FORCE)
     set(TINYUSDZ_NO_WERROR ON CACHE BOOL "" FORCE)
     set(TINYUSDZ_USE_CCACHE OFF CACHE BOOL "" FORCE)
-    if(EXISTS "/tmp/tinyusdz.tgz")
-        set(_solstice_tinyusdz_url "file:///tmp/tinyusdz.tgz")
-    else()
-        set(_solstice_tinyusdz_url
-            "https://github.com/lighttransport/tinyusdz/archive/refs/tags/v0.9.4.tar.gz")
-    endif()
-    FetchContent_Declare(tinyusdz
-        URL ${_solstice_tinyusdz_url}
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    set(_solstice_tinyusdz_src "${CMAKE_BINARY_DIR}/_deps/tinyusdz-src")
     # TinyUSDZ headers must not be scanned by Qt AUTOMOC.
     set(_solstice_saved_automoc ${CMAKE_AUTOMOC})
     set(_solstice_saved_autouic ${CMAKE_AUTOUIC})
@@ -510,7 +550,22 @@ if(SOLSTICE_ENABLE_TINYUSDZ)
     set(CMAKE_AUTOMOC OFF)
     set(CMAKE_AUTOUIC OFF)
     set(CMAKE_AUTORCC OFF)
-    FetchContent_MakeAvailable(tinyusdz)
+    if(EXISTS "${_solstice_tinyusdz_src}/CMakeLists.txt")
+        add_subdirectory("${_solstice_tinyusdz_src}" "${CMAKE_BINARY_DIR}/_deps/tinyusdz-build")
+    elseif(EXISTS "/tmp/tinyusdz.tgz")
+        FetchContent_Declare(tinyusdz
+            URL "file:///tmp/tinyusdz.tgz"
+            DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+        FetchContent_MakeAvailable(tinyusdz)
+        FetchContent_GetProperties(tinyusdz SOURCE_DIR _solstice_tinyusdz_src)
+    else()
+        FetchContent_Declare(tinyusdz
+            GIT_REPOSITORY https://github.com/lighttransport/tinyusdz.git
+            GIT_TAG v0.9.4
+            GIT_SHALLOW TRUE
+            SOURCE_DIR "${_solstice_tinyusdz_src}")
+        FetchContent_MakeAvailable(tinyusdz)
+    endif()
     set(CMAKE_AUTOMOC ${_solstice_saved_automoc})
     set(CMAKE_AUTOUIC ${_solstice_saved_autouic})
     set(CMAKE_AUTORCC ${_solstice_saved_autorcc})
@@ -552,6 +607,7 @@ set(SOLSTICE_LIB_SOURCES
     src/io/materialx_bake.cpp
     src/io/materialx_compile.cpp
     src/render/framebuffer.cpp
+    src/render/bdpt_scratch.cpp
     src/render/rgb_spectrum_tables.cpp
     src/render/rgb_spectrum_tables_aces.cpp
     src/render/render_session.cpp
@@ -575,6 +631,7 @@ set(SOLSTICE_LIB_SOURCES
     src/app/default_scene.cpp
     src/app/document.cpp
     src/app/headless.cpp
+    src/app/undo_hub.cpp
 )
 
 set(SOLSTICE_LIB_HEADERS
@@ -609,9 +666,16 @@ set(SOLSTICE_LIB_HEADERS
     src/render/shading.h
     src/render/lights.h
     src/render/physical_sky.h
+    src/render/exit_to_diffuse.h
+    src/render/exit_to_diffuse_walk.h
+    src/render/surface_maps.h
     src/render/integrator.h
     src/render/photon_map.h
+    src/render/photon_aim.h
     src/render/framebuffer.h
+    src/render/bdpt_stats.h
+    src/render/bdpt_scratch.h
+    src/render/integrator_aimed_lt.h
     src/render/render_device.h
     src/render/xpu_split.h
     src/render/pixel_oracle.h
@@ -627,6 +691,8 @@ set(SOLSTICE_LIB_HEADERS
     src/app/default_scene.h
     src/app/document.h
     src/app/headless.h
+    src/app/integrator_device.h
+    src/app/undo_hub.h
 )
 
 add_library(solstice_lib STATIC ${SOLSTICE_LIB_SOURCES} ${SOLSTICE_LIB_HEADERS})
@@ -634,7 +700,7 @@ target_include_directories(solstice_lib PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_B
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/lentil)
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/earcut)
 target_include_directories(solstice_lib PRIVATE ${CMAKE_SOURCE_DIR}/third_party/hosek_wilkie)
-target_link_libraries(solstice_lib PUBLIC Qt6::Core Qt6::Gui embree)
+target_link_libraries(solstice_lib PUBLIC Qt6::Core Qt6::Gui Qt6::Widgets embree)
 
 if(SOLSTICE_HAVE_ALEMBIC_01)
     target_link_libraries(solstice_lib PUBLIC Alembic::Alembic)

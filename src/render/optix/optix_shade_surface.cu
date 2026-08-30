@@ -2,8 +2,13 @@
 // No optixTrace — NEE writes a shadow ray for intersect_shadow.
 // Opaque BSDF weights: pbrt RGBAlbedoSpectrum (CPU liftBsdfWeight). Dielectric stays 1/η².
 // NEE bakes throughput at the vertex (pbrt SampleLd) before the BSDF/RR step.
-// Light-trace is SDS-only: first connectable after a spec prefix, then stop.
-// While LT is on, camera PT skips the SDS suffix so the two don't double-count.
+// Light-trace: splat on connectable vertices after a spec prefix, then continue
+// (do not splat from the caster, do not kill the SDS path).
+//
+// Do not include optix_mnee.cuh here. Eye-path Newton lives in the dedicated
+// MNEE pipeline (optix_mnee.cu). Shade only arms a GpuMneeJob; intersect_shadow
+// peeks the glass blocker; __raygen__mnee runs the solver.
+#include "render/integrator.h"
 #include "render/lights.h"
 #include "render/optix/optix_geom.cuh"
 #include "render/optix/optix_light_trace.cuh"
@@ -12,6 +17,51 @@
 #include "render/optix/optix_volume.cuh"
 
 namespace sol {
+
+__device__ inline void beginExitToDiffuseEscape(GpuPath& path, const Surf& si, const Material& mat) {
+    // Job only. Both walks run in the dedicated ETD pipeline (optix_etd.cu).
+    path.exitEscapeMat = si.materialIndex;
+    path.exitWantsRefract = exitToDiffuseWantsRefractWalk(mat) ? 1 : 0;
+    path.exitP = si.p;
+    path.exitNg = si.ng;
+    path.exitNs = si.ns;
+    path.exitUv = si.uv;
+    path.queue = kQueueExitToDiffuse;
+}
+
+__device__ inline void tryEnqueueExitToDiffuseNee(GpuPath& path, GpuShadow& shadow, const SceneView& scene,
+                                                 const Surf& si, const Material& mat, const Frame& frame,
+                                                 Vec3 wo) {
+    // Destination only — the flag lives on the dying surface (exitEscapeMat).
+    if (path.lightPath || path.exitEscapeMat < 0 || scene.lightCount <= 0) return;
+    const Material lambert = exitToDiffuseLambert(mat);
+    const Vec3 woLocal = frame.toLocal(wo);
+    if (!eyePathNeeConnectable(lambert, woLocal)) return;
+    float selectPdf = 0.0f;
+    const int lightIndex = sampleLightIndex(scene, si.p, path.rng.nextFloat(), selectPdf);
+    LightSample ls;
+    if (lightIndex < 0 || selectPdf <= 0.0f ||
+        !sampleLight(scene, lightIndex, si.p, path.rng.nextFloat(), path.rng.nextFloat(), ls) ||
+        ls.pdf <= 0.0f || isBlack(ls.radiance) ||
+        !shadingNormalConsistent(si.ng, si.ns, wo, ls.wi))
+        return;
+    const Vec3 wiLocal = frame.toLocal(ls.wi);
+    const BsdfEval be = bsdfEvalLocal(lambert, woLocal, wiLocal);
+    if (be.pdf <= 0.0f || isBlack(be.f)) return;
+    const float lightPdf = ls.pdf * selectPdf;
+    const float mis = ls.delta ? 1.0f : powerHeuristic(1.0f, lightPdf, 1.0f, be.pdf);
+    const float scale = (fabsf(wiLocal.z) / lightPdf) * mis;
+    float neeS[kMaxSpectrumSamples];
+    evalSurfaceNeeSpectral(scene.lights[lightIndex], ls.radiance, lambert, woLocal, wiLocal, scale, path,
+                           lambert.ior, neeS);
+    const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
+    float tMax = 1.0e8f;
+    if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
+    const LightData& lightNee = scene.lights[lightIndex];
+    enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS, path.mediumIndex,
+                           lightNee.shadowEnable, scene.settings.clampDirect,
+                           exitToDiffuseDestShadowNee());
+}
 
 __device__ inline void shadeSurfacePixel(int pixel) {
     const LaunchParams& params = launchParams();
@@ -23,6 +73,8 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     shadow.queue = kShadowIdle;
     shadow.splatPixel = -1;
     shadow.specContrib = 0;
+    shadow.eyeBounceNee = 0;
+    shadow.diagnosticAo = 0;
 
     Surf si;
     if (!buildSurf(scene, hit, path.origin, path.direction, si)) {
@@ -31,7 +83,8 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     }
 
     const InstanceData& volInst = scene.instances[si.instanceIndex];
-    if (volInst.volumeIndex >= 0 && volInst.volumeIndex < params.volumeCount && params.volumes) {
+    if (scene.settings.integrator != kIntegratorWireframe && volInst.volumeIndex >= 0 &&
+        volInst.volumeIndex < params.volumeCount && params.volumes) {
         const GpuVolumeGrid& vol = params.volumes[volInst.volumeIndex];
         if (!vol.density) {
             path.origin = offsetRay(si.p, si.ng, path.direction);
@@ -68,6 +121,26 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         }
     }
 
+    if (scene.settings.integrator == kIntegratorWireframe) {
+        RayHit rh;
+        rh.t = hit.t;
+        rh.instanceIndex = hit.instanceIndex;
+        rh.primIndex = hit.primIndex;
+        rh.u = hit.u;
+        rh.v = hit.v;
+        SurfaceInteraction siW;
+        siW.p = si.p;
+        siW.ng = si.ng;
+        siW.ns = si.ns;
+        siW.uv = si.uv;
+        siW.instanceIndex = si.instanceIndex;
+        siW.materialIndex = si.materialIndex;
+        siW.lightIndex = si.lightIndex;
+        addPathEmissionRgb(path, shadeWireframe(scene, rh, siW, path.direction), 1.0f, 0.0f);
+        terminatePath(pixel, path);
+        return;
+    }
+
     if (si.lightIndex >= 0 && path.depth == 0 && !path.lightPath) {
         const InstanceData& inst = scene.instances[si.instanceIndex];
         if (!inst.visibleCamera) {
@@ -85,12 +158,16 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         }
         const bool suppressCausticLight =
             scene.settings.caustics == 0 && path.causticSuffix;
-        if ((params.splatInvLightPaths > 0.0f && path.causticSuffix) || suppressCausticLight) {
+        const bool exitEscaping = path.exitEscapeMat >= 0;
+        if (!exitEscaping &&
+            (gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
+                              params.splatInvLightPaths) ||
+             suppressCausticLight)) {
             terminatePath(pixel, path);
             return;
         }
         const LightData& light = scene.lights[si.lightIndex];
-        if (path.causticSuffix && !lightContributesCaustics(light)) {
+        if (!exitEscaping && path.causticSuffix && !lightContributesCaustics(light)) {
             terminatePath(pixel, path);
             return;
         }
@@ -120,8 +197,8 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         return;
     }
 
-    Material matSrc = scene.materials[si.materialIndex];
-    if (path.lightPath) matSrc = gpuMaterialForCausticTransport(scene, si.materialIndex);
+    Material matSrc = path.lightPath ? materialForCausticTransport(scene, si.materialIndex)
+                                    : materialForRay(scene, si.materialIndex, RayShadeKind(path.rayKind));
     Material mat = optixpt::evaluateMaps(scene, matSrc, si.uv, si.ns);
     if (mat.transmission <= 0.0f && mat.doubleSided && dot(si.ns, -path.direction) < 0.0f) {
         si.ns = -si.ns;
@@ -139,19 +216,60 @@ __device__ inline void shadeSurfacePixel(int pixel) {
         return;
     }
 
+    if (scene.settings.integrator == kIntegratorAmbientOcclusion) {
+        const Vec3 n = dot(si.ns, -path.direction) < 0.0f ? -si.ns : si.ns;
+        const Frame aoFrame(n);
+        const Vec3 wi = aoFrame.toWorld(sampleCosineHemisphere(path.rng.nextFloat(), path.rng.nextFloat()));
+        if (dot(wi, n) <= 0.0f) {
+            terminatePath(pixel, path);
+            return;
+        }
+        shadow.origin = offsetRay(si.p, si.ng, wi);
+        shadow.direction = wi;
+        shadow.tMax = scene.settings.aoDistance > 0.0f ? scene.settings.aoDistance : 1.0e8f;
+        shadow.queue = kShadowTrace;
+        shadow.occluded = 0;
+        shadow.volumeTr = 0;
+        shadow.mediumIndex = -1;
+        shadow.splatPixel = -1;
+        shadow.specContrib = 0;
+        shadow.contrib = Vec3(1.0f);
+        shadow.mneeCaster = -1;
+        shadow.diagnosticAo = 1;
+        path.queue = kQueueDead;
+        return;
+    }
+
     const Vec3 wo = -path.direction;
     const Frame frame(si.ns);
     if (path.lightPath) {
         const Vec3 woLocal = frame.toLocal(wo);
-        const bool connectable = gpuLightVertexConnectable(mat, woLocal);
-        if (connectable) {
+        if (gpuLightVertexConnectable(mat, woLocal)) {
             tryEnqueueCausticSplat(pixel, path, shadow, si, mat, frame, wo);
-            terminatePath(pixel, path);
-            return;
+            path.specPrefix = 0;
         }
     }
 
     const int maxDepth = srMax(1, scene.settings.maxDepth);
+    if (path.exitEscapeMat >= 0) {
+        if (exitToDiffuseSkipSelf(path.exitEscapeMat, si.materialIndex, path.hops) ||
+            exitToDiffuseSkipDielectricDest(mat)) {
+            path.origin = offsetRay(si.p, si.ng, path.direction);
+            ++path.hops;
+            path.queue = kQueueIntersectClosest;
+            return;
+        }
+        tryEnqueueExitToDiffuseNee(path, shadow, scene, si, mat, frame, wo);
+        terminatePath(pixel, path);
+        return;
+    }
+    const bool exitNow =
+        !path.lightPath && ((path.depth >= maxDepth && exitToDiffuseShouldStart(mat, path.depth)) ||
+                            (path.depth < maxDepth && exitToDiffuseShouldArmBounce(mat, path.depth, maxDepth)));
+    if (exitNow) {
+        beginExitToDiffuseEscape(path, si, mat);
+        return;
+    }
     if (path.depth >= maxDepth) {
         terminatePath(pixel, path);
         return;
@@ -160,9 +278,17 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     const bool suppressCausticLight =
         !path.lightPath && scene.settings.caustics == 0 && path.causticSuffix;
     const bool skipCameraSds =
-        !path.lightPath && params.splatInvLightPaths > 0.0f && path.causticSuffix;
+        gpuSkipCameraSds(scene.settings, path.lightPath, path.causticSuffix, path.throughGlass,
+                         params.splatInvLightPaths);
+    if (params.mneeJobs && !path.lightPath) {
+        params.mneeJobs[pixel].armed = 0;
+        params.mneeJobs[pixel].pending = 0;
+    }
+    // Skip NEE on delta / near-spec glass (roughness 0.1): GGX-toward-light is
+    // the camera-port glow. BSDF sampling below still runs the 0.1 look.
+    const Vec3 woLocalNee = frame.toLocal(wo);
     if (!path.lightPath && !skipCameraSds && !(suppressCausticLight && !path.specularBounce) &&
-        scene.lightCount > 0) {
+        scene.lightCount > 0 && eyePathNeeConnectable(mat, woLocalNee)) {
         float selectPdf = 0.0f;
         const int lightIndex = sampleLightIndex(scene, si.p, path.rng.nextFloat(), selectPdf);
         LightSample ls;
@@ -170,7 +296,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             sampleLight(scene, lightIndex, si.p, path.rng.nextFloat(), path.rng.nextFloat(), ls) &&
             ls.pdf > 0.0f && !isBlack(ls.radiance) &&
             shadingNormalConsistent(si.ng, si.ns, wo, ls.wi)) {
-            const Vec3 woLocal = frame.toLocal(wo);
+            const Vec3 woLocal = woLocalNee;
             const Vec3 wiLocal = frame.toLocal(ls.wi);
             const BsdfEval be = bsdfEvalLocal(mat, woLocal, wiLocal);
             if (be.pdf > 0.0f && !isBlack(be.f)) {
@@ -183,11 +309,67 @@ __device__ inline void shadeSurfacePixel(int pixel) {
                 const Vec3 shadowOrigin = offsetRay(si.p, si.ng, ls.wi);
                 float tMax = 1.0e8f;
                 if (ls.distance < 1.0e7f) tMax = ls.distance * (1.0f - 1e-3f);
+                const LightData& lightNee = scene.lights[lightIndex];
+                const int connectable = 1;
                 enqueueOrAddVertexNeeS(path, shadow, shadowOrigin, ls.wi, tMax, neeS,
-                                       path.mediumIndex, scene.lights[lightIndex].shadowEnable,
+                                       path.mediumIndex, lightNee.shadowEnable,
                                        pathContributionClamp(scene.settings, path.depth,
                                                              path.specularBounce != 0,
-                                                             path.causticSuffix != 0));
+                                                             path.causticSuffix != 0),
+                                       gpuEyeBounceNee(scene.settings, path.depth, path.throughGlass,
+                                                       connectable, lightNee.type));
+                // Aimed LT + MNEE only: Newton peek after throughGlass when the
+                // interface fully blocks (TIR). Aimed LT does not arm — no MNEE
+                // wavefront. Do not arm on the glass itself (first-hit glass→light).
+                const bool envLike =
+                    lightNee.type == kLightDome || lightNee.type == kLightDistant;
+                if (params.mneeJobs && gpuEyePathMneeEnabled(scene.settings) &&
+                    shadow.queue == kShadowTrace && path.depth > 0 && path.throughGlass &&
+                    connectable && !envLike) {
+                    GpuMneeJob& job = params.mneeJobs[pixel];
+                    job.p = si.p;
+                    job.ns = si.ns;
+                    job.ng = si.ng;
+                    job.wo = wo;
+                    job.uv = si.uv;
+                    job.wi = ls.wi;
+                    job.distance = ls.distance;
+                    job.y = si.p + ls.wi * ls.distance;
+                    const LightData& light = lightNee;
+                    job.yN = areaLightNormal(light);
+                    if (light.type == kLightSphere) job.yN = normalize(job.y - lightOrigin(light));
+                    if (light.type == kLightPoint) job.yN = Vec3(0.0f, 1.0f, 0.0f);
+                    job.LeRgb = ls.radiance;
+                    job.pdfArea = ls.pdf;
+                    job.selectPdf = selectPdf;
+                    if (light.type == kLightPoint) {
+                        job.pdfArea = 1.0f;
+                        job.LeRgb = light.emittedRadiance();
+                    } else if (light.type == kLightRect) {
+                        const float area = rectLightArea(light);
+                        job.pdfArea = area > 1e-12f ? 1.0f / area : 0.0f;
+                        job.LeRgb = lightRadiance(light);
+                    } else if (light.type == kLightDisk) {
+                        const float area = diskLightArea(light);
+                        job.pdfArea = area > 1e-12f ? 1.0f / area : 0.0f;
+                        job.LeRgb = lightRadiance(light);
+                    } else if (light.type == kLightSphere) {
+                        const float radius = srMax(1e-5f, sphereLightRadius(light));
+                        job.pdfArea = 1.0f / (4.0f * kPi * radius * radius);
+                        job.LeRgb = lightRadiance(light);
+                    }
+                    job.distant = light.type == kLightDistant ? 1 : 0;
+                    job.materialIndex = si.materialIndex;
+                    job.lightIndex = lightIndex;
+                    job.casterInstance = -1;
+                    job.clampDepth = path.depth;
+                    job.clampSpec = path.specularBounce;
+                    job.clampCaustic = path.causticSuffix;
+                    job.pending = 0;
+                    job.armed = 1;
+                    for (int i = 0; i < path.nLambda && i < kMaxSpectrumSamples; ++i)
+                        job.throughputS[i] = path.throughputS[i];
+                }
             }
         }
     }
@@ -214,6 +396,7 @@ __device__ inline void shadeSurfacePixel(int pixel) {
     path.direction = wiWorld;
     path.bsdfPdf = bs.pdf;
     path.specularBounce = bs.specular ? 1 : 0;
+    path.transmittedBounce = bs.transmitted ? 1 : 0;
     BsdfSample rgbBs;
     rgbBs.wi = bs.wi;
     rgbBs.pdf = bs.pdf;
@@ -232,6 +415,8 @@ __device__ inline void shadeSurfacePixel(int pixel) {
             path.sawNonSpecular = 1;
             path.causticSuffix = 0;
         }
+        if (bs.transmitted && isTransmissiveCausticCaster(mat)) path.throughGlass = 1;
+        path.rayKind = int(nextRayShadeKind(rgbBs, lw));
     }
     if (bs.transmitted && volInst.mediumIndex >= 0) {
         const MediumData* med = getMedium(scene, volInst.mediumIndex);

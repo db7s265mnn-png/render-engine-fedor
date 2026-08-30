@@ -10,6 +10,7 @@
 
 #include "core/log.h"
 #include "io/ocio_util.h"
+#include "scene/types.h"
 
 namespace sol {
 
@@ -229,9 +230,9 @@ bool RenderSession::prepareDevice(std::string& error) {
                         "Rebuild with BUILD_WINDOWS.bat.";
                 return false;
             }
-            if (scene->settings.integrator != kIntegratorPathTracer) {
-                error = std::string(label) + " only supports Path Tracer. Switch Integrator to Path Tracer, "
-                        "or set Render Device to CPU (Embree).";
+            if (scene->settings.integrator == kIntegratorBdpt) {
+                error = std::string(label) + " does not support BDPT. Switch Integrator to Path Tracer "
+                        "(or Direct / AO / Wireframe), or set Render Device to CPU (Embree).";
                 return false;
             }
             if (backend == kBackendXpu) {
@@ -457,7 +458,8 @@ void RenderSession::threadMain() {
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - pass0)
                 .count();
         framebuffer_.setSampleCount(sample + sampleStep);
-        const float noiseT = (preview || scene->settings.samplingDebug != 0)
+        const float noiseT = (preview || scene->settings.samplingDebug != 0 ||
+                              gpuLightTraceSkipUnsafe(scene->settings))
                                  ? 0.0f
                                  : scene->settings.noiseThreshold;
         if (noiseT > 0.0f) {

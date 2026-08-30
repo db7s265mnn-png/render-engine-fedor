@@ -42,11 +42,7 @@ constexpr int kSeedRing = 4;                    // ring seeds beside the straigh
 constexpr float kSeedRingRadius = 0.75f;        // fraction of the cone angle
 
 
-SR_INL bool isCausticCaster(const Material& m) {
-    if (!materialContributesCaustics(m)) return false;
-    const LobeWeights lw = computeLobes(m);
-    return lw.delta && lw.transmission > 0.25f && lw.diffuse < 1e-3f;
-}
+SR_INL bool isCausticCaster(const Material& m) { return isDeltaCausticCaster(m); }
 
 // Refract direction d (travel direction) through a surface with normal n.
 // Returns false on total internal reflection.
@@ -537,6 +533,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
     bool sawNonSpecular = false;
     bool mneeFamily = false;
     bool photonFamily = false;  // diffuse → photon-caster → … (owned by photon map)
+    bool throughGlass = false;  // Aimed LT + MNEE: eye already refracted through glass
     int familyChainLen = 0;
     Vec3 anchorP(0.0f);  // last non-specular surface vertex (MNEE launch point)
     Vec3 anchorN(0.0f, 1.0f, 0.0f);
@@ -545,6 +542,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
     Material anchorMat{};
     int depth = 0;
     int passThrough = 0;
+    int exitEscapeMat = -1;
+    int exitEscapeSkips = 0;
     RayShadeKind rayKind = RayShadeKind::Camera;
     const RenderSettingsData& settings = scene.settings;
     const int maxDepth = srMax(1, settings.maxDepth);
@@ -560,9 +559,10 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             if (scene.domeLightIndex >= 0) {
                 const LightData& dome = scene.lights[scene.domeLightIndex];
                 // Per-light caustics off: skip env after a diffuse→specular suffix.
-                if (!(mneeFamily && !lightContributesCaustics(dome))) {
-                const bool primary = depth == 0 && passThrough == 0;
-                if (!(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
+                if (exitEscapeMat >= 0 || !(mneeFamily && !lightContributesCaustics(dome))) {
+                const bool primary = depth == 0 && passThrough == 0 && exitEscapeMat < 0;
+                if (exitEscapeMat >= 0 ||
+                    !(primary && (!settings.envVisibleCamera || !dome.visibleCamera))) {
                     Vec3 envL = domeRadiance(scene, dome, direction, /*nearestTexel=*/depth > 0);
                     if (!isBlack(envL)) {
                         float weight = 1.0f;
@@ -722,6 +722,29 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             continue;
         }
 
+        if (exitEscapeMat >= 0) {
+            if (exitToDiffuseSkipSelf(exitEscapeMat, si.materialIndex, exitEscapeSkips) ||
+                exitToDiffuseSkipDielectricDest(mat)) {
+                origin = offsetRayOrigin(si.p, si.ng, direction);
+                ++exitEscapeSkips;
+                ++passThrough;
+                continue;
+            }
+            const Vec3 nee =
+                nextEventEstimation(scene, tracer, si, exitToDiffuseLambert(mat), Frame(si.ns),
+                                    -direction, rng, guiding, -1, exitToDiffuseDestShadowNee());
+            Vec3 contrib = throughput * nee;
+            contrib = clampContribution(contrib, settings.clampDirect);
+            radiance += contrib;
+            break;
+        }
+        const bool exitNow = (depth >= maxDepth && exitToDiffuseShouldStart(mat, depth)) ||
+                             (depth < maxDepth && exitToDiffuseShouldArmBounce(mat, depth, maxDepth));
+        if (exitNow) {
+            radiance += exitToDiffuseContribution(scene, tracer, si.p, si.ng, si.ns, direction,
+                                                  si.materialIndex, mat, throughput, rng, -1);
+            break;
+        }
         if (depth >= maxDepth) break;
 
         const Vec3 wo = -direction;
@@ -740,7 +763,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 
             if (pSpec > 0.0f) {
                 const Vec3 nee =
-                    nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding);
+                    nextEventEstimation(scene, tracer, si, specMat, frame, wo, rng, guiding, -1,
+                                        depth > 0 ? 1 : 0);
                 Vec3 contrib = throughput * nee;
                 if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
                 radiance += contrib;
@@ -775,7 +799,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             }
             if (pSpec > 0.0f && pSpec < 0.999f) throughput /= (1.0f - pSpec);
 
-            const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, mat, rng);
+            const Material sssBody = sssBodyMaterial(scene, si, mat);
+            const SssWalkResult walk = sampleSssRandomWalk(scene, tracer, si, wo, sssBody, rng);
             if (!walk.escaped || isBlack(walk.pathWeight) || !isFinite(walk.pathWeight)) break;
             Material lambert = sssExitLambertMaterial();
             SurfaceInteraction ssSi = si;
@@ -784,7 +809,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
             ssSi.ng = walk.exitN;
             const Frame ssFrame(walk.exitN);
             const Vec3 nee =
-                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding);
+                nextEventEstimation(scene, tracer, ssSi, lambert, ssFrame, walk.exitWo, rng, guiding, -1,
+                                    depth > 0 ? 1 : 0);
             Vec3 contrib = throughput * walk.pathWeight * nee;
             if (depth > 0) contrib = clampContribution(contrib, settings.clampDirect);
             radiance += contrib;
@@ -835,8 +861,12 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 #endif
 
         // --- NEE with lazy MNEE upgrade -------------------------------------
-        const bool connectable = lw.diffuse > 1e-4f || !lw.delta;
-        if (connectable) {
+        // Same connectable test as Path Tracer / BDPT s=1: skip near-spec glass
+        // (roughness 0.1) so GGX-toward-light does not light the surface up.
+        const bool connectable = eyePathNeeConnectable(mat, woLocal);
+        const bool skipAimedSds =
+            cpuAimedSkipCameraSds(settings, mneeFamily ? 1 : 0, throughGlass ? 1 : 0);
+        if (connectable && !skipAimedSds) {
             if (photonCaustics) {
                 Vec3 g = photons->gather(si.p, si.ns, wo, mat, photonRadius);
                 if (!isBlack(g) && isFinite(g)) {
@@ -868,7 +898,8 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                     float visibility = 1.0f;
                     if (l.shadowEnable) {
                         const Vec3 o = offsetRayOrigin(si.p, si.ng, lsam.wi);
-                        visibility = shadowVisibility(scene, tracer, o, lsam.wi, 1.0e8f);
+                        visibility = shadowVisibility(scene, tracer, o, lsam.wi, 1.0e8f,
+                                                      depth > 0 ? 1 : 0);
                     }
                     if (visibility <= 1e-5f) continue;
                     if (!shadingNormalConsistent(si.ng, si.ns, wo, lsam.wi)) continue;
@@ -963,6 +994,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         neeSumGuide += c;
                     }
                 } else if (glassPath && !photonEngine) {
+                    // Aimed LT + MNEE: LT owns the open-floor SDS. MNEE only after
+                    // the eye has already gone through contributing glass.
+                    if (causticsUseAimedLt(settings) && !throughGlass) continue;
                     // Multi-seed MNEE: manifold connections through the refraction
                     // chain (matching BSDF path copies are MIS'd at light hits).
                     // Skipped when the photon engine owns caustics.
@@ -1094,6 +1128,7 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
 #endif
 
         throughput *= weight;
+        if (bs.transmitted && materialContributesCaustics(matCau)) throughGlass = true;
         if (bs.transmitted) throughput = applyFakeDispersionThroughput(throughput, mat, dispersion);
         if (!isFinite(throughput) || isBlack(throughput)) break;
 

@@ -149,6 +149,15 @@ endif()
 # so cicc never sees optixTrace + BSDF in the interactive pipeline. path_tail is
 # slower to nvcc; give it a longer timeout.
 #
+# Never add optix_mnee.cuh / optix_trace.cuh to shade_surface. Newton probes from
+# shade inlined optixTrace into shade_surface and path_tail; nvcc and
+# optixModuleCreate hung for every GPU caustics engine (same PTX).
+# Eye-path MNEE is a third pipeline (optix_mnee.cu) so cicc never sees Newton
+# inside the interactive shade/tail modules. Do not add optix_spawn.cuh to the
+# MNEE kernel: spawn/film regen stays in shade_shadow after Newton returns.
+# Exit to Diffuse walks are a fourth pipeline (optix_etd.cu). Do not fold them
+# into path_tail — extra optixTrace + BSDF there hung optixModuleCreate.
+#
 # Do NOT give ninja 16 separate custom commands. On Windows CI, after the
 # shade_surface embed finished, ninja never started [15/16] (shade_background)
 # and the step sat silent until the 45-minute cap. One Python process compiles
@@ -181,7 +190,8 @@ set(_solstice_optix_base
     ${CMAKE_SOURCE_DIR}/src/scene/types.h
     ${CMAKE_SOURCE_DIR}/src/core/math.h
     ${CMAKE_SOURCE_DIR}/src/core/rng.h
-    ${CMAKE_SOURCE_DIR}/src/render/camera_proj.h)
+    ${CMAKE_SOURCE_DIR}/src/render/camera_proj.h
+    ${CMAKE_SOURCE_DIR}/src/render/photon_aim.h)
 
 # Never use the Windows `py` launcher: cmake -P + py.exe hangs after the script
 # prints (pipe/handle leak) and starved ninja so shade_background never started.
@@ -280,6 +290,7 @@ solstice_optix_kernel(shade_surface
             ${_solstice_optix_dir}/optix_light_emit.cuh
             ${_solstice_optix_dir}/optix_light_trace.cuh
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/surface_maps.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 
@@ -334,6 +345,44 @@ solstice_optix_kernel(path_tail
             ${_solstice_optix_dir}/optix_light_emit.cuh
             ${_solstice_optix_dir}/optix_light_trace.cuh
             ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/surface_maps.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume.h
+            ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
+
+solstice_optix_kernel(mnee
+    ${_solstice_optix_dir}/optix_mnee.cu
+    solsticeOptixMneeIr
+    LIGHTS
+    TIMEOUT 1800
+    DEPENDS ${_solstice_optix_base}
+            ${_solstice_optix_dir}/optix_mnee.cuh
+            ${_solstice_optix_dir}/optix_trace.cuh
+            ${_solstice_optix_dir}/optix_geom.cuh
+            ${_solstice_optix_dir}/optix_bsdf.cuh
+            ${_solstice_optix_dir}/optix_spectral.cuh
+            ${_solstice_optix_dir}/optix_spectral_film.cuh
+            ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/shading_bsdf.h
+            ${CMAKE_SOURCE_DIR}/src/render/surface_maps.h)
+
+solstice_optix_kernel(etd
+    ${_solstice_optix_dir}/optix_etd.cu
+    solsticeOptixEtdIr
+    LIGHTS
+    TIMEOUT 1800
+    DEPENDS ${_solstice_optix_base}
+            ${_solstice_optix_dir}/optix_trace.cuh
+            ${_solstice_optix_dir}/optix_geom.cuh
+            ${_solstice_optix_dir}/optix_bsdf.cuh
+            ${_solstice_optix_dir}/optix_spectral.cuh
+            ${_solstice_optix_dir}/optix_spectral_film.cuh
+            ${_solstice_optix_dir}/optix_volume.cuh
+            ${_solstice_optix_dir}/optix_intersect_shadow.cu
+            ${CMAKE_SOURCE_DIR}/src/render/exit_to_diffuse.h
+            ${CMAKE_SOURCE_DIR}/src/render/exit_to_diffuse_walk.h
+            ${CMAKE_SOURCE_DIR}/src/render/surface_maps.h
+            ${CMAKE_SOURCE_DIR}/src/render/lights.h
+            ${CMAKE_SOURCE_DIR}/src/render/shading_bsdf.h
             ${CMAKE_SOURCE_DIR}/src/render/volume.h
             ${CMAKE_SOURCE_DIR}/src/render/volume_track.h)
 

@@ -165,14 +165,52 @@ ScenePtr Stage::toScene() const {
                 material.specularColorTex = scene->addTexture(prim.specularColorTexture);
                 material.transmissionColorTex = scene->addTexture(prim.transmissionColorTexture);
 
-                // Append shade-time procedurals; remap local child / texture indices.
+                // Shared image pool for shade-time procedurals and ray_switch branches.
+                std::vector<int> localTexToScene(prim.proceduralImages.size(), -1);
+                for (size_t i = 0; i < prim.proceduralImages.size(); ++i)
+                    localTexToScene[i] = scene->addTexture(prim.proceduralImages[i]);
+                const int procBase = int(scene->procedurals.size());
+
+                auto remapProcRoot = [&](int& idx) {
+                    if (idx >= 0) idx += procBase;
+                    if (idx >= int(scene->procedurals.size()) && idx >= 0) idx = -1;
+                };
+                auto remapLocalTex = [&](int& idx) {
+                    if (idx < 0) return;
+                    if (idx >= int(localTexToScene.size())) {
+                        idx = -1;
+                        return;
+                    }
+                    idx = localTexToScene[size_t(idx)];
+                };
+                auto remapMaterialMaps = [&](Material& m, bool remapDedicatedTex) {
+                    if (remapDedicatedTex) {
+                        remapLocalTex(m.baseColorTex);
+                        remapLocalTex(m.roughnessTex);
+                        remapLocalTex(m.metallicTex);
+                        remapLocalTex(m.opacityTex);
+                        remapLocalTex(m.emissionTex);
+                        remapLocalTex(m.normalTex);
+                        remapLocalTex(m.bumpTex);
+                        remapLocalTex(m.displacementTex);
+                        remapLocalTex(m.subsurfaceTex);
+                        remapLocalTex(m.specularColorTex);
+                        remapLocalTex(m.transmissionColorTex);
+                    }
+                    remapProcRoot(m.baseColorProc);
+                    remapProcRoot(m.roughnessProc);
+                    remapProcRoot(m.metallicProc);
+                    remapProcRoot(m.opacityProc);
+                    remapProcRoot(m.emissionProc);
+                    remapProcRoot(m.normalProc);
+                    remapProcRoot(m.subsurfaceProc);
+                    remapProcRoot(m.bumpProc);
+                    remapProcRoot(m.displacementProc);
+                    remapProcRoot(m.specularColorProc);
+                    remapProcRoot(m.transmissionColorProc);
+                };
+
                 if (!prim.procedurals.empty()) {
-                    // Map each proceduralImages[i] → absolute scene texture index
-                    // (addTexture may skip empty images — never assume dense texBase+i).
-                    std::vector<int> localTexToScene(prim.proceduralImages.size(), -1);
-                    for (size_t i = 0; i < prim.proceduralImages.size(); ++i)
-                        localTexToScene[i] = scene->addTexture(prim.proceduralImages[i]);
-                    const int procBase = int(scene->procedurals.size());
                     auto remapProc = [&](int& idx) {
                         if (idx >= 0) idx += procBase;
                     };
@@ -183,9 +221,6 @@ ScenePtr Stage::toScene() const {
                             return;
                         }
                         idx = localTexToScene[size_t(idx)];
-                    };
-                    auto remapRoot = [&](int& idx) {
-                        if (idx >= 0) idx += procBase;
                     };
                     for (ProceduralNode node : prim.procedurals) {
                         switch (node.op) {
@@ -200,7 +235,6 @@ ScenePtr Stage::toScene() const {
                                 remapTex(node.in0);
                                 remapTex(node.in1);
                                 remapTex(node.in2);
-                                // Optional future: position/normal children on in3 — keep remap for safety.
                                 remapProc(node.in3);
                                 break;
                             default:
@@ -212,31 +246,7 @@ ScenePtr Stage::toScene() const {
                         }
                         scene->procedurals.push_back(node);
                     }
-                    remapRoot(material.baseColorProc);
-                    remapRoot(material.roughnessProc);
-                    remapRoot(material.metallicProc);
-                    remapRoot(material.opacityProc);
-                    remapRoot(material.emissionProc);
-                    remapRoot(material.normalProc);
-                    remapRoot(material.subsurfaceProc);
-                    remapRoot(material.bumpProc);
-                    remapRoot(material.displacementProc);
-                    remapRoot(material.specularColorProc);
-                    remapRoot(material.transmissionColorProc);
-                    auto clampRoot = [&](int& idx) {
-                        if (idx >= int(scene->procedurals.size())) idx = -1;
-                    };
-                    clampRoot(material.baseColorProc);
-                    clampRoot(material.roughnessProc);
-                    clampRoot(material.metallicProc);
-                    clampRoot(material.opacityProc);
-                    clampRoot(material.emissionProc);
-                    clampRoot(material.normalProc);
-                    clampRoot(material.subsurfaceProc);
-                    clampRoot(material.bumpProc);
-                    clampRoot(material.displacementProc);
-                    clampRoot(material.specularColorProc);
-                    clampRoot(material.transmissionColorProc);
+                    remapMaterialMaps(material, false);
                 }
 
                 // Cages only at cook — tessellation + displace run at Render start.
@@ -280,7 +290,7 @@ ScenePtr Stage::toScene() const {
                     }
                     Material branch = prim.raySwitchBranches[size_t(slot)];
                     branch.raySwitch = RaySwitchTable{};
-                    // Branches currently carry scalar/params only (no private textures).
+                    remapMaterialMaps(branch, true);
                     slot = scene->addMaterial(branch);
                 };
                 remapSwitchSlot(material.raySwitch.camera);
@@ -289,6 +299,7 @@ ScenePtr Stage::toScene() const {
                 remapSwitchSlot(material.raySwitch.specularReflection);
                 remapSwitchSlot(material.raySwitch.diffuseTransmission);
                 remapSwitchSlot(material.raySwitch.specularTransmission);
+                remapSwitchSlot(material.raySwitch.volume);
                 remapSwitchSlot(material.raySwitch.sss);
                 remapSwitchSlot(material.raySwitch.caustics);
 

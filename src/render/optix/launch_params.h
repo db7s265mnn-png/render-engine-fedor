@@ -4,6 +4,7 @@
 
 #include "render/camera_proj.h"
 #include "render/optix/path_state.h"
+#include "render/photon_aim.h"
 #include "render/spectrum_device.h"
 #include "scene/types.h"
 
@@ -50,6 +51,7 @@ struct alignas(16) LaunchParams {
     GpuPath* paths = nullptr;
     GpuHit* hits = nullptr;
     GpuShadow* shadows = nullptr;
+    GpuMneeJob* mneeJobs = nullptr;
 
     // Compacted work queues (pixel indices). Host launches 1D on live count.
     int* qIntersect = nullptr;
@@ -77,8 +79,14 @@ struct alignas(16) LaunchParams {
 
     CameraProj camProj{};
     // 1 / (light paths this wavefront). CPU BDPT divides the splat plane by W×H.
-    // 0 disables GPU light-trace splats.
+    // 0 disables GPU light-trace splats. Iray aiming uses 1/(W×H) (no extra K).
     float splatInvLightPaths = 0.0f;
+    int mcmcMutations = 0;  // leftover cone-mutation slots; always 0 (Iray aiming)
+
+    // Iray photon aiming: caster bounding spheres. Mix 1 = aimed only.
+    const GpuPhotonCluster* photonClusters = nullptr;
+    int photonClusterCount = 0;
+    float photonAimMix = 0.0f;
 
     unsigned long long traversable = 0;  // OptixTraversableHandle
 };

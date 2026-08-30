@@ -1,23 +1,27 @@
 // SDS-family camera splat for OptiX light paths. No optixTrace.
+// Connectable = lightTraceConnectable (not the caster). After a splat the path
+// continues; specPrefix is cleared by shade so later diffuse hits do not re-splat.
+// Floor SDS stays on directly visible receivers. Through-glass fill is eye-path
+// MNEE (Aimed LT + MNEE), not a camera-MNEE splat of this vertex.
 #pragma once
 
 #include "render/camera_proj.h"
 #include "render/optix/optix_light_emit.cuh"
 #include "render/optix/optix_spectral.cuh"
+#include "render/shading_bsdf.h"
 
 namespace sol {
 
 __device__ inline bool gpuLightVertexConnectable(const Material& mat, Vec3 woLocal) {
-    const LobeWeights lw = computeLobes(mat, woLocal);
-    return !(lw.delta && lw.diffuse < 1e-4f);
+    return lightTraceConnectable(mat, woLocal);
 }
 
-// SDS family only: light → near-spec chain → first connectable → camera, then stop.
-// Unweighted vs camera PT: camera skips the SDS suffix while LT is running.
+// SDS family: light → near-spec chain → connectable → camera splat, then the
+// path continues (caster is not connectable, so glass does not splat-and-die).
+// Camera PT skips the SDS suffix while LT is running so the two don't double-count.
 __device__ inline void tryEnqueueCausticSplat(int pixel, GpuPath& path, GpuShadow& shadow, const Surf& si,
                                               const Material& mat, const Frame& frame, Vec3 wo) {
     const LaunchParams& params = launchParams();
-    (void)pixel;
     if (!path.lightPath || !path.specPrefix) return;
     if (params.splatInvLightPaths <= 0.0f || !params.camProj.valid) return;
     if (path.lightIndex >= 0 && path.lightIndex < params.scene.lightCount &&
