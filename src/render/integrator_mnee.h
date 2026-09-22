@@ -18,6 +18,7 @@
 #pragma once
 
 #include "core/rng.h"
+#include "render/camera_proj.h"
 #include "render/integrator.h"
 #include "render/lights.h"
 #include "render/photon_map.h"
@@ -382,6 +383,100 @@ SR_INL SeedSet buildSeedSet(const SceneView& scene, Vec3 p, Vec3 straightDir, in
 
 SR_INL bool sameBranch(Vec3 a, Vec3 b) { return dot(a, b) > 0.99996f; }  // ≈0.5°
 
+// One converged refraction chain from a light-path vertex to the pinhole.
+// geom is 1/|det J| and replaces 1/dist² in the direct light-tracing splat
+// (a straight line has |det J| = dist²). The pixel is the chain exit.
+struct CameraChainHit {
+    Vec3 omega{0.0f};
+    Vec3 throughput{1.0f};
+    float geom = 0.0f;
+    float cosTheta = 0.0f;
+    float px = 0.0f;
+    float py = 0.0f;
+};
+
+constexpr int kMaxCameraChains = 1 + kSeedRing;
+
+struct CameraChainSet {
+    CameraChainHit hits[kMaxCameraChains];
+    int count = 0;
+};
+
+// Straight vertex→camera was already blocked. If that blocker is a delta
+// caustic caster, Newton-walk the same manifold used for light connections
+// until the chain exits through the pinhole. Opaque blockers and a failed
+// solve return nothing — no photon map, no second estimator. A clear segment
+// is not solved here; the caller keeps the direct splat.
+template <typename Tracer>
+SR_INL CameraChainSet cameraChainsToPinhole(const SceneView& scene, const Tracer& tracer, Vec3 p, Vec3 ng,
+                                            Vec3 ns, const CameraProj& cam, DispersionContext* dispersion) {
+    CameraChainSet out;
+    if (!cam.valid) return out;
+    Vec3 toCam = cam.camPos - p;
+    const float dist = length(toCam);
+    if (dist < 1e-5f) return out;
+    toCam = toCam / dist;
+
+    const Vec3 origin = offsetRayOrigin(p, ng, toCam);
+    RayHit blockerHit;
+    if (!tracer.intersect(origin, toCam, dist * (1.0f - 1e-3f), blockerHit)) return out;
+    SurfaceInteraction blockerSi;
+    if (!buildSurfaceInteraction(scene, blockerHit, origin, toCam, blockerSi)) return out;
+    if (blockerSi.lightIndex >= 0) return out;
+    Material blockerMat = materialForCausticTransport(scene, blockerSi.materialIndex);
+    blockerMat = evaluateTexturedMaterial(scene, blockerMat, blockerSi.uv, blockerSi.ns, blockerSi.pObject,
+                                          blockerSi.nObject, blockerSi.uvFilterWidth, blockerSi.pRef,
+                                          blockerSi.nRef, blockerSi.hasPref);
+    if (!isCausticCaster(blockerMat)) return out;
+
+    const SeedSet seeds = buildSeedSet(scene, p, toCam, blockerSi.instanceIndex);
+    Vec3 found[kMaxCameraChains];
+    int foundCount = 0;
+    for (int i = 0; i < seeds.count; ++i) {
+        // lightIndex < 0: traceChain treats a light hit as a chain end, and the
+        // segment test below still rejects any surface before the pinhole.
+        const ManifoldSolution sol =
+            solveManifold(scene, tracer, p, ns, /*lightIndex=*/-1, cam.camPos, seeds.dirs[i], dispersion);
+        if (!sol.solved) continue;
+        bool duplicate = false;
+        for (int k = 0; k < foundCount; ++k) {
+            if (sameBranch(sol.omega, found[k])) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+
+        const ChainState& chain = sol.chain;
+        Vec3 seg = cam.camPos - chain.exitP;
+        const float segLen = length(seg);
+        if (segLen < 1e-5f) continue;
+        seg = seg / segLen;
+        // Converged exit ray passes through the pinhole. A backwards segment is
+        // not that ray, and any hit — including lightIndex == -1 — is not the camera.
+        if (dot(seg, chain.exitDir) <= 0.999f) continue;
+        const Vec3 exitOrigin = offsetRayOrigin(chain.exitP, chain.exitN, seg);
+        RayHit occupied;
+        if (tracer.intersect(exitOrigin, seg, segLen * (1.0f - 1e-3f), occupied)) continue;
+
+        float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
+        if (!projectToPixel(cam, chain.exitP, px, py, cosTheta, dist2)) continue;
+        const float geom = 1.0f / sol.detJ;
+        if (!(geom > 0.0f) || !srIsFinite(geom) || isBlack(chain.throughput)) continue;
+
+        found[foundCount++] = sol.omega;
+        CameraChainHit& hit = out.hits[out.count++];
+        hit.omega = sol.omega;
+        hit.throughput = chain.throughput;
+        hit.geom = geom;
+        hit.cosTheta = cosTheta;
+        hit.px = px;
+        hit.py = py;
+        if (out.count >= kMaxCameraChains) break;
+    }
+    return out;
+}
+
 // BSDF density at the anchor mapped to light-surface area through a manifold
 // solution (dω → dA_y via the chain Jacobian). Used for MIS between MNEE and
 // the BSDF-sampled copy of the same caustic family.
@@ -622,6 +717,9 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                 lightContributesCaustics(light))
                 break;
             if (photonEngine && mneeFamily && finiteLight) break;
+            // Aimed LT owns the delta-chain family. A failed camera manifold
+            // contributes nothing — do not keep this BSDF copy as a second estimator.
+            if (causticsUseAimedLt(settings) && mneeFamily && finiteLight) break;
 
             // MIS with the MNEE estimator: when replaying the seed set converges to
             // the branch this BSDF path took, the two estimators sample the same
@@ -994,9 +1092,10 @@ SR_INL Vec3 traceRadiancePtMnee(const SceneView& scene, const Tracer& tracer, Ve
                         neeSumGuide += c;
                     }
                 } else if (glassPath && !photonEngine) {
-                    // Aimed LT + MNEE: LT owns the open-floor SDS. MNEE only after
-                    // the eye has already gone through contributing glass.
-                    if (causticsUseAimedLt(settings) && !throughGlass) continue;
+                    // Aimed LT owns this connection from the light side (direct
+                    // splat, or the camera manifold when glass blocks the pinhole).
+                    // Eye MNEE on the same through-glass family would double-count.
+                    if (causticsUseAimedLt(settings)) continue;
                     // Multi-seed MNEE: manifold connections through the refraction
                     // chain (matching BSDF path copies are MIS'd at light hits).
                     // Skipped when the photon engine owns caustics.

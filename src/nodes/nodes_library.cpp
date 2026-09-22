@@ -1297,9 +1297,14 @@ public:
                                       "black bases through refraction.\n"
                                       "Aimed LT: Keller 2017 caster-AABB light tracing (aimed-only). "
                                       "PT gains LT splats; BDPT aims the existing t=1 subpath. "
-                                      "No MNEE, no photon map. SDS on directly visible receivers.\n"
-                                      "Aimed LT + MNEE: the same aimed LT, plus CPU MNEE after the "
-                                      "eye has gone through contributing glass (not on open floor)."));
+                                      "No photon map. Direct splats land on receivers the camera "
+                                      "sees. If delta glass blocks that ray and the light prefix "
+                                      "is a caustic chain, a manifold walks the refraction to the "
+                                      "pinhole and splats the exit pixel. Opaque blockers and a "
+                                      "failed solve contribute nothing.\n"
+                                      "Aimed LT + MNEE: the same light-tracing splats, including "
+                                      "that camera manifold. Eye-side MNEE is not stacked on the "
+                                      "same through-glass family."));
         addParameter(Parameter::makeMenu("causticsenginegpu", "Caustics Engine (GPU)",
                                          {"Aimed LT", "Aimed LT + MNEE"}, 0)
                          .withGroup("Caustics")

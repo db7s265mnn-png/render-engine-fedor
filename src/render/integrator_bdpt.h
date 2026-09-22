@@ -5,9 +5,10 @@
 // Strategies: t = 1 light-tracing splats onto the camera (the workhorse for
 // caustics from small lights: light → delta glass chain → diffuse → camera),
 // s = 0 (eye path hits an emitter), s = 1 (light resampled toward the eye
-// vertex, NEE-like — upgraded to MNEE when the eye arrived through glass and
-// the shadow hits a delta dielectric, so caustics under refractive objects
-// are visible through refraction), s >= 2 (surface↔surface connections),
+// vertex, NEE-like — classic MNEE upgrades it when the eye arrived through
+// glass and the shadow hits a delta dielectric. Aimed LT does not: that
+// family is the t=1 camera manifold, and stacking both would double-count),
+// s >= 2 (surface↔surface connections),
 // all t >= 2. Dome / distant lights start light subpaths via pbrt SampleLe
 // (disk on the scene bounding sphere) so t=1 can carry sun/env caustics;
 // s∈{0,1} still handles eye-path env/sun NEE. Optional OpenPGL guiding mixes
@@ -971,51 +972,65 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
                 // Per-light Contribute to Caustics off.
                 continue;
             }
-            float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
-            if (!projectToPixel(camProj, v.p, px, py, cosTheta, dist2)) continue;
-            if (dist2 < 1e-8f) continue;
-            const Vec3 toCam = normalize(camProj.camPos - v.p);
-            const Vec3 f = bsdfF(v, v.wo, toCam);
-            if (isBlack(f)) continue;
-            if (!connectionVisible(scene, tracer, v.p, v.ng, camProj.camPos, -1)) continue;
+            auto deposit = [&](float px, float py, Vec3 dirAtV, float cosV, float pdfOmega, float geom,
+                               Vec3 throughput) {
+                const Vec3 f = bsdfF(v, v.wo, dirAtV);
+                if (isBlack(f)) return;
+                Vec3 c = v.beta * f * throughput * (cosV * pdfOmega * geom);
+                // MIS against the t >= 2 strategies for the same path. When the prefix
+                // from the light runs through a delta chain, the s'=0 twin has been
+                // handed to this strategy (family partition) — weight it fully.
+                MisOverride ov;
+                ov.splatStrategy = true;
+                ov.s0Sampled = !(causticsOn && lightPrefixCaustic);
+                ov.lightOriginDelta = lightOriginDelta;
+                ov.lightLastRev = pdfOmega * cosV * geom;
+                if (s >= 2)
+                    ov.lightPrevRev = toAreaPdf(bsdfPdfSa(v, dirAtV, normalize(light[s - 2].p - v.p)),
+                                                v.p, light[s - 2].p,
+                                                light[s - 2].type == VType::Surface ? light[s - 2].ns
+                                                                                    : light[s - 2].ng);
+                Vert camVert = eye[0];
+                camVert.p = camProj.camPos;
+                c = c * misWeight(&camVert, 1, light, s, ov);
+                // Indirect Clamp on LT in pixel-radiance units (raw splat × camera PDF
+                // → threshold scaled by W·H so resolve /N matches Arnold Indirect).
+                if (s >= 2) c = clampContribution(c, lightTraceSplatClamp(settings));
+                if (!isFinite(c)) return;
+                if (dispersion && dispersion->heroChannel >= 0 && dispersion->used &&
+                    (dispersion->mode == kDispersionHero || dispersion->mode == kDispersionOptimized ||
+                     dispersion->mode == kDispersionSpectral3)) {
+                    // Hero-channel discipline: deposit only the sampled channel, ×3.
+                    const int ch = dispersion->heroChannel;
+                    const float hero = (ch == 0 ? c.x : (ch == 1 ? c.y : c.z)) * 3.0f;
+                    c = Vec3(0.0f);
+                    if (ch == 0) c.x = hero;
+                    else if (ch == 1) c.y = hero;
+                    else c.z = hero;
+                }
+                splatFb->addSplat(int(px), int(py), c);
+            };
 
-            const float pdfOmega = cameraPdfOmega(camProj, cosTheta);
-            const float cosV = fabsf(dot(v.ns, toCam));
-            Vec3 c = v.beta * f * (cosV * pdfOmega / dist2);
-
-            // MIS against the t >= 2 strategies for the same path. When the prefix
-            // from the light runs through a delta chain, the s'=0 twin has been
-            // handed to this strategy (family partition) — weight it fully.
-            MisOverride ov;
-            ov.splatStrategy = true;
-            ov.s0Sampled = !(causticsOn && lightPrefixCaustic);
-            ov.lightOriginDelta = lightOriginDelta;
-            ov.lightLastRev = toAreaPdf(pdfOmega, camProj.camPos, v.p, v.ns);
-            if (s >= 2)
-                ov.lightPrevRev = toAreaPdf(bsdfPdfSa(v, toCam, normalize(light[s - 2].p - v.p)),
-                                            v.p, light[s - 2].p,
-                                            light[s - 2].type == VType::Surface ? light[s - 2].ns
-                                                                                : light[s - 2].ng);
-            Vert camVert = eye[0];
-            camVert.p = camProj.camPos;
-            const float w = misWeight(&camVert, 1, light, s, ov);
-            c = c * w;
-            // Indirect Clamp on LT in pixel-radiance units (raw splat × camera PDF
-            // → threshold scaled by W·H so resolve /N matches Arnold Indirect).
-            if (s >= 2) c = clampContribution(c, lightTraceSplatClamp(settings));
-            if (!isFinite(c)) continue;
-            if (dispersion && dispersion->heroChannel >= 0 && dispersion->used &&
-                (dispersion->mode == kDispersionHero || dispersion->mode == kDispersionOptimized ||
-                 dispersion->mode == kDispersionSpectral3)) {
-                // Hero-channel discipline: deposit only the sampled channel, ×3.
-                const int ch = dispersion->heroChannel;
-                const float hero = (ch == 0 ? c.x : (ch == 1 ? c.y : c.z)) * 3.0f;
-                c = Vec3(0.0f);
-                if (ch == 0) c.x = hero;
-                else if (ch == 1) c.y = hero;
-                else c.z = hero;
+            // Clear segment keeps the direct splat (geom = 1/dist²). A delta-glass
+            // block on a caustic prefix walks the camera manifold instead.
+            if (connectionVisible(scene, tracer, v.p, v.ng, camProj.camPos, -1)) {
+                float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
+                if (!projectToPixel(camProj, v.p, px, py, cosTheta, dist2) || dist2 < 1e-8f) continue;
+                const Vec3 toCam = normalize(camProj.camPos - v.p);
+                const float pdfOmega = cameraPdfOmega(camProj, cosTheta);
+                const float cosV = fabsf(dot(v.ns, toCam));
+                deposit(px, py, toCam, cosV, pdfOmega, 1.0f / dist2, Vec3(1.0f));
+                continue;
             }
-            splatFb->addSplat(int(px), int(py), c);
+            if (!lightPrefixCaustic) continue;
+            const mnee::CameraChainSet chains =
+                mnee::cameraChainsToPinhole(scene, tracer, v.p, v.ng, v.ns, camProj, dispersion);
+            for (int ci = 0; ci < chains.count; ++ci) {
+                const mnee::CameraChainHit& h = chains.hits[ci];
+                const float pdfOmega = cameraPdfOmega(camProj, h.cosTheta);
+                const float cosV = fabsf(dot(v.ns, h.omega));
+                deposit(h.px, h.py, h.omega, cosV, pdfOmega, h.geom, h.throughput);
+            }
         }
     }
 
@@ -1234,8 +1249,8 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             }
         }
 
-        // Eye arrived through near-specular glass/mirror: LT cannot splat the
-        // floor under that glass (camera↔floor occluded), so MNEE owns the family.
+        // Eye arrived through near-specular glass/mirror. Classic MNEE owns the
+        // occluded family. Aimed LT owns it from the light side instead.
         bool eyeThroughSpec = false;
         for (int i = 1; i <= t - 2; ++i) {
             if (eye[i].type == VType::Surface && eye[i].nearSpec) {
@@ -1253,6 +1268,7 @@ inline Vec3 traceRadianceBdpt(const SceneView& scene, const Tracer& tracer, Vec3
             // the same glass block is already handled by t=1 splats; skip MNEE
             // there to avoid double-counting.
             if (!causticsUseMnee(settings, &scene) || photonEngine) continue;
+            if (causticsUseAimedLt(settings)) continue;
             if (!(glassPath && eyeThroughSpec)) continue;
             // Radiance / intensity as expected by manifoldConnect (not /r²).
             const Vec3 LeMnee =
