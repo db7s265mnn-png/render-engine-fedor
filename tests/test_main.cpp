@@ -3468,6 +3468,136 @@ void testAimedLtCpu() {
     check(okPbrt > 8, "pbrt startLightPath still works without aim clusters");
 }
 
+// Aimed LT: a delta pane between the camera and a caustic receiver blocks the
+// straight splat. The camera manifold must carry that energy; an opaque pane
+// must not, and a clear view must still splat.
+void testAimedLtCameraChain() {
+    std::printf("aimed-lt-camera-chain\n");
+    auto buildScene = [](int integrator, int paneMode) {
+        auto scene = std::make_shared<Scene>();
+        MeshPtr floor = std::make_shared<Mesh>();
+        floor->positions = {Vec3(-1.2f, 0, -1.2f), Vec3(1.2f, 0, -1.2f), Vec3(1.2f, 0, 0.55f),
+                            Vec3(-1.2f, 0, 0.55f)};
+        floor->indices = {0, 2, 1, 0, 3, 2};
+        floor->normals = {Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0), Vec3(0, 1, 0)};
+        floor->validate();
+        Material floorMat;
+        floorMat.baseColor = Vec3(0.8f);
+        floorMat.roughness = 0.9f;
+        floorMat.specular = 0.0f;
+        InstanceData floorInst;
+        floorInst.meshIndex = scene->addMesh(floor);
+        floorInst.materialIndex = scene->addMaterial(floorMat);
+        scene->instances.push_back(floorInst);
+
+        MeshPtr ball = makeSphereMesh(0.32f, 32, 16);
+        Material glass;
+        glass.transmission = 1.0f;
+        glass.ior = 1.5f;
+        glass.roughness = 0.0f;
+        glass.specular = 1.0f;
+        glass.baseColor = Vec3(1.0f);
+        InstanceData ballInst;
+        ballInst.xform = Mat4::translate(Vec3(0.0f, 0.55f, -0.1f));
+        ballInst.meshIndex = scene->addMesh(ball);
+        ballInst.materialIndex = scene->addMaterial(glass);
+        scene->instances.push_back(ballInst);
+
+        if (paneMode != 0) {
+            const int paneMat = [&]() {
+                Material pane;
+                if (paneMode == 1) {
+                    pane.transmission = 1.0f;
+                    pane.ior = 1.5f;
+                    pane.roughness = 0.0f;
+                    pane.specular = 1.0f;
+                    pane.baseColor = Vec3(1.0f);
+                } else {
+                    pane.transmission = 0.0f;
+                    pane.roughness = 1.0f;
+                    pane.specular = 0.0f;
+                    pane.baseColor = Vec3(0.0f);
+                    pane.baseWeight = 1.0f;
+                }
+                return scene->addMaterial(pane);
+            }();
+            auto addPane = [&](float z, Vec3 n) {
+                MeshPtr quad = std::make_shared<Mesh>();
+                quad->positions = {Vec3(-1.6f, 0.0f, z), Vec3(1.6f, 0.0f, z), Vec3(1.6f, 1.4f, z),
+                                   Vec3(-1.6f, 1.4f, z)};
+                quad->indices = {0, 1, 2, 0, 2, 3};
+                quad->normals = {n, n, n, n};
+                quad->validate();
+                InstanceData inst;
+                inst.meshIndex = scene->addMesh(quad);
+                inst.materialIndex = paneMat;
+                scene->instances.push_back(inst);
+            };
+            addPane(1.05f, Vec3(0, 0, -1));
+            addPane(1.28f, Vec3(0, 0, 1));
+        }
+
+        LightData light;
+        light.type = kLightRect;
+        light.width = 0.35f;
+        light.height = 0.35f;
+        light.intensity = 80.0f;
+        light.normalize = 1;
+        light.visibleCamera = 0;
+        light.xform = Mat4::translate(Vec3(0.0f, 2.6f, -0.1f)) * Mat4::rotateX(-90.0f);
+        light.xformInv = inverse(light.xform);
+        scene->lights.push_back(light);
+
+        scene->settings.resolutionX = 40;
+        scene->settings.resolutionY = 30;
+        scene->settings.samplesPerPixel = 8;
+        scene->settings.maxDepth = 8;
+        scene->settings.rrStartDepth = 8;
+        scene->settings.integrator = integrator;
+        scene->settings.backend = kBackendCpuEmbree;
+        scene->settings.caustics = 1;
+        scene->settings.causticsEngine = kCausticsEngineAimedLt;
+        scene->settings.pathGuiding = 0;
+        scene->settings.envVisibleCamera = 0;
+        scene->settings.clampDirect = 0.0f;
+        scene->settings.clampIndirect = 0.0f;
+        scene->settings.seed = 3;
+        scene->camera.cameraToWorld =
+            lookAtMatrix(Vec3(0.0f, 0.42f, 2.5f), Vec3(0.0f, 0.12f, 0.0f), Vec3(0.0f, 1.0f, 0.0f));
+        scene->cameraAuthored = true;
+        scene->finalize();
+        return scene;
+    };
+
+    auto renderSum = [&](int integrator, int paneMode, bool& finiteOut) -> double {
+        RenderSession session;
+        session.setScene(buildScene(integrator, paneMode));
+        session.start();
+        session.waitForCompletion();
+        const Image img = session.linearImage();
+        double sum = 0.0;
+        finiteOut = true;
+        for (int y = 0; y < img.height(); ++y) {
+            for (int x = 0; x < img.width(); ++x) {
+                const Vec3 c = img.rgb(x, y);
+                if (!isFinite(c)) finiteOut = false;
+                sum += double(luminance(c));
+            }
+        }
+        return sum;
+    };
+
+    bool finGlass = true, finOpaque = true, finOpen = true;
+    const double sumGlass = renderSum(kIntegratorBdpt, 1, finGlass);
+    const double sumOpaque = renderSum(kIntegratorBdpt, 2, finOpaque);
+    const double sumOpen = renderSum(kIntegratorBdpt, 0, finOpen);
+    check(finGlass && finOpaque && finOpen, "aimed LT camera-chain renders are finite");
+    check(sumOpen > 1.0, "aimed LT still splats a directly visible receiver");
+    check(sumGlass > sumOpaque * 2.0 && sumGlass > 0.5,
+          "camera manifold carries the caustic through delta glass");
+    std::printf("  bdpt glass=%.3f opaque=%.3f open=%.3f\n", sumGlass, sumOpaque, sumOpen);
+}
+
 void testExitToDiffuse() {
     std::printf("exit-to-diffuse\n");
 
@@ -8870,6 +9000,7 @@ int main(int argc, char** argv) {
         testBdptScratchReuse();
         testIntegratorDeviceMemory();
         testAimedLtCpu();
+        testAimedLtCameraChain();
         testExitToDiffuse();
         testUndoHub();
         std::printf("%d checks, %d failures\n", g_checks, g_failures);
@@ -8927,6 +9058,7 @@ int main(int argc, char** argv) {
     testBdptScratchReuse();
     testIntegratorDeviceMemory();
     testAimedLtCpu();
+    testAimedLtCameraChain();
     testExitToDiffuse();
     testUndoHub();
     testDispersionAndThinFilm();

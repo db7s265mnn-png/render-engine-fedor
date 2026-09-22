@@ -55,29 +55,46 @@ SR_INL void splatAimedLightTrace(const SceneView& scene, const Tracer& tracer, R
                    !lightContributesCaustics(scene.lights[light[0].lightIndex])) {
             continue;
         }
-        float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
-        if (!projectToPixel(camProj, v.p, px, py, cosTheta, dist2) || dist2 < 1e-8f) continue;
-        const Vec3 toCam = normalize(camProj.camPos - v.p);
-        const Vec3 f = bsdfF(v, v.wo, toCam);
-        if (isBlack(f)) continue;
-        if (!connectionVisible(scene, tracer, v.p, v.ng, camProj.camPos, -1)) continue;
+        auto deposit = [&](float px, float py, Vec3 c) {
+            if (s >= 2) c = clampContribution(c, lightTraceSplatClamp(settings));
+            if (!isFinite(c)) return;
+            if (dispersion && dispersion->heroChannel >= 0 && dispersion->used &&
+                (dispersion->mode == kDispersionHero || dispersion->mode == kDispersionOptimized ||
+                 dispersion->mode == kDispersionSpectral3)) {
+                const int ch = dispersion->heroChannel;
+                const float hero = (ch == 0 ? c.x : (ch == 1 ? c.y : c.z)) * 3.0f;
+                c = Vec3(0.0f);
+                if (ch == 0) c.x = hero;
+                else if (ch == 1) c.y = hero;
+                else c.z = hero;
+            }
+            splatFb->addSplat(int(px), int(py), c);
+        };
 
-        const float pdfOmega = cameraPdfOmega(camProj, cosTheta);
-        const float cosV = fabsf(dot(v.ns, toCam));
-        Vec3 c = v.beta * f * (cosV * pdfOmega / dist2);
-        if (s >= 2) c = clampContribution(c, lightTraceSplatClamp(settings));
-        if (!isFinite(c)) continue;
-        if (dispersion && dispersion->heroChannel >= 0 && dispersion->used &&
-            (dispersion->mode == kDispersionHero || dispersion->mode == kDispersionOptimized ||
-             dispersion->mode == kDispersionSpectral3)) {
-            const int ch = dispersion->heroChannel;
-            const float hero = (ch == 0 ? c.x : (ch == 1 ? c.y : c.z)) * 3.0f;
-            c = Vec3(0.0f);
-            if (ch == 0) c.x = hero;
-            else if (ch == 1) c.y = hero;
-            else c.z = hero;
+        // Clear segment: the existing direct splat only. A blocked segment is a
+        // camera manifold when the light prefix is a caustic chain; otherwise nothing.
+        if (connectionVisible(scene, tracer, v.p, v.ng, camProj.camPos, -1)) {
+            float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
+            if (!projectToPixel(camProj, v.p, px, py, cosTheta, dist2) || dist2 < 1e-8f) continue;
+            const Vec3 toCam = normalize(camProj.camPos - v.p);
+            const Vec3 f = bsdfF(v, v.wo, toCam);
+            if (isBlack(f)) continue;
+            const float pdfOmega = cameraPdfOmega(camProj, cosTheta);
+            const float cosV = fabsf(dot(v.ns, toCam));
+            deposit(px, py, v.beta * f * (cosV * pdfOmega / dist2));
+            continue;
         }
-        splatFb->addSplat(int(px), int(py), c);
+        if (!lightPrefixCaustic) continue;
+        const mnee::CameraChainSet chains =
+            mnee::cameraChainsToPinhole(scene, tracer, v.p, v.ng, v.ns, camProj, dispersion);
+        for (int ci = 0; ci < chains.count; ++ci) {
+            const mnee::CameraChainHit& h = chains.hits[ci];
+            const Vec3 f = bsdfF(v, v.wo, h.omega);
+            if (isBlack(f)) continue;
+            const float pdfOmega = cameraPdfOmega(camProj, h.cosTheta);
+            const float cosV = fabsf(dot(v.ns, h.omega));
+            deposit(h.px, h.py, v.beta * f * h.throughput * (cosV * pdfOmega * h.geom));
+        }
     }
 }
 

@@ -562,41 +562,58 @@ inline Vec3 traceRadianceBdptSpectral(
                 continue;
             }
 
-            float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
-            if (!projectToPixel(camProj, v.p, px, py, cosTheta, dist2) || dist2 < 1e-8f)
-                continue;
-            const Vec3 toCam = normalize(camProj.camPos - v.p);
             const SampledWavelengths& wL = lightWavePath[s - 1];
-            const SampledSpectrum f = vertBsdfFSpectral(v, v.wo, toCam, wL, filmCs);
             if (stats) stats->shadows.fetch_add(1, std::memory_order_relaxed);
-            if (spectrumNearBlack(f) ||
-                !connectionVisible(scene, tracer, v.p, v.ng, camProj.camPos, -1))
-                continue;
+            auto deposit = [&](float px, float py, Vec3 dirAtV, float cosV, float pdfOmega, float geom,
+                               Vec3 throughput) {
+                const SampledSpectrum f = vertBsdfFSpectral(v, v.wo, dirAtV, wL, filmCs);
+                if (spectrumNearBlack(f)) return;
+                // Chain throughput is a path weight (Fresnel, tint, 1/η²), not an albedo.
+                SampledSpectrum c = lightBeta[s - 1] * f * rgbToSpectrumLinear(throughput, wL) *
+                                    (cosV * pdfOmega * geom);
+                MisOverride ov;
+                ov.splatStrategy = true;
+                ov.s0Sampled = !(causticsOn && lightPrefixCaustic);
+                ov.lightOriginDelta = lightOriginDelta;
+                ov.lightLastRev = pdfOmega * cosV * geom;
+                if (s >= 2)
+                    ov.lightPrevRev =
+                        toAreaPdf(bsdfPdfSa(v, dirAtV, normalize(light[s - 2].p - v.p)), v.p,
+                                  light[s - 2].p,
+                                  light[s - 2].type == VType::Surface ? light[s - 2].ns
+                                                                      : light[s - 2].ng);
+                Vert cameraVert = eye[0];
+                cameraVert.p = camProj.camPos;
+                c *= misWeight(&cameraVert, 1, light, s, ov);
+                // Indirect Clamp (LT): radiance-scaled via W·H (see lightTraceSplatClamp).
+                if (s >= 2) c = clampSpectrumIndirect(c, lightTraceSplatClamp(settings));
+                if (!spectrumIsFinite(c)) return;
+                // Arrival λ at this vertex — not the walk's post-bounce TerminateSecondary.
+                const Vec3 rgb = spectrumToRgb(c, wL, filmCs);
+                if (isFinite(rgb)) splatFb->addSplat(int(px), int(py), rgb);
+            };
 
-            const float pdfOmega = cameraPdfOmega(camProj, cosTheta);
-            const float cosV = fabsf(dot(v.ns, toCam));
-            SampledSpectrum c =
-                lightBeta[s - 1] * f * (cosV * pdfOmega / dist2);
-            MisOverride ov;
-            ov.splatStrategy = true;
-            ov.s0Sampled = !(causticsOn && lightPrefixCaustic);
-            ov.lightOriginDelta = lightOriginDelta;
-            ov.lightLastRev = toAreaPdf(pdfOmega, camProj.camPos, v.p, v.ns);
-            if (s >= 2)
-                ov.lightPrevRev =
-                    toAreaPdf(bsdfPdfSa(v, toCam, normalize(light[s - 2].p - v.p)), v.p,
-                              light[s - 2].p,
-                              light[s - 2].type == VType::Surface ? light[s - 2].ns
-                                                                  : light[s - 2].ng);
-            Vert cameraVert = eye[0];
-            cameraVert.p = camProj.camPos;
-            c *= misWeight(&cameraVert, 1, light, s, ov);
-            // Indirect Clamp (LT): radiance-scaled via W·H (see lightTraceSplatClamp).
-            if (s >= 2) c = clampSpectrumIndirect(c, lightTraceSplatClamp(settings));
-            if (!spectrumIsFinite(c)) continue;
-            // Arrival λ at this vertex — not the walk's post-bounce TerminateSecondary.
-            const Vec3 rgb = spectrumToRgb(c, wL, filmCs);
-            if (isFinite(rgb)) splatFb->addSplat(int(px), int(py), rgb);
+            // Clear segment keeps the direct splat (geom = 1/dist²). A delta-glass
+            // block on a caustic prefix walks the camera manifold instead.
+            if (connectionVisible(scene, tracer, v.p, v.ng, camProj.camPos, -1)) {
+                float px = 0.0f, py = 0.0f, cosTheta = 0.0f, dist2 = 0.0f;
+                if (!projectToPixel(camProj, v.p, px, py, cosTheta, dist2) || dist2 < 1e-8f)
+                    continue;
+                const Vec3 toCam = normalize(camProj.camPos - v.p);
+                const float pdfOmega = cameraPdfOmega(camProj, cosTheta);
+                const float cosV = fabsf(dot(v.ns, toCam));
+                deposit(px, py, toCam, cosV, pdfOmega, 1.0f / dist2, Vec3(1.0f));
+                continue;
+            }
+            if (!lightPrefixCaustic) continue;
+            const mnee::CameraChainSet chains =
+                mnee::cameraChainsToPinhole(scene, tracer, v.p, v.ng, v.ns, camProj, dispersion);
+            for (int ci = 0; ci < chains.count; ++ci) {
+                const mnee::CameraChainHit& h = chains.hits[ci];
+                const float pdfOmega = cameraPdfOmega(camProj, h.cosTheta);
+                const float cosV = fabsf(dot(v.ns, h.omega));
+                deposit(h.px, h.py, h.omega, cosV, pdfOmega, h.geom, h.throughput);
+            }
         }
         }
     }
@@ -834,6 +851,7 @@ inline Vec3 traceRadianceBdptSpectral(
 
         if (!clearPath) {
             if (!causticsUseMnee(settings, &scene) || photonEngine) continue;
+            if (causticsUseAimedLt(settings)) continue;
             if (!(glassPath && eyeThroughSpec)) continue;
             const Vec3 LeMnee =
                 l.type == kLightPoint ? l.emittedRadiance() : lightRadiance(l);

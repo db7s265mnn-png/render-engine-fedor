@@ -694,7 +694,8 @@ SR_INL SR_HD bool causticsUseAimedLt(const RenderSettingsData& s) {
 
 // Aimed LT family partition on the eye path (these two engines only).
 // Skip LDS camera SDS that light tracing owns. Aimed LT + MNEE keeps the
-// through-glass suffix (MNEE / Fresnel NEE), matching GPU Aimed LT + MNEE.
+// through-glass suffix for Fresnel NEE. The delta connection to the pinhole
+// is the light-trace camera manifold, not a second eye MNEE.
 SR_INL SR_HD bool cpuAimedSkipCameraSds(const RenderSettingsData& s, int causticSuffix, int throughGlass) {
     if (!causticsUseAimedLt(s) || causticSuffix == 0) return false;
     if (s.causticsEngine == kCausticsEngineAimedLtMnee && throughGlass) return false;
